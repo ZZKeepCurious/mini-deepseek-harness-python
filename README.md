@@ -8,6 +8,8 @@ The upstream project builds its entire system on a philosophy where **everything
 
 > **This is a learning project, not a port.** It is not affiliated with DeepSeek AI. We do not aim for feature parity or a drop-in replacement; we aim to understand and teach the ideas.
 
+> **Disclaimer**: a large part of this repository — including the analysis report and the handbook — was summarized, written, and re-implemented with the help of AI assistants. It may contain misunderstandings or inaccuracies about the upstream source code and documentation. The upstream repository itself is the only authoritative reference.
+
 ## Documentation
 
 Two complementary documents (both in Chinese):
