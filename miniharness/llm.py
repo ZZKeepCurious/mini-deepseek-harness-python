@@ -2,10 +2,19 @@
 
 对应 dsh 真实源码：packages/llm/llm（协议）+ packages/llm/llm-deepseek（适配器）。
 
+StreamChunk 字段与上游协议对齐（docs/subsystems/llm-streaming.md）：
+  * block-start     { index, blockType }         # blockType: text | reasoning | tool-call | ...
+  * text-delta      { index, text }
+  * reasoning-delta { index, text }
+  * tool-call-delta { index, id, name?, argumentsDelta }   # argumentsDelta 为增量分片
+  * block-end       { index, block }              # block 为组装好的 ContentBlock
+  * usage           { usage }                     # 必须在 finish 之前
+  * finish          { reason }                    # finish 之后不再有值
+
 协议不变量：
-  1. block-end 携带完整块
+  1. 每个 ContentBlock 一对 block-start / block-end；block-end 携带完整块
   2. usage 必须在 finish 之前，finish 之后不再有值
-  3. 两种授权错误统一为 LlmFailure；上下文溢出编码 CONTEXT_WINDOW_EXCEEDED
+  3. 授权/请求/上下文溢出统一为 LlmFailure；上下文溢出编码 CONTEXT_WINDOW_EXCEEDED
 """
 from __future__ import annotations
 
@@ -31,7 +40,12 @@ class StreamChunk(dict):
 
 
 class LlmFailure(Exception):
-    """统一错误收口：授权 / 请求 / 上下文溢出。"""
+    """统一错误收口：授权 / 请求 / 上下文溢出。
+
+    上游还规范了 EMPTY_RESPONSE（空响应 = 可重试的规范错误），并支持
+    finish {kind:'error'|'aborted', failure} 带内失败路径；简化版只在
+    stream() 抛出异常，未实现带内失败路径。
+    """
 
     def __init__(self, code: str, message: str):
         super().__init__(message)
@@ -61,19 +75,33 @@ class FakeLlmAdapter(LlmAdapter):
     def stream(self, messages, tools):
         self.calls += 1
         if self._tool and self.calls == 1:
-            yield StreamChunk("block-start", index=0, block_kind="assistant")
-            yield StreamChunk("tool-call-delta", index=0, name=self._tool["name"], arguments=self._tool.get("arguments", {}))
-            yield StreamChunk("block-end", index=0, block={"role": "assistant", "tool_calls": [self._tool]})
-            yield StreamChunk("finish", finish_reason="tool_calls")
+            arguments = self._tool.get("arguments", {})
+            arguments_text = json.dumps(arguments, ensure_ascii=False)
+            yield StreamChunk("block-start", index=0, blockType="tool-call")
+            yield StreamChunk("tool-call-delta", index=0, id="call_0",
+                              name=self._tool["name"], argumentsDelta=arguments_text)
+            yield StreamChunk("block-end", index=0, block={
+                "type": "tool-call", "id": "call_0", "name": self._tool["name"],
+                "arguments": arguments_text,
+            })
+            yield StreamChunk("finish", reason="tool_calls")
         else:
-            yield StreamChunk("block-start", index=0, block_kind="assistant")
-            yield StreamChunk("text-delta", index=0, delta=self._text)
-            yield StreamChunk("block-end", index=0, block={"role": "assistant", "content": self._text})
-            yield StreamChunk("finish", finish_reason="stop")
+            yield StreamChunk("block-start", index=0, blockType="text")
+            yield StreamChunk("text-delta", index=0, text=self._text)
+            yield StreamChunk("block-end", index=0, block={
+                "type": "text", "text": self._text,
+            })
+            yield StreamChunk("finish", reason="stop")
 
 
 class DeepSeekAdapter(LlmAdapter):
-    """DeepSeek 官方 chat API 的 SSE 适配器（纯 stdlib urllib，零依赖）。"""
+    """DeepSeek 官方 chat API 的 SSE 适配器（纯 stdlib urllib，零依赖）。
+
+    与上游 llm-deepseek 一致：fetch + SSE；SSE 分片先收集为增量
+    （tool-call 的 name/arguments 分片到达），随后按 ContentBlock 重放为
+    block-start → delta* → block-end。Consumer 若做流式 UI 可改为逐片转发
+    delta；本实现以协议完整为准。
+    """
 
     provider = "deepseek-official"
 
@@ -98,7 +126,8 @@ class DeepSeekAdapter(LlmAdapter):
             code = "AUTH_ERROR" if e.code in (401, 403) else "REQUEST_ERROR"
             raise LlmFailure(code, f"HTTP {e.code}: {detail}") from e
 
-        # tool-call 增量是按块流式的：name 与 arguments 分片到达，需要累积
+        texts: dict[int, str] = {}
+        reasonings: dict[int, str] = {}
         pending: dict[int, dict[str, str]] = {}
         for raw in resp:
             line = raw.decode("utf-8", "replace").strip()
@@ -111,20 +140,31 @@ class DeepSeekAdapter(LlmAdapter):
             for choice in piece.get("choices", []):
                 delta = choice.get("delta", {})
                 if delta.get("reasoning_content"):
-                    yield StreamChunk("reasoning-delta", index=choice["index"], delta=delta["reasoning_content"])
+                    reasonings[choice["index"]] = reasonings.get(choice["index"], "") + delta["reasoning_content"]
                 if delta.get("content"):
-                    yield StreamChunk("text-delta", index=choice["index"], delta=delta["content"])
+                    texts[choice["index"]] = texts.get(choice["index"], "") + delta["content"]
                 for tc in delta.get("tool_calls") or []:
-                    slot = pending.setdefault(tc["index"], {"name": "", "arguments": ""})
+                    slot = pending.setdefault(tc["index"], {"id": "", "name": "", "arguments": ""})
                     fn = tc.get("function", {})
+                    slot["id"] = tc.get("id") or slot["id"]
                     slot["name"] += fn.get("name", "")
                     slot["arguments"] += fn.get("arguments", "")
 
+        for idx in sorted(texts):
+            yield StreamChunk("block-start", index=idx, blockType="text")
+            yield StreamChunk("text-delta", index=idx, text=texts[idx])
+            yield StreamChunk("block-end", index=idx, block={"type": "text", "text": texts[idx]})
+        for idx in sorted(reasonings):
+            yield StreamChunk("block-start", index=idx, blockType="reasoning")
+            yield StreamChunk("reasoning-delta", index=idx, text=reasonings[idx])
+            yield StreamChunk("block-end", index=idx, block={"type": "reasoning", "text": reasonings[idx]})
         if pending:
-            calls = []
-            yield StreamChunk("block-start", index=0, block_kind="assistant")
             for idx, slot in sorted(pending.items()):
-                calls.append({"id": f"call_{idx}", "type": "function", "function": slot})
-                yield StreamChunk("tool-call-delta", index=idx, name=slot["name"], arguments=slot["arguments"])
-            yield StreamChunk("block-end", index=0, block={"role": "assistant", "tool_calls": calls})
-        yield StreamChunk("finish", finish_reason="tool_calls" if pending else "stop")
+                call_id = slot["id"] or f"call_{idx}"
+                yield StreamChunk("block-start", index=idx, blockType="tool-call")
+                yield StreamChunk("tool-call-delta", index=idx, id=call_id,
+                                  name=slot["name"], argumentsDelta=slot["arguments"])
+                yield StreamChunk("block-end", index=idx, block={
+                    "type": "tool-call", "id": call_id, "name": slot["name"], "arguments": slot["arguments"],
+                })
+        yield StreamChunk("finish", reason="tool_calls" if pending else "stop")

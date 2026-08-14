@@ -7,6 +7,7 @@
   * step = 一次模型请求 + 它调用的工具
   * 工具结果回灌后在同一 turn 内自动进入下一步（_continue）
   * 模型可见 ⟺ 已记录：user/message 在 pre-step 通过后才落日志
+  * 事件携带 turn/step 编号（与上游 SessionEvent 字段一致，turn/step 从 0 起）
 """
 from __future__ import annotations
 
@@ -40,6 +41,8 @@ class AgentLoop:
         self.inbox: deque[dict[str, Any]] = deque()
         self._turn_open = False
         self._continue = False
+        self._turn = -1   # 当前已打开的 turn 编号（从 0 起）
+        self._step = -1   # 当前已打开的 step 编号（从 0 起）
 
     # ---------- 对外入口 ----------
 
@@ -59,19 +62,37 @@ class AgentLoop:
                 return m["content"]
         return ""
 
+    # ---------- 事件落日志（统一注入 turn/step 编号） ----------
+
+    def _append(self, etype: str, **payload: Any) -> None:
+        """回合事件统一入口：自动带上当前 turn/step 编号（与上游字段一致）。"""
+        ev = {"type": etype, **payload}
+        if etype == "turn/start":
+            ev["turn"] = self._turn
+        elif etype == "turn/end":
+            ev["turn"] = self._turn
+        elif etype in ("step/start", "step/end"):
+            ev["turn"] = self._turn
+            ev["step"] = self._step
+        else:
+            ev["turn"] = self._turn
+            ev["step"] = self._step
+        self.session.append(ev)
+
     # ---------- turn 生命周期 ----------
 
     def _open_turn(self) -> None:
         if self._turn_open:
             return
         self.status = "running"
-        self.session.append({"type": "turn/start"})
+        self._turn += 1
+        self._append("turn/start")
         self._turn_open = True
 
     def _close_turn(self, reason: str = "completed") -> None:
         if not self._turn_open:
             return
-        self.session.append({"type": "turn/end", "reason": reason})
+        self._append("turn/end", reason=reason)
         self._turn_open = False
         self.status = "idle"
 
@@ -96,36 +117,51 @@ class AgentLoop:
             decision = self.ctx.waterfall("agent/pre-step", {"messages": [claimed]})
             if isinstance(decision, dict) and decision.get("verdict") == "reject":
                 return  # 零 step 尝试：不留 step/start，turn 照常闭合
-            self.session.append({"type": "step/start"})
-            self.session.append({
-                "type": "user/message",
-                "content": claimed["content"],
-                "surfaceOp": "append",
-                "source": claimed.get("source", "user"),
-            })
+            self._step += 1
+            self._append("step/start")
+            self._append(
+                "user/message",
+                content=claimed["content"],
+                surfaceOp="append",
+                source=claimed.get("source", "user"),
+            )
         else:
             # next-step 继续：工具结果回灌后同一 turn 内的再次请求
-            self.session.append({"type": "step/start"})
+            self._step += 1
+            self._append("step/start")
 
         history = derive_messages(self.session.events)
         messages = [{"role": "system", "content": self.system_prompt}] + history
 
         # LLM 流式（简化：不逐 chunk 落 assistant/chunk，只落合并后的 message）
         chunks = list(self.adapter.stream(messages, self._tool_definitions()))
-        text = "".join(c.get("delta", "") for c in chunks if c["kind"] == "text-delta")
-        tool_calls = [c for c in chunks if c["kind"] == "tool-call-delta"]
+        text = "".join(c.get("text", "") for c in chunks if c["kind"] == "text-delta")
 
-        self.session.append({
-            "type": "assistant/message",
-            "content": text,
-            "surfaceOp": "append",
-            "toolCalls": [{"name": c["name"], "arguments": c.get("arguments", "")} for c in tool_calls],
-        })
+        # tool-call-delta 是增量分片：按 (id) 累积 name 与 argumentsDelta
+        pending_calls: dict[str, dict[str, str]] = {}
+        for c in chunks:
+            if c["kind"] != "tool-call-delta":
+                continue
+            key = c.get("id") or str(c.get("index"))
+            slot = pending_calls.setdefault(key, {"name": "", "argumentsDelta": ""})
+            slot["name"] += c.get("name", "")
+            slot["argumentsDelta"] += c.get("argumentsDelta", "")
+        tool_calls = [
+            {"name": slot["name"], "arguments": slot["argumentsDelta"]}
+            for slot in pending_calls.values()
+        ]
+
+        self._append(
+            "assistant/message",
+            content=text,
+            surfaceOp="append",
+            toolCalls=tool_calls,
+        )
 
         for call in tool_calls:
-            self._run_tool(call["name"], call.get("arguments", ""))
+            self._run_tool(call["name"], call["arguments"])
 
-        self.session.append({"type": "step/end"})
+        self._append("step/end")
         self._continue = bool(tool_calls)
 
     def _tool_definitions(self) -> list[dict]:
@@ -155,14 +191,14 @@ class AgentLoop:
                     arguments = json.loads(arguments)
                 except json.JSONDecodeError:
                     arguments = {}
-            # 执行前先记录（durable）
-            self.session.append({"type": "tool/call", "name": name, "arguments": arguments})
+            # 执行前先记录（durable）；arguments 以 JSON 字符串落盘（与上游字段一致）
+            self._append("tool/call", name=name, arguments=json.dumps(arguments, ensure_ascii=False))
             result = run_pipeline(self.ctx, tool, arguments)
-        self.session.append({
-            "type": "tool/result",
-            "name": name,
-            "content": result.content,
-            "isError": result.is_error,
-            "error": result.error,
-            "surfaceOp": "append",
-        })
+        self._append(
+            "tool/result",
+            name=name,
+            content=result.content,
+            isError=result.is_error,
+            error=result.error,
+            surfaceOp="append",
+        )

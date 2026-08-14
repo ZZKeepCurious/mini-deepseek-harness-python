@@ -223,6 +223,7 @@ python -m unittest tests.test_tools -v
 - `tools/pre-execute` / `execute` / `post-execute` 三个 waterfall 的真实事件契约
 - 注册表外层规范化的真实位置（snapshot 异常 → isError）
 - `finalizeContent`：最后一个内容只读不变量（我们简化掉了，值得知道它存在）
+- **语义差异**：上游 `tools/post-execute` 是"无损物化前的 content 替换钩子"（返回 `undefined` 即保留原内容，返回其他值替换 content），我们把它简化为 accept/block 门（拒绝时返回 `{verdict: "block", feedback}`）——方向不同但都是"模型最终只能看到规范化的结果"
 
 ## 3.7 本章小结
 

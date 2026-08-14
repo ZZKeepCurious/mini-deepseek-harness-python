@@ -85,6 +85,26 @@ class TestLoop(unittest.TestCase):
             [e["type"] for e in session.events].count("step/start"), 2
         )
 
+    def test_events_carry_turn_step_numbers(self):
+        session, loop, _ = _make_env(tool_call={"name": "bash", "arguments": {"cmd": "ls"}})
+        loop.followup("第一句")
+        loop.followup("第二句")
+        start = [e for e in session.events if e["type"] == "turn/start"]
+        self.assertEqual([e["turn"] for e in start], [0, 1])
+        steps = [e for e in session.events if e["type"] == "step/start"]
+        self.assertEqual([e["step"] for e in steps], [0, 1, 2])
+        # 每个回合事件都带 turn/step（surface 事件、tool 事件）
+        for e in session.events:
+            if e["type"] in ("turn/start", "turn/end"):
+                self.assertIn("turn", e)
+            else:
+                self.assertIn("turn", e)
+                self.assertIn("step", e)
+        # tool/call 的 arguments 是 JSON 字符串（与上游字段一致）
+        tc = [e for e in session.events if e["type"] == "tool/call"][0]
+        self.assertIsInstance(tc["arguments"], str)
+        self.assertIn('"cmd"', tc["arguments"])
+
     def test_stream_chunk_protocol_invariants(self):
         adapter = FakeLlmAdapter(tool_call={"name": "bash", "arguments": {}})
         chunks = list(adapter.stream([], []))
@@ -100,10 +120,10 @@ class TestLoop(unittest.TestCase):
 
         class AlwaysToolAdapter(FakeLlmAdapter):
             def stream(self, messages, tools):
-                yield StreamChunk("block-start", index=0, block_kind="assistant")
-                yield StreamChunk("tool-call-delta", index=0, name="loop", arguments={})
-                yield StreamChunk("block-end", index=0, block={"role": "assistant"})
-                yield StreamChunk("finish", finish_reason="tool_calls")
+                yield StreamChunk("block-start", index=0, blockType="tool-call")
+                yield StreamChunk("tool-call-delta", index=0, id="call_0", name="loop", argumentsDelta="{}")
+                yield StreamChunk("block-end", index=0, block={"type": "tool-call", "name": "loop"})
+                yield StreamChunk("finish", reason="tool_calls")
 
         session = Session("s1")
         ctx = Context()

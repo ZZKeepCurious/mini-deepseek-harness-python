@@ -149,6 +149,14 @@ python -m unittest tests.test_seams -v
 - 完整接缝列表与每个接缝的三角色实例
 - "共享执行世界"的迁移机制（FS/subprocess Provider 指向远程沙箱 → Bash/PTY/LSP 跟随迁移）
 
+**三个接缝与上游的接口差异（简化命名，语义一致）：**
+
+| 接缝 | 我们的接口 | 上游真实接口 | 备注 |
+|---|---|---|---|
+| 沙箱 | `Sandbox.wrap(argv)` | `SandboxProvider.confine(argv): ConfinedArgv`（含 runner/profile/分离符 + `allowedExitCodes`/`fatalSignatures`/`denialSignatures`） | `SandboxMode`：`read-only` / `workspace-write` / `danger-full-access`；"失败即拒"契约一致 |
+| 凭据 | `CredentialProvider.resolve(key)` | `resolve(ref): ResolvedCredential`（值 + 来源层）+ `describe(ref)`；本地 provider 层：`env` / `file` / `project-env` / `user-env` | 引用是带 brand 的 POSIX 环境变量名语法；每次操作重新解析 ✓ |
+| 子 agent | `SubAgentProvider.spawn(name, prompt)` | `SubagentProvider.start(...)` + `prepareContinuable`（可继续对话）+ `SubagentCapabilities` 能力门（不支持则 `UNSUPPORTED_CAPABILITY` 拒绝） | 六个真实 Provider：in-process / fork / ACP / Codex / Claude Code / dsh-sdk |
+
 ## 6.9 手册收尾：三大心智模型
 
 全部 6 章做完，你应当能用 Python 亲手证明这三件事（报告第 12 节同样强调）：

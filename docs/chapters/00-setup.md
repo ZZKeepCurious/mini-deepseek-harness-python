@@ -66,6 +66,11 @@ python -m miniharness.demo                  # 端到端演示（假模型 + 工�
 | 工具并发执行退化为串行 | `isConcurrencySafe` 并行池 + 串行屏障 |
 | 不逐 chunk 落 `assistant/chunk` | 每个 chunk 都是 durable 事件 |
 | JSON 配置 + 补丁 | YAML cordis.yml（同样的 id/insert/replace 语义） |
+| LLM 失败只抛异常，无 `finish {kind:'error'\|'aborted'}` 带内失败路径 | 规范错误编码 `CONTEXT_WINDOW_EXCEEDED` / `EMPTY_RESPONSE`（可重试） |
+| 无 `agent/turn-stopping`、`agent/request-error`、`system-prompt/assemble` waterfall | 上游都有（turn-stopping 是串行终点检查点） |
+| 事件无 `time` 字段、无 `sourceEventSeqs`、无 `session/seed`（`firstLiveSeq`） | 上游均有（`time` epoch 毫秒；`sourceEventSeqs` 引用 chunk 来源） |
+| JSONL 明文行；SQLite 列 `(session_id, seq, type, data)` | JSONL 默认 checksum+Zstandard 压缩；SQLite 列 `(session_id, seq, type, time, data, source_event_seqs, surface_op)` |
+| 事件 `reason` 用字符串（`"completed"` / `"interrupted"`） | `TurnEndReason` 判别联合（`{ kind: 'interrupted' }` 等，可扩展） |
 
 简化不改变契约；每一处简化在对应章节都标注了。
 

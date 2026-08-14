@@ -85,7 +85,7 @@ class LlmAdapter:
         raise NotImplementedError
 ```
 
-> 真实 dsh 的授权错误路径统一为 `LlmFailure`，上下文溢出编码 `CONTEXT_WINDOW_EXCEEDED`，空响应编码 `EMPTY_RESPONSE`（可重试）。
+> 真实 dsh 的授权错误路径统一为 `LlmFailure`，上下文溢出编码 `CONTEXT_WINDOW_EXCEEDED`，空响应编码 `EMPTY_RESPONSE`（可重试）。我们的实现只覆盖前两个：溢出以 docstring 说明、空响应尚未实现（见 4.8 差异表）。
 
 ### 步骤 3：FakeLlmAdapter —— 无 key 也能跑回合
 
@@ -101,15 +101,23 @@ class FakeLlmAdapter(LlmAdapter):
     def stream(self, messages, tools):
         self.calls += 1
         if self._tool and self.calls == 1:
-            yield StreamChunk("block-start", index=0, block_kind="assistant")
-            yield StreamChunk("tool-call-delta", index=0, name=self._tool["name"], arguments=self._tool.get("arguments", {}))
-            yield StreamChunk("block-end", index=0, block={"role": "assistant", "tool_calls": [self._tool]})
-            yield StreamChunk("finish", finish_reason="tool_calls")
+            arguments = self._tool.get("arguments", {})
+            arguments_text = json.dumps(arguments, ensure_ascii=False)
+            yield StreamChunk("block-start", index=0, blockType="tool-call")
+            yield StreamChunk("tool-call-delta", index=0, id="call_0",
+                              name=self._tool["name"], argumentsDelta=arguments_text)
+            yield StreamChunk("block-end", index=0, block={
+                "type": "tool-call", "id": "call_0", "name": self._tool["name"],
+                "arguments": arguments_text,
+            })
+            yield StreamChunk("finish", reason="tool_calls")
         else:
-            yield StreamChunk("block-start", index=0, block_kind="assistant")
-            yield StreamChunk("text-delta", index=0, delta=self._text)
-            yield StreamChunk("block-end", index=0, block={"role": "assistant", "content": self._text})
-            yield StreamChunk("finish", finish_reason="stop")
+            yield StreamChunk("block-start", index=0, blockType="text")
+            yield StreamChunk("text-delta", index=0, text=self._text)
+            yield StreamChunk("block-end", index=0, block={
+                "type": "text", "text": self._text,
+            })
+            yield StreamChunk("finish", reason="stop")
 ```
 
 ### 步骤 4：DeepSeekAdapter —— 官方 SSE（stdlib urllib）
@@ -137,8 +145,9 @@ class DeepSeekAdapter(LlmAdapter):
             code = "AUTH_ERROR" if e.code in (401, 403) else "REQUEST_ERROR"
             raise LlmFailure(code, f"HTTP {e.code}: {detail}") from e
 
-        # tool-call 增量按块流式：name 与 arguments 分片到达，需累积
-        pending = {}
+        # tool-call 的 name / arguments 分片到达，需先收集；随后按 ContentBlock
+        # 重放为 block-start → delta* → block-end（Consumer 做流式 UI 可改为逐片转发）
+        texts, reasonings, pending = {}, {}, {}
         for raw in resp:
             line = raw.decode("utf-8", "replace").strip()
             if not line.startswith("data:"):
@@ -150,23 +159,34 @@ class DeepSeekAdapter(LlmAdapter):
             for choice in piece.get("choices", []):
                 delta = choice.get("delta", {})
                 if delta.get("reasoning_content"):
-                    yield StreamChunk("reasoning-delta", index=choice["index"], delta=delta["reasoning_content"])
+                    reasonings[choice["index"]] = reasonings.get(choice["index"], "") + delta["reasoning_content"]
                 if delta.get("content"):
-                    yield StreamChunk("text-delta", index=choice["index"], delta=delta["content"])
+                    texts[choice["index"]] = texts.get(choice["index"], "") + delta["content"]
                 for tc in delta.get("tool_calls") or []:
-                    slot = pending.setdefault(tc["index"], {"name": "", "arguments": ""})
+                    slot = pending.setdefault(tc["index"], {"id": "", "name": "", "arguments": ""})
                     fn = tc.get("function", {})
+                    slot["id"] = tc.get("id") or slot["id"]
                     slot["name"] += fn.get("name", "")
                     slot["arguments"] += fn.get("arguments", "")
 
+        for idx in sorted(texts):
+            yield StreamChunk("block-start", index=idx, blockType="text")
+            yield StreamChunk("text-delta", index=idx, text=texts[idx])
+            yield StreamChunk("block-end", index=idx, block={"type": "text", "text": texts[idx]})
+        for idx in sorted(reasonings):
+            yield StreamChunk("block-start", index=idx, blockType="reasoning")
+            yield StreamChunk("reasoning-delta", index=idx, text=reasonings[idx])
+            yield StreamChunk("block-end", index=idx, block={"type": "reasoning", "text": reasonings[idx]})
         if pending:
-            calls = []
-            yield StreamChunk("block-start", index=0, block_kind="assistant")
             for idx, slot in sorted(pending.items()):
-                calls.append({"id": f"call_{idx}", "type": "function", "function": slot})
-                yield StreamChunk("tool-call-delta", index=idx, name=slot["name"], arguments=slot["arguments"])
-            yield StreamChunk("block-end", index=0, block={"role": "assistant", "tool_calls": calls})
-        yield StreamChunk("finish", finish_reason="tool_calls" if pending else "stop")
+                call_id = slot["id"] or f"call_{idx}"
+                yield StreamChunk("block-start", index=idx, blockType="tool-call")
+                yield StreamChunk("tool-call-delta", index=idx, id=call_id,
+                                  name=slot["name"], argumentsDelta=slot["arguments"])
+                yield StreamChunk("block-end", index=idx, block={
+                    "type": "tool-call", "id": call_id, "name": slot["name"], "arguments": slot["arguments"],
+                })
+        yield StreamChunk("finish", reason="tool_calls" if pending else "stop")
 ```
 
 - 这就是报告里 `llm-deepseek` 适配器的简化版：`fetch + SSE`，逐块翻译成统一协议。
@@ -245,27 +265,38 @@ class AgentLoop:
             decision = self.ctx.waterfall("agent/pre-step", {"messages": [claimed]})
             if isinstance(decision, dict) and decision.get("verdict") == "reject":
                 return   # 零 step 尝试：turn 照常闭合
-            self.session.append({"type": "step/start"})
-            self.session.append({"type": "user/message", "content": claimed["content"],
-                                 "surfaceOp": "append", "source": claimed.get("source", "user")})
+            self._step += 1
+            self._append("step/start")
+            self._append("user/message", content=claimed["content"],
+                         surfaceOp="append", source=claimed.get("source", "user"))
         else:
-            self.session.append({"type": "step/start"})   # 工具回灌后的继续
+            self._step += 1
+            self._append("step/start")   # 工具回灌后的继续
 
         history = derive_messages(self.session.events)
         messages = [{"role": "system", "content": self.system_prompt}] + history
         chunks = list(self.adapter.stream(messages, self._tool_definitions()))
-        text = "".join(c.get("delta", "") for c in chunks if c["kind"] == "text-delta")
-        tool_calls = [c for c in chunks if c["kind"] == "tool-call-delta"]
+        text = "".join(c.get("text", "") for c in chunks if c["kind"] == "text-delta")
 
-        self.session.append({"type": "assistant/message", "content": text,
-                             "surfaceOp": "append",
-                             "toolCalls": [{"name": c["name"], "arguments": c.get("arguments", "")} for c in tool_calls]})
+        # tool-call-delta 是增量分片：按 (id) 累积 name 与 argumentsDelta
+        pending_calls = {}
+        for c in chunks:
+            if c["kind"] != "tool-call-delta":
+                continue
+            key = c.get("id") or str(c.get("index"))
+            slot = pending_calls.setdefault(key, {"name": "", "argumentsDelta": ""})
+            slot["name"] += c.get("name", "")
+            slot["argumentsDelta"] += c.get("argumentsDelta", "")
+        tool_calls = [{"name": s["name"], "arguments": s["argumentsDelta"]} for s in pending_calls.values()]
+
+        self._append("assistant/message", content=text, surfaceOp="append", toolCalls=tool_calls)
         for call in tool_calls:
-            self._run_tool(call["name"], call.get("arguments", ""))
-        self.session.append({"type": "step/end"})
+            self._run_tool(call["name"], call["arguments"])
+        self._append("step/end")
         self._continue = bool(tool_calls)
 ```
 
+- `_append` 是回合事件的统一入口：自动注入 `turn` / `step` 编号（与上游 `SessionEvent` 字段一致，从 0 起）。
 - **pre-step 拒绝**：waterfall 返回 `{"verdict": "reject"}` → 不落 `step/start`，turn 直接闭合——这正是报告第 5.1 节的"零 step turn"。
 - 历史 = `derive_messages(日志)` + system prompt，绝不另存。
 - `_continue = bool(tool_calls)`：有工具调用 → 同 turn 内再问模型（第 2 次 adapter 调用看到 tool/result 消息）。
@@ -333,6 +364,17 @@ print([e["type"] for e in session.events])
 
 - 主 Driver 的 `_run_step` 对应我们的 `_run_step`——真实实现更复杂（交错工具批、屏障、回灌顺序）
 - `docs/agent-lifecycle.md` 顶部的 Mermaid 时序图：与我们 4.2 的图逐条对应
+
+**我们省略/简化的真实扩展点（值得知道它们存在）：**
+
+| 上游事件/扩展点 | 用途 | 我们的状态 |
+|---|---|---|
+| `system-prompt/assemble` waterfall | 提示词按片段组装（hook 可注入上下文） | 直接拼接，无扩展点 |
+| `agent/request` waterfall → `llm/stream` | 请求构造拦截（steering） | 未实现 waterfall，直连 adapter |
+| `agent/request-error` waterfall | 规范错误（如上下文溢出）后的重试决策 | 未实现；`LlmFailure.code` 已就绪 |
+| `agent/turn-stopping` serial | turn 结束前串行终点检查（compaction 压力等） | 未实现（报告图 11 有此环节，代码暂无） |
+| `finish {kind:'error'\|'aborted'}` 带内失败 | 流中途失败也可经协议传递 | 只在 `stream()` 抛 `LlmFailure` |
+| `EMPTY_RESPONSE` 编码 | 空响应 = 规范错误，可重试 | 未实现（`dsh-llm-retry` 默认重试） |
 
 ## 4.9 本章小结
 

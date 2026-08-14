@@ -17,6 +17,7 @@
 ## 阶段 1：会话地基（事件溯源）—— ✅
 
 - [x] `Session` 追加重放日志：seq 单调、append 复制、unknown 拒绝
+- [x] 回合事件携带 `turn` / `step` 编号（与上游 `SessionEvent` 字段一致，从 0 起）
 - [x] deep-freeze、is_json_safe、`derive_messages` 投影、`turn_balance` 不变量
 - [x] `repair_interrupted_turn`（崩溃只补括号，不截断）
 - [x] 持久化接缝：JSONL / SQLite 双后端、flush 栅栏、fail-closed 加载、版本拒绝
@@ -45,7 +46,7 @@
 ## 阶段 4：智能（Agent Loop + LLM）—— ✅
 
 - [x] `AgentLoop`：turn/step 状态机、inbox、pre-step 拒绝（零 step turn）、工具回灌续跑、max_steps 守卫
-- [x] `StreamChunk` 统一流协议（block-start / text-delta / tool-call-delta / usage / finish）
+- [x] `StreamChunk` 统一流协议（block-start / text-delta / tool-call-delta / usage / finish），字段与上游对齐（`blockType` / `text` / `argumentsDelta` 增量 / `finish.reason`）
 - [x] `FakeLlmAdapter`（无 key 测试）、`DeepSeekAdapter`（官方 SSE，urllib 实现）
 - [ ] 重试/退避、上下文溢出降级（LlmFailure 编码已就绪）
 
@@ -64,8 +65,8 @@
 - [x] 沙箱基础版：Passthrough / ReadOnly（deny-on-failure 契约）
 - [x] 凭据基础版：EnvCredentialProvider（env-over-.env，按操作解析）
 - [x] 子 agent 基础版：InProcessSubAgentProvider
-- [ ] 真沙箱后端：Windows Job Object / Linux bwrap（降级为"文档 + 契约测试"）
-- [ ] 凭据多来源：.env 文件 / keyring / 提示注入
+- [ ] 真沙箱后端：Linux bwrap / Landlock、macOS Seatbelt、**Windows ACL runner**（上游 `sandbox/sandbox-local` 的四个后端；降级为"文档 + 契约测试"）
+- [ ] 凭据多来源：`.env` 文件 / keyring / 提示注入（上游 local provider 的 `env` / `file` / `project-env` / `user-env` 四层）
 - [ ] 子 agent 远程：fork / ACP / SDK 通道
 
 对应 dsh：`docs/capability-seams.md` 各页｜手册：06 章
@@ -81,12 +82,15 @@
 
 ## 阶段 8：CLI 与交互 —— ⏳
 
-- [ ] `miniharness chat`：交互式多轮对话（stdin REPL，接任意适配器）
+> 上游 `apps/dsh` 没有子命令式 CLI，而是 **profile 机制**：`dsh --profile headless "job"`（跑一个任务后退出）、`dsh web`（`--profile web` 的别名）、`dsh plugin --profile <name> <pnpm args>`。以下按同构对齐。
+
+- [ ] `miniharness --profile headless "job"`：单任务模式（新会话 → 跑 → 打印最终答复退出）
+- [ ] `miniharness web`：`--profile web` 别名（可先做终端 TUI 版）
 - [ ] `miniharness sessions`：会话列表 / 恢复 / 删除
 - [ ] `--config` / `--patch` 标志派发（复用 `apply_patch`）
-- [ ] `--dump-config`（组合结果导出）
+- [ ] `--dump-config` / `--dump-default-config`（组合结果导出；上游两个标志都有）
 
-对应 dsh：`apps/dsh` 的 CLI 三件套
+对应 dsh：`apps/dsh`（profile 启动器 + `packages/boot/cmdline`）
 
 ## 阶段 9：配置与生态 —— ⏳
 
@@ -99,6 +103,16 @@
 - [ ] 多 agent 编排（子 agent 递归任务分解）
 - [ ] 会话管理服务（多会话并行、ACL）
 - [ ] 遥测：事件订阅、用量统计（`usage` chunk 已就绪）
+
+## 观察清单（上游已有、暂不纳入复现范围的包）
+
+> 这些 `packages/` 包确认存在，若未来想扩充复现范围可从中挑选；多数属于"能力接缝 + 消费工具"的延伸，核心契约不依赖它们。
+
+- **能力类**：`fs`（文件系统+策略）、`shell`（bash/pwsh 能力）、`terminal`（持久会话终端）、`subprocess`（进程树）、`web`（搜索/抓取）、`lsp`、`skill`、`mcp`、`code-runtime`、`storage`、`spill`、`workspace`
+- **编排类**：`workflow`（worker-thread provider）、`jobs`、`goal`、`schedule`、`compaction`（上下文压缩）、`plan`（plan 模式）、`todo`、`preset`（按会话组合）
+- **横切类**：`interaction`（审批/权限/ask-user）、`settings`、`identity`、`hooks`（Claude Code/Codex 桥）、`acp`（Agent Client Protocol 服务端）、`session-query`、`attachment`、`feedback`、`guard`（loop 卫生/工具超时）、`runtime-diagnostics`、`host`、`extensions`、`client`
+- **平台类**：`api`（远程 BFF + Typert RPC）、`typert`（类型图生成器/注册表）、`sdk`（JSON-RPC 协议与服务端）、`bundle`（可安装 profile 补丁层）、`test-support`
+- **官方 Python SDK**：`python/sdk`（`deepseek-harness-sdk`，stdio JSON-RPC 客户端）+ `python/sdk-runtime`（`deepseek-harness-runtime-bin`，打包默认 agent 的运行时）——阶段 9 的互操作测试以它为目标
 
 ---
 

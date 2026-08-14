@@ -252,6 +252,18 @@ python -m unittest tests.test_persistence_boot -v
 - `session/flush` 事件的真实语义：等待的并行栅栏
 - `docs/subsystems/persistence.md` 的"格式拒绝，不迁移"原则
 
+**我们与上游的持久化细节差异（已简化但值得知道）：**
+
+| 细节 | 真实 dsh | 我们的简化 |
+|---|---|---|
+| JSONL 存储 | 默认 checksum + Zstandard 帧压缩（可原始行） | 明文 JSON 行 |
+| SQLite 列 | `(session_id, seq, type, time, data, source_event_seqs, surface_op)` | `(session_id, seq, type, data)` |
+| `time` 字段 | 每个事件 epoch 毫秒 | 无 |
+| `sourceEventSeqs` | `assistant/message` 精确引用组成它的 `assistant/chunk` seqs（含显式空列表） | 无（因为不落 chunk） |
+| `session/seed` + `firstLiveSeq` | 构造种子事件，标记可回放起点 | 无 |
+| 活会话 load | 等权威内存快照持久化后才允许加载 | 未实现（检查点练习 1 的方向） |
+| `locate(meta)` | 多会话按元数据定位 | 无 |
+
 ## 5.9 本章小结
 
 | 概念 | 一句话 |
