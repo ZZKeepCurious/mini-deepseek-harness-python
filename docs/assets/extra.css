@@ -48,7 +48,21 @@
 }
 
 /* Mermaid 容器悬停提示 */
-.md-typeset .mermaid { cursor: zoom-in; }
+.md-typeset .mermaid { cursor: zoom-in; position: relative; }
+.md-typeset .mermaid:hover::after {
+  content: "点击放大";
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  font-size: 12px;
+  color: var(--md-default-fg-color--light, #5c6474);
+  background: var(--md-default-bg-color, #fff);
+  border: 1px solid var(--md-default-fg-color--lightest, #e2e8f0);
+  border-radius: 999px;
+  padding: 2px 10px;
+  opacity: .9;
+  pointer-events: none;
+}
 
 /* 放大弹窗 */
 #zoom-modal {

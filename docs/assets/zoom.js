@@ -1,4 +1,6 @@
 // Mermaid 图点击放大弹窗（移植自原 HTML 报告的 zoom-modal 脚本）
+// 适配 MkDocs Material 内置 mermaid：SVG 渲染进 closed shadow DOM，
+// 故用 composedPath() 穿透 shadow 查找 svg，并清除内联 max-width 以支持放大。
 (function () {
   var modal = document.getElementById('zoom-modal');
   if (!modal) {
@@ -24,18 +26,36 @@
     modal.classList.remove('show');
     svgEl = null;
   }
+  function findSvg(e) {
+    var path = e.composedPath ? e.composedPath() : [];
+    for (var i = 0; i < path.length; i++) {
+      var n = path[i];
+      if (n && n.tagName === 'svg') return n;
+    }
+    return null;
+  }
+  function viewBoxBounds(svg) {
+    var vb = svg.getAttribute && svg.getAttribute('viewBox');
+    if (!vb) return null;
+    var p = vb.trim().split(/[\s,]+/).map(Number);
+    if (p.length !== 4 || isNaN(p[0]) || isNaN(p[1]) || isNaN(p[2]) || isNaN(p[3])) return null;
+    if (p[2] <= 0 || p[3] <= 0) return null;
+    return { x: p[0], y: p[1], w: p[2], h: p[3] };
+  }
   function bindZoom(container) {
     if (container.dataset.zoomBound) return;
     container.dataset.zoomBound = '1';
     container.addEventListener('click', function (e) {
-      var svg = e.target && e.target.closest ? e.target.closest('svg') : null;
-      if (!svg || !container.contains(svg)) return;
+      var svg = findSvg(e);
+      if (!svg) return;
       var clone = svg.cloneNode(true);
-      var bounds = null;
-      try {
-        var bb = svg.getBBox();
-        if (bb.width > 0 && bb.height > 0) bounds = { x: bb.x, y: bb.y, w: bb.width, h: bb.height };
-      } catch (err) {}
+      var bounds = viewBoxBounds(svg);
+      if (!bounds) {
+        try {
+          var bb = svg.getBBox();
+          if (bb.width > 0 && bb.height > 0) bounds = { x: bb.x, y: bb.y, w: bb.width, h: bb.height };
+        } catch (err) {}
+      }
       if (!bounds) {
         var g = svg.querySelector('g');
         if (g) {
@@ -53,13 +73,14 @@
       }
       clone.removeAttribute('width');
       clone.removeAttribute('height');
+      clone.style.maxWidth = 'none';
+      clone.style.height = 'auto';
       if (bounds) {
         var availW = Math.min(window.innerWidth * 0.94, 1600);
         var availH = window.innerHeight * 0.78;
         var fit = Math.min(availW / bounds.w, availH / bounds.h);
         clone.style.width = Math.max(1, Math.round(bounds.w * fit)) + 'px';
       }
-      clone.style.height = 'auto';
       clone.style.transform = '';
       stage.innerHTML = '';
       stage.appendChild(clone);
