@@ -37,7 +37,6 @@ mini-deepseek-harness-python/        ← 仓库根
 │   └── test_seams.py
 └── docs/                        ← 文档
     ├── README.md                ← 本手册索引（学习地图）
-    ├── WRITING-STYLE.md         ← 本项目文档写作规范
     ├── chapters/                ← 00-setup.md ~ 06-advanced-seams.md（本章所在目录）
     └── report/                  ← 《DeepSeek Harness 深度学习指南与技术报告》HTML
 ```
