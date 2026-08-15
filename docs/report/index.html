@@ -99,6 +99,21 @@
   .footer { color: var(--muted); font-size: 12.5px; margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line); }
   .mermaid { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 20px; margin: 14px 0 6px; overflow-x: auto; }
   .fig-cap { font-size: 13px; font-weight: 600; color: var(--brand); margin: 18px 0 0; }
+
+  .footer { text-align: center; }
+  .footer .foot-note { font-size: 12px; color: var(--muted); }
+  .mermaid { position: relative; cursor: zoom-in; }
+  .mermaid::after {
+    content: "点击图表放大";
+    position: absolute; top: 8px; right: 12px;
+    font-size: 11px; color: #64748b; background: rgba(255,255,255,.88);
+    padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line);
+    pointer-events: none;
+  }
+  #zoom-modal { display: none; position: fixed; inset: 0; z-index: 9999; background: rgba(15,23,42,.82); overflow: auto; cursor: zoom-out; padding: 28px; }
+  #zoom-modal.show { display: block; }
+  #zoom-modal .zoom-box { width: fit-content; max-width: 100%; margin: 0 auto; background: #fff; border-radius: 10px; padding: 20px; box-shadow: 0 24px 64px rgba(0,0,0,.5); }
+  #zoom-modal svg { display: block; width: 100%; height: auto; }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.3/dist/mermaid.min.js"></script>
 <script>
@@ -136,12 +151,11 @@
   <a class="slink" href="04-product-surface.html">04 产品面全解读</a>
   <a class="slink" href="05-roadmap.html">05 路线图与 Python 复现</a>
   <a class="slink" href="06-appendix.html">06 附录与 HOWTO</a>
-  <a class="slink" href="DEEPSEEK-HARNESS-DEEP-LEARNING-GUIDE.html">旧版完整报告（归档保留）</a>
 </nav>
 <main>
 
 <h1>DeepSeek Harness 深度掌握指南 · 体系化报告</h1>
-<p class="lead">本报告将原单文件《深度掌握指南与技术报告》拆分为<b>六个主题子页</b> + 本阅读地图。每个子页独立可维护、可锚点直达。本页同时承载<b>四维对照表</b>（上游包 ↔ mini 模块 ↔ 手册章节 ↔ 报告页面），作为解读完整性的检查清单。</p>
+<p class="lead">本报告由<b>六个主题子页</b> + 本阅读地图构成。每个子页独立可维护、可锚点直达。本页同时承载<b>四维对照表</b>（上游包 ↔ mini 模块 ↔ 手册章节 ↔ 报告页面），作为解读完整性的检查清单。</p>
 <div class="pill-row">
   <span class="tag t-blue">everything is a plugin</span>
   <span class="tag t-blue">event-sourcing</span>
@@ -163,8 +177,8 @@ flowchart LR
     O6["06 附录与 HOWTO"]
   end
   subgraph MD["手册（施工图纸层 · 怎么做）"]
-    M1["00-07 现有八章<br/>(会话/总线/工具/Loop/持久化/扩展口/入口)"]
-    M2["08-11 新增四章<br/>(组合层/干预面/轨迹投影/动态插件)"]
+    M1["00-06 基础章<br/>(会话/总线/工具/Loop/持久化/扩展口)"]
+    M2["07-12 进阶章<br/>(入口/组合/干预/轨迹/动态/异步)"]
   end
   subgraph SRC["源码（唯一权威）"]
     S1["deepseek-harness/ 上游仓库"]
@@ -176,17 +190,17 @@ flowchart LR
 <p class="fig-cap">图 A：三层阅读结构——源码是唯一权威，报告回答"是什么/为什么"，手册回答"怎么亲手做出来"。</p>
 
 <table>
-  <tr><th>子页</th><th>内容</th><th>规模</th><th>状态</th></tr>
-  <tr><td><a href="01-overview.html">01 项目全景与分层架构</a></td><td>仓库构成、五层架构（应用/组合/能力/框架/外部 SDK）</td><td>14 KB</td><td>迁移自旧版 §1-2</td></tr>
-  <tr><td><a href="02-architecture.html">02 系统架构与内核</a></td><td>核心包脊柱、ctx 服务地图、事件体系、外围接入面；技术核心六节（Cordis 模型/事件溯源/扩展口/类型/作用域/门禁）</td><td>35 KB</td><td>迁移自旧版 §3-4</td></tr>
-  <tr><td><a href="03-flows.html">03 关键处理流程</a></td><td>Turn/Step、工具管线、持久化、LLM 流式、启动组合五条时序</td><td>21 KB</td><td>迁移自旧版 §5</td></tr>
-  <tr><td><a href="04-product-surface.html">04 产品面全解读</a></td><td><b>九大议题</b>：模式设计、外部入口、Trajectory、干预面、审批、自我修改、resume、plan/goal、压缩与后台</td><td>60 KB</td><td><b>新建 · 九议题全部补全</b></td></tr>
-  <tr><td><a href="05-roadmap.html">05 路线图与 Python 复现</a></td><td>学习路线、概念映射表、迷你复现清单、实操资源索引</td><td>26 KB</td><td>迁移自旧版 §6-8</td></tr>
-  <tr><td><a href="06-appendix.html">06 附录与 HOWTO</a></td><td>Python SDK、添加插件、HOWTO、参考速查、结语</td><td>25 KB</td><td>迁移自旧版 §9-12</td></tr>
+  <tr><th>子页</th><th>内容</th><th>规模</th></tr>
+  <tr><td><a href="01-overview.html">01 项目全景与分层架构</a></td><td>仓库构成、五层架构（应用/组合/能力/框架/外部 SDK）</td><td>14 KB</td></tr>
+  <tr><td><a href="02-architecture.html">02 系统架构与内核</a></td><td>核心包脊柱、ctx 服务地图、事件体系、外围接入面；技术核心六节（Cordis 模型/事件溯源/扩展口/类型/作用域/门禁）</td><td>35 KB</td></tr>
+  <tr><td><a href="03-flows.html">03 关键处理流程</a></td><td>Turn/Step、工具管线、持久化、LLM 流式、启动组合五条时序</td><td>21 KB</td></tr>
+  <tr><td><a href="04-product-surface.html">04 产品面全解读</a></td><td><b>九大议题</b>：模式设计、外部入口、Trajectory、干预面、审批、自我修改、resume、plan/goal、压缩与后台</td><td>60 KB</td></tr>
+  <tr><td><a href="05-roadmap.html">05 路线图与 Python 复现</a></td><td>学习路线、概念映射表、迷你复现清单、实操资源索引</td><td>26 KB</td></tr>
+  <tr><td><a href="06-appendix.html">06 附录与 HOWTO</a></td><td>Python SDK、添加插件、HOWTO、参考速查、结语</td><td>25 KB</td></tr>
 </table>
 
 <h2><span class="no">§B</span>四维对照表（解读完整性检查清单）</h2>
-<p>每一行代表一个解读主题；"解读了 + 注释了 + 对照了"三者齐备才算完成。表随解读进度持续更新。</p>
+<p>每一行代表一个解读主题；"解读了 + 注释了 + 对照了"三者齐备才算完成。</p>
 <table>
   <tr><th>上游包 / 文件（唯一权威）</th><th>mini 模块</th><th>手册章节</th><th>报告页面</th><th>状态</th></tr>
   <tr><td class="path">packages/core/session</td><td class="path">session.py</td><td>01</td><td>02 §3-4</td><td>✔ 已解读已对齐</td></tr>
@@ -231,10 +245,41 @@ flowchart LR
 <p>手册入口：<span class="path">docs/README.md</span> 与 <span class="path">docs/index.md</span>。章节 08-11 与报告 04 页议题一一对应（08 组合层↔议题 1，09 干预面↔议题 4，10 轨迹↔议题 3，11 动态插件↔议题 6）。</p>
 
 <div class="footer">
-体系化报告 · 首页（阅读地图 + 四维对照表）<br>
-旧版完整报告保留于本目录（DEEPSEEK-HARNESS-DEEP-LEARNING-GUIDE.html）· 图表由 Mermaid.js 渲染，需联网加载 CDN
+DeepSeek Harness 深度掌握指南 · 体系化报告<br>
+<span class="foot-note">配套教程手册：docs/chapters/（从 0 到 1 实现核心系统）· 图表由 Mermaid.js 渲染，需联网加载 CDN</span>
 </div>
 </main>
 </div>
+<div id="zoom-modal"><div class="zoom-box"></div></div>
+<script>
+(function () {
+  var modal = document.getElementById('zoom-modal');
+  var box = modal.querySelector('.zoom-box');
+  function bind(svg) {
+    if (svg.dataset.zoomBound) return;
+    svg.dataset.zoomBound = '1';
+    svg.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var clone = svg.cloneNode(true);
+      var w = svg.getAttribute('width'), h = svg.getAttribute('height');
+      if (!clone.getAttribute('viewBox') && w && h) {
+        clone.setAttribute('viewBox', '0 0 ' + parseFloat(w) + ' ' + parseFloat(h));
+      }
+      clone.removeAttribute('width');
+      clone.removeAttribute('height');
+      box.innerHTML = '';
+      box.appendChild(clone);
+      modal.classList.add('show');
+    });
+  }
+  function scan() { document.querySelectorAll('.mermaid svg').forEach(bind); }
+  modal.addEventListener('click', function () { modal.classList.remove('show'); });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') modal.classList.remove('show'); });
+  document.addEventListener('DOMContentLoaded', function () {
+    scan();
+    new MutationObserver(scan).observe(document.body, { childList: true, subtree: true });
+  });
+})();
+</script>
 </body>
 </html>

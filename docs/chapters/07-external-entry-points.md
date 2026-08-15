@@ -26,7 +26,7 @@
 
 其它名字的 profile 首次使用不会自动初始化，必须先经 `dsh plugin` 路径显式创建（`initProfile`），否则 fail loud。`dsh-base` 是共享的内核底座（persona、工具模式、Code Mode worker 等），两个表面都叠在它上面。
 
-### mini 复现现状（launcher 层，阶段 8）
+### mini 复现现状（launcher 层）
 
 `miniharness/cli.py` 复现了启动器的选项语义（对齐 `apps/cli/src/args.ts`，已核实）：
 

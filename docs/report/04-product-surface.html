@@ -115,6 +115,21 @@
   .fig-cap { font-size: 13px; font-weight: 600; color: var(--brand); margin: 18px 0 0; }
   .walkthrough { background: var(--panel); border: 1px dashed var(--line); border-left: 4px solid var(--green); border-radius: 0 10px 10px 0; padding: 12px 18px; margin: 14px 0 20px; font-size: 14px; }
   .walkthrough b { color: var(--brand); }
+
+  .footer { text-align: center; }
+  .footer .foot-note { font-size: 12px; color: var(--muted); }
+  .mermaid { position: relative; cursor: zoom-in; }
+  .mermaid::after {
+    content: "点击图表放大";
+    position: absolute; top: 8px; right: 12px;
+    font-size: 11px; color: #64748b; background: rgba(255,255,255,.88);
+    padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line);
+    pointer-events: none;
+  }
+  #zoom-modal { display: none; position: fixed; inset: 0; z-index: 9999; background: rgba(15,23,42,.82); overflow: auto; cursor: zoom-out; padding: 28px; }
+  #zoom-modal.show { display: block; }
+  #zoom-modal .zoom-box { width: fit-content; max-width: 100%; margin: 0 auto; background: #fff; border-radius: 10px; padding: 20px; box-shadow: 0 24px 64px rgba(0,0,0,.5); }
+  #zoom-modal svg { display: block; width: 100%; height: auto; }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.3/dist/mermaid.min.js"></script>
 <script>
@@ -162,14 +177,13 @@
   <a class="slink" href="03-flows.html">03 关键处理流程</a>
   <a class="slink" href="05-roadmap.html">05 路线图与 Python 复现</a>
   <a class="slink" href="06-appendix.html">06 附录与 HOWTO</a>
-  <a class="slink" href="DEEPSEEK-HARNESS-DEEP-LEARNING-GUIDE.html">旧版完整报告（归档保留）</a>
 </nav>
 <main>
 
 <h1>04 · 产品面全解读</h1>
 <p class="lead">前三个子页回答"系统是什么、怎么运转"；本页回答"<b>用户/宿主看到的是什么、哪些设计塑造了使用体验</b>"。九个议题，每个都按固定四段式展开：<b>产品体验</b>（使用者看到什么）→ <b>机制</b>（怎么实现）→ <b>源码证据</b>（文件:行号）→ <b>mini 对照</b>（已复现 / 简化 / 规划）。</p>
 <div class="callout">
-<b>定位说明</b>：本页内容全部可定位到上游源码或 docs；产品体验的归纳（如四种模式中文名）来自 <code>apps/cli/config/agent-presets/*/preset.yml</code> 的 description 字段直译，属上游真实存在。调研过程中发现多处<i>命名换代</i>（如审批词汇、包路径），已在各议题中标出——这些勘误本身就是解读价值。
+<b>定位说明</b>：本页内容全部可定位到上游源码或 docs；产品体验的归纳（如四种模式中文名）来自 <code>apps/cli/config/agent-presets/*/preset.yml</code> 的 description 字段直译，属上游真实存在。上游存在多处<i>命名换代</i>（如审批词汇、包路径），相关澄清见各议题。
 </div>
 
 <!-- ==================== 议题 1 ==================== -->
@@ -256,22 +270,11 @@ bin.ts → args 解析（--profile/--task/--session） → profile-boot 层
 </ul>
 
 <h3>2.4 mini 对照</h3>
-<div class="callout ok">
-<b>已完成</b>：headless 一次性任务入口（<span class="path">miniharness/headless.py</span> + <span class="path">cli.py</span>）：stdout 最后一条非空 assistant 文本、退出码按 turn/end reason、空任务拒绝、未知 profile fail loud、不开端口、<code>ctx.appExit</code> 宿主钩子。9 个测试，手册 07 章。
-</div>
-<div class="callout ok">
-<b>已完成（ROADMAP 阶段 12）</b>：JSON-RPC 信封最小子集（<span class="path">miniharness/sdk_protocol.py</span>，21 测试，07 章 §7.6）；ACP 最小子集（<span class="path">miniharness/acp.py</span>，26 测试，07 章 §7.7）；hooks 桥（<span class="path">miniharness/hooks.py</span>，40 测试，07 章 §7.8）。web 表面留在观察清单。
-</div>
-<div class="callout ok">
-<b>已完成（ROADMAP 阶段 7）</b>：异步化与并行工具执行（<span class="path">miniharness/scheduler.py</span> + bus async 变体 + <code>execution_mode</code> 分类器，36 测试，手册 12 章）——屏障/滚动池/模型序提交/取消排干与上游 <span class="path">agent-loop/src/tool-calls.ts</span> 逐条对齐。
-</div>
-<div class="callout ok">
-<b>已完成（ROADMAP 阶段 4 补全）</b>：模型请求重试/退避（<span class="path">miniharness/retry_policy.py</span> + <span class="path">miniharness/llm_retry.py</span> + <span class="path">loop.py</span> 接线，36 测试，手册 04 章 §4.10）——<code>agent/request-error</code> waterfall 扩展点、normal/always 策略、有界指数退避 + 对称抖动、<code>providerRetryAfterMs</code>（429 Retry-After）优先、durable <code>llm/retry</code> + <code>llm/retry-started</code> 审计对；上下文溢出/认证不在默认可重试白名单 → 终局降级，对齐上游 <span class="path">llm-retry/src/index.ts</span> 与 <span class="path">retry-policy.ts</span>。
-</div>
-
-<div class="callout ok">
-<b>已完成（收尾批次：阶段 5/8/9/0）</b>：YAML 配置 + <code>!!js</code> 插值子集（<span class="path">miniharness/composition.py</span>，23 测试）——pyyaml 可选依赖双载体、<code>process.env.&lt;NAME&gt;</code> 子集（其它表达式 fail loud，简化为不求值 JS）、<code>.env</code> 加载（ENOENT 静默/其它 warn/已存在不覆盖）、组合 dump 渲染；启动器选项（<span class="path">miniharness/cli.py</span>，24 测试）——<code>--patch</code> 可重复、<code>--dump-config</code>/<code>--dump-default-config</code> 互斥且 boot-free、dump 不接受任务参数、default 不接受 <code>--patch</code>，行级 <code># ==</code> 来源注释 + <code>!!js</code> 原样未求值 + skipped patch warn 不失败 + 单文档可再加载；会话管理子命令（<span class="path">miniharness/sessions.py</span>，8 测试，mini 教学扩展——上游会话管理在 web 表层）；CI（<span class="path">.github/workflows/ci.yml</span>：unittest + Python 3.10~3.13 matrix × ubuntu/windows + demo 冒烟）+ integration 标签真实 API 测试（<span class="path">tests/test_real_api.py</span>，<code>MINIHARNESS_INTEGRATION=1</code> + key 缺一即跳过）。当前 398 个测试全绿。
-</div>
+<p>headless 一次性任务入口（<span class="path">miniharness/headless.py</span> + <span class="path">cli.py</span>）：stdout 最后一条非空 assistant 文本、退出码按 turn/end reason、空任务拒绝、未知 profile fail loud、不开端口、<code>ctx.appExit</code> 宿主钩子。9 个测试，手册 07 章。</p>
+<p>协议入口最小子集：JSON-RPC 信封（<span class="path">miniharness/sdk_protocol.py</span>，21 测试，07 章 §7.6）、ACP（<span class="path">miniharness/acp.py</span>，26 测试，07 章 §7.7）、hooks 桥（<span class="path">miniharness/hooks.py</span>，40 测试，07 章 §7.8）；web 表面留在观察清单。</p>
+<p>异步化与并行工具执行（<span class="path">miniharness/scheduler.py</span> + bus async 变体 + <code>execution_mode</code> 分类器，36 测试，手册 12 章）——屏障/滚动池/模型序提交/取消排干与上游 <span class="path">agent-loop/src/tool-calls.ts</span> 逐条对齐。</p>
+<p>模型请求重试/退避（<span class="path">miniharness/retry_policy.py</span> + <span class="path">miniharness/llm_retry.py</span> + <span class="path">loop.py</span> 接线，36 测试，手册 04 章 §4.10）——<code>agent/request-error</code> waterfall 扩展点、normal/always 策略、有界指数退避 + 对称抖动、<code>providerRetryAfterMs</code>（429 Retry-After）优先、durable <code>llm/retry</code> + <code>llm/retry-started</code> 审计对；上下文溢出/认证不在默认可重试白名单 → 终局降级，对齐上游 <span class="path">llm-retry/src/index.ts</span> 与 <span class="path">retry-policy.ts</span>。</p>
+<p>YAML 配置 + <code>!!js</code> 插值子集（<span class="path">miniharness/composition.py</span>，23 测试）——pyyaml 可选依赖双载体、<code>process.env.&lt;NAME&gt;</code> 子集（其它表达式 fail loud，简化为不求值 JS）、<code>.env</code> 加载（ENOENT 静默/其它 warn/已存在不覆盖）、组合 dump 渲染；启动器选项（<span class="path">miniharness/cli.py</span>，24 测试）——<code>--patch</code> 可重复、<code>--dump-config</code>/<code>--dump-default-config</code> 互斥且 boot-free、dump 不接受任务参数、default 不接受 <code>--patch</code>，行级 <code># ==</code> 来源注释 + <code>!!js</code> 原样未求值 + skipped patch warn 不失败 + 单文档可再加载；会话管理子命令（<span class="path">miniharness/sessions.py</span>，8 测试，mini 教学扩展——上游会话管理在 web 表层）；CI（<span class="path">.github/workflows/ci.yml</span>：unittest + Python 3.10~3.13 matrix × ubuntu/windows + demo 冒烟）+ integration 标签真实 API 测试（<span class="path">tests/test_real_api.py</span>，<code>MINIHARNESS_INTEGRATION=1</code> + key 缺一即跳过）。当前 398 个测试全绿。</p>
 
 <!-- ==================== 议题 3 ==================== -->
 
@@ -280,7 +283,7 @@ bin.ts → args 解析（--profile/--task/--session） → profile-boot 层
 <h3>3.1 产品体验</h3>
 <p>Trajectory 是 <b>web 专属</b>的"Agent 的 DevTools"：一个按 turn 组织的可检查事件台账（<span class="path">packages/client/ui-trajectory/README.md:5</span>）。它把原始事件流折叠成 User/Assistant/Tool/嵌套 Subtool 的记录，用户可：按时间线扫读（Overview 区域，四种投影模式、TTFT 两色标注）、展开任意记录看局部检查器（Summary/Payload/Timing/Input/Output）、全文搜索（浏览器内）、折叠展开。长会话呈虚拟化滚动：尾部打开、向上翻页加载更早记录。</p>
 <div class="callout warn">
-<b>勘误（重要）</b>：Trajectory <b>不是独立数据系统</b>，也不是某种"session-timeline"包——全仓 grep 无该包。它就是同一份事件溯源日志在浏览器端的投影视图；<code>session-query</code>（议题 7）与它无数据关系。
+<b>澄清（重要）</b>：Trajectory <b>不是独立数据系统</b>，也不是某种"session-timeline"包——全仓 grep 无该包。它就是同一份事件溯源日志在浏览器端的投影视图；<code>session-query</code>（议题 7）与它无数据关系。
 </div>
 
 <h3>3.2 机制</h3>
@@ -367,7 +370,7 @@ bin.ts → args 解析（--profile/--task/--session） → profile-boot 层
 <h3>5.1 产品体验</h3>
 <p>当模型调用需要人类点头的操作（危险命令、写文件、删除等）时，web 面板弹出 <b>Reject / Allow once</b> 两个按钮（<span class="path">packages/client/ui-conversation/src/client/skeleton/ApprovalPanel.tsx:57-83</span>）。<b>没有"永远允许"</b>：每次授权只作用于被询问的那一个动作，下一次调用必须重新 ask。无人值守时可用 <code>never</code> 策略确定性拒绝，或由 ACP 机器应答（只给一次性 allow-once/reject-once 两个选项）。</p>
 <div class="callout warn">
-<b>勘误（命名换代）</b>：现仓库词汇是 <code>ApprovalOutcome</code> / <code>ApprovalPolicy</code> / <code>PreToolDecision</code>，不存在 <code>PermissionStatus</code>、<code>approvalContext</code> 等旧符号；且"allowed-once 豁免下一次"不存在——README 已知限制清单明示无 allow-always、无记忆规则、无撤销、无授权存储（<span class="path">packages/interaction/user-approval/README.md:60</span>）。
+<b>词汇澄清</b>：现仓库词汇是 <code>ApprovalOutcome</code> / <code>ApprovalPolicy</code> / <code>PreToolDecision</code>，不存在 <code>PermissionStatus</code>、<code>approvalContext</code> 等旧符号；且"allowed-once 豁免下一次"不存在——README 已知限制清单明示无 allow-always、无记忆规则、无撤销、无授权存储（<span class="path">packages/interaction/user-approval/README.md:60</span>）。
 </div>
 
 <h3>5.2 机制</h3>
@@ -497,7 +500,7 @@ sidebar 搜索 → ctx.sessions.search（runtime manager.ts:518-527）→ RPC se
 </ul>
 <h4>goal（<span class="path">packages/goal/</span>：goal + goal-round-driver + tool-goal + command-goal）</h4>
 <ul>
-  <li><b>事件</b>：durable 事件只有 <code>goal/change</code>（全快照或 clear 墓碑，version 1，domain.ts:25-36）+ 进程内通知 <code>goal/changed</code>；<b>不存在</b> <code>goal/claim</code> / <code>goal/round</code> 事件——round 只是消息 source 字段与快照计数（勘误）；</li>
+  <li><b>事件</b>：durable 事件只有 <code>goal/change</code>（全快照或 clear 墓碑，version 1，domain.ts:25-36）+ 进程内通知 <code>goal/changed</code>；<b>不存在</b> <code>goal/claim</code> / <code>goal/round</code> 事件——round 只是消息 source 字段与快照计数（澄清）；</li>
   <li><b>goal round</b>：驱动器把"active 且 armed 且未超限"的 goal 变成顺序轮次——每条是 goal 来源的 user 消息（<code>source:{kind:'goal', goalId, revision, round}</code>），经 <code>agent.followup()</code> 进 inbox，成为普通 FIFO turn（goal-round-driver/src/index.ts:174-179）；</li>
   <li><b>pre-step 消费</b>：goal 消息<b>不是被 reject 而是 enter</b>；驱动器在 proposed messages 中认出 goal 来源，下游之前/之后各校验一次完整 reservation（active/armed、revision、round==roundsStarted+1、phase==claimed），校验失败才 reject（或下游 reject 时标记 blocked，code <code>prompt-rejected</code>）（index.ts:334-414）；</li>
   <li><b>容量与并发</b>：轮次上限 <code>maxGoalRounds</code> 超限自动 block（code <code>round-limit</code>，index.ts:166-172）；按 agent 串行化——同一时刻最多一个在飞 round（index.ts:208-241）；resume/fork 后需人授权重新 armed；预留前先 <code>ctx.sessions.flush()</code> 检查点保证 goal/changed 持久义务（index.ts:142-154）。</li>
@@ -529,7 +532,7 @@ sidebar 搜索 → ctx.sessions.search（runtime manager.ts:518-527）→ RPC se
 <ul>
   <li><b>可选能力</b>：不在 agent-loop 脊柱上；<code>ctx.tokenMeter</code> 独立服务（docs/subsystems/compaction.md:5,69）；</li>
   <li><b>触发</b>：<code>thresholdRatio</code> 默认 <b>0.8</b>（<code>floor(contextWindow × ratio)</code> → thresholdTokens，config.ts:20-23,144-154），tokenMeter 请求+响应压力 ≥ 阈值触发；<code>retainRatio</code> 默认 0.16 为保留尾部预算；<code>context-overflow</code>（provider 报 <code>CONTEXT_WINDOW_EXCEEDED</code>）绕过阈值强制减容（index.ts:283-312）；</li>
-  <li><b>事件</b>：<code>compaction/start</code>（先落地为锁）、<code>compaction/summary</code>、<code>compaction/end</code>（最后释放，崩溃留下可检测孤儿锁）+ 可选 <code>compaction/prune</code>；<b>不存在</b> compaction-request / compaction/compress 名称（勘误）；三个事件 log-only；surface 实际变更是带 <code>surfaceOp:{op:'replace',start,end}</code> 的 user/message 检查点（事务 id 关联）；</li>
+  <li><b>事件</b>：<code>compaction/start</code>（先落地为锁）、<code>compaction/summary</code>、<code>compaction/end</code>（最后释放，崩溃留下可检测孤儿锁）+ 可选 <code>compaction/prune</code>；<b>不存在</b> compaction-request / compaction/compress 名称（澄清）；三个事件 log-only；surface 实际变更是带 <code>surfaceOp:{op:'replace',start,end}</code> 的 user/message 检查点（事务 id 关联）；</li>
   <li><b>KV 复用</b>：summarization 是一次直接 <code>ctx.llm.stream()</code>（purpose:'compaction'），<b>逐字重放</b>会话自己的 system prompt、工具、被遮蔽区消息，最后追加固定压缩指令——复用 provider warm prefix cache（summarizer.ts:111,161-176）；</li>
   <li><b>衔接</b>：压力检查挂在串行 <code>agent/pre-step</code>（request 派生前）；overflow 恢复挂在 <code>agent/request-error</code>，仅当 <code>surface.replaceGeneration</code> 前进才返回 retry（index.ts:147-223）；手动路径 compactNow 闭合后 <code>ctx.sessions.flush()</code> 放行后续 prompt（region.ts:231-237）。</li>
 </ul>
@@ -571,10 +574,41 @@ sidebar 搜索 → ctx.sessions.search（runtime manager.ts:518-527）→ RPC se
 <p>mini 无压缩/作业/子代理续跑。规划（按价值排序）：① token 计量 fold（可先做固定启发式估算版）；② 压缩最小版（pre-step 压力检查 + summary replace 检查点 + 前缀重放标注简化）；③ 后台作业语义（进程内注册表，无会话事件——与上游一致）后置。</p>
 
 <div class="footer">
-体系化报告 · 04 产品面全解读（九议题已全部补全）<br>
-配套教程手册：docs/chapters/（从 0 到 1 实现核心系统）· 图表由 Mermaid.js 渲染，需联网加载 CDN
+DeepSeek Harness 深度掌握指南 · 体系化报告<br>
+<span class="foot-note">配套教程手册：docs/chapters/（从 0 到 1 实现核心系统）· 图表由 Mermaid.js 渲染，需联网加载 CDN</span>
 </div>
 </main>
 </div>
+<div id="zoom-modal"><div class="zoom-box"></div></div>
+<script>
+(function () {
+  var modal = document.getElementById('zoom-modal');
+  var box = modal.querySelector('.zoom-box');
+  function bind(svg) {
+    if (svg.dataset.zoomBound) return;
+    svg.dataset.zoomBound = '1';
+    svg.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var clone = svg.cloneNode(true);
+      var w = svg.getAttribute('width'), h = svg.getAttribute('height');
+      if (!clone.getAttribute('viewBox') && w && h) {
+        clone.setAttribute('viewBox', '0 0 ' + parseFloat(w) + ' ' + parseFloat(h));
+      }
+      clone.removeAttribute('width');
+      clone.removeAttribute('height');
+      box.innerHTML = '';
+      box.appendChild(clone);
+      modal.classList.add('show');
+    });
+  }
+  function scan() { document.querySelectorAll('.mermaid svg').forEach(bind); }
+  modal.addEventListener('click', function () { modal.classList.remove('show'); });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') modal.classList.remove('show'); });
+  document.addEventListener('DOMContentLoaded', function () {
+    scan();
+    new MutationObserver(scan).observe(document.body, { childList: true, subtree: true });
+  });
+})();
+</script>
 </body>
 </html>

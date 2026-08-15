@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>DeepSeek Harness 深度掌握指南 · 03 关键处理流程</title>
 <style>
-<style>
   :root {
     --bg: #f7f8fa;
     --panel: #ffffff;
@@ -116,7 +115,21 @@
   .fig-cap { font-size: 13px; font-weight: 600; color: var(--brand); margin: 18px 0 0; }
   .walkthrough { background: var(--panel); border: 1px dashed var(--line); border-left: 4px solid var(--green); border-radius: 0 10px 10px 0; padding: 12px 18px; margin: 14px 0 20px; font-size: 14px; }
   .walkthrough b { color: var(--brand); }
-</style>
+
+  .footer { text-align: center; }
+  .footer .foot-note { font-size: 12px; color: var(--muted); }
+  .mermaid { position: relative; cursor: zoom-in; }
+  .mermaid::after {
+    content: "点击图表放大";
+    position: absolute; top: 8px; right: 12px;
+    font-size: 11px; color: #64748b; background: rgba(255,255,255,.88);
+    padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line);
+    pointer-events: none;
+  }
+  #zoom-modal { display: none; position: fixed; inset: 0; z-index: 9999; background: rgba(15,23,42,.82); overflow: auto; cursor: zoom-out; padding: 28px; }
+  #zoom-modal.show { display: block; }
+  #zoom-modal .zoom-box { width: fit-content; max-width: 100%; margin: 0 auto; background: #fff; border-radius: 10px; padding: 20px; box-shadow: 0 24px 64px rgba(0,0,0,.5); }
+  #zoom-modal svg { display: block; width: 100%; height: auto; }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.3/dist/mermaid.min.js"></script>
 <script>
@@ -158,7 +171,6 @@
   <a class="slink" href="04-product-surface.html">04 产品面全解读</a>
   <a class="slink" href="05-roadmap.html">05 路线图与 Python 复现</a>
   <a class="slink" href="06-appendix.html">06 附录与 HOWTO</a>
-  <a class="slink" href="DEEPSEEK-HARNESS-DEEP-LEARNING-GUIDE.html">旧版完整报告（归档保留）</a>
 <div class="sec">本页目录</div>
   <a class="slink" href="#s5">5. 关键处理流程</a>
   <a class="slink l2" href="#s5-1">5.1 Turn/Step 循环</a>
@@ -372,10 +384,41 @@ flowchart TD
 <!-- ============ PART 2 ============ -->
 
 <div class="footer">
-体系化报告子页 · 内容迁移自 DEEPSEEK-HARNESS-DEEP-LEARNING-GUIDE.html（旧版完整报告保留于本目录）<br>
-配套教程手册：docs/chapters/（从 0 到 1 实现核心系统）· 图表由 Mermaid.js 渲染，需联网加载 CDN
+DeepSeek Harness 深度掌握指南 · 体系化报告<br>
+<span class="foot-note">配套教程手册：docs/chapters/（从 0 到 1 实现核心系统）· 图表由 Mermaid.js 渲染，需联网加载 CDN</span>
 </div>
 </main>
 </div>
+<div id="zoom-modal"><div class="zoom-box"></div></div>
+<script>
+(function () {
+  var modal = document.getElementById('zoom-modal');
+  var box = modal.querySelector('.zoom-box');
+  function bind(svg) {
+    if (svg.dataset.zoomBound) return;
+    svg.dataset.zoomBound = '1';
+    svg.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var clone = svg.cloneNode(true);
+      var w = svg.getAttribute('width'), h = svg.getAttribute('height');
+      if (!clone.getAttribute('viewBox') && w && h) {
+        clone.setAttribute('viewBox', '0 0 ' + parseFloat(w) + ' ' + parseFloat(h));
+      }
+      clone.removeAttribute('width');
+      clone.removeAttribute('height');
+      box.innerHTML = '';
+      box.appendChild(clone);
+      modal.classList.add('show');
+    });
+  }
+  function scan() { document.querySelectorAll('.mermaid svg').forEach(bind); }
+  modal.addEventListener('click', function () { modal.classList.remove('show'); });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') modal.classList.remove('show'); });
+  document.addEventListener('DOMContentLoaded', function () {
+    scan();
+    new MutationObserver(scan).observe(document.body, { childList: true, subtree: true });
+  });
+})();
+</script>
 </body>
 </html>

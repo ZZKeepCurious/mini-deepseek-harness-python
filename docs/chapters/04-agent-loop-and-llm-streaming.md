@@ -397,7 +397,7 @@ print([e["type"] for e in session.events])
 | `finish {kind:'error'\|'aborted'}` 带内失败 | 流中途失败也可经协议传递 | 只在 `stream()` 抛 `LlmFailure` |
 | `EMPTY_RESPONSE` 编码 | 空响应 = 规范错误，可重试 | ✅ 已实现且默认可重试（§4.10） |
 
-## 4.10 重试/退避与上下文溢出降级（阶段 4 补全）
+## 4.10 重试/退避与上下文溢出降级
 
 对应 dsh：`packages/llm/llm/src/retry-policy.ts` + `packages/llm/llm-retry/src/index.ts` + `packages/core/agent/src/runtime-types.ts`（`agent/request-error`）。
 
@@ -438,7 +438,7 @@ payload `{agent, turn, step, provider, failure, retryPolicy, signal}`（与上�
 
 **上下文溢出降级**：`CONTEXT_WINDOW_EXCEEDED`（400 上下文超限）不在默认白名单
 → 终局不重试（重试只会以相同方式失败），`turn/end` reason 为 `{kind:'error'}`。
-这是刻意的降级语义：溢出该走压缩/剪枝路径（阶段 12 观察清单），而不是退避重试。
+这是刻意的降级语义：溢出该走压缩/剪枝路径（观察清单），而不是退避重试。
 
 验证：`python -m unittest tests.test_retry -v`（36 项：策略解析、退避边界、
 Retry-After 解析、全部 recover 分支、loop 集成——重试成功/耗尽终局/非白名单终局）。
