@@ -1,0 +1,95 @@
+site_name: Mini DeepSeek Harness 文档
+site_description: 用纯 Python 标准库从 0 到 1 复现 DeepSeek Harness 核心能力的教学项目
+site_url: https://zzkeepcurious.github.io/mini-deepseek-harness-python/
+repo_url: https://github.com/ZZKeepCurious/mini-deepseek-harness-python
+edit_uri: blob/main/docs/
+copyright: MIT License · DeepSeek Harness 深度掌握指南
+
+theme:
+  name: material
+  language: zh
+  icon:
+    logo: material/book-open-page-variant
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: 切换为深色模式
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: 切换为浅色模式
+  features:
+    - navigation.tabs
+    - navigation.top
+    - navigation.footer
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - content.tooltips
+
+extra_css:
+  - assets/extra.css
+
+extra_javascript:
+  - assets/zoom.js
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.betterem
+  - pymdownx.caret
+  - pymdownx.details
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+nav:
+  - 首页: index.md
+  - 分析报告:
+      - 报告首页（阅读地图）: report/index.md
+      - 01 项目全景与分层架构: report/01-overview.md
+      - 02 系统架构与内核: report/02-architecture.md
+      - 03 关键处理流程: report/03-flows.md
+      - 04 产品面全解读: report/04-product-surface.md
+      - 05 路线图与 Python 复现: report/05-roadmap.md
+      - 06 附录与 HOWTO: report/06-appendix.md
+  - 教程手册:
+      - 00 环境准备: chapters/00-setup.md
+      - 01 事件溯源会话: chapters/01-event-sourced-session.md
+      - 02 插件上下文与事件总线: chapters/02-plugin-context-and-event-bus.md
+      - 03 工具执行管线: chapters/03-tool-execution-pipeline.md
+      - 04 Agent Loop + LLM 流式: chapters/04-agent-loop-and-llm-streaming.md
+      - 05 持久化 + 崩溃恢复 + 组合: chapters/05-persistence-recovery-composition.md
+      - 06 进阶扩展口: chapters/06-advanced-seams.md
+      - 07 外部入口: chapters/07-external-entry-points.md
+      - 08 组合层深读: chapters/08-composition-layer.md
+      - 09 Agent 干预面: chapters/09-agent-intervention.md
+      - 10 轨迹投影引擎: chapters/10-trajectory-projection.md
+      - 11 运行时自我修改: chapters/11-runtime-self-modification.md
+      - 12 异步化与并行工具: chapters/12-async-parallel-tools.md

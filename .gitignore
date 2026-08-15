@@ -25,3 +25,6 @@ miniharness-demo-*/
 .idea/
 .vscode/
 *.swp
+
+# MkDocs build output
+site/

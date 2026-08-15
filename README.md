@@ -14,7 +14,7 @@ The upstream project builds its entire system on a philosophy where **everything
 
 Two complementary documents (both in Chinese):
 
-- **[Analysis report](docs/report/index.html)** — a deep dive into the upstream repository: five-layer architecture, the `ctx` service map, core techniques, and key processing flows, fully illustrated with Mermaid diagrams (landing page + six topic pages).
+- **[Analysis report](docs/report/index.md)** — a deep dive into the upstream repository: five-layer architecture, the `ctx` service map, core techniques, and key processing flows, fully illustrated with Mermaid diagrams (landing page + six topic pages). Rendered on GitHub Pages via MkDocs: https://zzkeepcurious.github.io/mini-deepseek-harness-python/
 - **[Step-by-step handbook](docs/chapters/)** — how the system grows from zero, one chapter at a time: concepts → minimal runnable code → invariants/tests → checkpoint exercises.
 
 See [ROADMAP.md](ROADMAP.md) for where this project is heading.

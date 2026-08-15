@@ -1,0 +1,114 @@
+/* ============ Mini Harness 文档自定义样式 ============ */
+
+/* 顶部标签条（pill-row + tag） */
+.pill-row { margin: 12px 0 8px; }
+.tag {
+  display: inline-block;
+  font-size: 11px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  margin-right: 6px;
+  margin-bottom: 4px;
+  font-weight: 600;
+  letter-spacing: .02em;
+}
+.t-blue { background: #eef2ff; color: #4f46e5; }
+.t-green { background: #ecfdf5; color: #047857; }
+.t-amber { background: #fffbeb; color: #b45309; }
+.t-rose { background: #fff1f2; color: #be123c; }
+[data-md-color-scheme="slate"] .t-blue { background: #1e1b4b; color: #a5b4fc; }
+[data-md-color-scheme="slate"] .t-green { background: #022c22; color: #6ee7b7; }
+[data-md-color-scheme="slate"] .t-amber { background: #431407; color: #fcd34d; }
+[data-md-color-scheme="slate"] .t-rose { background: #4c0519; color: #fda4af; }
+
+/* 路径 / 代码提示样式 */
+.path {
+  font-family: var(--md-code-font-family, monospace);
+  font-size: .8rem;
+  color: #5c6474;
+  background: #f1f5f9;
+  padding: 1px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+[data-md-color-scheme="slate"] .path { color: #9ca3af; background: #1f2937; }
+
+/* 图注 */
+.fig-cap {
+  font-size: .82rem;
+  font-weight: 600;
+  color: var(--md-primary-fg-color, #4f46e5);
+  margin: 18px 0 0;
+}
+/* 图下注释 */
+.mermaid-note, .toc-hint {
+  font-size: .8rem;
+  color: var(--md-default-fg-color--light, #5c6474);
+  margin: 6px 0 0;
+}
+
+/* Mermaid 容器悬停提示 */
+.md-typeset .mermaid { cursor: zoom-in; }
+
+/* 放大弹窗 */
+#zoom-modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(15, 23, 42, .82);
+  overflow: auto;
+  cursor: zoom-out;
+}
+#zoom-modal.show { display: block; }
+#zoom-modal .zoom-pane {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 28px;
+}
+#zoom-modal .zoom-box {
+  width: fit-content;
+  max-width: min(94vw, 1600px);
+  background: #fff;
+  border-radius: 10px;
+  padding: 20px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, .5);
+}
+[data-md-color-scheme="slate"] #zoom-modal .zoom-box { background: #1e1e2e; }
+#zoom-modal .zoom-stage { overflow: hidden; cursor: grab; }
+#zoom-modal .zoom-stage.dragging { cursor: grabbing; }
+#zoom-modal .zoom-stage svg {
+  display: block;
+  height: auto;
+  transform-origin: center center;
+}
+#zoom-modal .zoom-label {
+  position: fixed;
+  top: 12px;
+  right: 20px;
+  z-index: 1;
+  color: #fff;
+  background: rgba(15, 23, 42, .65);
+  font-size: 13px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-family: var(--md-code-font-family, monospace);
+}
+#zoom-modal .zoom-hint {
+  position: fixed;
+  bottom: 16px;
+  left: 0;
+  right: 0;
+  text-align: center;
+  color: #e2e8f0;
+  font-size: 12.5px;
+  opacity: .85;
+}
+
+/* 检查清单（checklist 列表） */
+.checklist { list-style: none; padding-left: 0; }
+.checklist li { margin: 4px 0; }
+.checklist li::before { content: "☐ "; color: var(--md-primary-fg-color, #4f46e5); }
