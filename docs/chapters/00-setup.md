@@ -25,7 +25,7 @@ mini-deepseek-harness-python/        ← 仓库根
 │   ├── loop.py                  ← 第 4 章：Agent Loop 状态机
 │   ├── persistence.py           ← 第 5 章：JSONL / SQLite + 恢复
 │   ├── boot.py                  ← 第 5 章：启动与组合
-│   ├── seams.py                 ← 第 6 章：进阶接缝
+│   ├── seams.py                 ← 第 6 章：进阶扩展口
 │   ├── example_plugins.py       ← 第 5 章 boot 演示插件
 │   └── demo.py                  ← 端到端演示（无 key 可跑）
 ├── tests/                       ← 每章验收测试（unittest）

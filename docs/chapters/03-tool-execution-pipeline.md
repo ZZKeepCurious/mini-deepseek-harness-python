@@ -213,7 +213,7 @@ def run_pipeline(ctx, tool, args, exec_=None):
 
 **超时**：用线程 + `join(timeout)` 强制。超时后设置 `exec_.signal`——这是给工具体的协作取消信号，愿意配合的工具可以借此尽快收尾。为什么不直接在工具内部做超时？因为超时是宿主策略，不该让每个工具作者各自实现一遍。真实 dsh 挂在 `tools/execute` 的 around-dispatch 上，语义相同。
 
-**规范化**：三种"出错形态"——抛异常、返回 `isError` dict、返回不可序列化的值——全部收敛为 `ToolResult(is_error=True)`。这是"回合不中断"承诺的落实：模型收到的是结构化错误消息，而不是一个崩溃的回合。常规做法里异常向上抛，一次工具崩溃整个会话就没了。
+**规范化**：三种"出错形态"（抛异常、返回 `isError` dict、返回不可序列化的值）全部收敛为 `ToolResult(is_error=True)`。这是"回合不中断"承诺的落实：模型收到的是结构化错误消息，而不是一个崩溃的回合。常规做法里异常向上抛，一次工具崩溃整个会话就没了。
 
 ## 3.4 验收：硬性规定 + 测试
 
@@ -241,7 +241,7 @@ python -m unittest tests.test_tools -v
 
 - `tools/pre-execute` / `execute` / `post-execute` 三个 waterfall 的真实事件约定，字段名与我们一致
 - 注册表外层规范化的真实位置（snapshot 异常 → isError）
-- `finalizeContent`：最后一个内容只读不变量（简化版没有实现，值得知道它存在）
+- `finalizeContent`：最后一个内容只读硬性规定（简化版没有实现，值得知道它存在）
 
 一个语义差异需要明说：上游 `tools/post-execute` 是"无损物化前的 content 替换钩子"——返回 `undefined` 即保留原内容，返回其他值替换 content。简化版把它做成 accept/block 门（拒绝时返回 `{verdict: "block", feedback}`）。方向不同，但落点相同：模型最终只能看到规范化的结果。
 

@@ -145,13 +145,13 @@ def load_events_checked(raw_events):
 def repair_and_replay(persistence, session_id, session):
     """load → 校验 → 崩溃修复 → 回放进内存 Session（重启后继续对话）。"""
     raw = load_events_checked(persistence.load(session_id))
-    repaired = repair_interrupted_turn(raw)   # 第 1 章的不变量
+    repaired = repair_interrupted_turn(raw)   # 第 1 章的硬性规定
     for ev in repaired:
         session.append(ev)
     return session
 ```
 
-`load_events_checked` 的 fail-closed 值得展开：磁盘上有一条未知类型的事件，说明它来自更新版本的 harness（或有人手改了文件）。两条路：跳过它继续加载（省事，但解读被悄悄改变——事件序列断了一个环节），或者整体拒绝（严格，但保证解读不变）。dsh 选后者，唯一例外是事件带 `ignorable: true` 标记——那是上游明确声明"可以忽略"的。
+`load_events_checked` 的 fail-closed 值得展开：磁盘上有一条未知类型的事件，说明它来自更新版本的 harness（或有人手改了文件）。两条路：跳过它继续加载（省事，但解读被悄悄改变：事件序列断了一个环节），或者整体拒绝（严格，但保证解读不变）。dsh 选后者，唯一例外是事件带 `ignorable: true` 标记——那是上游明确声明"可以忽略"的。
 
 `repair_and_replay` 就是第 1 章 `repair_interrupted_turn` 的消费方：load → 校验 → 补括号 → 重新 append 进内存 Session。回放 = 重新派生，`derive_messages` 自动重建历史，第 1 章的"回放 = 重新派生"在这里落地。
 

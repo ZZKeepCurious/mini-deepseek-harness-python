@@ -21,7 +21,7 @@ sequenceDiagram
   participant A as Agent
   participant D as Driver
   participant S as Session 日志
-  participant L as LLM 接缝
+  participant L as LLM 扩展口
   participant T as tools
   U->>A: followup(content)
   A->>S: turn/start [durable]
@@ -69,7 +69,7 @@ class StreamChunk(dict):
 
 为什么要统一协议？因为不同模型厂商的流式格式各不相同（OpenAI 系、Anthropic 系、原生 SSE……），loop 不该关心厂商差异。所有适配器都吐同一种 `StreamChunk`，loop 只认这一种。
 
-协议不变量（真实 dsh 逐条遵守，`docs/subsystems/llm-streaming.md` 有完整规范）：
+协议硬性规定（真实 dsh 逐条遵守，`docs/subsystems/llm-streaming.md` 有完整规范）：
 
 - `block-end` 携带完整块；`usage` 必须在 `finish` 之前；`finish` 之后不再有值
 - 块索引关联交错增量：多块并行时用 `index` 区分
@@ -202,7 +202,7 @@ class DeepSeekAdapter(LlmAdapter):
 
 两个细节：
 
-- `baseURL / apiKey` 从环境变量读取，代码里只存引用。凭据的完整处理在第 6 章（凭据接缝）。
+- `baseURL / apiKey` 从环境变量读取，代码里只存引用。凭据的完整处理在第 6 章（凭据扩展口）。
 - 401/403 映射为 `AUTH_ERROR`，其余 HTTP 错误映射为 `REQUEST_ERROR`——错误在源头就分类，调用方不用猜。
 
 ## 4.4 代码 step-by-step（loop.py）

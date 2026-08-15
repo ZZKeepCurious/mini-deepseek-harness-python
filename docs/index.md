@@ -15,6 +15,6 @@
 - [03 工具执行管线](chapters/03-tool-execution-pipeline.md)
 - [04 Agent Loop + LLM 流式](chapters/04-agent-loop-and-llm-streaming.md)
 - [05 持久化 + 崩溃恢复 + 组合](chapters/05-persistence-recovery-composition.md)
-- [06 进阶接缝](chapters/06-advanced-seams.md)
+- [06 进阶扩展口](chapters/06-advanced-seams.md)
 
 > 手册内 Mermaid 图在 GitHub Pages 上不会渲染（显示为代码块），完整效果请查看分析报告或本地 IDE 预览。

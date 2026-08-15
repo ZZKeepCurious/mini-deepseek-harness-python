@@ -1,7 +1,7 @@
 # ROADMAP：从 0 到 1 复现 DeepSeek Harness（Python）
 
 > 对照物：`deepseek-harness/` 真实源码 + `docs/report/` 报告的功能地图。
-> 原则：每个阶段可独立运行、有测试、可演示；优先"契约正确"而非"功能齐全"。
+> 原则：每个阶段可独立运行、有测试、可演示；优先"约定正确"而非"功能齐全"。
 
 图例：✅ 完成 · ◐ 部分完成 · ⏳ 待办
 
@@ -18,9 +18,9 @@
 
 - [x] `Session` 追加重放日志：seq 单调、append 复制、unknown 拒绝
 - [x] 回合事件携带 `turn` / `step` 编号（与上游 `SessionEvent` 字段一致，从 0 起）
-- [x] deep-freeze、is_json_safe、`derive_messages` 投影、`turn_balance` 不变量
+- [x] deep-freeze、is_json_safe、`derive_messages` 投影、`turn_balance` 硬性规定
 - [x] `repair_interrupted_turn`（崩溃只补括号，不截断）
-- [x] 持久化接缝：JSONL / SQLite 双后端、flush 栅栏、fail-closed 加载、版本拒绝
+- [x] 持久化扩展口：JSONL / SQLite 双后端、flush 栅栏、fail-closed 加载、版本拒绝
 - [x] 端到端演示（demo.py：回合 → 崩溃 → 修复 → 回放续聊）
 
 对应 dsh：`packages/core/session`、`packages/session/session-persistence`｜手册：01、05 章
@@ -60,12 +60,12 @@
 
 对应 dsh：`packages/boot`｜手册：05 章
 
-## 阶段 6：能力接缝（进阶）—— ◐
+## 阶段 6：能力扩展口（进阶）—— ◐
 
-- [x] 沙箱基础版：Passthrough / ReadOnly（deny-on-failure 契约）
+- [x] 沙箱基础版：Passthrough / ReadOnly（deny-on-failure 约定）
 - [x] 凭据基础版：EnvCredentialProvider（env-over-.env，按操作解析）
 - [x] 子 agent 基础版：InProcessSubAgentProvider
-- [ ] 真沙箱后端：Linux bwrap / Landlock、macOS Seatbelt、**Windows ACL runner**（上游 `sandbox/sandbox-local` 的四个后端；降级为"文档 + 契约测试"）
+- [ ] 真沙箱后端：Linux bwrap / Landlock、macOS Seatbelt、**Windows ACL runner**（上游 `sandbox/sandbox-local` 的四个后端；降级为"文档 + 约定测试"）
 - [ ] 凭据多来源：`.env` 文件 / keyring / 提示注入（上游 local provider 的 `env` / `file` / `project-env` / `user-env` 四层）
 - [ ] 子 agent 远程：fork / ACP / SDK 通道
 
@@ -95,7 +95,7 @@
 ## 阶段 9：配置与生态 —— ⏳
 
 - [ ] YAML 配置（`pyyaml` 可选依赖）+ 插值
-- [ ] 官方 SDK 互操作测试（`deepseek-harness-sdk` 驱动真实 harness 对照契约）
+- [ ] 官方 SDK 互操作测试（`deepseek-harness-sdk` 驱动真实 harness 对照约定）
 - [ ] 插件示例集（教程用插件 + 真实工具演示）
 
 ## 阶段 10：高级 —— ⏳
@@ -106,7 +106,7 @@
 
 ## 观察清单（上游已有、暂不纳入复现范围的包）
 
-> 这些 `packages/` 包确认存在，若未来想扩充复现范围可从中挑选；多数属于"能力接缝 + 消费工具"的延伸，核心契约不依赖它们。
+> 这些 `packages/` 包确认存在，若未来想扩充复现范围可从中挑选；多数属于"能力扩展口 + 消费工具"的延伸，核心约定不依赖它们。
 
 - **能力类**：`fs`（文件系统+策略）、`shell`（bash/pwsh 能力）、`terminal`（持久会话终端）、`subprocess`（进程树）、`web`（搜索/抓取）、`lsp`、`skill`、`mcp`、`code-runtime`、`storage`、`spill`、`workspace`
 - **编排类**：`workflow`（worker-thread provider）、`jobs`、`goal`、`schedule`、`compaction`（上下文压缩）、`plan`（plan 模式）、`todo`、`preset`（按会话组合）

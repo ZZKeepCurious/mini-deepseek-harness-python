@@ -5,7 +5,7 @@
 
 ## 6.1 这一章要做什么
 
-前面几章反复出现一个模式：接口 + 可替换实现 + 只依赖接口的消费方。这一章把这个模式正式化——"能力接缝三角色"——并且亲手实现三遍，每一遍都在验证同一句话：
+前面几章反复出现一个模式：接口 + 可替换实现 + 只依赖接口的消费方。这一章把这个模式正式化——"能力扩展口三角色"，并且亲手实现三遍，每一遍都在验证同一句话：
 
 > **换一个 Provider，不改 Consumer，即换行为。**
 
@@ -15,18 +15,18 @@
 2. **凭据**：`CredentialProvider` 接口 + `resolve(key)`——配置只存引用，每次操作解析
 3. **子 agent**：`SubAgentProvider` 工厂接口 + `spawn(name, prompt)`
 
-## 6.2 概念：接缝三角色
+## 6.2 概念：扩展口三角色
 
 ```mermaid
 flowchart LR
-  D["Service Definition&lt;br/&gt;接口 + 生命周期 + 错误码契约"]
+  D["Service Definition&lt;br/&gt;接口 + 生命周期 + 错误码约定"]
   P["Service Provider&lt;br/&gt;实现（可整体替换）"]
   C["Consumer&lt;br/&gt;只依赖接口"]
   P -->|"实现"| D
   C -->|"依赖"| D
 ```
 
-一个角色单独不构成接缝。新增能力 = 同时设计三个角色：定义接口（Service Definition）、提供实现（Provider）、写消费逻辑（Consumer）。三者缺一，替换性就不成立——没有接口，Consumer 直接依赖具体实现，一换就炸。
+一个角色单独不构成扩展口。新增能力 = 同时设计三个角色：定义接口（Service Definition）、提供实现（Provider）、写消费逻辑（Consumer）。三者缺一，替换性就不成立——没有接口，Consumer 直接依赖具体实现，一换就炸。
 
 还有一个联动值得知道：**共享执行世界**。dsh 里 FS 与 subprocess 的 Provider 指向远程沙箱后，Bash / PTY / LSP 会全部跟随迁移——因为它们共享同一个"执行世界"对象，换一次配置，所有相关能力一起搬家。
 
@@ -81,7 +81,7 @@ with self.assertRaises(PermissionError):
 assert passthrough.run("echo ok") == "ok"
 ```
 
-注意 `ReadOnlySandbox` 的"失败即拒"（deny on failure）：检测到写操作标志直接抛错，而不是"试试看能不能写"。dsh 的真实契约也是如此——无法确认安全就拒绝执行。
+注意 `ReadOnlySandbox` 的"失败即拒"（deny on failure）：检测到写操作标志直接抛错，而不是"试试看能不能写"。dsh 的真实约定也是如此——无法确认安全就拒绝执行。
 
 > 真实 dsh：`sandbox-local` 用 bwrap / Landlock / Seatbelt / Windows ACL 后端；`native/landlock-run` 是 Node 插件。失败即拒是共同约定。
 
@@ -155,7 +155,7 @@ python -m unittest tests.test_seams -v
 
 打开 `deepseek-harness/docs/capability-seams.md`：
 
-- 完整接缝列表与每个接缝的三角色实例
+- 完整扩展口列表与每个扩展口的三角色实例
 - "共享执行世界"的迁移机制（FS/subprocess Provider 指向远程沙箱 → Bash/PTY/LSP 跟随迁移）
 
 三个扩展口与上游的接口差异（简化命名，语义一致）：

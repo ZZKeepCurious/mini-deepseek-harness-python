@@ -156,7 +156,7 @@
   <a class="slink" href="#s4">4. 技术核心</a>
   <a class="slink l2" href="#s4-1">4.1 Cordis 插件模型</a>
   <a class="slink l2" href="#s4-2">4.2 事件溯源会话日志</a>
-  <a class="slink l2" href="#s4-3">4.3 能力接缝三角色</a>
+  <a class="slink l2" href="#s4-3">4.3 能力扩展口三角色</a>
   <a class="slink l2" href="#s4-4">4.4 类型技术</a>
   <a class="slink l2" href="#s4-5">4.5 作用域化注册</a>
   <a class="slink l2" href="#s4-6">4.6 生成器与门禁</a>
@@ -239,7 +239,7 @@
   <tr>
     <td><b>能力层</b></td>
     <td class="path">packages/&lt;group&gt;/&lt;pkg&gt;</td>
-    <td>49 个包组、219 个包级 package.json（workspace glob <code>packages/*/*</code>），全部能力接缝</td>
+    <td>49 个包组、219 个包级 package.json（workspace glob <code>packages/*/*</code>），全部能力扩展口</td>
     <td>每包遵循 Service Definition / Provider / Consumer 三段式</td>
   </tr>
   <tr>
@@ -257,7 +257,7 @@
 </table>
 
 <p class="fig-cap">图 1：五层架构总览（应用 / 组合 / 能力 / 框架 / 外部 SDK）</p>
-<p class="mermaid-note">注：分层为本报告的学习归纳视角；上游架构文档（docs/architecture.md）以"核心包表 + 事件 + 能力接缝 + 扩展点"组织，并无五层说法。图 1~15 均为此归纳视角下的示意。</p>
+<p class="mermaid-note">注：分层为本报告的学习归纳视角；上游架构文档（docs/architecture.md）以"核心包表 + 事件 + 能力扩展口 + 扩展点"组织，并无五层说法。图 1~15 均为此归纳视角下的示意。</p>
 <div class="mermaid">
 flowchart TD
   subgraph L1["应用层 · apps"]
@@ -269,7 +269,7 @@ flowchart TD
     B2["bundle 可分发补丁层"]
     B3["preset 会话级 agent 组合"]
   end
-  subgraph L3["能力层 · 49 包组 / 219 包 · 全部为能力接缝"]
+  subgraph L3["能力层 · 49 包组 / 219 包 · 全部为能力扩展口"]
     C1["core：session / tools / agent / agent-loop"]
     C2["llm 适配 · shell · fs · sandbox"]
     C3["subagents · web · skills · persistence"]
@@ -289,7 +289,7 @@ flowchart TD
   E1 -.stdio JSON-RPC 子进程.-> A1
   E2 -.stdio JSON-RPC 子进程.-> A1
 </div>
-<p class="mermaid-note">注意：能力层向上提供"接缝"，组合层用 profile / bundle / patch 挑选具体 Provider，因此"换一个 Provider 就换掉整个产品"。所有图表需联网加载 Mermaid CDN 渲染。</p>
+<p class="mermaid-note">注意：能力层向上提供"扩展口"，组合层用 profile / bundle / patch 挑选具体 Provider，因此"换一个 Provider 就换掉整个产品"。所有图表需联网加载 Mermaid CDN 渲染。</p>
 
 <div class="callout">
 <b>核心分层约束（最重要的一条架构纪律）</b>：<b>扩展插件只依赖 Service Definition，绝不依赖具体 Provider。</b> 例如 UI、hook、工具插件只依赖 <code>dsh-agent</code>（接口），从不依赖 <code>dsh-agent-loop</code>（实现），所以主循环可整体替换。这是"换一个 Provider 就把整个产品换掉"的根本原因——文件系统/子进程/终端/LSP 共享一个执行世界，把 FS 与子进程 Provider 指向远程沙箱，Bash、PTY、LSP 全部随之迁移。
@@ -300,15 +300,15 @@ flowchart TD
 <h3 id="s3-1">3.1 核心包脊柱（packages/core）——Turn 循环穿过的包</h3>
 <table>
   <tr><th>包</th><th>ctx key</th><th>职责</th></tr>
-  <tr><td class="path">core/session</td><td><code>ctx.sessions</code></td><td>追加式 <code>SessionEvent</code> 日志 + 内存 store（唯一事实来源）</td></tr>
+  <tr><td class="path">core/session</td><td><code>ctx.sessions</code></td><td>追加式 <code>SessionEvent</code> 日志 + 内存 store（唯一数据源）</td></tr>
   <tr><td class="path">core/system-prompt</td><td><code>ctx.systemPrompt</code></td><td>Prompt 分节 + 工具 schema 组装</td></tr>
   <tr><td class="path">core/tools</td><td><code>ctx.tools</code></td><td>作用域化工具注册表 + 守卫执行管线</td></tr>
   <tr><td class="path">core/agent</td><td><code>ctx.agents</code></td><td><code>Agent</code> 接口、注册表、initiator 作用域、<code>agent/*</code> 事件</td></tr>
-  <tr><td class="path">core/agent-loop</td><td><code>ctx.agentLoop</code></td><td>默认具体 Driver，唯一实现 <code>Agent</code> 契约</td></tr>
+  <tr><td class="path">core/agent-loop</td><td><code>ctx.agentLoop</code></td><td>默认具体 Driver，唯一实现 <code>Agent</code> 约定</td></tr>
   <tr><td class="path">core/agent-default-model</td><td><code>ctx.agentDefaultModel</code></td><td>Agent 入口点共用的部署级默认模型选择</td></tr>
   <tr><td class="path">core/scope</td><td>无（纯库）</td><td>作用域注册原语 <code>createScope/scopeOf/scopeTarget</code></td></tr>
 </table>
-<p class="toc-hint">循环流程：driver 认领排队输入 → 打开 turn → 经 system-prompt 组装前缀 + 从日志 derive 历史 → 经 LLM 接缝流式调用 → 经工具注册表分发工具调用 → 把所有模型可见事实 append 回日志 → 下一步骤再次从日志 derive。</p>
+<p class="toc-hint">循环流程：driver 认领排队输入 → 打开 turn → 经 system-prompt 组装前缀 + 从日志 derive 历史 → 经 LLM 扩展口流式调用 → 经工具注册表分发工具调用 → 把所有模型可见事实 append 回日志 → 下一步骤再次从日志 derive。</p>
 
 <p class="fig-cap">图 2：核心包脊柱——Turn 循环一次往返穿过的包</p>
 <div class="mermaid">
@@ -317,24 +317,24 @@ flowchart LR
     LOOP["core/agent-loop&lt;br/&gt;Driver：认领输入 · 开闭 turn"]
     PRE["core/system-prompt&lt;br/&gt;组装前缀 + 工具 schema"]
     DER["core/session&lt;br/&gt;deriveMessages 派生历史"]
-    LLMSEAM["agent/request → LLM 接缝&lt;br/&gt;llm/stream 流式"]
+    LLMSEAM["agent/request → LLM 扩展口&lt;br/&gt;llm/stream 流式"]
     TOOLSEAM["core/tools&lt;br/&gt;作用域化注册表分发"]
     LOG["core/session&lt;br/&gt;所有模型可见事实 append 回日志"]
   end
   subgraph BASE["被循环依赖的基础包"]
     SCP["core/scope&lt;br/&gt;createScope / scopeOf / scopeTarget"]
-    AG["core/agent&lt;br/&gt;Agent 契约 + initiator 作用域 + agent/* 事件"]
+    AG["core/agent&lt;br/&gt;Agent 约定 + initiator 作用域 + agent/* 事件"]
     DM["core/agent-default-model&lt;br/&gt;部署级默认模型选择"]
   end
   LOOP --> PRE --> DER --> LLMSEAM --> TOOLSEAM --> LOG
   LOG -.下一步骤再次 derive.-> DER
   SCP -.作用域原语.-> TOOLSEAM
-  AG -.契约与事件.-> LOOP
+  AG -.约定与事件.-> LOOP
   DM -.默认模型.-> AG
 </div>
-<p class="mermaid-note">agent-loop 是 <code>Agent</code> 契约的唯一默认实现（Provider）；换一个 Provider 即换掉整个主循环。</p>
+<p class="mermaid-note">agent-loop 是 <code>Agent</code> 约定的唯一默认实现（Provider）；换一个 Provider 即换掉整个主循环。</p>
 
-<h3 id="s3-2">3.2 ctx 服务地图（能力接缝速览）</h3>
+<h3 id="s3-2">3.2 ctx 服务地图（能力扩展口速览）</h3>
 <table>
   <tr><th>能力</th><th>Service（ctx key）</th><th>Provider 实现示例</th><th>Consumer（模型面向工具）</th></tr>
   <tr><td>LLM</td><td><code>ctx.llm</code></td><td>llm-deepseek（官方）、llm-pi-ai</td><td>—（对话直接经 loop）</td></tr>
@@ -356,10 +356,10 @@ flowchart LR
   <tr><td>会话标题</td><td><code>ctx.sessionTitle</code></td><td>log-backed</td><td>—</td></tr>
 </table>
 
-<p class="fig-cap">图 3：ctx 服务地图的结构——能力接缝三角色 + 共享执行世界</p>
+<p class="fig-cap">图 3：ctx 服务地图的结构——能力扩展口三角色 + 共享执行世界</p>
 <div class="mermaid">
 flowchart LR
-  subgraph SEAM["能力接缝 = 三角色缺一不可"]
+  subgraph SEAM["能力扩展口 = 三角色缺一不可"]
     D["Service Definition&lt;br/&gt;ctx.llm / ctx.fs / ctx.shell / ctx.sandbox&lt;br/&gt;ctx.subagents / ctx.skills / ctx.sessionPersistence ..."]
     P["Service Provider&lt;br/&gt;llm-deepseek / local / pwsh / sandbox-local&lt;br/&gt;in-process / fork / ACP / JSONL / SQLite ..."]
     C["Consumer（模型面向工具）&lt;br/&gt;bash / terminal / read_file / edit&lt;br/&gt;web_search / subagent / skill ..."]
@@ -381,9 +381,9 @@ flowchart LR
   <tr><th>域</th><th>例子</th><th>用途</th></tr>
   <tr><td><b>Session 事件</b>（持久化事实）</td><td><code>turn/*</code>、<code>step/*</code>、<code>user/message</code>、<code>assistant/*</code>、<code>tool/*</code></td><td>追加到日志并广播 <code>session/event</code>；必须跨重载存活的事实用它</td></tr>
   <tr><td><b>Agent 事件</b>（携带活体 <code>Agent</code>）</td><td><code>agent/inbox/*</code>、<code>agent/status</code>、<code>agent/pre-step</code>、<code>agent/request</code>、<code>agent/request-error</code>、<code>agent/turn-stopping</code></td><td>观察/拦截进行中的工作</td></tr>
-  <tr><td><b>能力事件</b>（附着策略与适配器）</td><td><code>fs/*</code>、<code>tools/*</code>、<code>telemetry/*</code></td><td>不改 loop 即可给接缝挂策略</td></tr>
+  <tr><td><b>能力事件</b>（附着策略与适配器）</td><td><code>fs/*</code>、<code>tools/*</code>、<code>telemetry/*</code></td><td>不改 loop 即可给扩展口挂策略</td></tr>
 </table>
-<p><b>四种派发模式</b>（Cordis 语义，报告的公共契约）。流水线事件（<code>agent/pre-step</code>、<code>agent/request</code>、<code>llm/stream</code>、三个 <code>tools/*</code>）全部用 waterfall：</p>
+<p><b>四种派发模式</b>（Cordis 语义，报告的公共约定）。流水线事件（<code>agent/pre-step</code>、<code>agent/request</code>、<code>llm/stream</code>、三个 <code>tools/*</code>）全部用 waterfall：</p>
 <ol>
   <li><code>emit</code>——同步广播，不等待、无返回值、按注册序观察。通知类事件专用。</li>
   <li><code>waterfall</code>——around-middleware，监听器必须 <code>next()</code> 委派；不调 <code>next</code> 即短路，返回值就是唯一决策。</li>
@@ -420,7 +420,7 @@ flowchart LR
   <tr>
     <td><b>Web GUI 宿主端</b></td>
     <td class="path">packages/host（8）</td>
-    <td>共享 API 网关 <code>ctx.apiProxy</code>（apiproxy）+ HTTP 路由载体 <code>ctx.webServer</code>（webserver）+ SPA 静态托管 + 目录选择接缝 <code>ctx.directoryPicker</code> + 插件清单远程接口。配套 <code>docs/subsystems/web-server.md</code>、workspace.md</td>
+    <td>共享 API 网关 <code>ctx.apiProxy</code>（apiproxy）+ HTTP 路由载体 <code>ctx.webServer</code>（webserver）+ SPA 静态托管 + 目录选择扩展口 <code>ctx.directoryPicker</code> + 插件清单远程接口。配套 <code>docs/subsystems/web-server.md</code>、workspace.md</td>
   </tr>
   <tr>
     <td><b>Web GUI 浏览器端</b></td>
@@ -445,7 +445,7 @@ flowchart LR
   <tr>
     <td><b>会话数据面</b></td>
     <td class="path">packages/session（13）、packages/session-query（4）</td>
-    <td>持久化接缝 + JSONL/SQLite 后端 + 投影接缝 + 标题 + 上报 + session-query（逻辑语料、lineage 血缘、事件关系、语义过滤、SQLite FTS 全文检索）。配套 docs/subsystems/persistence.md、session-projection.md、session-query.md</td>
+    <td>持久化扩展口 + JSONL/SQLite 后端 + 投影扩展口 + 标题 + 上报 + session-query（逻辑语料、lineage 血缘、事件关系、语义过滤、SQLite FTS 全文检索）。配套 docs/subsystems/persistence.md、session-projection.md、session-query.md</td>
   </tr>
   <tr>
     <td><b>协作与状态</b></td>
@@ -460,7 +460,7 @@ flowchart LR
   <tr>
     <td><b>支撑基础设施</b></td>
     <td class="path">packages/boot、test-support、util、examples、runtime-diagnostics</td>
-    <td>共享 app-bin 启动胶水；dev/test 基础设施（testkits、invariants、replay、mock LLM、Loader smokes）；零依赖工具库（<code>Branded&lt;B&gt;</code>、home 路径、超时、保留期）；演示 bundle；运行时诊断/不变量注册表</td>
+    <td>共享 app-bin 启动胶水；dev/test 基础设施（testkits、invariants、replay、mock LLM、Loader smokes）；零依赖工具库（<code>Branded&lt;B&gt;</code>、home 路径、超时、保留期）；演示 bundle；运行时诊断/硬性规定注册表</td>
   </tr>
 </table>
 <div class="callout">
@@ -494,12 +494,12 @@ flowchart LR
 </div>
 <p class="mermaid-note">"注册 = 可逆副作用"是热重载与故障清理能可靠工作的根基：任何贡献都能被 disposer 精确撤销。</p>
 
-<h3 id="s4-2">4.2 事件溯源会话日志（核心中的核心）</h3>
-<p>通常的会话实现是保存一份聊天记录，需要上下文时直接读它。dsh 恰好反过来：<code>Session</code> 只记录"发生了什么"，模型历史是每次现算的投影——这个结构在 <code>packages/core/session</code> 的 <code>SessionEvent</code> + <code>deriveMessages()</code> 组织方式里一目了然。它的六条契约拆开讲：</p>
+<h3 id="s4-2">4.2 事件溯源会话日志（整个框架的地基）</h3>
+<p>通常的会话实现是保存一份聊天记录，需要上下文时直接读它。dsh 恰好反过来：<code>Session</code> 只记录"发生了什么"，模型历史是每次现算的投影——这个结构在 <code>packages/core/session</code> 的 <code>SessionEvent</code> + <code>deriveMessages()</code> 组织方式里一目了然。它的六条约定拆开讲：</p>
 <div class="card">
 <ol>
-  <li><b>单一事实来源。</b><code>Session</code> 是一条只追加、不修改的 <code>SessionEvent</code> 日志。模型的消息历史不是另外存出来的，而是每次用 <code>deriveMessages()</code> 从日志现算——回放也等于重新派生一遍。相比"内存一份、磁盘一份"的常规做法，没有第二份副本，就没有两份数据对不上的问题。</li>
-  <li><b>模型可见 ⟺ 已记录。</b>这是单一事实来源的直接推论：历史是派生视图，那么模型能看到的任何内容，都必须能从日志重建。反过来，想给模型加一种新输入，就必须先加一种新的 session 事件（扩展 <code>SessionEventMap</code>，再写"从日志渲染它"的代码）。</li>
+  <li><b>唯一数据源。</b><code>Session</code> 是一条只追加、不修改的 <code>SessionEvent</code> 日志。模型的消息历史不是另外存出来的，而是每次用 <code>deriveMessages()</code> 从日志现算——回放也等于重新派生一遍。相比"内存一份、磁盘一份"的常规做法，没有第二份副本，就没有两份数据对不上的问题。</li>
+  <li><b>模型可见 ⟺ 已记录。</b>这是唯一数据源的直接推论：历史是派生视图，那么模型能看到的任何内容，都必须能从日志重建。反过来，想给模型加一种新输入，就必须先加一种新的 session 事件（扩展 <code>SessionEventMap</code>，再写"从日志渲染它"的代码）。</li>
   <li><b>可合并扩展。</b>常规框架加事件类型往往要改核心包；dsh 用 TypeScript 的 <code>declare module</code> 声明合并，插件就能把新类型直接"塞"进 <code>SessionEventMap</code>——类型系统本身成了扩展点，这是相当少见的设计。</li>
   <li><b>表面（surface）机制。</b>三种"产生消息"的事件（<code>user/message</code>、<code>assistant/message</code>、<code>tool/result</code>）都带 <code>surfaceOp</code>，取值 <code>append</code> 或 <code>replace</code>。投影时 <code>append</code> 按序排列，<code>replace</code> 整体替换旧的那一条。后面 5.2 节会看到，上下文压缩就是靠 <code>replace</code> 落地的——压缩不改日志，只追加一条替换事件。</li>
   <li><b>无损 JSON 强制。</b><code>append()</code> 在写入源头做深度校验并冻结，序列化不了的东西（包括非有限浮点数）当场抛错。坏事件在源头就被拦住，进不了日志——日志里永远只有合法的数据。</li>
@@ -510,7 +510,7 @@ flowchart LR
 <p class="fig-cap">图 6：事件溯源会话——append 记录、投影派生、持久化回放三者关系</p>
 <div class="mermaid">
 flowchart LR
-  subgraph LOG["Session 追加式事件日志（唯一事实来源）"]
+  subgraph LOG["Session 追加式事件日志（唯一数据源）"]
     direction TB
     E1["user/message · surfaceOp=append"]
     E2["assistant/message · append"]
@@ -531,16 +531,16 @@ flowchart LR
 <b>示例走查（surfaceOp=replace）</b>：常见的疑问是"replace 之后历史还完整吗"。走一遍就清楚了：上下文压力触发压缩后，日志尾部会追加一条 <code>assistant/message { surfaceOp: "replace", references: seq=3 }</code>——投影时它整体替换第 3 条旧消息，但日志本身只做追加，<code>seq</code> 依然连续。于是模型下一次请求看到的历史，永远是"从完整日志实时派生"的版本，绝不会读到过期快照。这也是"不另存"的用意所在：只要派生是纯函数，持久化和恢复就永远不用操心一致性问题。
 </div>
 
-<h3 id="s4-3">4.3 能力接缝三角色（产品可替换性的来源）</h3>
-<p>一个<b>接缝（seam）</b> = 三种角色：<b>Service Definition</b>（声明接口）、<b>Service Provider</b>（实现）、<b>Consumer</b>（使用者，通常是模型面向工具）。一个角色单独不构成接缝；新增能力 = 同时设计三个角色。Provider 之间通过"共享执行世界"联动——例如 FS 与 subprocess 的 Provider 指向远程沙箱后，Bash/PTY/LSP 全部跟随迁移。</p>
+<h3 id="s4-3">4.3 能力扩展口三角色（产品可替换性的来源）</h3>
+<p>一个<b>扩展口（seam）</b> = 三种角色：<b>Service Definition</b>（声明接口）、<b>Service Provider</b>（实现）、<b>Consumer</b>（使用者，通常是模型面向工具）。一个角色单独不构成扩展口；新增能力 = 同时设计三个角色。Provider 之间通过"共享执行世界"联动——例如 FS 与 subprocess 的 Provider 指向远程沙箱后，Bash/PTY/LSP 全部跟随迁移。</p>
 <div class="callout">
-<b>与普通插件框架的区别</b>：插件框架通常只解决"注册/发现"，而 dsh 的接缝还解决了<b>语义一致替换</b>——接口覆盖完整的生命周期、错误码、取消、回滚契约，使一次 Provider 替换不留下行为死角。
+<b>与普通插件框架的区别</b>：插件框架通常只解决"注册/发现"，而 dsh 的扩展口还解决了<b>语义一致替换</b>——接口覆盖完整的生命周期、错误码、取消、回滚约定，使一次 Provider 替换不留下行为死角。
 </div>
 
-<p class="fig-cap">图 7：能力接缝三角色——接口、实现、使用者的关系</p>
+<p class="fig-cap">图 7：能力扩展口三角色——接口、实现、使用者的关系</p>
 <div class="mermaid">
 flowchart LR
-  D["Service Definition&lt;br/&gt;接口 + 完整生命周期 + 错误码&lt;br/&gt;+ 取消 + 回滚契约"]
+  D["Service Definition&lt;br/&gt;接口 + 完整生命周期 + 错误码&lt;br/&gt;+ 取消 + 回滚约定"]
   P["Service Provider（实现）&lt;br/&gt;local / pwsh / sandbox-local / ACP ..."]
   P2["另一个 Provider&lt;br/&gt;远程沙箱 / 其他实现"]
   C["Consumer&lt;br/&gt;只依赖接口，从不 import 具体实现"]
@@ -548,7 +548,7 @@ flowchart LR
   P2 -.整体替换 P.-> D
   C -->|"依赖"| D
 </div>
-<p class="mermaid-note">新增能力 = 同时设计三个角色；只注册一个 Provider 不构成接缝。</p>
+<p class="mermaid-note">新增能力 = 同时设计三个角色；只注册一个 Provider 不构成扩展口。</p>
 
 <h3 id="s4-4">4.4 类型技术（TypeScript 层）</h3>
 <p>常规 TS 项目的扩展靠"给接口留可选字段"；dsh 把类型系统本身做成扩展机制，三件套：</p>
@@ -627,7 +627,7 @@ sequenceDiagram
   participant A as Agent
   participant D as agent-loop Driver
   participant S as Session 日志
-  participant LLM as ctx.llm 接缝
+  participant LLM as ctx.llm 扩展口
   participant T as ctx.tools 注册表
   U->>A: followup(content)
   A->>D: 排队输入唤醒 driver
@@ -676,7 +676,7 @@ flowchart TD
   BODY["工具 execute() 体&lt;br/&gt;自有事件：todo/write · fs/observed · tool/code-dispatch"]
   POST["tools/post-execute waterfall&lt;br/&gt;accept / replace / block(+feedback)"]
   NORM["注册表外层规范化&lt;br/&gt;snapshot 异常 → isError"]
-  FIN["finalizeContent&lt;br/&gt;最后一个内容只读不变量"]
+  FIN["finalizeContent&lt;br/&gt;最后一个内容只读硬性规定"]
   RES["tools/result 同步通知&lt;br/&gt;冻结的权威结果"]
   TR["Session: tool/result&lt;br/&gt;唯一模型面向结果 [durable]"]
   PR["UI 完成卡片 presentResult"]
@@ -711,7 +711,7 @@ flowchart TD
 <h3 id="s5-3">5.3 会话持久化（durability seam）</h3>
 <p>常规做法是"每次变化立刻写库"；dsh 把持久化做成订阅者，异步成批写入。四个要点：</p>
 <ul>
-  <li><b>接缝</b>：<code>ctx.sessionPersistence</code> 抽象（locate / create / append / 逻辑 load/inspect / 物理后缀读）+ 两个可互换后端：<b>JSONL</b>（每会话一个文件，支持 packed chunk 行）与 <b>SQLite</b>（多会话一库，单调 <code>SCHEMA_VERSION</code>）。</li>
+  <li><b>扩展口</b>：<code>ctx.sessionPersistence</code> 抽象（locate / create / append / 逻辑 load/inspect / 物理后缀读）+ 两个可互换后端：<b>JSONL</b>（每会话一个文件，支持 packed chunk 行）与 <b>SQLite</b>（多会话一库，单调 <code>SCHEMA_VERSION</code>）。</li>
   <li><b>flush 检查点</b>：<code>session/event</code> 是同步通知，持久化插件先复制事件再异步成批写入；<code>session/flush</code> 是等待的并行栅栏，用于认领下一个普通 turn 前的排序与错误观察点。</li>
   <li><b>格式拒绝，不迁移</b>：版本落后 = "升级 harness"；版本超前 = "使用更新的 harness 打开"。未知事件类型若未带 <code>ignorable: true</code> 则整体拒绝加载（防止静默丢事件改变后续解读）。</li>
   <li><b>崩溃恢复</b>：关闭孤儿 turn（合成 <code>interrupted</code>），只作用于冷会话；活会话 <code>load</code> 等待权威内存快照持久化。</li>
@@ -743,7 +743,7 @@ flowchart LR
 <b>示例走查（进程崩溃）</b>：<code>turn/start</code> 已落库但 <code>turn/end</code> 未及写入时进程被杀 → 重启后 JSONL/SQLite 后端的 <code>load()</code> 发现括号不平衡 → 不截断日志，而是追加合成 <code>turn/end { reason: "interrupted" }</code> → 会话回到可继续状态。若日志里混入未知事件类型（未带 <code>ignorable: true</code>），则整体拒绝加载——宁可不打开，也不能静默丢事件改变后续解读。
 </div>
 
-<h3 id="s5-4">5.4 LLM 流式适配接缝</h3>
+<h3 id="s5-4">5.4 LLM 流式适配扩展口</h3>
 <p>常规做法是"官方 SDK 直接调用，错误各自处理"；dsh 把模型厂商差异收敛到统一流协议里。四个要点：</p>
 <ul>
   <li><b>统一流协议 <code>StreamChunk</code></b>：<code>block-start / text-delta / reasoning-delta / tool-call-delta / block-end / usage / finish</code>。块索引关联交错增量；<code>block-end</code> 携带完整块；<code>usage</code> 必须在 <code>finish</code> 前、之后不再有值。</li>
@@ -840,7 +840,7 @@ flowchart TD
   </tr>
   <tr>
     <td><b>P4 事件溯源</b></td>
-    <td>掌握单一事实来源与持久化</td>
+    <td>掌握唯一数据源与持久化</td>
     <td>docs/persistence.md、docs/persistence-catalog.md；读 <code>packages/session/session-persistence</code> 双后端源码</td>
     <td>手动构造一个 JSONL 会话文件并写脚本回放 <code>deriveMessages()</code> 的等价逻辑</td>
     <td>能解释 <code>interrupted</code> turn 与 surface replace 的语义</td>
@@ -853,7 +853,7 @@ flowchart TD
     <td>能解释"注册=可逆副作用"与 waterfall 短路语义</td>
   </tr>
   <tr>
-    <td><b>P6 动手写插件 + 横向接缝</b></td>
+    <td><b>P6 动手写插件 + 横向扩展口</b></td>
     <td>从读者变成作者</td>
     <td>docs/cookbook/adding-a-tool.md、adding-a-package.md、adding-an-llm-adapter.md</td>
     <td>写一个最小工具插件并在 preset 中挂载；用 <code>agent/pre-step</code> 拦截一次请求；用 <code>tools/pre-execute</code> 加权限策略</td>
@@ -862,7 +862,7 @@ flowchart TD
 </table>
 
 <div class="callout ok">
-<b>学习顺序建议</b>：不要一上来读所有子系统页。按 <b>P1 → P3 → P4 → P5 → P2 → P6</b> 的顺序最有收益：先懂循环与日志（系统的"骨头"），再懂框架（"关节"），再动手跑（"肌肉"）。能力接缝逐个横向扫读放在 P6 之后。
+<b>学习顺序建议</b>：不要一上来读所有子系统页。按 <b>P1 → P3 → P4 → P5 → P2 → P6</b> 的顺序最有收益：先懂循环与日志（系统的"骨头"），再懂框架（"关节"），再动手跑（"肌肉"）。能力扩展口逐个横向扫读放在 P6 之后。
 </div>
 
 <h2 id="s7"><span class="no">7</span>用 Python 深刻掌握与复现技术核心</h2>
@@ -870,8 +870,8 @@ flowchart TD
 <h3 id="s7-1">7.1 策略：三条路线并行</h3>
 <div class="card">
 <ol>
-  <li><b>黑盒路线（官方 SDK，最省力）</b>：直接安装 <code>deepseek-harness-sdk</code>（PyPI，import <code>deepseek_harness</code>），用 Python 驱动真实 harness 子进程（stdio JSON-RPC），观察它如何编排 turn/step、工具、持久化。<b>这是理解"运行时契约"最便宜的方式。</b></li>
-  <li><b>白盒路线（读 TS，翻译成 Python）</b>：把第 6 章的阅读路径走完，对每个核心概念写一份"Python 对照笔记"（见 7.2 映射表）。目的不是照抄代码，而是<b>用 Python 重述契约</b>。</li>
+  <li><b>黑盒路线（官方 SDK，最省力）</b>：直接安装 <code>deepseek-harness-sdk</code>（PyPI，import <code>deepseek_harness</code>），用 Python 驱动真实 harness 子进程（stdio JSON-RPC），观察它如何编排 turn/step、工具、持久化。<b>这是理解"运行时约定"最便宜的方式。</b></li>
+  <li><b>白盒路线（读 TS，翻译成 Python）</b>：把第 6 章的阅读路径走完，对每个核心概念写一份"Python 对照笔记"（见 7.2 映射表）。目的不是照抄代码，而是<b>用 Python 重述约定</b>。</li>
   <li><b>复现路线（迷你 harness）</b>：用纯 Python 从零实现一个"最小可用的核心子集"（见 7.3）。这是唯一能证明你真正掌握的方式。</li>
 </ol>
 </div>
@@ -879,7 +879,7 @@ flowchart TD
 <h3 id="s7-2">7.2 TS → Python 概念映射表</h3>
 <table>
   <tr><th>dsh 的 TypeScript 概念</th><th>Python 对应物</th><th>关键要点</th></tr>
-  <tr><td>Service Definition / Provider / Consumer 接缝</td><td><code>abc.ABC</code> + <code>Protocol</code>；Provider 注册在模块级注册表</td><td>接口要覆盖完整生命周期与错误码；Consumer 只依赖接口不依赖实现</td></tr>
+  <tr><td>Service Definition / Provider / Consumer 扩展口</td><td><code>abc.ABC</code> + <code>Protocol</code>；Provider 注册在模块级注册表</td><td>接口要覆盖完整生命周期与错误码；Consumer 只依赖接口不依赖实现</td></tr>
   <tr><td>声明合并（<code>declare module</code> 扩展 Map）</td><td>注册表 dict + <code>Literal</code> 联合；<code>get_type_hints</code> 反射</td><td>"Map → derived-union" 用 <code>Union[...]</code> 或 <code>TypeAlias</code> 表达；扩展 = 注册新键</td></tr>
   <tr><td><code>Branded&lt;B&gt;</code> 品牌化 ID</td><td><code>typing.NewType</code>（如 <code>SessionId = NewType("SessionId", str)</code>）</td><td>编译期隔离；运行时就是 str</td></tr>
   <tr><td>可逆副作用（effects + disposer）</td><td><code>contextlib.AbstractContextManager</code> 或 <code>__enter__/__exit__</code></td><td><code>register()</code> 返回 <code>Callback</code>；退出栈顺序回滚</td></tr>
@@ -896,7 +896,7 @@ flowchart TD
 
 <h3 id="s7-3">7.3 迷你复现项目清单（MiniHarness，用 Python）</h3>
 <div class="callout ok">
-<b>本节已升级为独立的引导式手册</b>：从 0 到 1 实现核心系统的完整 step-by-step 教程（每章 = 概念讲解 → 最小可运行 Python 代码 → 逐段解释 → 不变量/测试 → 检查点练习）位于仓库的 <span class="path">docs/chapters/</span>（索引见 <span class="path">docs/README.md</span>），配套可运行代码包 <span class="path">miniharness/</span>。本表是手册的骨架索引。
+<b>本节已升级为独立的引导式手册</b>：从 0 到 1 实现核心系统的完整 step-by-step 教程（每章 = 概念讲解 → 最小可运行 Python 代码 → 逐段解释 → 硬性规定/测试 → 检查点练习）位于仓库的 <span class="path">docs/chapters/</span>（索引见 <span class="path">docs/README.md</span>），配套可运行代码包 <span class="path">miniharness/</span>。本表是手册的骨架索引。
 </div>
 <p>建议用 5 个递进的项目把核心吃透。每个项目都要<b>配测试 + 配 README</b>，最后能跑通一个"文本 + 一个工具 + 会话持久化"的端到端 demo。</p>
 
@@ -907,7 +907,7 @@ flowchart TD
     <ul>
       <li>实现 <code>Session</code>：append-only 事件日志、seq=len、deep-freeze（<code>types.MappingProxyType</code> / 自定义冻结）、无损 JSON 校验。</li>
       <li>实现 <code>derive_messages()</code>：按 surface 节点投影；<code>surfaceOp=replace</code> 压缩。</li>
-      <li>实现 <code>turn/start … turn/end</code> 括号平衡不变量。</li>
+      <li>实现 <code>turn/start … turn/end</code> 括号平衡硬性规定。</li>
     </ul>
     <p class="toc-hint">验收：给一组事件 + 一次压缩 replace，能输出与手算一致的模型历史。</p>
   </div>
@@ -951,12 +951,12 @@ flowchart TD
     <p class="toc-hint">验收：kill 一个进行中的回合再重启，日志平衡、可继续。</p>
   </div>
   <div class="card">
-    <h4>⑥ 进阶接缝（任选一）</h4>
+    <h4>⑥ 进阶扩展口（任选一）</h4>
     <span class="tag t-amber">选做</span><span class="tag t-rose">各 2-3 天</span>
     <ul>
       <li><b>子 agent</b>：注册表多 Provider + 可续接子会话。</li>
       <li><b>沙箱</b>：subprocess 包裹 + 只读/写策略 + 失败即拒。</li>
-      <li><b>凭据接缝</b>：配置只存引用，每次操作解析。</li>
+      <li><b>凭据扩展口</b>：配置只存引用，每次操作解析。</li>
       <li><b>Web 工具</b>：search/fetch Provider + 工具 Consumer。</li>
     </ul>
     <p class="toc-hint">验收：换一个 Provider 不改 Consumer 即换行为。</p>
@@ -964,7 +964,7 @@ flowchart TD
 </div>
 
 <div class="callout warn">
-<b>复现的取舍</b>：复现目标是<b>掌握契约与不变量</b>，不是逐行移植。跳过：声明合并、双面打包、生成器门禁、HMR 热重载、typert 类型图、Web 客户端。保留：事件溯源、插件副作用、waterfall、作用域、工具管线、状态机、持久化恢复、配置组合——这些是"技术核心"本身。
+<b>复现的取舍</b>：复现目标是<b>掌握约定与硬性规定</b>，不是逐行移植。跳过：声明合并、双面打包、生成器门禁、HMR 热重载、typert 类型图、Web 客户端。保留：事件溯源、插件副作用、waterfall、作用域、工具管线、状态机、持久化恢复、配置组合——这些是"技术核心"本身。
 </div>
 
 <h2 id="s8"><span class="no">8</span>实操资源索引</h2>
@@ -1003,9 +1003,9 @@ flowchart TD
   <tr><td>会话事件溯源</td><td class="path">docs/subsystems/session.md</td><td class="path">packages/core/session/src</td></tr>
   <tr><td>持久化</td><td class="path">docs/subsystems/persistence.md</td><td class="path">packages/session/session-persistence</td></tr>
   <tr><td>工具管线</td><td class="path">docs/subsystems/tools.md</td><td class="path">packages/core/tools/src</td></tr>
-  <tr><td>LLM 接缝</td><td class="path">docs/subsystems/llm-streaming.md</td><td class="path">packages/llm/llm/src + llm-deepseek/src</td></tr>
+  <tr><td>LLM 扩展口</td><td class="path">docs/subsystems/llm-streaming.md</td><td class="path">packages/llm/llm/src + llm-deepseek/src</td></tr>
   <tr><td>时序图</td><td class="path">docs/agent-lifecycle.md</td><td class="path">docs/tool-execution-pipeline.md</td></tr>
-  <tr><td>能力接缝全景</td><td class="path">docs/capability-seams.md（docs/subsystems/ 各页）</td><td class="path">packages/&lt;group&gt;/&lt;pkg&gt;/src</td></tr>
+  <tr><td>能力扩展口全景</td><td class="path">docs/capability-seams.md（docs/subsystems/ 各页）</td><td class="path">packages/&lt;group&gt;/&lt;pkg&gt;/src</td></tr>
   <tr><td>组合 / 启动</td><td class="path">packages/boot/app-boot/README.md</td><td class="path">apps/cli/src/{profile-boot,bin}.ts</td></tr>
   <tr><td>Python SDK</td><td class="path">python/sdk/README.md</td><td class="path">python/sdk/src/deepseek_harness</td></tr>
 </table>
@@ -1016,7 +1016,7 @@ flowchart TD
   <li>能手绘 turn/step 完整时序（含 reject / request-error / turn-stopping 分支）</li>
   <li>能解释"模型可见 ⟺ 已记录"并知道为何新增模型可见输入要加 session 事件</li>
   <li>能解释 waterfall 的 <code>next()</code> 语义与四种派发模式</li>
-  <li>能说清能力接缝三角色为什么缺一不可</li>
+  <li>能说清能力扩展口三角色为什么缺一不可</li>
   <li>能说清 JSONL/SQLite 双后端 + 崩溃恢复 <code>interrupted</code> turn</li>
   <li>能用 <code>--dump-config</code> 读懂实际组合树</li>
   <li>写过至少一个挂载进 preset 的最小插件</li>
@@ -1070,7 +1070,7 @@ print(result.final_response)</code></pre></li>
 <div class="callout warn"><b>安全边界</b>：内置组合是 <code>danger-full-access</code>——bash 与编辑器可改任何路径，且上下文压缩关闭。只应在可丢弃的 checkout 或容器内运行。仓库内置示例：<code>python examples/jsonrpc-agent/minimal.py --workspace &lt;dir&gt; --session-root &lt;dir&gt; --session-id example-001 "task"</code>。</div>
 
 <h2 id="s10"><span class="no">10</span>添加插件与贡献</h2>
-<p>所有扩展都走"在旁边挂插件"，不改核心。两条路径：<b>入门路径</b>是往 preset 里挂一个最小插件（5 分钟验证）；<b>正式贡献</b>是按仓库清单新增一个 workspace 包（含门禁、测试、文档契约）。</p>
+<p>所有扩展都走"在旁边挂插件"，不改核心。两条路径：<b>入门路径</b>是往 preset 里挂一个最小插件（5 分钟验证）；<b>正式贡献</b>是按仓库清单新增一个 workspace 包（含门禁、测试、文档约定）。</p>
 
 <h3 id="s10-1">10.1 最小工具插件（入门路径）</h3>
 <p>最小工具就是一个有 <code>name/inject/Config/apply</code> 的 Cordis 插件 + <code>ctx.tools.register(defineTool(...))</code>。schema 自动进入 system-prompt 组装，卸载插件即注销工具：</p>
@@ -1099,7 +1099,7 @@ export function apply(ctx: Context) {
     },
   }))
 }</code></pre>
-<p><b>execute 契约要点</b>：参数在进入 <code>execute</code> 前已按 <code>ParameterSchemaSpec</code> 校验；<code>exec</code> 携带不可变身份与 token，<code>exec.signal</code> 是唯一可替换的运行期字段（用于超时）；返回单一 canonical JSON 值；抛错或返回非法值即视为 <code>isError</code>。完整契约见 <code>docs/cookbook/adding-a-tool.md</code>。</p>
+<p><b>execute 约定要点</b>：参数在进入 <code>execute</code> 前已按 <code>ParameterSchemaSpec</code> 校验；<code>exec</code> 携带不可变身份与 token，<code>exec.signal</code> 是唯一可替换的运行期字段（用于超时）；返回单一 canonical JSON 值；抛错或返回非法值即视为 <code>isError</code>。完整约定见 <code>docs/cookbook/adding-a-tool.md</code>。</p>
 <p><b>UI 渲染是设计的一部分</b>：用 <code>output.presentCall/presentResult</code> 返回 <code>card</code>-tagged render intent（<code>generic</code> / <code>terminal</code> / <code>diff</code> / <code>search</code> / <code>web</code>），且必须是 <code>args</code>（+ result）的纯函数——回放也要跑。见 11.3。</p>
 
 <h3 id="s10-2">10.2 挂载到 preset 验证</h3>
@@ -1116,7 +1116,7 @@ export function apply(ctx: Context) {
 <ol>
   <li><b>建包</b>：<code>packages/&lt;group&gt;/&lt;pkg&gt;/</code> 下四个文件——<code>package.json</code>（拷贝 <code>packages/core/tools</code>，改 name/description/deps）、<code>tsconfig.json</code>（extends <code>../../../tsconfig.base.json</code>，rootDir src，references 含 <code>vendor/cosmokit</code> + <code>vendor/cordis</code>（用 Config 时加 <code>schemastery</code>）+ 每个 dsh 依赖）、<code>src/index.ts</code>（service 默认导出或 <code>name/inject/apply/Config</code> 插件）、<code>README.md</code>（含 gated Model Experience 段 + Known Limitations 段）。</li>
   <li><b>注册进根配置</b>：新包组加 <code>tsconfig.base.json</code> 的 <code>@deepseek-ai/dsh-*</code> wildcard；Host/Client 包分别加 <code>tsconfig.host.json</code> / <code>tsconfig.client.json</code> 的 <code>references</code>（一个包只属于一个 aggregate）；有额外 entrypoint 才动 <code>knip.json</code>。workspaces、publint、tsdown、oxlint、constraints 全部由 glob 自动覆盖，不用改。</li>
-  <li><b>决定拓扑</b>：可替换能力按 Service Definition / Provider / Consumer 拆包（shell 三人组是模板）；单一用途插件一个包。命名用稳定职责，role 后缀有词典（Controller/Store/Registry/Policy/Provider/Backend/…），<code>local</code> 仅在"契约包含同宿主执行"时用。</li>
+  <li><b>决定拓扑</b>：可替换能力按 Service Definition / Provider / Consumer 拆包（shell 三人组是模板）；单一用途插件一个包。命名用稳定职责，role 后缀有词典（Controller/Store/Registry/Policy/Provider/Backend/…），<code>local</code> 仅在"约定包含同宿主执行"时用。</li>
   <li><b>写 README</b>：包自身 API/事件/扩展点在前，最后以固定四段收尾：<code>## Model Experience</code> → <code>### Request context and condition</code>（What the model sees / Token effect / KV Cache effect）→ <code>## Known Limitations and Deferred Work</code>。</li>
   <li><b>验证</b>：<pre><code>pnpm install
 pnpm run doc-sync
@@ -1165,9 +1165,9 @@ pnpm run build && pnpm run hygiene</code></pre> 再按 <code>docs/testing.md</co
 <h2 id="s12"><span class="no">12</span>结语</h2>
 <p>DeepSeek Harness 的本质可以用一句话概括：</p>
 <div class="card" style="font-size:16px; text-align:center;">
-<b>一个"无特权内核 + 可逆副作用注册"的 Cordis 插件树，以事件溯源会话日志为单一事实来源，通过"Service Definition / Provider / Consumer"三段式能力接缝把模型适配、工具执行、沙箱、子 agent 等一切能力做成可配置替换的插件；外层由 profile / bundle 补丁层组合出 Web / headless / SDK 等运行形态，并辅以内容寻址的生成器门禁与每文件 100% 覆盖率纪律。</b>
+<b>一个"无特权内核 + 可逆副作用注册"的 Cordis 插件树，以事件溯源会话日志为唯一数据源，通过"Service Definition / Provider / Consumer"三段式能力扩展口把模型适配、工具执行、沙箱、子 agent 等一切能力做成可配置替换的插件；外层由 profile / bundle 补丁层组合出 Web / headless / SDK 等运行形态，并辅以内容寻址的生成器门禁与每文件 100% 覆盖率纪律。</b>
 </div>
-<p>对想用 Python 深刻掌握并复现的你，最有价值的三件事依次是：<b>(1) 事件溯源日志作为唯一事实来源；</b><b>(2) "注册 = 可逆副作用 + waterfall 短路"的插件语义；</b><b>(3) 能力接缝三角色带来的整体可替换性。</b>把这三件事用 Python 亲手实现一遍，对 dsh 的理解会超过大多数读过一遍文档的人。</p>
+<p>对想用 Python 深刻掌握并复现的你，最有价值的三件事依次是：<b>(1) 事件溯源日志作为唯一数据源；</b><b>(2) "注册 = 可逆副作用 + waterfall 短路"的插件语义；</b><b>(3) 能力扩展口三角色带来的整体可替换性。</b>把这三件事用 Python 亲手实现一遍，对 dsh 的理解会超过大多数读过一遍文档的人。</p>
 
 <div class="footer">
 本报告由 opencode 依据仓库当前源码与文档生成 · DeepSeek Harness（MIT）· 报告文件：DEEPSEEK-HARNESS-DEEP-LEARNING-GUIDE.html<br>

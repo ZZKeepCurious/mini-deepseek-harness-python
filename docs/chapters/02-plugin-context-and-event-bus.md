@@ -217,7 +217,7 @@ class PluginManager:
 
 > 简化声明：真实 Cordis 由 apply 期间的 `provide`/`effect` 动态登记；这里用声明式 `provides` 字段近似。语义（依赖驱动、可逆回滚）一致。
 
-## 2.4 验收：不变量 + 测试
+## 2.4 验收：硬性规定 + 测试
 
 这一章的硬性规定，`tests/test_bus.py` 每个都有对应测试：
 
