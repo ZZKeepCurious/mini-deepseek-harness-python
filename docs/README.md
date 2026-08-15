@@ -21,7 +21,7 @@
 
 ```mermaid
 flowchart LR
-  A["00 环境准备"] --> B["01 事件溯源会话<br/>（核心之核）"]
+  A["00 环境准备"] --> B["01 事件溯源会话&lt;br/&gt;（整个框架的地基）"]
   B --> C["02 插件上下文 + 事件总线"]
   C --> D["03 工具执行管线"]
   D --> E["04 Agent Loop + LLM 流式"]
@@ -31,7 +31,7 @@ flowchart LR
 
 | 章节 | 内容 | 对应 dsh 真实源码 | 预计 |
 |---|---|---|---|
-| [00 环境准备](chapters/00-setup.md) | 运行环境、包结构、跑通测试 | — | 30 分钟 |
+| [00 环境准备](chapters/00-setup.md) | 运行环境、包结构、跑通测试 | — | 1 小时 |
 | [01 事件溯源会话](chapters/01-event-sourced-session.md) | `Session` 追加式日志、seq 连续、deep-freeze、`derive_messages` 投影、崩溃修复 | `packages/core/session` | 2-3 天 |
 | [02 插件上下文 + 事件总线](chapters/02-plugin-context-and-event-bus.md) | `Context` 服务仓库、四种派发（emit/waterfall/parallel/serial）、可逆副作用、作用域、依赖驱动激活 | `vendor/cordis` + `core/scope` | 2 天 |
 | [03 工具执行管线](chapters/03-tool-execution-pipeline.md) | 作用域化注册表、schema 校验、pre/execute/post waterfall、超时、规范化 | `packages/core/tools` | 2 天 |

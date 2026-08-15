@@ -34,7 +34,7 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 | Async event bus, true parallel tools + barrier | planned | `core/agent-loop` |
 | CLI, YAML config, official SDK interop | planned | `apps/dsh`, `python/` |
 
-Status: **62 unit tests passing** (stdlib only).
+Status: **63 unit tests passing** (stdlib only).
 
 ## Getting started
 

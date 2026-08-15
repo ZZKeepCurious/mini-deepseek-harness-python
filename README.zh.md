@@ -34,7 +34,7 @@
 | 异步总线、真并行工具 + 屏障 | ⏳ | `core/agent-loop` |
 | CLI、YAML 配置、官方 SDK 互操作 | ⏳ | `apps/dsh`、`python/` |
 
-状态：**62 个单元测试全部通过**（仅标准库）。
+状态：**63 个单元测试全部通过**（仅标准库）。
 
 ## 快速开始
 
@@ -79,7 +79,7 @@ mini-deepseek-harness-python/
 │   ├── boot.py           # 启动 + 补丁层叠
 │   ├── seams.py          # 沙箱 / 凭据 / 子 agent 接缝
 │   └── demo.py           # 端到端演示
-├── tests/                # 62 个验收测试（unittest）
+├── tests/                # 63 个验收测试（unittest）
 ├── examples/             # 对话 & 真实 API 示例
 └── docs/
     ├── README.md         # 手册索引（学习地图）
