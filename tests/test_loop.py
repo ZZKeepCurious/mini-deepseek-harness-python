@@ -3,7 +3,7 @@
 import unittest
 
 from miniharness.bus import Context
-from miniharness.llm import FakeLlmAdapter, StreamChunk
+from miniharness.llm import FakeLlmAdapter, LlmFailure, StreamChunk
 from miniharness.loop import AgentLoop
 from miniharness.session import Session, derive_messages, turn_balance
 from miniharness.tools import Tool, ToolRegistry
@@ -43,6 +43,17 @@ class TestLoop(unittest.TestCase):
         self.assertEqual(types[-1], "turn/end")
         self.assertIn("step/start", types)
         self.assertIn("step/end", types)
+        # 模型可见 ⟺ 已记录：chunk 与请求配置都落日志
+        self.assertIn("assistant/chunk", types)
+        self.assertIn("request/header", types)
+        self.assertEqual(session.events[-1]["data"]["reason"], {"kind": "completed"})
+
+    def test_assistant_message_cites_chunk_seqs(self):
+        session, loop, _ = _make_env()
+        loop.followup("你好")
+        am = [e for e in session.events if e["type"] == "assistant/message"][0]
+        chunk_seqs = [e["seq"] for e in session.events if e["type"] == "assistant/chunk"]
+        self.assertEqual(am["sourceEventSeqs"], tuple(chunk_seqs))
 
     def test_tool_call_roundtrip(self):
         session, loop, adapter = _make_env(
@@ -55,11 +66,17 @@ class TestLoop(unittest.TestCase):
         # 同 turn 内模型再次被请求（看到工具结果后给出最终回答）
         self.assertEqual(adapter.calls, 2)
         self.assertEqual(loop.last_response(), "搞定。")
-        # 模型历史包含工具结果消息
-        roles = [m["role"] for m in derive_messages(session.events)]
-        self.assertIn("tool", roles)
+        # 模型历史：assistant 消息带 tool-call 块，工具结果以 role 'user' 的
+        # tool-result 块回灌（上游 ToolResultMessage 模型）
+        msgs = derive_messages(session.events)
+        assistant = [m for m in msgs if m["role"] == "assistant"][0]
+        self.assertTrue(any(b["type"] == "tool-call" for b in assistant["content"]))
+        tool_msgs = [m for m in msgs if any(b["type"] == "tool-result" for b in m["content"])]
+        self.assertEqual(len(tool_msgs), 1)
+        self.assertEqual(tool_msgs[0]["role"], "user")
+        self.assertEqual(tool_msgs[0]["content"][0]["toolCallId"], "call_0")
 
-    def test_rejected_pre_step_zero_step_turn(self):
+    def test_rejected_pre_step_blocked_turn(self):
         session, loop, _ = _make_env()
         loop.ctx.on("agent/pre-step", lambda p, nxt: {"verdict": "reject"})
         loop.followup("危险操作")
@@ -67,43 +84,48 @@ class TestLoop(unittest.TestCase):
         self.assertIn("turn/start", types)
         self.assertIn("turn/end", types)
         self.assertNotIn("step/start", types)
+        # 上游：pre-step 拒绝 → turn 以 {kind:'blocked'} 结束（agent.ts）
+        self.assertEqual(session.events[-1]["data"]["reason"], {"kind": "blocked"})
         self.assertEqual(loop.status, "idle")
 
     def test_unknown_tool_produces_error_result(self):
         session, loop, _ = _make_env(tool_call={"name": "nope", "arguments": {}})
         loop.followup("调用一个不存在的工具")
+        calls = [e for e in session.events if e["type"] == "tool/call"]
+        # 未知工具同样先落 tool/call 再出 error 结果（上游 appendToolCall 先于派发）
+        self.assertEqual([c["data"]["name"] for c in calls], ["nope"])
         last = [e for e in session.events if e["type"] == "tool/result"][-1]
-        self.assertTrue(last["isError"])
+        block = last["data"]["message"]["content"][0]
+        self.assertTrue(block["isError"])
+        self.assertIn("未知工具", block["content"][0]["text"])
 
-    def test_multiple_user_messages_one_turn(self):
+    def test_multiple_followups_multiple_turns(self):
         session, loop, _ = _make_env()
         loop.followup("第一句")
         loop.followup("第二句")
         self.assertEqual(turn_balance(session.events), 0)
-        # 一个 turn 里有两个 step（两次模型请求）
         self.assertEqual(
             [e["type"] for e in session.events].count("step/start"), 2
         )
 
-    def test_events_carry_turn_step_numbers(self):
+    def test_events_carry_1based_turn_step_numbers(self):
         session, loop, _ = _make_env(tool_call={"name": "bash", "arguments": {"cmd": "ls"}})
         loop.followup("第一句")
         loop.followup("第二句")
         start = [e for e in session.events if e["type"] == "turn/start"]
-        self.assertEqual([e["turn"] for e in start], [0, 1])
+        # 与上游一致：turn 从 1 起（session/invariant.ts nextTurn: 1）
+        self.assertEqual([e["data"]["turn"] for e in start], [1, 2])
         steps = [e for e in session.events if e["type"] == "step/start"]
-        self.assertEqual([e["step"] for e in steps], [0, 1, 2])
-        # 每个回合事件都带 turn/step（surface 事件、tool 事件）
-        for e in session.events:
-            if e["type"] in ("turn/start", "turn/end"):
-                self.assertIn("turn", e)
-            else:
-                self.assertIn("turn", e)
-                self.assertIn("step", e)
-        # tool/call 的 arguments 是 JSON 字符串（与上游字段一致）
+        # turn1: 带工具的两步；turn2: 一步（每 turn 内 step 重置为 1）
+        self.assertEqual([e["data"]["step"] for e in steps], [1, 2, 1])
+        # tool/call 的 arguments 是原始 JSON 字符串（与上游字段一致）
         tc = [e for e in session.events if e["type"] == "tool/call"][0]
-        self.assertIsInstance(tc["arguments"], str)
-        self.assertIn('"cmd"', tc["arguments"])
+        self.assertEqual(tc["data"]["callId"], "call_0")
+        self.assertIsInstance(tc["data"]["arguments"], str)
+        self.assertIn('"cmd"', tc["data"]["arguments"])
+        # tool/result 通过 callId 关联
+        tr = [e for e in session.events if e["type"] == "tool/result"][0]
+        self.assertEqual(tr["data"]["message"]["source"]["callId"], "call_0")
 
     def test_stream_chunk_protocol_invariants(self):
         adapter = FakeLlmAdapter(tool_call={"name": "bash", "arguments": {}})
@@ -114,16 +136,38 @@ class TestLoop(unittest.TestCase):
         for c in chunks:
             self.assertIsInstance(c, StreamChunk)
         self.assertIn("tool-call-delta", kinds)
+        # finish reason 是对象（上游 FinishReasonMap）
+        self.assertEqual(chunks[-1]["reason"], {"kind": "tool-calls"})
+
+    def test_adapter_error_closes_turn_in_finally(self):
+        class BoomAdapter(FakeLlmAdapter):
+            def stream(self, messages, tools):
+                raise LlmFailure("RATE_LIMIT", "429 Too Many Requests")
+
+        session = Session("s1")
+        ctx = Context()
+        reg = ToolRegistry(ctx)
+        loop = AgentLoop(session, BoomAdapter(), reg, ctx)
+        with self.assertRaises(LlmFailure):
+            loop.followup("你好")
+        # 失败回合也闭合：step/end 与 turn/end {kind:'error'} 必定落日志
+        types = [e["type"] for e in session.events]
+        self.assertEqual(types[-1], "turn/end")
+        self.assertEqual(session.events[-1]["data"]["reason"]["kind"], "error")
+        self.assertEqual(session.events[-1]["data"]["reason"]["failure"]["code"], "RATE_LIMIT")
+        self.assertEqual(types.count("step/end"), 1)
+        self.assertEqual(turn_balance(session.events), 0)
 
     def test_max_steps_guard(self):
-        # 模型永远调用工具 → 死循环守卫
-
+        # 模型永远调用工具 → 死循环守卫；回合以 error 闭合
         class AlwaysToolAdapter(FakeLlmAdapter):
             def stream(self, messages, tools):
                 yield StreamChunk("block-start", index=0, blockType="tool-call")
                 yield StreamChunk("tool-call-delta", index=0, id="call_0", name="loop", argumentsDelta="{}")
-                yield StreamChunk("block-end", index=0, block={"type": "tool-call", "name": "loop"})
-                yield StreamChunk("finish", reason="tool_calls")
+                yield StreamChunk("block-end", index=0, block={
+                    "type": "tool-call", "id": "call_0", "name": "loop", "arguments": "{}",
+                })
+                yield StreamChunk("finish", reason={"kind": "tool-calls"})
 
         session = Session("s1")
         ctx = Context()
@@ -132,6 +176,8 @@ class TestLoop(unittest.TestCase):
         loop = AgentLoop(session, AlwaysToolAdapter(), reg, ctx, max_steps=5)
         with self.assertRaises(RuntimeError):
             loop.followup("开始")
+        self.assertEqual(session.events[-1]["type"], "turn/end")
+        self.assertEqual(turn_balance(session.events), 0)
 
 
 if __name__ == "__main__":

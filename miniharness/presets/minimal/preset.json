@@ -1,0 +1,16 @@
+{
+  "id": "minimal",
+  "name": "极简模式",
+  "description": "仅两个工具（持久 bash + str_replace_editor）+ 固定完整提示词，无运行时上下文快照、无压缩",
+  "order": 3,
+  "persona": {
+    "complete": true,
+    "include_runtime_context": false,
+    "system_prompt": "你是一个极简助手。你只有两个工具：bash 和 str_replace_editor。请用它们完成用户任务。"
+  },
+  "tools": [
+    "bash",
+    "str_replace_editor"
+  ],
+  "provides": []
+}

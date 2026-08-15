@@ -11,7 +11,7 @@ from .bus import Context
 from .llm import FakeLlmAdapter
 from .loop import AgentLoop
 from .persistence import JsonlPersistence, repair_and_replay
-from .session import Session, derive_messages, turn_balance
+from .session import Session, create_message, derive_messages, text_block, turn_balance
 from .tools import Tool, ToolRegistry
 
 
@@ -45,20 +45,26 @@ def main() -> None:
 
     # ---- 跑一个回合 ----
     loop.followup("帮我看看目录里有什么")
-    print("\n-- 回合结束，日志（事件溯源）--")
+    print("\n-- 回合结束，日志（事件溯源，信封 {type, seq, time, data}）--")
     for ev in session.events:
-        print(f"  #{ev['seq']:<3} {ev['type']:<18} {dict(ev)}")
-    print(f"\n-- 模型历史（deriveMessages 投影）--")
+        print(f"  #{ev['seq']:<3} {ev['type']:<18} {dict(ev['data'])}")
+    print(f"\n-- 模型历史（deriveMessages 投影，ContentBlock 消息）--")
     for m in derive_messages(session.events):
-        print(f"  [{m['role']:<9}] {m['content']}")
+        blocks = " | ".join(
+            b["type"] + (":" + b.get("text", "") if b.get("text") is not None else "")
+            for b in m["content"]
+        )
+        print(f"  [{m['role']:<9}] {blocks}")
     print(f"\n-- 括号平衡: turn_balance = {turn_balance(session.events)} --")
 
     # ---- 持久化 + "崩溃" + 恢复 ----
     print("\n-- 模拟进程崩溃（未写 turn/end 就退出）--")
     crash_session = Session("demo-002")
     crash_loop = AgentLoop(crash_session, FakeLlmAdapter(final_text="快照"), reg, ctx)
-    crash_session.append({"type": "turn/start"})
-    crash_session.append({"type": "user/message", "content": "这条消息刚发出就崩了", "surfaceOp": "append"})
+    crash_session.append("turn/start", {"turn": 1})
+    crash_session.append("user/message", create_message(
+        "user", [text_block("这条消息刚发出就崩了")], {"kind": "user"},
+    ), surfaceOp="append")
 
     pers = JsonlPersistence(root / "sessions")
     for ev in crash_session.events:
@@ -66,10 +72,10 @@ def main() -> None:
     pers.flush()
 
     print("重启后 load + 修复...")
-    recovered = Session("demo-002")
-    repair_and_replay(pers, "demo-002", recovered)
+    recovered = repair_and_replay(pers, "demo-002", Session("demo-002"))
     print(f"  turn_balance = {turn_balance(recovered.events)}（interrupted 已补齐）")
-    print(f"  最后一条事件: {recovered.events[-1]['type']} reason={recovered.events[-1].get('reason')}")
+    last = next(ev for ev in reversed(recovered.events) if ev["type"] != "session/end-seed")
+    print(f"  最后一条事件: {last['type']} reason={last['data']['reason']}")
 
     print("\n-- 回放：从日志重建历史并继续对话 --")
     resumed = AgentLoop(recovered, FakeLlmAdapter(final_text="恢复完成。"), reg, ctx)

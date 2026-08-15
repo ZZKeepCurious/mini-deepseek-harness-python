@@ -24,7 +24,10 @@ classifiers = [
 ]
 
 [project.scripts]
-miniharness = "miniharness.demo:main"
+miniharness = "miniharness.cli:main"
+
+[project.optional-dependencies]
+yaml = ["pyyaml>=6"]
 
 [tool.setuptools]
 packages = ["miniharness"]

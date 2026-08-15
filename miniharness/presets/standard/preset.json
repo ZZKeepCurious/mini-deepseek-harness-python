@@ -1,0 +1,22 @@
+{
+  "id": "standard",
+  "name": "标准模式",
+  "description": "完整编码 agent：bash/pwsh、文件系统、skills、goals、plan、上下文压缩、子代理/工作流、web 搜索",
+  "order": 1,
+  "persona": {
+    "complete": false,
+    "include_runtime_context": true,
+    "system_prompt": "你是一个软件工程助手。请先理解任务，再动手修改文件，最后验证结果。"
+  },
+  "tools": [
+    "bash",
+    "fs_read",
+    "fs_write",
+    "str_replace_editor",
+    "web_search",
+    "skills",
+    "goal",
+    "plan"
+  ],
+  "provides": []
+}

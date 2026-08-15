@@ -10,6 +10,7 @@ pre-execute / execute / post-execute 三段 waterfall 管线。
 """
 from __future__ import annotations
 
+import asyncio
 import threading
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -82,7 +83,7 @@ class Tool:
     execute: Callable[[dict, ToolExec], Any]
     parameters: dict = field(default_factory=dict)      # JSON Schema
     output: dict = field(default_factory=dict)          # canonical schema
-    is_concurrency_safe: bool = False                   # False = 串行屏障
+    is_concurrency_safe: Callable[[dict], bool] | bool = False  # True/恒真 → 可并行
     timeout_ms: int | None = None                       # 由管线 wrapper 强制
     present_call: Callable | None = None                # UI 挂起卡片（纯函数）
     present_result: Callable | None = None              # UI 完成卡片（纯函数）
@@ -96,6 +97,7 @@ class ToolResult:
     is_error: bool = False
     error: str | None = None
     meta: dict = field(default_factory=dict)
+    _aborted: bool = field(default=False, repr=False, compare=False)
 
 
 # ---------- 作用域化注册表 ----------
@@ -153,24 +155,39 @@ class ToolRegistry:
         return allowed
 
 
+# ---------- 执行模式分类（阶段 7，对齐上游 executionMode） ----------
+
+def execution_mode(tool: Tool | None, args: dict) -> str:
+    """调度模式：'parallel' | 'exclusive'。
+
+    与上游 tools/src/index.ts executionMode 逐条一致：只有 `isConcurrencySafe`
+    声明的精确 `True`（bool True 或 callable 返回 True）才 parallel；
+    未声明、False、callable 抛错或返回非布尔 → exclusive（fail 到独占）。
+    """
+    if tool is None:
+        return "exclusive"
+    declared = tool.is_concurrency_safe
+    if isinstance(declared, bool):
+        return "parallel" if declared else "exclusive"
+    if callable(declared):
+        try:
+            safe = declared(dict(args))
+        except Exception:
+            return "exclusive"
+        return "parallel" if safe is True else "exclusive"
+    return "exclusive"
+
+
 # ---------- 执行管线 ----------
 
-def run_pipeline(ctx: Context, tool: Tool, args: dict, exec_: ToolExec | None = None) -> ToolResult:
-    """pre-execute → 守卫 → execute → post-execute → 规范化 → 冻结结果。"""
-    exec_ = exec_ or ToolExec()
-
-    # 1. 参数一次性无损物化 + 深度冻结
-    try:
-        frozen_args = deep_freeze(dict(args))
-    except Exception as e:
-        return ToolResult(ok=False, is_error=True, error=f"参数无法物化: {e}")
-
-    # 2. schema 校验（模型给错参数 = 工具的 isError，不进回合）
+def pipeline_policy(
+    ctx: Context, tool: Tool, frozen_args: Any,
+) -> ToolResult | None:
+    """政策段（同步版）：pre-execute waterfall / ask / guards。返回拒绝结果或 None。"""
     schema_errors = validate_schema(frozen_args, tool.parameters)
     if schema_errors:
         return ToolResult(ok=False, is_error=True, error="; ".join(schema_errors))
 
-    # 3. pre-execute waterfall（hooks / 权限 / 沙箱）：allow | deny | ask
     decision = ctx.waterfall("tools/pre-execute", {"tool": tool.name, "args": frozen_args})
     verdict = decision.get("verdict", "allow") if isinstance(decision, dict) else "allow"
     if verdict == "deny":
@@ -180,13 +197,43 @@ def run_pipeline(ctx: Context, tool: Tool, args: dict, exec_: ToolExec | None = 
         if approved is not True:
             return ToolResult(ok=False, is_error=True, error="approval refused")
 
-    # 4. 单调守卫（只减权；此处复用 waterfall 通道，语义上不可加回）
     guard = ctx.waterfall("tools/guards", {"tool": tool.name, "args": frozen_args})
     guard_verdict = guard.get("verdict", "allow") if isinstance(guard, dict) else "allow"
     if guard_verdict == "deny":
         return ToolResult(ok=False, is_error=True, error="denied by monotonic guard")
+    return None
 
-    # 5. execute（超时由管线 wrapper 强制，绝不发给模型）
+
+async def pipeline_policy_async(
+    ctx: Context, tool: Tool, frozen_args: Any,
+) -> ToolResult | None:
+    """政策段（async 版）：同一语义，waterfall 走 awaterfall。
+    供调度器在事件循环按模型序有序 await（上游 prepare 的 pre-execute 有序）。"""
+    schema_errors = validate_schema(frozen_args, tool.parameters)
+    if schema_errors:
+        return ToolResult(ok=False, is_error=True, error="; ".join(schema_errors))
+
+    decision = await ctx.awaterfall("tools/pre-execute", {"tool": tool.name, "args": frozen_args})
+    verdict = decision.get("verdict", "allow") if isinstance(decision, dict) else "allow"
+    if verdict == "deny":
+        return ToolResult(ok=False, is_error=True, error="denied by tools/pre-execute")
+    if verdict == "ask":
+        approved = await ctx.awaterfall("tools/ask", {"tool": tool.name, "args": frozen_args})
+        if approved is not True:
+            return ToolResult(ok=False, is_error=True, error="approval refused")
+
+    guard = await ctx.awaterfall("tools/guards", {"tool": tool.name, "args": frozen_args})
+    guard_verdict = guard.get("verdict", "allow") if isinstance(guard, dict) else "allow"
+    if guard_verdict == "deny":
+        return ToolResult(ok=False, is_error=True, error="denied by monotonic guard")
+    return None
+
+
+def pipeline_body(
+    ctx: Context, tool: Tool, frozen_args: Any, exec_: ToolExec, *,
+    async_: bool = False,
+) -> tuple[Any, Exception | None]:
+    """执行体段：execute（可选线程超时）+ post-execute。返回 (raw, error)。"""
     box: dict[str, Any] = {}
 
     def target() -> None:
@@ -201,19 +248,39 @@ def run_pipeline(ctx: Context, tool: Tool, args: dict, exec_: ToolExec | None = 
         t.join(tool.timeout_ms / 1000)
         if t.is_alive():
             exec_.signal.set()
-            return ToolResult(ok=False, is_error=True, error=f"timeout after {tool.timeout_ms}ms")
+            t.join()   # 排干：等待执行体到达静止点
+            return None, TimeoutError(f"timeout after {tool.timeout_ms}ms")
     else:
         target()
 
-    # 6. post-execute waterfall：accept | block(+feedback)
     raw = box.get("value")
     post = ctx.waterfall("tools/post-execute", {"tool": tool.name, "result": raw})
     if isinstance(post, dict) and post.get("action") == "block":
-        return ToolResult(ok=False, is_error=True, error=post.get("feedback", "blocked by tools/post-execute"))
+        return None, RuntimeError(post.get("feedback", "blocked by tools/post-execute"))
+    return raw, box.get("error")
+
+
+def run_pipeline(ctx: Context, tool: Tool, args: dict, exec_: ToolExec | None = None) -> ToolResult:
+    """pre-execute → 守卫 → execute → post-execute → 规范化 → 冻结结果。"""
+    exec_ = exec_ or ToolExec()
+
+    # 1. 参数一次性无损物化 + 深度冻结
+    try:
+        frozen_args = deep_freeze(dict(args))
+    except Exception as e:
+        return ToolResult(ok=False, is_error=True, error=f"参数无法物化: {e}")
+
+    # 2-4. 政策段
+    rejected = pipeline_policy(ctx, tool, frozen_args)
+    if rejected is not None:
+        return rejected
+
+    # 5-6. 执行体段
+    raw, error = pipeline_body(ctx, tool, frozen_args, exec_)
 
     # 7. 外层规范化：异常 / 非法值 → isError
-    if "error" in box:
-        e = box["error"]
+    if error is not None:
+        e = error
         return ToolResult(ok=False, is_error=True, error=f"{type(e).__name__}: {e}")
     if isinstance(raw, ToolResult):
         return raw
@@ -224,3 +291,69 @@ def run_pipeline(ctx: Context, tool: Tool, args: dict, exec_: ToolExec | None = 
 
     # 8. 冻结的权威结果
     return ToolResult(ok=True, content=deep_freeze(raw))
+
+
+async def pipeline_async_body(
+    ctx: Context, tool: Tool, frozen_args: Any, exec_: ToolExec | None = None,
+) -> ToolResult:
+    """政策通过后的执行体段（async 版）：execute 在线程池，post-execute
+    回事件循环（awaterfall），超时 wait_for + 置位 signal + shield 排干。
+    供调度器复用——政策段已按模型序有序跑过，此处只做 body。"""
+    exec_ = exec_ or ToolExec()
+    loop = asyncio.get_running_loop()
+
+    def body() -> tuple[Any, Exception | None]:
+        try:
+            raw = tool.execute(dict(frozen_args), exec_)
+        except Exception as e:
+            return None, e
+        return raw, None
+
+    if tool.timeout_ms:
+        try:
+            raw, error = await asyncio.wait_for(
+                loop.run_in_executor(None, body), tool.timeout_ms / 1000,
+            )
+        except asyncio.TimeoutError:
+            exec_.signal.set()
+            # 排干：线程无法取消，必须等它到达静止点（上游排干语义）
+            raw, error = await asyncio.shield(loop.run_in_executor(None, body))
+            if error is None:
+                error = TimeoutError(f"timeout after {tool.timeout_ms}ms")
+    else:
+        raw, error = await loop.run_in_executor(None, body)
+
+    # post-execute 回事件循环（与上游 finalize 在事件循环跑一致）
+    post = await ctx.awaterfall("tools/post-execute", {"tool": tool.name, "result": raw})
+    if isinstance(post, dict) and post.get("action") == "block":
+        error = RuntimeError(post.get("feedback", "blocked by tools/post-execute"))
+
+    if error is not None:
+        e = error
+        return ToolResult(ok=False, is_error=True, error=f"{type(e).__name__}: {e}")
+    if isinstance(raw, ToolResult):
+        return raw
+    if isinstance(raw, dict) and raw.get("isError"):
+        return ToolResult(ok=False, content=raw.get("content"), is_error=True, error=raw.get("error"))
+    if not is_json_safe(raw):
+        return ToolResult(ok=False, is_error=True, error="工具返回了不可 JSON 序列化的值")
+    return ToolResult(ok=True, content=deep_freeze(raw))
+
+
+async def run_pipeline_async(
+    ctx: Context, tool: Tool, args: dict, exec_: ToolExec | None = None,
+) -> ToolResult:
+    """管线异步版（阶段 7）：政策段在事件循环按序 await（awaterfall），
+    执行体在线程池真并行；超时用 wait_for + 置位 signal + 排干，
+    与上游"已启动的 promise 必须排干到静止"一致。"""
+    exec_ = exec_ or ToolExec()
+
+    try:
+        frozen_args = deep_freeze(dict(args))
+    except Exception as e:
+        return ToolResult(ok=False, is_error=True, error=f"参数无法物化: {e}")
+
+    rejected = await pipeline_policy_async(ctx, tool, frozen_args)
+    if rejected is not None:
+        return rejected
+    return await pipeline_async_body(ctx, tool, frozen_args, exec_)

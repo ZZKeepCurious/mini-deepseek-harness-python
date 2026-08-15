@@ -7,10 +7,24 @@
   waterfall  流水线（around-middleware），必须 next() 委派，不调 next 即短路
   parallel   并行，等待全部监听完成（此处为同步近似）
   serial     串行，按序执行，有返回值
+
+阶段 7 追加：aemit / awaterfall / aparallel —— 同一语义的 asyncio 版本。
+监听器可以是普通同步函数，也可以是 async 函数；async 监听器会被 await，
+同步监听器直接调用。事件循环取自调用点的 running loop，不私建 loop。
 """
 from __future__ import annotations
 
-from typing import Any, Callable
+import asyncio
+import inspect
+from typing import Any, Awaitable, Callable
+
+
+async def _maybe_await(value: Any) -> Any:
+    """监听器返回值统一化：coroutine/awaitable 循环解包（中间件 return nxt() 会
+    直接返回下一层 coroutine，须逐层 await 到普通值）。"""
+    while inspect.iscoroutine(value) or isinstance(value, Awaitable):
+        value = await value
+    return value
 
 
 class Context:
@@ -94,6 +108,42 @@ class Context:
 
     def serial(self, event: str, payload: Any = None) -> list:
         return [fn(payload) for fn in self._listeners_for(event)]
+
+    # ---------- 阶段 7：asyncio 变体 ----------
+
+    async def aemit(self, event: str, payload: Any = None) -> None:
+        """观察式异步派发：按注册序 await 每个监听器（async 监听器 await，同步直调）。"""
+        for fn in self._listeners_for(event):
+            await _maybe_await(fn(payload))
+
+    async def awaterfall(self, event: str, payload: Any = None) -> Any:
+        """流水线异步版：语义与 waterfall 相同（next() 委派、不调即短路）。"""
+        listeners = self._listeners_for(event)
+        idx = 0
+
+        async def step(cur: Any) -> Any:
+            nonlocal idx
+            if idx >= len(listeners):
+                return cur
+            fn = listeners[idx]
+            idx += 1
+            result = fn(cur, lambda new=cur: step(new))
+            return await _maybe_await(result)
+
+        return await step(payload)
+
+    async def aparallel(self, event: str, payload: Any = None) -> list:
+        """并行异步版：全部监听器并发启动（asyncio.gather），结果按注册序返回。"""
+        coros = []
+        for fn in self._listeners_for(event):
+            result = fn(payload)
+            if inspect.iscoroutine(result):
+                coros.append(result)
+            else:
+                async def _const(value=result):
+                    return value
+                coros.append(_const())
+        return await asyncio.gather(*coros)
 
     # ---------- 副作用与生命周期 ----------
 

@@ -1,0 +1,169 @@
+"""`miniharness sessions` 子命令：会话列表 / 恢复 / 删除（mini 教学扩展）。
+
+上游无对应 CLI 子命令：会话管理在 web 表层（dsh --profile web 的浏览器 GUI）。
+mini 未复现 web 表面，故以子命令提供同等的本地管理入口（契约不变：加载 fail-closed、
+崩溃修复只合成 closers、resume 继续对话遵循 headless 的输出与退出码契约）。
+"""
+from __future__ import annotations
+
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable
+
+from .bus import Context
+from .headless import _default_tools, summarize
+from .llm import DeepSeekAdapter, LlmAdapter, LlmFailure
+from .loop import AgentLoop
+from .persistence import JsonlPersistence, load_events_checked, repair_and_replay
+from .session import Session, repair_interrupted_turn, turn_balance
+
+
+def sessions_root() -> Path:
+    home = Path(os.environ.get("MINIHARNESS_HOME", Path.home() / ".miniharness"))
+    return home / "sessions"
+
+
+def _fmt_time(ms: int | None) -> str:
+    if ms is None:
+        return "-"
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def list_sessions(root: Path) -> list[dict]:
+    pers = JsonlPersistence(root)
+    out = []
+    for path in sorted(root.glob("*.jsonl")):
+        sid = path.stem
+        entry = {"id": sid, "events": 0, "last": None, "balanced": None, "error": None}
+        try:
+            raw = load_events_checked(pers.load(sid))
+        except RuntimeError as e:
+            entry["error"] = str(e)
+            out.append(entry)
+            continue
+        repaired = repair_interrupted_turn(raw)
+        entry["events"] = len(raw)
+        entry["last"] = raw[-1]["time"] if raw else None
+        entry["balanced"] = turn_balance(repaired) == 0
+        out.append(entry)
+    return out
+
+
+def print_list(root: Path, stdout: Any | None = None) -> None:
+    stdout = stdout or sys.stdout
+    rows = list_sessions(root)
+    if not rows:
+        stdout.write(f"no sessions under {root}\n")
+        return
+    for row in rows:
+        if row["error"]:
+            stdout.write(f"{row['id']}  ERROR: {row['error']}\n")
+            continue
+        state = "balanced" if row["balanced"] else "unbalanced"
+        stdout.write(
+            f"{row['id']}  events={row['events']}  {state}  last={_fmt_time(row['last'])}\n"
+        )
+
+
+def resume_session(
+    session_id: str,
+    task: str,
+    *,
+    root: Path,
+    adapter: LlmAdapter,
+    stdout: Any | None = None,
+    stderr: Any | None = None,
+    exit_fn: Callable[[int], None] | None = None,
+) -> None:
+    """恢复会话：fail-closed 加载 → 崩溃修复 → 重放；带任务则继续对话（headless 契约）。"""
+    stdout = stdout or sys.stdout
+    stderr = stderr or sys.stderr
+    exit_fn = exit_fn or sys.exit
+    pers = JsonlPersistence(root)
+    safe = session_id.replace("/", "_").replace("\\", "_")
+    if not (root / f"{safe}.jsonl").exists():
+        stderr.write(f"error: session {session_id!r} not found\n")
+        exit_fn(1)
+        return
+    session = repair_and_replay(pers, session_id, Session(session_id))
+    base_count = len(session.events)
+    if task.strip() == "":
+        stdout.write(
+            f"session {session_id}\n"
+            f"  events: {base_count} (balanced: {turn_balance(session.events) == 0})\n"
+            f"  created: {_fmt_time(session.created_at)}\n"
+            f"  last:    {_fmt_time(session.events[-1]['time'] if session.events else None)}\n"
+        )
+        return
+
+    ctx = Context(name="headless")
+    if adapter is None:
+        raise ValueError("resume 继续对话需要 adapter")
+    loop = AgentLoop(session, adapter, _default_tools(ctx), ctx)
+    first_seq = session.seq
+    try:
+        loop.followup(task)
+    except Exception as error:  # 对齐 headless：意外失败 stderr 一行 + exit(1)
+        stderr.write(f"dsh: {error}\n")
+        exit_fn(1)
+        return
+    for ev in session.events[base_count:]:
+        pers.append(session_id, dict(ev))
+    pers.flush()
+
+    text, reason = summarize(session.events, first_seq)
+    stdout.write(text + "\n")
+    if reason is not None and reason.get("kind") == "error":
+        failure = reason.get("failure") or {}
+        stderr.write(f"dsh: {failure.get('code', 'UNKNOWN')}: {failure.get('message', '')}\n")
+    exit_fn(0 if (reason is not None and reason.get("kind") == "completed") else 1)
+
+
+def delete_session(session_id: str, root: Path, stdout: Any, stderr: Any) -> None:
+    safe = session_id.replace("/", "_").replace("\\", "_")
+    path = root / f"{safe}.jsonl"
+    if not path.exists():
+        stderr.write(f"error: session {session_id!r} not found\n")
+        sys.exit(1)
+    path.unlink()
+    stdout.write(f"deleted {session_id}\n")
+
+
+def sessions_main(argv: list[str], adapter: LlmAdapter | None = None, root: Path | None = None) -> None:
+    root = root or sessions_root()
+    if not argv or argv[0] in ("list", "ls"):
+        print_list(root, sys.stdout)
+        return
+    cmd, rest = argv[0], argv[1:]
+    if cmd == "resume":
+        if not rest:
+            sys.stderr.write('error: usage: miniharness sessions resume <id> [task...]\n')
+            sys.exit(1)
+        session_id = rest[0]
+        safe = session_id.replace("/", "_").replace("\\", "_")
+        if not (root / f"{safe}.jsonl").exists():
+            sys.stderr.write(f"error: session {session_id!r} not found\n")
+            sys.exit(1)
+        task = " ".join(rest[1:])
+        if task.strip() and adapter is None:
+            try:
+                adapter = DeepSeekAdapter()
+            except LlmFailure as e:
+                sys.stderr.write(f"dsh: {e.failure['code']}: {e.failure['message']}\n")
+                sys.exit(1)
+        resume_session(session_id, task, root=root, adapter=adapter)
+        return
+    if cmd == "delete":
+        if not rest or len(rest) != 1:
+            sys.stderr.write('error: usage: miniharness sessions delete <id>\n')
+            sys.exit(1)
+        delete_session(rest[0], root, sys.stdout, sys.stderr)
+        return
+    sys.stderr.write(f"error: unknown sessions subcommand {cmd!r} (list | resume <id> [task...] | delete <id>)\n")
+    sys.exit(1)
+
+
+if __name__ == "__main__":
+    sessions_main(sys.argv[1:])

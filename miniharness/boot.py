@@ -6,14 +6,15 @@
   1. 补丁算法是纯函数（replace 按 id 整段替换 config / insert 新条目）
   2. 补丁按层叠顺序应用：bundle 层 → profile 级 → home 级 → --patch overlay
   3. 启动结束必须断言"条目已加载 + 已激活"，否则 fail loud
+  4. 配置载体支持 JSON 与 YAML（pyyaml 可选依赖）；!!js 表达式求值见 composition
 """
 from __future__ import annotations
 
 import importlib
-import json
 from typing import Any, Callable
 
 from .bus import Context, PluginManager
+from .composition import load_composition, load_patch_list, resolve_js_exprs
 
 
 def apply_patch(entries: list[dict], patches: list[dict]) -> list[dict]:
@@ -51,15 +52,16 @@ def boot(
     config_path: str,
     *patch_paths: str,
     env: dict[str, Any] | None = None,
+    bin_name: str = "miniharness",
 ) -> tuple[Context, list[tuple[str, Callable]]]:
-    """boot()：加载配置 → 依序应用补丁 → 激活插件 → 断言全部就绪。"""
+    """boot()：加载配置 → 依序应用补丁 → 激活插件 → 断言全部就绪。
+
+    config_path 与补丁支持 .json/.yaml/.yml；YAML 内 !!js 表达式读取时求值。
+    """
     env = env or {}
-    with open(config_path, encoding="utf-8") as f:
-        config = json.load(f)
-    entries = list(config.get("plugins", []))
+    entries = resolve_js_exprs(load_composition(config_path, bin_name))
     for pp in patch_paths:
-        with open(pp, encoding="utf-8") as f:
-            patches = json.load(f)
+        patches = resolve_js_exprs(load_patch_list(pp, bin_name))
         entries = apply_patch(entries, patches)
 
     root = Context(name="root")
