@@ -4,11 +4,14 @@
 >（`docs/agent-lifecycle.md`、`docs/subsystems/llm-streaming.md`）
 > 前置：第 1~3 章。产出文件：`miniharness/miniharness/llm.py`、`loop.py` + `tests/test_loop.py`
 
-## 4.1 本章目标
+## 4.1 这一章要做什么
 
-- 实现 `StreamChunk` 统一流协议 + `LlmAdapter` 接口 + DeepSeek 官方 SSE 适配器（纯 stdlib）
-- 实现 turn/step 状态机：inbox、pre-step 拒绝、工具回灌继续、turn 括号闭合
-- 用 `FakeLlmAdapter` 无 key 跑通"文本 + 工具调用"完整回合
+前三章分别备好了日志、插件骨架和工具管线，这一章把它们接起来：模型在循环里转起来，一个回合完整跑完。两个部分：
+
+1. `llm.py`——统一流协议 `StreamChunk` + `LlmAdapter` 接口 + DeepSeek 官方 SSE 适配器（纯 stdlib，不装 SDK）
+2. `loop.py`——turn/step 状态机：inbox 排队、pre-step 拒绝、工具回灌继续、turn 括号闭合
+
+用 `FakeLlmAdapter` 不需要 API key 就能跑通"文本 + 工具调用"的完整回合——测试和演示都靠它。
 
 ## 4.2 概念：turn/step 时序
 
@@ -43,9 +46,9 @@ sequenceDiagram
 
 三个要点：
 
-1. **turn 打开于认领输入之前**——"被拒绝的尝试"也留下 `turn/start + turn/end` 持久化记录（可审计）。
-2. **step = 一次模型请求 + 它调用的工具**；工具结果回灌后，同一 turn 内自动再问一次模型（`_continue`）。
-3. **模型可见 ⟺ 已记录**：`user/message` 在 pre-step 通过后才 append。
+1. **turn 打开于认领输入之前**。"被拒绝的尝试"也留下 `turn/start + turn/end` 的持久化记录——审计要看到"发生过一次尝试"，即使它什么都没做。
+2. **step = 一次模型请求 + 它调用的工具**。工具结果回灌后，同一 turn 内自动再问一次模型（`_continue`）。所以"一次对话回合"可能包含多次模型请求，这是 agent 循环和普通聊天 API 的本质区别。
+3. **模型可见 ⟺ 已记录**（第 1 章那句话在这里落地）：`user/message` 在 pre-step 通过后才 append，模型永远看不到没进日志的输入。
 
 ## 4.3 代码 step-by-step（llm.py）
 
@@ -64,10 +67,12 @@ class StreamChunk(dict):
         super().__init__({"kind": kind, **payload})
 ```
 
-协议不变量（真实 dsh 逐条遵守）：
+为什么要统一协议？因为不同模型厂商的流式格式各不相同（OpenAI 系、Anthropic 系、原生 SSE……），loop 不该关心厂商差异。所有适配器都吐同一种 `StreamChunk`，loop 只认这一种。
+
+协议不变量（真实 dsh 逐条遵守，`docs/subsystems/llm-streaming.md` 有完整规范）：
 
 - `block-end` 携带完整块；`usage` 必须在 `finish` 之前；`finish` 之后不再有值
-- 块索引关联交错增量（多块并行 delta 用 `index` 区分）
+- 块索引关联交错增量：多块并行时用 `index` 区分
 
 ### 步骤 2：接口 + 错误收口
 
@@ -85,7 +90,9 @@ class LlmAdapter:
         raise NotImplementedError
 ```
 
-> 真实 dsh 的授权错误路径统一为 `LlmFailure`，上下文溢出编码 `CONTEXT_WINDOW_EXCEEDED`，空响应编码 `EMPTY_RESPONSE`（可重试）。我们的实现只覆盖前两个：溢出以 docstring 说明、空响应尚未实现（见 4.8 差异表）。
+常规做法的错误处理是"哪个 SDK 抛什么就 catch 什么"，不同厂商的报错对象还不一样。dsh 统一为 `LlmFailure(code, message)`：授权失败 `AUTH_ERROR`、网络/HTTP `REQUEST_ERROR`、上下文溢出 `CONTEXT_WINDOW_EXCEEDED`，全部一个异常类型。
+
+> 真实 dsh 还有 `EMPTY_RESPONSE` 编码（空响应 = 可重试的规范错误）。简化版只覆盖前两个：溢出以 docstring 说明，空响应未实现——见 4.8 差异表。
 
 ### 步骤 3：FakeLlmAdapter —— 无 key 也能跑回合
 
@@ -119,6 +126,8 @@ class FakeLlmAdapter(LlmAdapter):
             })
             yield StreamChunk("finish", reason="stop")
 ```
+
+行为规则：第一次调用返回一次工具调用，之后返回最终文本。这样就能驱动"模型调工具 → 拿到结果 → 再回答"的完整回合，全程不需要真实模型。注意 `tool-call` 块的 `arguments` 是 **JSON 字符串**，与上游 `ContentBlock` 一致——模型侧协议里参数就是字符串，不是对象。
 
 ### 步骤 4：DeepSeekAdapter —— 官方 SSE（stdlib urllib）
 
@@ -189,8 +198,12 @@ class DeepSeekAdapter(LlmAdapter):
         yield StreamChunk("finish", reason="tool_calls" if pending else "stop")
 ```
 
-- 这就是报告里 `llm-deepseek` 适配器的简化版：`fetch + SSE`，逐块翻译成统一协议。
-- `baseURL / apiKey` 从环境变量读取——配置只存引用，绝无明文（第 6 章凭据接缝再深入）。
+核心逻辑在 SSE 循环里：`reasoning_content`、`content`、`tool_calls` 三类增量各自累积，其中 tool-call 的 name 和 arguments 是**分片到达**的，必须攒齐。攒齐之后按 ContentBlock 重放为 `block-start → delta* → block-end`——这样 Consumer（loop）看到的永远是完整的块结构，而不是碎片。
+
+两个细节：
+
+- `baseURL / apiKey` 从环境变量读取，代码里只存引用。凭据的完整处理在第 6 章（凭据接缝）。
+- 401/403 映射为 `AUTH_ERROR`，其余 HTTP 错误映射为 `REQUEST_ERROR`——错误在源头就分类，调用方不用猜。
 
 ## 4.4 代码 step-by-step（loop.py）
 
@@ -220,6 +233,8 @@ class AgentLoop:
         return self.last_response()
 ```
 
+`inbox` 是唯一入口：用户的输入先进队列，由 `_pump` 消费。为什么排队而不是直接处理？因为一次 `followup` 可能触发多轮工具调用，期间再来新输入必须排队，不能打断当前回合。
+
 ### 步骤 2：turn 生命周期
 
 ```python
@@ -238,6 +253,8 @@ class AgentLoop:
         self.status = "idle"
 ```
 
+`turn/start` / `turn/end` 是第 1 章的括号。`reason` 默认为 `"completed"`，被拒绝的尝试、被打断的回合会写别的值。
+
 ### 步骤 3：主循环
 
 ```python
@@ -254,8 +271,7 @@ class AgentLoop:
                 self._close_turn()
 ```
 
-- 循环条件：有排队输入，或有工具回灌待继续（`_continue`）。
-- `max_steps` 是死循环守卫（测试 `test_max_steps_guard`：模型永远调工具 → 报错而不是挂死）。
+循环条件：有排队输入，或有工具回灌待继续（`_continue`）。`max_steps` 是死循环守卫：模型如果永远调工具不结束，会在 50 步时报错而不是挂死（测试 `test_max_steps_guard` 钉住）。
 
 ### 步骤 4：一个 step
 
@@ -296,10 +312,13 @@ class AgentLoop:
         self._continue = bool(tool_calls)
 ```
 
-- `_append` 是回合事件的统一入口：自动注入 `turn` / `step` 编号（与上游 `SessionEvent` 字段一致，从 0 起）。
-- **pre-step 拒绝**：waterfall 返回 `{"verdict": "reject"}` → 不落 `step/start`，turn 直接闭合——这正是报告第 5.1 节的"零 step turn"。
-- 历史 = `derive_messages(日志)` + system prompt，绝不另存。
-- `_continue = bool(tool_calls)`：有工具调用 → 同 turn 内再问模型（第 2 次 adapter 调用看到 tool/result 消息）。
+四个要点：
+
+- `_append` 是回合事件的统一入口，自动注入 `turn` / `step` 编号——与上游 `SessionEvent` 字段一致，从 0 起。这是 B 部分对齐后与上游完全一致的字段。
+- **pre-step 拒绝**：waterfall 返回 `{"verdict": "reject"}` → 不落 `step/start`，turn 直接闭合。这就是"零 step turn"：被拒绝的尝试也留下括号痕迹（4.2 要点 1）。
+- 历史 = `derive_messages(日志)` + system prompt，绝不另存——第 1 章的投影在这里消费。
+- `tool-call-delta` 是增量分片，loop 按 id 累积 name 与 `argumentsDelta`，组装成完整的 `toolCalls` 再落日志。所以日志里存的是完整参数（JSON 字符串），而不是碎片。
+- `_continue = bool(tool_calls)`：有工具调用 → 同 turn 内再问模型。第二次 adapter 调用时，消息历史里已经多了 `tool/result`。
 
 ### 步骤 5：工具执行与落日志
 
@@ -320,9 +339,11 @@ class AgentLoop:
                              "isError": result.is_error, "error": result.error, "surfaceOp": "append"})
 ```
 
-`tool/call` 在**执行前**落日志（durable），`tool/result` 是唯一模型面向的结果——和第 3 章管线无缝对接。
+`tool/call` 在**执行前**落日志（durable），`tool/result` 是唯一模型面向的结果——和第 3 章管线无缝对接。注意"未知工具"也被规范化成 `ToolResult(is_error=True)`：模型收到错误消息并自己决定怎么办，而不是整个回合崩溃。
 
-## 4.5 不变量清单
+## 4.5 验收：硬性规定 + 测试
+
+`tests/test_loop.py` 钉住的规定：
 
 1. `turn/start` 与 `turn/end` 成对且 `turn_balance == 0`
 2. 拒绝的尝试：有 `turn/start + turn/end`，无 `step/start`
@@ -350,7 +371,7 @@ print(loop.run("用 bash 执行 echo hello，然后告诉我结果。"))
 print([e["type"] for e in session.events])
 ```
 
-需要环境变量 `DEEPSEEK_API_KEY`（可选 `DEEPSEEK_BASE_URL` 指向兼容代理）。
+需要环境变量 `DEEPSEEK_API_KEY`（可选 `DEEPSEEK_BASE_URL` 指向兼容代理）。跑完后 `session.events` 里能看到完整回合：turn/step 括号、消息、工具调用与结果，全都在。
 
 ## 4.7 检查点练习
 
@@ -365,7 +386,7 @@ print([e["type"] for e in session.events])
 - 主 Driver 的 `_run_step` 对应我们的 `_run_step`——真实实现更复杂（交错工具批、屏障、回灌顺序）
 - `docs/agent-lifecycle.md` 顶部的 Mermaid 时序图：与我们 4.2 的图逐条对应
 
-**我们省略/简化的真实扩展点（值得知道它们存在）：**
+下面这些真实扩展点简化版没有实现，对照时不要找"上游为什么多这些东西"，它们是刻意省略的：
 
 | 上游事件/扩展点 | 用途 | 我们的状态 |
 |---|---|---|
@@ -376,11 +397,6 @@ print([e["type"] for e in session.events])
 | `finish {kind:'error'\|'aborted'}` 带内失败 | 流中途失败也可经协议传递 | 只在 `stream()` 抛 `LlmFailure` |
 | `EMPTY_RESPONSE` 编码 | 空响应 = 规范错误，可重试 | 未实现（`dsh-llm-retry` 默认重试） |
 
-## 4.9 本章小结
+## 4.9 收尾
 
-| 概念 | 一句话 |
-|---|---|
-| turn/step | turn = 括号，step = 一次模型请求 + 工具 |
-| 零 step turn | 拒绝的尝试也要持久化留痕 |
-| `_continue` | 工具结果回灌后同 turn 内继续问模型 |
-| StreamChunk | 统一流协议；usage 在 finish 前，finish 后无值 |
+回合跑通的那一刻，前三章的积木全部就位：日志在写、插件在拦、工具在跑、模型在转。这一章最后要记住的是 turn/step 的分层——turn 是对话的括号，step 是括号里的每一轮"请求 + 工具"。下一章处理一个没解决的实际问题：这些日志怎么落盘、崩溃怎么恢复、整个系统怎么组合启动。

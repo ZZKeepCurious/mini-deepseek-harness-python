@@ -204,15 +204,15 @@
 
 <!-- ============ PART 1 ============ -->
 <h2 id="s1"><span class="no">1</span>项目全景</h2>
-<p><b>DeepSeek Harness（<code>dsh</code>）</b> 是 DeepSeek AI 开源的一款 <b>Agent 运行时（agent harness）</b>：它把"大模型对话 + 工具调用 + 会话管理 + 权限策略 + 沙箱执行"组装成一个可配置、可替换、可组合的运行时产品。它的定位介于"框架"与"应用"之间——既提供完整可运行的 CLI / Web 产品，又提供可编程的插件生态。</p>
+<p><b>DeepSeek Harness（<code>dsh</code>）</b> 是 DeepSeek AI 开源的一款 <b>Agent 运行时（agent harness）</b>：它把"大模型对话 + 工具调用 + 会话管理 + 权限策略 + 沙箱执行"组装成一个可配置、可替换、可组合的运行时产品。通常的 agent 框架把主循环、工具注册、会话存储写死在框架里，只留少量扩展点；dsh 的定位反过来——它介于"框架"与"应用"之间：既提供完整可运行的 CLI / Web 产品，又提供可编程的插件生态。</p>
 
 <div class="card">
 <h4>三个标志性设计决策</h4>
-<ul>
-  <li><b>无特权内核（no privileged core）</b>：包括模型适配器、工具注册表、会话日志、甚至 Agent 主循环本身，全部是插件。扩展方式 = 在旁边再挂一个插件，而非修改内核。</li>
-  <li><b>事件溯源会话（event-sourced session）</b>：会话是<b>追加式事件日志</b>，模型可见的历史由日志 <code>deriveMessages()</code> 投影得出，绝不另存一份副本。"模型可见 ⟺ 已记录"是不变量。</li>
-  <li><b>框架层完全自持（vendored Cordis）</b>：底层插件框架 Cordis 被源码 vendored 进仓库并改名 <code>@deepseek-ai/*</code>，附 18 项本地加固，因此整个框架层可审计、可补丁、可发布。</li>
-</ul>
+<ol>
+  <li><b>无特权内核（no privileged core）</b>。常规框架里总有几个"核心模块"是不可替换的；dsh 连模型适配器、工具注册表、会话日志、甚至 Agent 主循环本身都做成插件。扩展方式 = 在旁边再挂一个插件，而非修改内核。</li>
+  <li><b>事件溯源会话（event-sourced session）</b>。常规会话存储"最终状态"，dsh 存"发生了什么"：会话是<b>追加式事件日志</b>，模型可见的历史由日志 <code>deriveMessages()</code> 投影得出，绝不另存一份副本。"模型可见 ⟺ 已记录"是始终成立的性质。</li>
+  <li><b>框架层完全自持（vendored Cordis）</b>。常规项目把插件框架当作 npm 依赖引入；dsh 把底层插件框架 Cordis 源码直接 vendored 进仓库并改名 <code>@deepseek-ai/*</code>，附 18 项本地加固，因此整个框架层可审计、可补丁、可发布。</li>
+</ol>
 </div>
 
 <div class="callout ok">
@@ -220,7 +220,7 @@
 </div>
 
 <h2 id="s2"><span class="no">2</span>分层架构</h2>
-<p>仓库是 pnpm monorepo（Node ^22.19 || >=24，全 ESM）。自上而下分五层：</p>
+<p>仓库是 pnpm monorepo（Node ^22.19 || >=24，全 ESM）。自上而下分五层（各层之间只通过接口约定连接，这是它和"按目录分层的单体框架"的本质区别）：</p>
 
 <table>
   <tr><th>层</th><th>位置</th><th>职责</th><th>关键事实</th></tr>
@@ -383,7 +383,13 @@ flowchart LR
   <tr><td><b>Agent 事件</b>（携带活体 <code>Agent</code>）</td><td><code>agent/inbox/*</code>、<code>agent/status</code>、<code>agent/pre-step</code>、<code>agent/request</code>、<code>agent/request-error</code>、<code>agent/turn-stopping</code></td><td>观察/拦截进行中的工作</td></tr>
   <tr><td><b>能力事件</b>（附着策略与适配器）</td><td><code>fs/*</code>、<code>tools/*</code>、<code>telemetry/*</code></td><td>不改 loop 即可给接缝挂策略</td></tr>
 </table>
-<p><b>四种派发模式</b>（Cordis 语义，报告的公共契约）：<code>emit</code>（不等待、无返回值、按注册序观察）、<code>waterfall</code>（around-middleware，必须 <code>next()</code> 委派，短路即决策）、<code>parallel</code>（等待全部并行监听）、<code>serial</code>（按序、有返回值）。流水线事件（<code>agent/pre-step</code>、<code>agent/request</code>、<code>llm/stream</code>、三个 <code>tools/*</code>）是 waterfall。</p>
+<p><b>四种派发模式</b>（Cordis 语义，报告的公共契约）。流水线事件（<code>agent/pre-step</code>、<code>agent/request</code>、<code>llm/stream</code>、三个 <code>tools/*</code>）全部用 waterfall：</p>
+<ol>
+  <li><code>emit</code>——同步广播，不等待、无返回值、按注册序观察。通知类事件专用。</li>
+  <li><code>waterfall</code>——around-middleware，监听器必须 <code>next()</code> 委派；不调 <code>next</code> 即短路，返回值就是唯一决策。</li>
+  <li><code>parallel</code>——等待全部并行监听器完成，收集结果列表。横切动作专用。</li>
+  <li><code>serial</code>——按序执行，有返回值。依赖前序结果的变换专用。</li>
+</ol>
 
 <p class="fig-cap">图 4：Cordis 四种事件派发模式的语义对比</p>
 <div class="mermaid">
@@ -458,19 +464,20 @@ flowchart LR
   </tr>
 </table>
 <div class="callout">
-<b>一条贯穿所有接入面的纪律（值得专门记下）</b>：UI/工具展示是纯投影——"如何绘制"（工具卡片、队列状态）永远不进 session 日志；宿主按帧计算或实时推送，回放时重算。而<b>任何新的模型可见输入</b>仍必须新增 session 事件（仓库级硬规则）。Web 客户端据此成为"日志驱动的重放投影"，而非第二份事实来源。
+<b>一条贯穿所有接入面的纪律</b>：UI/工具展示是纯投影——"如何绘制"（工具卡片、队列状态）永远不进 session 日志；宿主按帧计算或实时推送，回放时重算。而<b>任何新的模型可见输入</b>仍必须新增 session 事件（仓库级硬规则）。Web 客户端据此成为"日志驱动的重放投影"，而非第二份事实来源。
 </div>
 
 <h2 id="s4"><span class="no">4</span>技术核心</h2>
 
 <h3 id="s4-1">4.1 Cordis 插件模型——"一切皆插件"的地基</h3>
-<ul>
+<p>通常的插件框架只解决"注册与发现"；Cordis 更进一步，把"装载什么、何时装载、如何卸载"全部形式化。四个核心机制：</p>
+<ol>
   <li><b>插件是实现了 Service 的对象</b>：函数插件形如 <code>{ name, inject, Config, apply(ctx) }</code>；Service 子类插件由 Cordis 挂载进当前上下文。</li>
   <li><b>Context 是服务仓库</b>：服务声明稳定的 <code>ctx.&lt;key&gt;</code>（如 <code>ctx.tools</code>），插件按 key 查找而非 import 具体实现。</li>
-  <li><b>依赖用 <code>inject</code> 声明</b>：命名所需服务，Cordis 等待其出现后再激活插件 → 加载顺序由依赖关系表达，而非手工 boot 排序。</li>
-  <li><b>注册 = 可逆副作用（effects）</b>：一切贡献经 <code>ctx.effect()</code> / <code>ctx.on()</code> / <code>ctx.waterfall()</code> 安装，<code>register()</code> 返回 disposer，插件卸载时按序回滚。这是 HMR 与热重载能可靠工作的根基。</li>
-  <li><b>作用域化事件派发</b>：事件携带 subject 载体，监听器可以只收到指定 agent / 作用域的事件（<code>@deepseek-ai/dsh-scope</code>）。</li>
-</ul>
+  <li><b>依赖用 <code>inject</code> 声明</b>：命名所需服务，Cordis 等待其出现后再激活插件 → 加载顺序由依赖关系表达，而非手工 boot 排序。常规的"启动脚本按行排列"在这里被依赖图取代。</li>
+  <li><b>注册 = 可逆副作用（effects）</b>：一切贡献经 <code>ctx.effect()</code> / <code>ctx.on()</code> / <code>ctx.waterfall()</code> 安装，<code>register()</code> 返回 disposer，插件卸载时按序回滚。这是 HMR 与热重载能可靠工作的根基——常规做法里"卸载"往往只能靠重启进程。</li>
+</ol>
+<p>另外一条：<b>作用域化事件派发</b>——事件携带 subject 载体，监听器可以只收到指定 agent / 作用域的事件（<code>@deepseek-ai/dsh-scope</code>）。</p>
 
 <p class="fig-cap">图 5：Cordis 插件完整生命周期（注册 → 激活 → 副作用 → 回滚 / 热重载）</p>
 <div class="mermaid">
@@ -488,15 +495,16 @@ flowchart LR
 <p class="mermaid-note">"注册 = 可逆副作用"是热重载与故障清理能可靠工作的根基：任何贡献都能被 disposer 精确撤销。</p>
 
 <h3 id="s4-2">4.2 事件溯源会话日志（核心中的核心）</h3>
+<p>通常的会话实现是保存一份聊天记录，需要上下文时直接读它。dsh 恰好反过来：<code>Session</code> 只记录"发生了什么"，模型历史是每次现算的投影——这个结构在 <code>packages/core/session</code> 的 <code>SessionEvent</code> + <code>deriveMessages()</code> 组织方式里一目了然。它的六条契约拆开讲：</p>
 <div class="card">
-<ul>
-  <li><b>单一事实来源</b>：<code>Session</code> 是 <code>SessionEvent</code> 追加式日志；LLM 消息历史经 <code>deriveMessages()</code> 投影派生，绝不另存；回放 = 重新派生。</li>
-  <li><b>模型可见 ⟺ 已记录</b>：任何进入模型请求的内容必须能从日志重建；新增模型可见输入必须新增 session 事件（扩展 <code>SessionEventMap</code> + 从日志渲染）。</li>
-  <li><b>可合并扩展</b>：插件通过 TypeScript 声明合并（<code>declare module</code>）往 <code>SessionEventMap</code> 加事件类型，不触碰核心包。</li>
-  <li><b>表面（surface）机制</b>：三种消息产生型事件（<code>user/message</code>、<code>assistant/message</code>、<code>tool/result</code>）携带 <code>surfaceOp</code>（<code>append</code> 或 <code>replace</code>），决定历史投影的顺序与压缩替换。</li>
-  <li><b>无损 JSON 强制</b>：<code>append()</code> 在源头深度校验并冻结，非序列化数据直接抛错 → 坏事件永远不会进日志。</li>
-  <li><b>崩溃恢复</b>：重载发现未闭合 turn 时，不截断（大 turn 可能很巨大），而是合成 <code>turn/end { reason: interrupted }</code> 保持括号平衡。</li>
-</ul>
+<ol>
+  <li><b>单一事实来源。</b><code>Session</code> 是一条只追加、不修改的 <code>SessionEvent</code> 日志。模型的消息历史不是另外存出来的，而是每次用 <code>deriveMessages()</code> 从日志现算——回放也等于重新派生一遍。相比"内存一份、磁盘一份"的常规做法，没有第二份副本，就没有两份数据对不上的问题。</li>
+  <li><b>模型可见 ⟺ 已记录。</b>这是单一事实来源的直接推论：历史是派生视图，那么模型能看到的任何内容，都必须能从日志重建。反过来，想给模型加一种新输入，就必须先加一种新的 session 事件（扩展 <code>SessionEventMap</code>，再写"从日志渲染它"的代码）。</li>
+  <li><b>可合并扩展。</b>常规框架加事件类型往往要改核心包；dsh 用 TypeScript 的 <code>declare module</code> 声明合并，插件就能把新类型直接"塞"进 <code>SessionEventMap</code>——类型系统本身成了扩展点，这是相当少见的设计。</li>
+  <li><b>表面（surface）机制。</b>三种"产生消息"的事件（<code>user/message</code>、<code>assistant/message</code>、<code>tool/result</code>）都带 <code>surfaceOp</code>，取值 <code>append</code> 或 <code>replace</code>。投影时 <code>append</code> 按序排列，<code>replace</code> 整体替换旧的那一条。后面 5.2 节会看到，上下文压缩就是靠 <code>replace</code> 落地的——压缩不改日志，只追加一条替换事件。</li>
+  <li><b>无损 JSON 强制。</b><code>append()</code> 在写入源头做深度校验并冻结，序列化不了的东西（包括非有限浮点数）当场抛错。坏事件在源头就被拦住，进不了日志——日志里永远只有合法的数据。</li>
+  <li><b>崩溃恢复。</b>重载时发现 turn 没闭合（进程半路崩了），常规做法是截断或回滚；dsh 不这么做——大 turn 可能非常巨大，截断会丢内容。做法是合成一条 <code>turn/end { reason: interrupted }</code> 把括号补平衡：宁可标记"这次被打断了"，也不能悄悄丢掉已经发生过的事实。</li>
+</ol>
 </div>
 
 <p class="fig-cap">图 6：事件溯源会话——append 记录、投影派生、持久化回放三者关系</p>
@@ -517,9 +525,10 @@ flowchart LR
   LOG --> PERS
   PERS -.重启后重新加载.-> LOG
 </div>
+<p class="mermaid-note">读图顺序：日志永远是起点，投影和持久化都是它的下游，两者互不直接打交道。建议拿支笔，沿一条 user/message → assistant/message → tool/result 的路径把 seq 编号手推一遍，比盯着图看十遍有用。</p>
 
 <div class="walkthrough">
-<b>示例走查（surfaceOp=replace）</b>：上下文压力触发压缩后，日志中追加一条 <code>assistant/message { surfaceOp: "replace", references: seq=3 }</code>——投影时它整体替换第 3 条旧消息，<code>seq</code> 仍然连续。模型下一次请求看到的永远是"从完整日志实时派生"的历史，绝不会读到一个过期的快照副本。<code>append()</code> 在源头深度校验并冻结，非 JSON 序列化数据直接抛错——坏事件永远进不了日志。
+<b>示例走查（surfaceOp=replace）</b>：常见的疑问是"replace 之后历史还完整吗"。走一遍就清楚了：上下文压力触发压缩后，日志尾部会追加一条 <code>assistant/message { surfaceOp: "replace", references: seq=3 }</code>——投影时它整体替换第 3 条旧消息，但日志本身只做追加，<code>seq</code> 依然连续。于是模型下一次请求看到的历史，永远是"从完整日志实时派生"的版本，绝不会读到过期快照。这也是"不另存"的用意所在：只要派生是纯函数，持久化和恢复就永远不用操心一致性问题。
 </div>
 
 <h3 id="s4-3">4.3 能力接缝三角色（产品可替换性的来源）</h3>
@@ -542,11 +551,12 @@ flowchart LR
 <p class="mermaid-note">新增能力 = 同时设计三个角色；只注册一个 Provider 不构成接缝。</p>
 
 <h3 id="s4-4">4.4 类型技术（TypeScript 层）</h3>
-<ul>
+<p>常规 TS 项目的扩展靠"给接口留可选字段"；dsh 把类型系统本身做成扩展机制，三件套：</p>
+<ol>
   <li><b><code>…Map → derived-union</code> 模式</b>：接口按判别标签键控，<code>keyof</code> 派生联合类型，插件用声明合并扩展。六个规范 map：<code>ContentBlockMap</code>、<code>MessageSourceMap</code>、<code>FinishReasonMap</code>、<code>TurnTriggerMap</code>、<code>TurnEndReasonMap</code>、<code>SessionEventMap</code>。合并可扩展的联合在 <code>switch</code> 后落到文档化 default，不可 <code>assertNever</code>。</li>
   <li><b>品牌化 ID（<code>Branded&lt;B&gt;</code>）</b>：跨包 ID 结构上是 string、类型上不可互换（<code>SessionId</code> ≠ <code>CallId</code>）。纯类型包 <code>util/brand</code> 零运行时依赖。</li>
   <li><b>严格类型纪律</b>：<code>strict</code> + <code>noImplicitAny</code>；跨边界强制运行时校验（parser、wire、worker、持久化），同进程类型边界信任 TS 不重复校验。</li>
-</ul>
+</ol>
 
 <p class="fig-cap">图 8：类型技术——Map → derived-union → 声明合并扩展的闭环</p>
 <div class="mermaid">
@@ -587,7 +597,7 @@ flowchart TD
 <p class="mermaid-note">工具目录 / 配置目录 / 持久化日志目录 / 模块图 / Cordis API 参考均由生成器产出，作用域原语（<code>core/scope</code>）本身是零依赖纯库。</p>
 
 <h3 id="s4-6">4.6 生成器驱动 + 门禁文化</h3>
-<p>目录/类型/API 不是手写的：工具目录、配置目录、持久化日志目录、模块图、Cordis API 参考全部由 <code>scripts/gen-*.ts</code> 从源码生成，并经 <code>doc-sync</code> 新鲜度门禁校验。另有每文件 100% 覆盖率门禁（<code>test:coverage</code>）、<code>verify-export-jsdoc</code>、<code>verify-type-equiv</code>（文档内类型与源码逐字漂移检测）等数十个验证脚本。</p>
+<p>常规项目的文档靠人手同步，改一次源码往往要手动改三处文档，漂移是常态。dsh 用生成器把"文档落后于源码"从概率事件变成不可能事件：工具目录、配置目录、持久化日志目录、模块图、Cordis API 参考全部由 <code>scripts/gen-*.ts</code> 从源码生成，并经 <code>doc-sync</code> 新鲜度门禁校验。另有每文件 100% 覆盖率门禁（<code>test:coverage</code>）、<code>verify-export-jsdoc</code>、<code>verify-type-equiv</code>（文档内类型与源码逐字漂移检测）等数十个验证脚本。</p>
 
 <p class="fig-cap">图 10：生成器 + 门禁文化——"源码即唯一真相"</p>
 <div class="mermaid">
@@ -699,6 +709,7 @@ flowchart TD
 </ul>
 
 <h3 id="s5-3">5.3 会话持久化（durability seam）</h3>
+<p>常规做法是"每次变化立刻写库"；dsh 把持久化做成订阅者，异步成批写入。四个要点：</p>
 <ul>
   <li><b>接缝</b>：<code>ctx.sessionPersistence</code> 抽象（locate / create / append / 逻辑 load/inspect / 物理后缀读）+ 两个可互换后端：<b>JSONL</b>（每会话一个文件，支持 packed chunk 行）与 <b>SQLite</b>（多会话一库，单调 <code>SCHEMA_VERSION</code>）。</li>
   <li><b>flush 检查点</b>：<code>session/event</code> 是同步通知，持久化插件先复制事件再异步成批写入；<code>session/flush</code> 是等待的并行栅栏，用于认领下一个普通 turn 前的排序与错误观察点。</li>
@@ -733,6 +744,7 @@ flowchart LR
 </div>
 
 <h3 id="s5-4">5.4 LLM 流式适配接缝</h3>
+<p>常规做法是"官方 SDK 直接调用，错误各自处理"；dsh 把模型厂商差异收敛到统一流协议里。四个要点：</p>
 <ul>
   <li><b>统一流协议 <code>StreamChunk</code></b>：<code>block-start / text-delta / reasoning-delta / tool-call-delta / block-end / usage / finish</code>。块索引关联交错增量；<code>block-end</code> 携带完整块；<code>usage</code> 必须在 <code>finish</code> 前、之后不再有值。</li>
   <li><b>DeepSeek 官方适配器</b>（<code>dsh-llm-deepseek</code>）：直接 <code>fetch</code> + SSE（eventsource-parser）翻译官方 wire 格式。支持 thinking / reasoningEffort / contextWindow / maxTokens 输出上限 / 重试策略（normal|always + 退避）。</li>
@@ -859,7 +871,7 @@ flowchart TD
 <div class="card">
 <ol>
   <li><b>黑盒路线（官方 SDK，最省力）</b>：直接安装 <code>deepseek-harness-sdk</code>（PyPI，import <code>deepseek_harness</code>），用 Python 驱动真实 harness 子进程（stdio JSON-RPC），观察它如何编排 turn/step、工具、持久化。<b>这是理解"运行时契约"最便宜的方式。</b></li>
-  <li><b>白盒路线（读 TS，翻译成 Python）</b>：把第 6 章的阅读路径走完，对每个核心概念写一份"Python 心智模型"（见 7.2 映射表）。目的不是照抄代码，而是<b>用 Python 重述契约</b>。</li>
+  <li><b>白盒路线（读 TS，翻译成 Python）</b>：把第 6 章的阅读路径走完，对每个核心概念写一份"Python 对照笔记"（见 7.2 映射表）。目的不是照抄代码，而是<b>用 Python 重述契约</b>。</li>
   <li><b>复现路线（迷你 harness）</b>：用纯 Python 从零实现一个"最小可用的核心子集"（见 7.3）。这是唯一能证明你真正掌握的方式。</li>
 </ol>
 </div>
@@ -890,7 +902,7 @@ flowchart TD
 
 <div class="grid2">
   <div class="card">
-    <h4>① 事件溯源会话（核心之核）</h4>
+    <h4>① 事件溯源会话（整个框架的地基）</h4>
     <span class="tag t-blue">必须</span><span class="tag t-green">2-3 天</span>
     <ul>
       <li>实现 <code>Session</code>：append-only 事件日志、seq=len、deep-freeze（<code>types.MappingProxyType</code> / 自定义冻结）、无损 JSON 校验。</li>
@@ -1155,7 +1167,7 @@ pnpm run build && pnpm run hygiene</code></pre> 再按 <code>docs/testing.md</co
 <div class="card" style="font-size:16px; text-align:center;">
 <b>一个"无特权内核 + 可逆副作用注册"的 Cordis 插件树，以事件溯源会话日志为单一事实来源，通过"Service Definition / Provider / Consumer"三段式能力接缝把模型适配、工具执行、沙箱、子 agent 等一切能力做成可配置替换的插件；外层由 profile / bundle 补丁层组合出 Web / headless / SDK 等运行形态，并辅以内容寻址的生成器门禁与每文件 100% 覆盖率纪律。</b>
 </div>
-<p>对想用 Python 深刻掌握并复现的你，最有价值的三个心智模型依次是：<b>(1) 事件溯源日志作为唯一事实来源；</b><b>(2) "注册 = 可逆副作用 + waterfall 短路"的插件语义；</b><b>(3) 能力接缝三角色带来的整体可替换性。</b>把这三件事用 Python 亲手实现一遍，你对 dsh 的理解将超过大多数读过一遍文档的人。</p>
+<p>对想用 Python 深刻掌握并复现的你，最有价值的三件事依次是：<b>(1) 事件溯源日志作为唯一事实来源；</b><b>(2) "注册 = 可逆副作用 + waterfall 短路"的插件语义；</b><b>(3) 能力接缝三角色带来的整体可替换性。</b>把这三件事用 Python 亲手实现一遍，对 dsh 的理解会超过大多数读过一遍文档的人。</p>
 
 <div class="footer">
 本报告由 opencode 依据仓库当前源码与文档生成 · DeepSeek Harness（MIT）· 报告文件：DEEPSEEK-HARNESS-DEEP-LEARNING-GUIDE.html<br>

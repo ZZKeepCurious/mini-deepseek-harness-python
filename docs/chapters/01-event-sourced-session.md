@@ -1,29 +1,49 @@
-﻿# 第 1 章：事件溯源会话（Event-Sourced Session）——核心之核
+﻿# 第 1 章：事件溯源会话（Event-Sourced Session）
 
 > 对应 dsh 真实源码：`packages/core/session`（`docs/subsystems/session.md`）
 > 前置：第 00 章。产出文件：`miniharness/miniharness/session.py` + `tests/test_session.py`
 
-## 1.1 本章目标
+## 1.1 这一章要做什么，以及为什么它是整个框架的地基
 
-- 实现一个追加式事件日志 `Session`：`seq` 连续、坏事件进不来、日志不可变
-- 实现 `derive_messages()` 纯投影：模型历史只从这里派生，**绝不另存副本**
-- 实现 `turn` 括号平衡不变量与崩溃修复
+这一章是整个手册的地基，值得你认真读完。
 
-掌握这句话就掌握了 dsh 的根基：
+一个聊天框架的"会话"通常被实现为一个消息数组：把用户消息、模型回复 append 进去，需要上下文时直接读这个数组。dsh 不这么做。看 `packages/core/session` 的源码，第一印象就会非常不同：它没有"消息数组"，只有一个 `SessionEvent` 追加式日志，外加一个 `deriveMessages()` 投影函数。
 
-> **模型可见 ⟺ 已记录**。任何进入模型请求的内容，必须能从日志重建；新增任何模型可见输入，必须新增一种 session 事件。
+**dsh 不存"消息数组"，它只存"发生了什么"——一条只追加、永不修改的事件日志。模型看到的对话历史，是每次现算出来的一个投影。**
 
-## 1.2 概念：为什么是"事件日志"而不是"消息数组"
+这个决定会波及下游所有设计：压缩怎么做、崩溃怎么恢复、插件怎么加新东西、持久化怎么和内存保持一致，都能从这个决定推导出来。本章就把这个决定亲手实现一遍。
 
-普通聊天程序维护一个 `messages: list[Message]`，随对话 append。dsh 不这么做，原因有三：
+本章做三件事：
 
-1. **可回放**：日志是"发生了什么"的完整事实，模型历史只是它的一个投影（projection）。压缩、换模型、修 bug 后重放，历史可重新派生。
-2. **单一事实来源**：UI、持久化、回放、模型历史都读同一份日志。不存在"内存消息"和"磁盘消息"两份副本漂移的问题。
-3. **可扩展**：新事实（工具结果、上下文注入、目标更新）= 新事件类型。插件用声明合并往 `SessionEventMap` 加类型，不触碰核心。
+1. 实现 `Session`：一条追加式事件日志。`seq` 连续、坏事件进不来、日志不可变。
+2. 实现 `derive_messages()`：从日志派生模型历史的纯函数。历史只从这里来，绝不另存副本。
+3. 实现 turn 的"括号平衡"不变量，以及崩溃后的修复。
+
+全程就一个核心信念，先记在这里：
+
+> **模型可见 ⟺ 已记录**。任何进入模型请求的内容，必须能从日志重建；想新增任何模型可见的输入，就必须新增一种 session 事件。
+
+## 1.2 概念：为什么是"事件日志"，而不是"消息数组"
+
+先看常规做法的问题，再看 dsh 的选择，对比着理解会清楚得多。
+
+**常规做法**：维护一个 `messages: list[Message]`，每次对话往里面 append。简单、直接，多数场景够用。但它有三个固有短板：
+
+1. **不可回放**。数组只保存"最终状态"，丢了"过程"。压缩上下文之后，旧消息就没了；想换一种压缩策略重放一遍？做不到。
+2. **副本漂移风险**。UI 显示一份、持久化落盘一份，往往还有一份"内存里的权威版本"。两份数据对不上时，排查成本很高。
+3. **扩展要动核心**。想加一种新的事实（工具结果、上下文注入），得改核心的数据结构，插件很难插进来。
+
+**dsh 的做法**：日志记的是"发生过什么"，这是完整事实；模型历史只是这份事实的一个投影。三个短板对应地变成三个优点：
+
+1. **可回放**。压缩、换模型、修 bug 之后，都可以把同一份日志重放一遍，重新派生历史。日志本身永不丢失内容。
+2. **单一事实来源**。UI、持久化、恢复、模型历史都读同一份日志，没有第二份副本，也就没有对不上的问题。
+3. **可扩展**。新的事实 = 新的事件类型。而且 dsh 用 TypeScript 的声明合并（`declare module`），插件加事件类型甚至不用改核心包——类型系统本身成了扩展点。
+
+下面是三者关系的图（故意画得简单，05 章持久化会在此基础上展开）：
 
 ```mermaid
 flowchart LR
-  LOG["Session 追加式事件日志<br/>（唯一事实来源）"]
+  LOG["Session 追加式事件日志&lt;br/&gt;（唯一事实来源）"]
   PROJ["deriveMessages() 纯投影"]
   HIST["模型历史（不另存副本）"]
   PERS["持久化：按 seq 顺序追加与回放"]
@@ -32,9 +52,13 @@ flowchart LR
   PERS -.重启后重新加载.-> LOG
 ```
 
+注意图里日志是唯一的起点，投影和持久化都是它的下游，两者互不直接打交道。这个结构后面会反复出现。
+
 ## 1.3 代码 step-by-step
 
-### 步骤 1：定义事件类型集合
+每一步都先说"为什么这么写"，再给代码，然后讨论容易踩的坑。建议边读边敲，而不是复制粘贴。
+
+### 步骤 1：先定事件类型集合
 
 ```python
 KNOWN_TYPES = frozenset({
@@ -46,14 +70,17 @@ KNOWN_TYPES = frozenset({
 SURFACE_TYPES = frozenset({"user/message", "assistant/message", "tool/result"})
 ```
 
-- `KNOWN_TYPES` 是"仓库级硬规则"：新模型可见输入 = 往这里加新类型 + 定义投影规则。
-- `SURFACE_TYPES` 是三种"产生消息"的事件：它们携带 `surfaceOp`（`append` 或 `replace`），决定历史投影的顺序与压缩替换。
+`KNOWN_TYPES` 是"仓库级硬规则"：日志里只允许出现这些类型。后面写插件加新事件时，改的就是这个集合（加类型）再加上投影规则（步骤 4）。用 `frozenset` 是为了防止运行中不小心改掉它。
 
-### 步骤 2：无损 JSON 强制 + 深度冻结
+`SURFACE_TYPES` 是三种"会产生消息"的事件，单独拎出来是因为它们携带 `surfaceOp`（`append` 或 `replace`），直接决定历史投影怎么排、压缩时怎么替换。其余事件（turn/step 括号、chunk、tool/call）不产生消息，投影时会跳过。
+
+### 步骤 2：先解决"坏事件"问题——无损 JSON 强制 + 深度冻结
+
+日志是唯一真相，那么"坏数据进日志"就是最不能接受的事。坏在哪？两种：没法序列化（比如塞了个对象进去），或者序列化会悄悄丢信息（比如 `NaN`）。先写两个工具函数：
 
 ```python
 def is_json_safe(value):
-    """无法序列化的值（含 NaN/Infinity）直接判非法。"""
+    """无损 JSON 强制：无法序列化的值（含非有限浮点数）直接判非法。"""
     try:
         json.dumps(value, ensure_ascii=False, allow_nan=False)
         return True
@@ -61,7 +88,7 @@ def is_json_safe(value):
         return False
 
 def deep_freeze(value):
-    """dict → 只读代理，list → tuple。冻结后任何修改都抛 TypeError。"""
+    """深度冻结：dict → 只读代理，list → tuple。冻结后任何修改都抛 TypeError。"""
     if isinstance(value, dict):
         return MappingProxyType({k: deep_freeze(v) for k, v in value.items()})
     if isinstance(value, list):
@@ -69,21 +96,30 @@ def deep_freeze(value):
     return value
 ```
 
-> 真实 dsh 用 `append()` 在源头深度校验并冻结 —— **坏事件永远进不了日志**。这是"日志即真相"的物理保证。
+两个细节值得展开：
+
+- `allow_nan=False`：Python 的 `json.dumps` 默认允许输出 `NaN`，但 `NaN` 不是合法 JSON，别的语言读不了。关掉它，序列化不了的一律抛错。很多 JSON 相关的隐性 bug 都是从这漏出去的。
+- `MappingProxyType`：返回的是"只读视图"而不是拷贝。调用方以为能改，一改就抛 `TypeError`。日志一旦写入就不可变，这条后面会被测试钉死。
+
+> 真实 dsh 在 `append()` 源头做同样的深度校验和冻结——坏事件永远进不了日志，这是"日志即真相"的硬保证。
 
 ### 步骤 3：Session.append —— 唯一的写入口
 
 ```python
 class Session:
+    """追加式事件日志：唯一事实来源。"""
+
     def __init__(self, session_id: str):
         self.session_id = session_id
-        self._events: list[dict] = []
+        self._events: list[dict[str, Any]] = []
 
     @property
-    def events(self):
-        return tuple(self._events)          # 只读视图，外部拿不到可变列表
+    def events(self) -> tuple[dict[str, Any], ...]:
+        """只读视图：外部永远拿不到可变的内部列表。"""
+        return tuple(self._events)
 
-    def append(self, event):
+    def append(self, event: dict[str, Any]) -> dict[str, Any]:
+        """源头校验 + 冻结：坏事件永远进不了日志。"""
         if not isinstance(event, dict) or "type" not in event:
             raise ValueError(f"事件必须是含 type 的 dict: {event!r}")
         etype = event["type"]
@@ -92,61 +128,84 @@ class Session:
         if etype in SURFACE_TYPES:
             op = event.get("surfaceOp")
             if op not in ("append", "replace"):
-                raise ValueError(...)
+                raise ValueError(f"surface 事件 {etype} 必须带 surfaceOp=append|replace，得到 {op!r}")
         if not is_json_safe(event):
-            raise TypeError(...)
-        record = dict(event, seq=len(self._events))   # seq = 当前长度，连续
+            raise TypeError(f"事件必须可无损 JSON 序列化: {event!r}")
+        record = dict(event, seq=len(self._events))
         self._events.append(deep_freeze(record))
         return record
 ```
 
-三个校验对应三个不变量：
-- 类型在册（`KNOWN_TYPES`）→ 拒绝未知类型
-- 可无损 JSON 序列化 → 拒绝坏数据
-- surface 事件必须带合法 `surfaceOp` → 投影才有据可依
+三个校验对应三个不变量，缺一不可：
 
-`seq = len(self._events)` —— 追加式，历史永不修改。
+- **类型在册**（`KNOWN_TYPES`）→ 拒绝未知类型，保证日志内容永远可被理解。
+- **surface 事件必须带合法 `surfaceOp`** → 保证投影永远有据可依。试想一条 `user/message` 没带 `surfaceOp` 进了日志，投影时是 append 还是 replace？没法判断，所以源头就拦下。
+- **可无损 JSON 序列化** → 保证日志永远可落盘、可重放。
+
+然后看最关键的一行：
+
+```python
+record = dict(event, seq=len(self._events))
+```
+
+`seq` 等于"当前长度"：第一条事件 `seq=0`，第二条 `seq=1`。追加式日志里"序号即长度"，这个巧合让索引非常便宜——05 章讲持久化时，`seq` 还是按序回放的依据。
+
+为什么写入口只有一个？因为"永远只有一个能改日志的地方"意味着任何新增事件都必须过同样的校验。要是到处都能 `session._events.append(...)`，校验就形同虚设。所以 `_events` 藏在类内部，外部只能通过 `events` 属性拿到**元组**——只读，连改的想法都不留。
 
 ### 步骤 4：derive_messages —— 纯投影
 
+日志写好了，现在回答：模型历史从哪来？
+
 ```python
-def derive_messages(events):
-    messages = []
+def derive_messages(events) -> list[dict[str, str]]:
+    """纯投影：按 seq 顺序派生模型历史（不修改日志，可重复调用）。"""
+    messages: list[dict[str, str]] = []
     for ev in events:
         etype = ev["type"]
         if etype == "user/message":
             _apply_surface(messages, "user", ev.get("content", ""), ev.get("surfaceOp", "append"))
         elif etype == "assistant/message":
-            _apply_surface(messages, "assistant", ...)
+            _apply_surface(messages, "assistant", ev.get("content", ""), ev.get("surfaceOp", "append"))
         elif etype == "tool/result":
-            content = f"[工具 {ev.get('name')} 结果] {ev.get('content')}" \
-                if not ev.get("isError") else f"[工具 {ev.get('name')} 失败] {ev.get('error')}"
-            _apply_surface(messages, "tool", content, ...)
+            if ev.get("isError"):
+                content = f"[工具 {ev.get('name')} 失败] {ev.get('error')}"
+            else:
+                content = f"[工具 {ev.get('name')} 结果] {ev.get('content')}"
+            _apply_surface(messages, "tool", content, ev.get("surfaceOp", "append"))
         # turn/* step/* assistant/chunk tool/call 不参与投影
     return messages
 
-def _apply_surface(messages, role, content, op):
+
+def _apply_surface(messages, role: str, content: str, op: str) -> None:
     if op == "append":
         messages.append({"role": role, "content": content})
     elif op == "replace":
-        for i in range(len(messages) - 1, -1, -1):   # 整体替换最近一条同 role
+        # 压缩替换：整体替换最近一条同 role 的消息；没有则退化为 append
+        for i in range(len(messages) - 1, -1, -1):
             if messages[i]["role"] == role:
                 messages[i] = {"role": role, "content": content}
                 return
         messages.append({"role": role, "content": content})
+    else:
+        raise ValueError(f"非法 surfaceOp: {op!r}")
 ```
 
-要点：
-- **纯函数**：输入事件列表，输出消息列表；调用多少次结果都一样（测试会钉住这一点）。
-- `append`：历史末尾追加一条消息。
-- `replace`：上下文压缩时用（`surfaceOp=replace` 整体替换旧消息，`seq` 仍然连续）。
-- 控制类事件（`turn/*`、`step/*`）不投影 —— 它们是"括号"，不是"内容"。
+要点拆开说：
+
+- **纯函数**：输入事件列表，输出消息列表，不改任何东西。调用十次和一次结果完全一样。这个性质值得写测试钉住，因为"投影可重复"是后面"回放 = 重新派生"的前提。而且出了压缩 bug 时，能对着同一份日志反复调用调试，是纯函数最大的红利。
+- **`append`**：往历史末尾追加一条消息。
+- **`replace`**：从末尾往前找最近一条同 role 的消息，整体替换。这就是上下文压缩落地的机制——压缩不是删日志，而是往日志**追加**一条 `surfaceOp=replace` 的事件，让它替换旧消息的投影。注意关键点：日志本身只是追加，`seq` 依然连续，事实没有丢失，只是投影时被替换。
+- **控制类事件不投影**：`turn/*`、`step/*` 是"括号"，不是"内容"。模型不需要看到 `turn/start`，它只关心实际的消息流。`tool/call` 也不投影——模型看到的是 `tool/result` 的汇总文本，看不到内部调用记录。
+
+`_apply_surface` 里有个容易踩的坑：`replace` 找不到同 role 消息时，如果直接 `return`，这条消息就凭空消失了。所以代码里是"退化为 append"——宁可多一条，不能丢一条。这个细节值得写进测试用例。
 
 ### 步骤 5：括号平衡 + 崩溃修复
 
+日志里 `turn/start` 和 `turn/end` 必须配对，就像代码里的括号。为什么在意？因为 05 章会讲到，持久化重载时如果发现 turn 没闭合，说明进程在回合中途崩了——日志不完整。
+
 ```python
-def turn_balance(events):
-    """返回未闭合 turn 数（>=0）。为负说明日志被破坏。"""
+def turn_balance(events) -> int:
+    """括号平衡不变量：返回未闭合 turn 数（>=0）。为负说明日志被破坏。"""
     balance = 0
     for ev in events:
         if ev["type"] == "turn/start":
@@ -154,55 +213,54 @@ def turn_balance(events):
         elif ev["type"] == "turn/end":
             balance -= 1
             if balance < 0:
-                raise ValueError("turn/end 出现在没有对应 turn/start 的位置")
+                raise ValueError("turn/end 出现在没有对应 turn/start 的位置，日志不平衡")
     return balance
 
-def repair_interrupted_turn(events):
-    """崩溃恢复：为未闭合 turn 合成 turn/end { reason: 'interrupted' }。"""
+
+def repair_interrupted_turn(events) -> list[dict]:
+    """崩溃恢复：为未闭合的 turn 合成 turn/end { reason: "interrupted" }。"""
     repaired = [dict(ev) for ev in events]
     for _ in range(turn_balance(repaired)):
         repaired.append({"type": "turn/end", "reason": "interrupted"})
     return repaired
 ```
 
-> 真实 dsh 的崩溃恢复也是"合成 `interrupted`，绝不截断"——大 turn 可能很巨大，截断会丢事实。
+`turn_balance` 是朴素的计数器：`start` 加一，`end` 减一。减到负数就说明日志被破坏了（`end` 比 `start` 多）。
 
-## 1.4 不变量清单（测试钉住的就是这些）
+崩溃修复的做法值得单独讨论：**常规做法是截断或回滚**，dsh 选择**绝不截断**。原因：大 turn 可能非常巨大——一次长会话里可能跑了几十轮工具调用——截断等于把已经发生过的事实悄悄丢掉。dsh 的做法是合成 `turn/end { reason: "interrupted" }` 把括号补平衡。历史保留完整，只是多了一条诚实的标记："这次回合是被打断的，不是正常结束的"。这个 `interrupted` 标记在 04 章讲 agent loop 时还会再见到。
+
+> 上游 `packages/core/session` 的崩溃恢复同样是合成 `interrupted`、绝不截断，连标记名都一致。
+
+## 1.4 写完怎么验收：不变量 + 测试
+
+这一章的不变量就五个，`tests/test_session.py` 里每一个都有对应的测试：
 
 1. `seq == len(events) - 1`，且事件一经 append 不可变
 2. 未知事件类型 / 非 JSON 数据 / 缺 `surfaceOp` → 直接抛错，不进日志
-3. `derive_messages` 是纯函数：同输入同输出
+3. `derive_messages` 是纯函数：同输入同输出，不改日志
 4. `replace` 压缩后历史仍正确（整体替换，不残留旧消息）
 5. `turn_balance >= 0`；崩溃日志可被 `repair_interrupted_turn` 修复到平衡
 
-运行验收：
+跑验收：
 
 ```bash
 python -m unittest tests.test_session -v
 ```
 
-## 1.5 检查点练习
+全绿的话，你已经有了一个可以放心喂给模型的事件日志。
 
-1. **加一种新事件**：仿照 `tool/result` 加 `feedback/rate`（人类反馈，`surfaceOp=replace`，替换最近一条 assistant 消息）。改 `KNOWN_TYPES` + `derive_messages`，再给 `tests/test_session.py` 加一个测试。
-2. **证明投影是纯函数**：写一个测试，调用 `derive_messages` 两次并断言结果相等且不改变 `session.events`。
+## 1.5 检查点练习（做了才算真的会）
+
+1. **加一种新事件**：仿照 `tool/result` 加 `feedback/rate`（人类反馈，`surfaceOp=replace`，替换最近一条 assistant 消息）。需要改 `KNOWN_TYPES` 和 `derive_messages`，再给 `tests/test_session.py` 加一个测试。做完会体会到"新增模型可见输入 = 新增事件类型"这句话的实际操作。
+2. **证明投影是纯函数**：写一个测试，连续调用 `derive_messages` 两次，断言结果相等，且 `session.events` 没有被改动。
 3. **动手数 seq**：给 `Session` 加一个 `__len__`，然后写测试断言 `len(session) == last_seq + 1`。
 
 ## 1.6 回到 dsh：真实源码对照
 
-打开 `deepseek-harness/packages/core/session/src`：
+现在打开 `deepseek-harness/packages/core/session/src` 对照。建议的读法：先看 `SessionEventMap`（对应本章的 `KNOWN_TYPES`，但它是 TypeScript 接口，靠声明合并扩展），再看 `append()` 的校验（真实实现还有 event 版本和 `ignorable` 标记，那个标记到 05 章讲持久化时才用得上），最后看 `deriveMessages()`（真实实现按"surface 节点"序列投影，语义和我们一致，但组织方式更正式）。
 
-- `SessionEventMap`：与我们的 `KNOWN_TYPES` 对应，但它是 TypeScript 接口 + 声明合并扩展
-- `append()` 的校验：真实实现还有 event 版本、`ignorable` 标记（第 5 章讲持久化时用）
-- `deriveMessages()`：真实实现按"surface 节点"（append/replace 节点序列）投影，语义与我们一致
+不用全读，读 50 行就够。目标不是读完，而是体会到一件事：**契约一样，实现更严格**。简化版抓住了设计精髓，真实版在细节上更严密——比如 `ignorable`、事件版本这类简化版没碰的东西，都是为真实世界的运维场景准备的。
 
-读 50 行就够：体会"契约一样、实现更严格"。
+## 1.7 收尾
 
-## 1.7 本章小结
-
-| 概念 | 一句话 |
-|---|---|
-| 事件溯源 | 日志记录"发生了什么"，历史只是投影 |
-| 模型可见 ⟺ 已记录 | 新增模型可见输入 = 新增事件类型 |
-| 追加式 + seq | 历史永不修改，`seq` 即序号即长度 |
-| 无损 JSON + 冻结 | 坏事件物理上进不来 |
-| 崩溃修复 | 合成 `interrupted`，不截断 |
+这一章立起了整座大厦的地基：一条只追加的日志，一个纯投影函数，一组不可违背的不变量。下一章在它上面叠第二层——插件上下文与事件总线。到时候会看到，"日志即真相"这个决定让很多东西都变得简单：插件想观察会话？订阅事件即可。插件想改变会话？照常追加事件。没有例外，没有后门。

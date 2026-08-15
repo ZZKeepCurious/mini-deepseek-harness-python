@@ -4,15 +4,16 @@
 >（`docs/subsystems/persistence.md`、`docs/subsystems/session-projection.md`）
 > 前置：第 1~4 章。产出文件：`miniharness/miniharness/persistence.py`、`boot.py`、`example_plugins.py` + `tests/test_persistence_boot.py`
 
-## 5.1 本章目标
+## 5.1 这一章要做什么
 
-- 实现 `SessionPersistence` 接缝 + **JSONL / SQLite 双后端**（可互换）
-- 实现 `flush` 栅栏、fail-closed 加载、`interrupted` 崩溃修复
-- 实现 `boot()`：配置加载 → 按 id 补丁 → 依赖驱动激活 → 断言全部就绪
+前四章的 `Session` 都在内存里，进程一退什么都没了。这一章解决两件事：
 
-本章验收（端到端）：**kill 一个进行中的回合再重启，日志平衡、可继续对话**。
+1. **持久化**：`SessionPersistence` 扩展口 + JSONL / SQLite 双后端（可互换），以及围绕它的一整套纪律：`flush` 栅栏、fail-closed 加载、`interrupted` 崩溃修复。
+2. **组合加载**：`boot()` 把配置、补丁、插件串成一次启动：加载配置 → 按 id 打补丁 → 依赖驱动激活 → 断言全部就绪。
 
-## 5.2 概念：持久化接缝
+本章的验收是端到端的：**kill 一个进行中的回合再重启，日志平衡、可继续对话**。`python -m miniharness.demo` 演示的就是这个。
+
+## 5.2 概念：持久化扩展口
 
 ```mermaid
 flowchart LR
@@ -20,8 +21,8 @@ flowchart LR
   EVT["session/event 同步广播"]
   P["持久化插件：先复制事件"]
   Q["异步成批写入队列"]
-  J["JSONL 后端<br/>每会话一个文件"]
-  QL["SQLite 后端<br/>多会话一库 · SCHEMA_VERSION"]
+  J["JSONL 后端&lt;br/&gt;每会话一个文件"]
+  QL["SQLite 后端&lt;br/&gt;多会话一库 · SCHEMA_VERSION"]
   F["flush 并行栅栏"]
   NEXT["下一 turn"]
   LOAD["load()：未知类型 fail-closed"]
@@ -34,16 +35,18 @@ flowchart LR
   LOAD --> INT
 ```
 
-四条纪律（与真实 dsh 一致）：
+常规做法是"每次消息变化立刻写库"——慢，而且写库失败会直接打断对话。dsh 的持久化不直接碰 Session，而是订阅 `session/event` 广播，把事件**复制**进自己的写入队列，异步成批落盘。四条纪律（与真实 dsh 一致）：
 
 1. **append 先复制事件、异步成批写入**；`flush` 是"等待的栅栏"——认领下一个普通 turn 之前，所有事件必须落盘。
 2. **格式拒绝，不迁移**：版本落后 = 升级 harness；版本超前 = 用更新的 harness 打开。
 3. **fail-closed**：未知事件类型（未带 `ignorable`）整体拒绝加载——宁可不打开，不能静默丢事件改变解读。
 4. **崩溃恢复只合成，不截断**：`turn/end { reason: interrupted }` 保持括号平衡。
 
+为什么是"扩展口"而不是直接写在 Session 里？因为存储策略（文件、数据库、未来可能的对象存储）不该和会话语义耦合。第 6 章会看到同样的思路在沙箱、凭据、子 agent 上重复出现。
+
 ## 5.3 代码 step-by-step（persistence.py）
 
-### 步骤 1：接缝接口
+### 步骤 1：扩展口接口
 
 ```python
 class SessionPersistence:
@@ -52,6 +55,8 @@ class SessionPersistence:
     def load(self, session_id): raise NotImplementedError
     def flush(self): raise NotImplementedError
 ```
+
+三个方法就是全部约定。谁实现这个接口，谁就能当后端的"可替换点"。
 
 ### 步骤 2：JSONL 后端
 
@@ -89,6 +94,8 @@ class JsonlPersistence(SessionPersistence):
         return events
 ```
 
+`append` 只进 `_pending` 队列，真正的写盘发生在 `flush`。这样一个回合里几十条事件可以一次批量写，不用每条都碰一次磁盘。每会话一个文件，`session_id` 里的路径分隔符做替换，防止目录穿越。
+
 ### 步骤 3：SQLite 后端（单调 SCHEMA_VERSION）
 
 ```python
@@ -121,8 +128,9 @@ class SqlitePersistence(SessionPersistence):
     # load()：SELECT data ORDER BY seq
 ```
 
-- `(session_id, seq)` 主键保证同一会话内 seq 单调不重。
-- 版本不符 → **拒绝加载**（fail loud），绝不迁移。
+`(session_id, seq)` 主键保证同一会话内 seq 单调不重——磁盘上的序号和内存里的序号由数据库直接保证。
+
+版本检查是关键：`SCHEMA_VERSION` 不符就**拒绝加载**（fail loud）。为什么不自动迁移？因为迁移意味着"改写历史"，而改写历史意味着可能丢事实。dsh 的原则是"格式拒绝，不迁移"：版本落后去升级 harness，版本超前用更新的 harness 打开。这是把决策权交给用户而不是代码。
 
 ### 步骤 4：fail-closed 加载 + 崩溃修复 + 回放
 
@@ -143,8 +151,9 @@ def repair_and_replay(persistence, session_id, session):
     return session
 ```
 
-- 用第 1 章的 `repair_interrupted_turn` —— 崩溃恢复不截断，只补括号。
-- 回放 = 重新 append 进内存 Session，然后 `derive_messages` 自然重建历史。
+`load_events_checked` 的 fail-closed 值得展开：磁盘上有一条未知类型的事件，说明它来自更新版本的 harness（或有人手改了文件）。两条路：跳过它继续加载（省事，但解读被悄悄改变——事件序列断了一个环节），或者整体拒绝（严格，但保证解读不变）。dsh 选后者，唯一例外是事件带 `ignorable: true` 标记——那是上游明确声明"可以忽略"的。
+
+`repair_and_replay` 就是第 1 章 `repair_interrupted_turn` 的消费方：load → 校验 → 补括号 → 重新 append 进内存 Session。回放 = 重新派生，`derive_messages` 自动重建历史，第 1 章的"回放 = 重新派生"在这里落地。
 
 ## 5.4 代码 step-by-step（boot.py）——启动与组合
 
@@ -170,6 +179,8 @@ def apply_patch(entries, patches):
             raise ValueError(f"未知补丁操作: {patch}")
     return out
 ```
+
+两个操作：`replace` 按 id 整段替换某条配置，`insert` 追加新条目。为什么 replace 用 id 定位而不是"替换同名插件"？因为同一个插件可能被实例化多次（不同 config），id 才是唯一标识。目标 id 不存在时直接抛错——补丁写错了要当场知道，而不是静默无效。
 
 > 报告第 5.5 节的关键设计：组合、`--dump-config`、标志派发共用同一个补丁算法（纯函数），三者永不漂移。我们把它写成模块级纯函数，测试直接钉住。
 
@@ -211,8 +222,9 @@ def boot(config_path, *patch_paths, env=None):
     return root, activations
 ```
 
-- **层叠顺序**：`boot(config, *patches)` 的补丁按参数顺序应用——对应报告里的"bundle 层 → profile 级 → home 级 → --patch overlay"。
-- **断言**：启动结束必须"条目已加载 + 已激活"，否则 fail loud（真实 dsh 同款纪律）。
+`boot()` 的职责链条对应报告里的层叠顺序：`boot(config, *patches)` 的补丁按参数顺序应用——bundle 层 → profile 级 → home 级 → `--patch` overlay，越靠后越优先。
+
+最后一步是**启动断言**：启动结束必须"条目已加载 + 已激活"，否则 fail loud。常规做法是"尽力而为"——加载失败记个 warning 继续跑，结果插件没生效，等运行期才爆。dsh 选择启动时就把话说死。
 
 > 简化声明：真实 dsh 用 YAML（cordis.yml），我们为保持零依赖用 JSON；补丁语义（id 定位整段替换 / insert / 插值）完全一致。
 
@@ -228,10 +240,12 @@ python -m miniharness.demo
 python -m unittest tests.test_persistence_boot -v
 ```
 
-## 5.6 不变量清单
+## 5.6 验收：硬性规定 + 测试
+
+`tests/test_persistence_boot.py` 钉住的规定：
 
 1. `flush` 之前 `load` 看不到数据（栅栏语义）
-2. 双后端可互换：同一接缝接口，同样的 seq 单调性
+2. 双后端可互换：同一扩展口接口，同样的 seq 单调性
 3. SQLite 版本不符 → 拒绝加载
 4. 未知事件类型 → fail-closed；带 `ignorable: true` → 放行
 5. 崩溃后 `turn_balance == 0` 且最后事件是 `turn/end reason=interrupted`
@@ -252,7 +266,7 @@ python -m unittest tests.test_persistence_boot -v
 - `session/flush` 事件的真实语义：等待的并行栅栏
 - `docs/subsystems/persistence.md` 的"格式拒绝，不迁移"原则
 
-**我们与上游的持久化细节差异（已简化但值得知道）：**
+与上游的细节差异（简化但值得知道）：
 
 | 细节 | 真实 dsh | 我们的简化 |
 |---|---|---|
@@ -264,12 +278,6 @@ python -m unittest tests.test_persistence_boot -v
 | 活会话 load | 等权威内存快照持久化后才允许加载 | 未实现（检查点练习 1 的方向） |
 | `locate(meta)` | 多会话按元数据定位 | 无 |
 
-## 5.9 本章小结
+## 5.9 收尾
 
-| 概念 | 一句话 |
-|---|---|
-| 接缝 | `SessionPersistence` 接口 + 可互换后端 |
-| flush 栅栏 | 下一 turn 前所有事件必须落盘 |
-| fail-closed | 未知事件宁可不打开，不静默丢事实 |
-| interrupted | 崩溃恢复只合成括号，不截断日志 |
-| boot + patch | 补丁算法纯函数；启动断言全部激活 |
+持久化这章想清楚一件事：**崩溃不是特例，是常态**。所以加载路径上每个决定（版本、未知类型、未闭合 turn）都是"宁可拒绝，不可篡改"。下一章看三个扩展口：沙箱、凭据、子 agent——它们展示 dsh 如何把"能力"本身做成可替换的。
