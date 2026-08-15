@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import sys
 import tempfile
 from pathlib import Path
 
@@ -16,6 +17,10 @@ from .tools import Tool, ToolRegistry
 
 
 def main() -> None:
+    # Windows 管道/控制台默认 cp1252 无法编码中文，统一 UTF-8 输出
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     print("=" * 60)
     print("MiniHarness 端到端演示（第 4 + 5 章验收）")
     print("=" * 60)

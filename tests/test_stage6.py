@@ -71,9 +71,13 @@ class TestSandboxProfiles(unittest.TestCase):
         self.assertIn("(allow file-write* (subpath", args[1])
 
     def test_seatbelt_escapes_quotes_and_backslashes(self):
+        # C:\a"b 在非 Windows 上不是绝对路径，realpath 会拼 cwd 前缀；
+        # 用平台绝对路径保留"引号 + 反斜杠转义"的测试意图
+        root = os.path.abspath(r'C:\a"b')
         args = seatbelt_profile_args({"mode": "workspace-write",
-                                      "workspaceRoot": 'C:\\a"b'})
-        self.assertIn('(subpath "C:\\\\a\\"b")', args[1])
+                                      "workspaceRoot": root})
+        escaped = root.replace("\\", "\\\\").replace('"', '\\"')
+        self.assertIn(f'(subpath "{escaped}")', args[1])
 
     def test_writable_roots_empty_under_read_only(self):
         self.assertEqual(writable_roots({"mode": "read-only", "workspaceRoot": "/ws"}), [])
@@ -307,6 +311,8 @@ class TestLocalCredentialProvider(unittest.TestCase):
         os.makedirs(self._dsh_home, exist_ok=True)
         with open(self._filename, "w", encoding="utf-8") as handle:
             handle.write('{"api_key": 42}')
+        # CI umask 022 会让新建文件 0644，先收紧为 0600 再测文档解析失败
+        os.chmod(self._filename, 0o600)
         with self.assertRaises(TypeError):
             LocalCredentialProvider(filename=self._filename, dsh_home=self._dsh_home,
                                     project_dir=self._project)

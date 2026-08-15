@@ -142,6 +142,12 @@ class _StdioRpcClient:
         except subprocess.TimeoutExpired:
             self._proc.kill()
             self._proc.wait()
+        for stream in (self._proc.stdout, self._proc.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
 
     def _write(self, line: str) -> None:
         try:

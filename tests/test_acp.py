@@ -1,4 +1,5 @@
 """第 12 章测试：ACP 最小子集 —— 自动化专用协议服务。"""
+import os
 import unittest
 
 from miniharness.acp import (
@@ -9,6 +10,9 @@ from miniharness.acp import (
     prompt_has_unsupported_content,
     turn_end_to_stop_reason,
 )
+
+# 双平台均为绝对路径（CI 在 ubuntu 与 windows 上都会跑）
+_CWD = os.path.abspath("work")
 
 
 class TestAcpHandshake(unittest.TestCase):
@@ -36,16 +40,16 @@ class TestAcpSession(unittest.TestCase):
 
     def test_new_session_rejects_additional_directories(self):
         with self.assertRaises(AcpRequestError) as cm:
-            self.server.new_session(r"C:\work", additional_directories=["/x"])
+            self.server.new_session(_CWD, additional_directories=["/x"])
         self.assertIn("additionalDirectories", cm.exception.detail)
 
     def test_new_session_rejects_mcp_servers(self):
         with self.assertRaises(AcpRequestError) as cm:
-            self.server.new_session(r"C:\work", mcp_servers=[{"name": "s"}])
+            self.server.new_session(_CWD, mcp_servers=[{"name": "s"}])
         self.assertIn("mcpServers", cm.exception.detail)
 
     def test_new_session_mints_id(self):
-        result = self.server.new_session(r"C:\work")
+        result = self.server.new_session(_CWD)
         self.assertIn("sessionId", result)
         self.assertIn(result["sessionId"], self.server.sessions)
 
@@ -53,7 +57,7 @@ class TestAcpSession(unittest.TestCase):
 class TestAcpPrompt(unittest.TestCase):
     def setUp(self):
         self.server = AcpServer()
-        self.session_id = self.server.new_session(r"C:\work")["sessionId"]
+        self.session_id = self.server.new_session(_CWD)["sessionId"]
 
     def test_prompt_text_returns_end_turn(self):
         result = self.server.prompt(self.session_id,
