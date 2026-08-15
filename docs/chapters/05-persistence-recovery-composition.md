@@ -226,7 +226,7 @@ def boot(config_path, *patch_paths, env=None):
 
 最后一步是**启动断言**：启动结束必须"条目已加载 + 已激活"，否则 fail loud。常规做法是"尽力而为"——加载失败记个 warning 继续跑，结果插件没生效，等运行期才爆。dsh 选择启动时就把话说死。
 
-> 简化声明：真实 dsh 用 YAML（cordis.yml），我们为保持零依赖用 JSON；补丁语义（id 定位整段替换 / insert / 插值）完全一致。
+> 载体说明：真实 dsh 用 YAML（cordis.yml）；mini 的 `boot()` 同时支持 `.json` 与 `.yaml/.yml`（pyyaml 可选依赖）。YAML 里的 `!!js` 表达式（上游 `loadOverlayPatches` 语义：tag → `{__jsExpr}` 节点、激活时求值）在 mini 中仅支持 `process.env.<NAME>` 完整匹配、读取时求值，其它表达式 fail loud（上游是 JS eval 全量表达式，mini 不求值 JS —— 简化标注）。补丁语义（id 定位整段替换 / insert / 插值）与 JSON 载体完全一致。组合 dump（`--dump-config` / `--dump-default-config`，见 07 章 CLI）与 `boot()` 共用同一补丁算法。
 
 ## 5.5 端到端验收（无 key）
 

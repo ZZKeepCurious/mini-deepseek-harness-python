@@ -78,6 +78,6 @@ MiniHarness 是教学实现，不是移植。下面是简化清单，每一条�
 
 ## 检查点
 
-- [ ] `python -m unittest discover -s tests -t .` 全部通过（63 个）
+- [ ] `python -m unittest discover -s tests -t .` 全部通过（398 个）
 - [ ] `python -m miniharness.demo` 输出一次完整的回合日志
 - [ ] 能说出 `session.py / bus.py / tools.py / llm.py / loop.py / persistence.py / boot.py` 各自管什么

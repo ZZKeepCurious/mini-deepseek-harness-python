@@ -23,22 +23,29 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 
 | Capability | Status | Upstream counterpart |
 |---|---|---|
-| Event-sourced session (seq, deep-freeze, `derive_messages`, interrupted repair) | done | `packages/core/session` |
-| Durable storage (JSONL / SQLite, flush barrier, fail-closed load, crash recovery) | done | `packages/session/session-persistence` |
+| Event-sourced session (envelope `{type,seq,time,data}`, 1-based turn/step, deep-freeze, `derive_messages`, interrupted repair) | done | `packages/core/session` |
+| Durable storage (JSONL / SQLite, header + `SESSION_FORMAT_VERSION=0` fail-closed, flush barrier, crash recovery) | done | `packages/session/session-persistence` |
 | Plugin event bus (emit / waterfall / parallel / serial, scopes, dependency-driven activation) | done | `vendor/cordis` + `core/scope` |
 | Tool registry + execution pipeline (schema validation, pre/execute/post, timeout) | done | `packages/core/tools` |
 | Agent loop (turn/step state machine, pre-step rejection, tool-feedback continuation) | done | `core/agent-loop` |
 | LLM seam (StreamChunk protocol, fake adapter, official DeepSeek SSE adapter) | done | `llm/llm` + `llm/llm-deepseek` |
-| Boot & composition (`apply_patch` overlays, startup assertions) | done | `packages/boot` |
-| Capability seams basics (sandbox / credentials / subagent) | partial | capability seams docs |
-| Async event bus, true parallel tools + barrier | planned | `core/agent-loop` |
-| CLI, YAML config, official SDK interop | planned | `apps/dsh`, `python/` |
+| Model request retry / backoff (normal/always policy, `agent/request-error`, `llm/retry` audit pair) | done | `llm/llm-retry` + `llm/llm-retry-policy` |
+| Boot & composition (YAML/JSON overlays, `!!js` env interpolation, startup assertions) | done | `packages/boot` |
+| Headless one-shot entry (`--profile headless "task"`: stdout final text, exit code by turn/end reason) | done | `bundle/headless` + `apps/cli` |
+| Launcher options (`--patch`, `--dump-config` / `--dump-default-config`, read-only composition dump) | done | `apps/cli/src/args.ts` |
+| Session management CLI (`miniharness sessions` list/resume/delete; mini teaching extension) | done | web surface (upstream) |
+| Capability seams (sandbox backends / credential layers / subagent ACP+SDK+fork channels) | done | capability seams docs |
+| Presets / agent intervention / trajectory / dynamic plugins / approval | done | `packages/preset` + `core/agent` + `interaction` |
+| Protocol entries (ACP / JSON-RPC SDK / hooks bridge) | done | `acp` + `sdk` + `hooks` |
+| Async event bus, true parallel tools + barrier | done | `core/agent-loop` |
+| CI (GitHub Actions, Python 3.10~3.13, integration-tagged real-API tests) | done | — |
+| Official SDK interop tests | planned | `python/sdk` |
 
-Status: **63 unit tests passing** (stdlib only).
+Status: **398 unit tests passing** (stdlib only; optional `pyyaml` for YAML config).
 
 ## Getting started
 
-Requirements: Python 3.10+, no third-party packages.
+Requirements: Python 3.10+, standard library only (optional `pyyaml` for YAML config files).
 
 ```sh
 # run all tests
@@ -49,6 +56,15 @@ python -m miniharness.demo
 
 # multi-turn chat with the fake model
 python examples/chat_demo.py
+
+# one-shot task, like `dsh --profile headless "task"` (needs DEEPSEEK_API_KEY)
+python -m miniharness.cli --profile headless "run the tests"
+
+# read-only composition dump, like `dsh --dump-config`
+python -m miniharness.cli --dump-config
+
+# list / resume / delete persisted sessions
+python -m miniharness.cli sessions
 ```
 
 ### Talk to the real DeepSeek API (optional)
@@ -74,16 +90,30 @@ mini-deepseek-harness-python/
 │   ├── bus.py            # Context registry / event bus / scopes / plugin activation
 │   ├── tools.py          # tool registry + execution pipeline
 │   ├── llm.py            # StreamChunk protocol + fake / DeepSeek adapters
+│   ├── retry_policy.py   # retry policy parsing (normal/always)
+│   ├── llm_retry.py      # agent/request-error recovery + backoff
 │   ├── loop.py           # agent loop state machine
+│   ├── scheduler.py      # async scheduling + parallel barrier
 │   ├── persistence.py    # JSONL / SQLite backends + crash recovery
 │   ├── boot.py           # startup + patch overlays
+│   ├── composition.py    # YAML config / !!js interpolation / dump rendering
+│   ├── cli.py            # launcher options (profile / patch / dump)
+│   ├── headless.py       # one-shot task entry
+│   ├── sessions.py       # session list / resume / delete
 │   ├── seams.py          # sandbox / credentials / subagent seams
+│   ├── presets.py        # preset rosters
+│   ├── approval.py       # approval policy + audit events
+│   ├── trajectory.py     # trajectory folding
+│   ├── dynamic.py        # dynamic plugin lifecycle
+│   ├── acp.py            # ACP protocol subset
+│   ├── sdk_protocol.py   # JSON-RPC SDK protocol subset
+│   ├── hooks.py          # hooks bridge
 │   └── demo.py           # end-to-end demo
-├── tests/                # 62 acceptance tests (unittest)
+├── tests/                # 398 acceptance tests (unittest)
 ├── examples/             # chat & real-API demos
 └── docs/
     ├── README.md         # handbook index (learning map)
-    ├── chapters/         # 00-setup ~ 06-advanced-seams tutorials
+    ├── chapters/         # 00-setup ~ 12-handbook tutorials
     └── report/           # analysis report (HTML, Mermaid diagrams)
 ```
 

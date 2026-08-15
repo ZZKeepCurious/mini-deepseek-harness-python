@@ -314,7 +314,7 @@ class AgentLoop:
 
 四个要点：
 
-- `_append` 是回合事件的统一入口，自动注入 `turn` / `step` 编号——与上游 `SessionEvent` 字段一致，从 0 起。这是 B 部分对齐后与上游完全一致的字段。
+- `_append` 是回合事件的统一入口，自动注入 `turn` / `step` 编号——与上游一致，**从 1 起**（`session/invariant.ts` `nextTurn: 1, nextStep: 1`，每 turn 内 step 重置为 1）。这是对齐后与上游完全一致的字段。
 - **pre-step 拒绝**：waterfall 返回 `{"verdict": "reject"}` → 不落 `step/start`，turn 直接闭合。这就是"零 step turn"：被拒绝的尝试也留下括号痕迹（4.2 要点 1）。
 - 历史 = `derive_messages(日志)` + system prompt，绝不另存——第 1 章的投影在这里消费。
 - `tool-call-delta` 是增量分片，loop 按 id 累积 name 与 `argumentsDelta`，组装成完整的 `toolCalls` 再落日志。所以日志里存的是完整参数（JSON 字符串），而不是碎片。
@@ -392,10 +392,56 @@ print([e["type"] for e in session.events])
 |---|---|---|
 | `system-prompt/assemble` waterfall | 提示词按片段组装（hook 可注入上下文） | 直接拼接，无扩展点 |
 | `agent/request` waterfall → `llm/stream` | 请求构造拦截（steering） | 未实现 waterfall，直连 adapter |
-| `agent/request-error` waterfall | 规范错误（如上下文溢出）后的重试决策 | 未实现；`LlmFailure.code` 已就绪 |
+| `agent/request-error` waterfall | 规范错误（如上下文溢出）后的重试决策 | ✅ 已实现（§4.10 重试/退避） |
 | `agent/turn-stopping` serial | turn 结束前串行终点检查（compaction 压力等） | 未实现（报告图 11 有此环节，代码暂无） |
 | `finish {kind:'error'\|'aborted'}` 带内失败 | 流中途失败也可经协议传递 | 只在 `stream()` 抛 `LlmFailure` |
-| `EMPTY_RESPONSE` 编码 | 空响应 = 规范错误，可重试 | 未实现（`dsh-llm-retry` 默认重试） |
+| `EMPTY_RESPONSE` 编码 | 空响应 = 规范错误，可重试 | ✅ 已实现且默认可重试（§4.10） |
+
+## 4.10 重试/退避与上下文溢出降级（阶段 4 补全）
+
+对应 dsh：`packages/llm/llm/src/retry-policy.ts` + `packages/llm/llm-retry/src/index.ts` + `packages/core/agent/src/runtime-types.ts`（`agent/request-error`）。
+
+**扩展点**：loop 在适配器抛 `LlmFailure` 时派发 `agent/request-error` waterfall，
+payload `{agent, turn, step, provider, failure, retryPolicy, signal}`（与上游逐字段
+一致）。监听器返回 `{kind:'retry'}` 且不调 `next()` = 自己接管恢复；调 `next()` 委派；
+默认 `undefined` 失败终局。`AgentLoop` 构造时幂等挂载重试规划器（`apply_retry_planner`）。
+
+**策略解析**（`retry_policy.py`，对齐 retry-policy.ts）：
+
+- 两种模式：`normal`（`maxRetries` + `retryableCodes` 白名单）/ `always`（无限重试）
+- 默认：`maxRetries 2`、`initialDelayMs 500`、`maxDelayMs 10000`、`jitterRatio 0.1`、
+  可重试码 `[EMPTY_RESPONSE, RATE_LIMIT, SERVER, TIMEOUT, TRANSPORT]`
+- 严格校验：未知键拒绝、backoff 正有限且 `initial ≤ max`、jitter ∈ [0,1]、
+  `maxRetries` 非负整数、codes 非空无重复；解析结果冻结，provider 注册时捕获
+
+**恢复决策**（`llm_retry.py`，对齐 llm-retry/index.ts）：
+
+1. 策略 `undefined` → 直接委派（不重试）
+2. `always`：先委派下游——下游给出 retry 决策即采用；失败/未接管则自己无限重试（不判 code）
+3. `normal`：code 不在白名单 → 委派；同 turn/step/provider/policyKey 的 `llm/retry`
+   计数 ≥ `maxRetries` → 委派（放弃）
+4. 每次重试前先落 `llm/retry`（durable，含策略细节/`retryId`/序数/`delayMs`/failure 快照），
+   可取消等待结束后落 `llm/retry-started` 并返回 `{kind:'retry'}`；`retryId` 同一对全程复用
+5. 延迟决议：`providerRetryAfterMs`（429 的 `Retry-After`，纯数字秒 ×1000 或 HTTP-date）
+   有效时优先——超过 `maxDelayMs` 则 normal 放弃 / always 改用本地延迟；否则本地退避
+   `min(initial × 2^min(retry-1, 1024), max) × (1 - ratio + 2×ratio×rand)` 再封顶 `maxDelayMs`
+6. 可取消：等待以分片 sleep 轮询 `signal.aborted`（mini 同步简化，无真实 AbortSignal；
+   loop 的 `_AbortProxy` 反映取消标记）；normal 分支不在派发前检查 abort——
+   `llm/retry` 仍落、等待立即放弃、不落 started（与上游一致）
+
+**接线语义**：重试是同 step 内重新发起模型请求——`messages` 不变（失败 attempt
+不产生任何消息事件，`derive_messages` 不受 `llm/retry` 影响）、`request/header`
+只落一次（上游仅在 header 变化时追加）、`assistant/message` 的 `sourceEventSeqs`
+只含成功 attempt 的 chunk。`LlmFailure` 扩展 `status` / `providerRetryAfterMs` /
+`requestId`（`x-request-id` / `x-deepseek-request-id`）可选字段；socket 超时映射
+`TIMEOUT`（原本混在 `TRANSPORT` 里）。
+
+**上下文溢出降级**：`CONTEXT_WINDOW_EXCEEDED`（400 上下文超限）不在默认白名单
+→ 终局不重试（重试只会以相同方式失败），`turn/end` reason 为 `{kind:'error'}`。
+这是刻意的降级语义：溢出该走压缩/剪枝路径（阶段 12 观察清单），而不是退避重试。
+
+验证：`python -m unittest tests.test_retry -v`（36 项：策略解析、退避边界、
+Retry-After 解析、全部 recover 分支、loop 集成——重试成功/耗尽终局/非白名单终局）。
 
 ## 4.9 收尾
 

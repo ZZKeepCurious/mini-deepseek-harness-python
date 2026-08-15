@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DeepSeek Harness 深度掌握指南 · 体系化报告首页</title>
+<style>
+  :root {
+    --bg: #f7f8fa;
+    --panel: #ffffff;
+    --ink: #1f2430;
+    --muted: #5c6474;
+    --line: #e3e7ef;
+    --brand: #1e3a8a;
+    --accent: #4f46e5;
+    --accent-soft: #eef2ff;
+    --code-bg: #0f172a;
+    --code-ink: #e2e8f0;
+    --green: #047857;
+    --green-soft: #ecfdf5;
+    --amber: #b45309;
+    --amber-soft: #fffbeb;
+    --rose: #be123c;
+    --rose-soft: #fff1f2;
+    --mono: "SFMono-Regular", Consolas, "JetBrains Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    line-height: 1.7;
+    font-size: 15px;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .layout { display: flex; }
+  nav.sidebar {
+    position: fixed; inset: 0 auto 0 0;
+    width: 280px;
+    background: #111827; color: #d1d5db;
+    overflow-y: auto;
+    padding: 20px 0 40px;
+  }
+  nav.sidebar .brand { padding: 0 20px 16px; border-bottom: 1px solid #1f2937; }
+  nav.sidebar .brand .logo { font-size: 17px; font-weight: 700; color: #fff; }
+  nav.sidebar .brand .sub { font-size: 12px; color: #9ca3af; margin-top: 4px; }
+  nav.sidebar a.slink {
+    display: block; padding: 7px 20px 7px 24px;
+    color: #cbd5e1; font-size: 13px; border-left: 3px solid transparent;
+  }
+  nav.sidebar a.slink:hover { background: #1f2937; color: #fff; text-decoration: none; }
+  nav.sidebar a.l2 { padding-left: 38px; font-size: 12.5px; color: #9ca3af; }
+  nav.sidebar .sec { padding: 14px 20px 4px; font-size: 11px; letter-spacing: .08em; color: #6b7280; text-transform: uppercase; font-weight: 600; }
+
+  main { margin-left: 280px; padding: 32px 48px 80px; max-width: 1000px; }
+  @media (max-width: 900px) {
+    .layout { display: block; }
+    nav.sidebar { position: static; width: 100%; }
+    main { margin-left: 0; padding: 24px 16px 60px; }
+  }
+
+  h1 { font-size: 28px; line-height: 1.3; margin: 0 0 8px; }
+  h2 { font-size: 22px; margin: 56px 0 14px; padding-bottom: 8px; border-bottom: 2px solid var(--line); }
+  h2 .no { display: inline-block; background: var(--brand); color: #fff; border-radius: 6px; font-size: 13px; padding: 2px 9px; margin-right: 10px; vertical-align: 3px; }
+  h3 { font-size: 17px; margin: 30px 0 10px; }
+  p { margin: 10px 0; }
+  ul, ol { margin: 8px 0; padding-left: 24px; }
+  li { margin: 4px 0; }
+  code { font-family: var(--mono); font-size: 13px; background: #f1f5f9; padding: 2px 6px; border-radius: 4px; }
+  .lead { font-size: 16px; color: var(--muted); }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 18px 22px; margin: 16px 0;
+  }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+  .tag { display: inline-block; font-size: 11px; padding: 2px 9px; border-radius: 20px; margin-right: 6px; }
+  .t-blue { background: var(--accent-soft); color: var(--accent); }
+  .t-green { background: var(--green-soft); color: var(--green); }
+  .t-amber { background: var(--amber-soft); color: var(--amber); }
+  .t-rose { background: var(--rose-soft); color: var(--rose); }
+
+  table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 13.5px; }
+  th, td { border: 1px solid var(--line); padding: 8px 12px; text-align: left; vertical-align: top; }
+  th { background: #f3f4f8; font-weight: 600; }
+  tr:nth-child(even) td { background: #fafbfc; }
+
+  .callout { border-left: 4px solid var(--accent); background: var(--accent-soft); border-radius: 0 10px 10px 0; padding: 12px 18px; margin: 16px 0; }
+  .callout.warn { border-left-color: var(--amber); background: var(--amber-soft); }
+  .callout.ok { border-left-color: var(--green); background: var(--green-soft); }
+  .callout b { color: var(--brand); }
+  .path { font-family: var(--mono); font-size: 12.5px; color: var(--muted); background: #f1f5f9; padding: 1px 6px; border-radius: 4px; }
+  .pill-row { margin: 8px 0; }
+  hr { border: none; border-top: 1px solid var(--line); margin: 32px 0; }
+  .footer { color: var(--muted); font-size: 12.5px; margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line); }
+  .mermaid { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 20px; margin: 14px 0 6px; overflow-x: auto; }
+  .fig-cap { font-size: 13px; font-weight: 600; color: var(--brand); margin: 18px 0 0; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.3/dist/mermaid.min.js"></script>
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: "base",
+    themeVariables: {
+      primaryColor: "#eef2ff",
+      primaryBorderColor: "#4f46e5",
+      primaryTextColor: "#1f2430",
+      secondaryColor: "#ecfdf5",
+      secondaryBorderColor: "#047857",
+      tertiaryColor: "#f8fafc",
+      lineColor: "#94a3b8",
+      fontSize: "13px",
+      fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif"
+    },
+    flowchart: { curve: "basis", htmlLabels: true, nodeSpacing: 45, rankSpacing: 42 },
+    sequence: { mirrorActors: false, actorMargin: 45, messageMargin: 30 }
+  });
+</script>
+</head>
+<body>
+<div class="layout">
+<nav class="sidebar">
+  <div class="brand">
+    <div class="logo">DeepSeek Harness</div>
+    <div class="sub">深度掌握指南 · 体系化报告</div>
+    <div class="sub">阅读地图 + 导航首页</div>
+  </div>
+  <div class="sec">报告子页</div>
+  <a class="slink" href="01-overview.html">01 项目全景与分层架构</a>
+  <a class="slink" href="02-architecture.html">02 系统架构与内核</a>
+  <a class="slink" href="03-flows.html">03 关键处理流程</a>
+  <a class="slink" href="04-product-surface.html">04 产品面全解读</a>
+  <a class="slink" href="05-roadmap.html">05 路线图与 Python 复现</a>
+  <a class="slink" href="06-appendix.html">06 附录与 HOWTO</a>
+  <a class="slink" href="DEEPSEEK-HARNESS-DEEP-LEARNING-GUIDE.html">旧版完整报告（归档保留）</a>
+</nav>
+<main>
+
+<h1>DeepSeek Harness 深度掌握指南 · 体系化报告</h1>
+<p class="lead">本报告将原单文件《深度掌握指南与技术报告》拆分为<b>六个主题子页</b> + 本阅读地图。每个子页独立可维护、可锚点直达。本页同时承载<b>四维对照表</b>（上游包 ↔ mini 模块 ↔ 手册章节 ↔ 报告页面），作为解读完整性的检查清单。</p>
+<div class="pill-row">
+  <span class="tag t-blue">everything is a plugin</span>
+  <span class="tag t-blue">event-sourcing</span>
+  <span class="tag t-blue">capability seams</span>
+  <span class="tag t-green">TypeScript strict</span>
+  <span class="tag t-green">Cordis vendored</span>
+  <span class="tag t-amber">Python SDK 存在</span>
+</div>
+
+<h2><span class="no">§A</span>阅读地图</h2>
+<div class="mermaid">
+flowchart LR
+  subgraph REP["报告（地图层 · 读什么）"]
+    O1["01 全景与分层架构"]
+    O2["02 系统架构与内核"]
+    O3["03 关键处理流程"]
+    O4["04 产品面全解读"]
+    O5["05 路线图与 Python 复现"]
+    O6["06 附录与 HOWTO"]
+  end
+  subgraph MD["手册（施工图纸层 · 怎么做）"]
+    M1["00-07 现有八章<br/>(会话/总线/工具/Loop/持久化/扩展口/入口)"]
+    M2["08-11 新增四章<br/>(组合层/干预面/轨迹投影/动态插件)"]
+  end
+  subgraph SRC["源码（唯一权威）"]
+    S1["deepseek-harness/ 上游仓库"]
+    S2["mini-deepseek-harness-python/ 复现"]
+  end
+  SRC --> REP --> MD
+  SRC --> MD
+</div>
+<p class="fig-cap">图 A：三层阅读结构——源码是唯一权威，报告回答"是什么/为什么"，手册回答"怎么亲手做出来"。</p>
+
+<table>
+  <tr><th>子页</th><th>内容</th><th>规模</th><th>状态</th></tr>
+  <tr><td><a href="01-overview.html">01 项目全景与分层架构</a></td><td>仓库构成、五层架构（应用/组合/能力/框架/外部 SDK）</td><td>14 KB</td><td>迁移自旧版 §1-2</td></tr>
+  <tr><td><a href="02-architecture.html">02 系统架构与内核</a></td><td>核心包脊柱、ctx 服务地图、事件体系、外围接入面；技术核心六节（Cordis 模型/事件溯源/扩展口/类型/作用域/门禁）</td><td>35 KB</td><td>迁移自旧版 §3-4</td></tr>
+  <tr><td><a href="03-flows.html">03 关键处理流程</a></td><td>Turn/Step、工具管线、持久化、LLM 流式、启动组合五条时序</td><td>21 KB</td><td>迁移自旧版 §5</td></tr>
+  <tr><td><a href="04-product-surface.html">04 产品面全解读</a></td><td><b>九大议题</b>：模式设计、外部入口、Trajectory、干预面、审批、自我修改、resume、plan/goal、压缩与后台</td><td>60 KB</td><td><b>新建 · 九议题全部补全</b></td></tr>
+  <tr><td><a href="05-roadmap.html">05 路线图与 Python 复现</a></td><td>学习路线、概念映射表、迷你复现清单、实操资源索引</td><td>26 KB</td><td>迁移自旧版 §6-8</td></tr>
+  <tr><td><a href="06-appendix.html">06 附录与 HOWTO</a></td><td>Python SDK、添加插件、HOWTO、参考速查、结语</td><td>25 KB</td><td>迁移自旧版 §9-12</td></tr>
+</table>
+
+<h2><span class="no">§B</span>四维对照表（解读完整性检查清单）</h2>
+<p>每一行代表一个解读主题；"解读了 + 注释了 + 对照了"三者齐备才算完成。表随解读进度持续更新。</p>
+<table>
+  <tr><th>上游包 / 文件（唯一权威）</th><th>mini 模块</th><th>手册章节</th><th>报告页面</th><th>状态</th></tr>
+  <tr><td class="path">packages/core/session</td><td class="path">session.py</td><td>01</td><td>02 §3-4</td><td>✔ 已解读已对齐</td></tr>
+  <tr><td class="path">packages/core/context + vendor/cordis(core)</td><td class="path">bus.py / context.py</td><td>02</td><td>02 §4.1</td><td>✔ 基础版；loader 未拆</td></tr>
+  <tr><td class="path">packages/core/tools + tool-group</td><td class="path">tools.py</td><td>03</td><td>03 §5.2</td><td>✔ 已对齐</td></tr>
+  <tr><td class="path">packages/llm/llm + llm-deepseek</td><td class="path">llm.py</td><td>04</td><td>02 §3 + 03 §5.4</td><td>✔ 已对齐（简化标注）</td></tr>
+  <tr><td class="path">packages/core/agent-loop + agent-invocation</td><td class="path">loop.py / agent.py</td><td>04 / 06</td><td>03 §5.1</td><td>✔ 已对齐；干预面缺失</td></tr>
+  <tr><td class="path">packages/core/session-persistence</td><td class="path">persistence.py</td><td>05</td><td>03 §5.3</td><td>✔ 已对齐</td></tr>
+  <tr><td class="path">packages/cordis-host + boot</td><td class="path">boot.py</td><td>05</td><td>03 §5.5</td><td>✔ 已对齐</td></tr>
+  <tr><td class="path">bundle/headless + apps/cli/src</td><td class="path">headless.py / cli.py</td><td>07</td><td>04 议题 2</td><td>✔ 已复现（9 测试）</td></tr>
+  <tr><td class="path">apps/cli/config/agent-presets/*</td><td class="path">presets.py</td><td>08</td><td>04 议题 1</td><td>✔ 已解读 + 已复现（roster/挂载）</td></tr>
+  <tr><td class="path">packages/core/agent（runtime-types）</td><td class="path">loop.py（干预面）</td><td>09</td><td>04 议题 4</td><td>✔ 已解读 + 已复现（steer/inject/cancel/whenIdle/maintenance）</td></tr>
+  <tr><td class="path">packages/interaction/user-approval</td><td class="path">approval.py</td><td>09</td><td>04 议题 5</td><td>✔ 已解读 + 已复现（策略/审计对，18 测试）</td></tr>
+  <tr><td class="path">packages/client/ui-trajectory</td><td class="path">trajectory.py</td><td>10</td><td>04 议题 3</td><td>✔ 已解读 + 已复现（折叠引擎，9 测试）</td></tr>
+  <tr><td class="path">packages/extensions（tool-cordis 等）</td><td class="path">dynamic.py</td><td>11</td><td>04 议题 6</td><td>✔ 已解读 + 已复现（生命周期，10 测试）</td></tr>
+  <tr><td class="path">packages/sdk/protocol（transport + types）</td><td class="path">sdk_protocol.py</td><td>07 §7.6</td><td>04 议题 2</td><td>✔ 已解读 + 已复现（信封子集 + 三方法，21 测试）</td></tr>
+  <tr><td class="path">packages/acp/acp</td><td class="path">acp.py</td><td>07 §7.7</td><td>04 议题 2</td><td>✔ 已解读 + 已复现（握手/会话/prompt/取消/审批桥，26 测试）</td></tr>
+  <tr><td class="path">packages/hooks（hook-protocol + hooks-claude-code）</td><td class="path">hooks.py</td><td>07 §7.8</td><td>04 议题 2</td><td>✔ 已解读 + 已复现（CC 配置 → 四类拦截决策 + 审计配对，40 测试）</td></tr>
+  <tr><td class="path">core/agent-loop 并行编排 + core/context 并发模型</td><td class="path">scheduler.py / bus.py（async 变体）</td><td>12</td><td>02 §2 + 03 §5.1</td><td>✔ 已复现（屏障/滚动池/模型序提交/取消排干，36 测试）</td></tr>
+  <tr><td class="path">packages/sandbox/sandbox + sandbox-local + sandbox-windows-acl</td><td class="path">sandbox_local.py（+ seams.py 基础）</td><td>06 §6.9</td><td>02 §2</td><td>✔ 已复现（四后端 profile / 平台链探测 / fail-closed / ConfinedArgv，约定测试；真实二进制后端不在仓库）</td></tr>
+  <tr><td class="path">packages/credentials/credentials-local</td><td class="path">credentials_local.py（+ seams.py 基础）</td><td>06 §6.9</td><td>03 §5.4</td><td>✔ 已复现（env > file > project-env > user-env 四层；JSON 载体简化）</td></tr>
+  <tr><td class="path">packages/subagent/subagent-fork-in-process + subagent-acp + subagent-dsh-sdk</td><td class="path">subagent_providers.py + subagent_worker.py</td><td>06 §6.9</td><td>04 议题 2</td><td>✔ 已复现（fork 前缀 seed / ACP 子进程 / SDK 子进程三通道，49 测试）</td></tr>
+  <tr><td class="path">packages/llm/llm-retry + llm/llm（retry-policy）+ core/agent（agent/request-error）</td><td class="path">llm_retry.py + retry_policy.py（+ loop.py 接线）</td><td>04 §4.10</td><td>04 议题 2</td><td>✔ 已复现（normal/always 策略 / 指数退避 + 抖动 / providerRetryAfterMs / durable llm/retry 审计对 / 上下文溢出终局降级，36 测试）</td></tr>
+  <tr><td class="path">packages/boot/app-boot（loadOverlayPatches / loadEnv / config-dump）+ apps/cli/src/args.ts</td><td class="path">composition.py + cli.py（launcher 选项）</td><td>05 + 07</td><td>03 §5.5</td><td>✔ 已复现（YAML/JSON 双载体、!!js env 子集、.env 加载、--patch/--dump-config/--dump-default-config 互斥与 boot-free、行级来源注释、skipped patch warn、单文档可再加载，23 测试）</td></tr>
+  <tr><td class="path">web 表面会话管理（上游无 CLI）</td><td class="path">sessions.py（教学扩展）</td><td>07</td><td>04 议题 2</td><td>✔ 已复现（列表/恢复/删除；fail-closed 加载 + 崩溃修复 + 重放，8 测试）</td></tr>
+  <tr><td class="path">（工程化）</td><td class="path">.github/workflows/ci.yml + tests/test_real_api.py</td><td>00</td><td>—</td><td>✔ 已复现（unittest + Python 3.10~3.13 matrix × ubuntu/windows + demo 冒烟；integration 标签真实 API 测试，CI 默认跳过）</td></tr>
+  <tr><td class="path">packages/bundle/web-app</td><td class="path">（观察清单）</td><td>07（入口总览）</td><td>04 议题 2</td><td>◐ 已解读未复现（web 表面，见 ROADMAP 阶段 12）</td></tr>
+</table>
+<div class="callout ok">
+<b>状态图例</b>：✔ 已解读已对齐 / ◐ 已解读未复现（代码待做）/ ○ 待解读。当前 398 个测试全绿（另有 2 个 integration 标签真实 API 测试，默认跳过）。
+</div>
+
+<h2><span class="no">§C</span>与教程手册的关系</h2>
+<div class="grid2">
+  <div class="card">
+    <b>报告（HTML 体系）</b>＝ 地图层：解释"是什么、为什么、影响面"，按主题读，Mermaid 图渲染完整。
+  </div>
+  <div class="card">
+    <b>手册（md 章节体系）</b>＝ 施工图纸层：step-by-step 从 0 到 1 亲手实现，与 <span class="path">miniharness/</span> 真实代码逐字一致（<span class="path">docs/README.md</span> 有完整索引）。
+  </div>
+</div>
+<p>手册入口：<span class="path">docs/README.md</span> 与 <span class="path">docs/index.md</span>。章节 08-11 与报告 04 页议题一一对应（08 组合层↔议题 1，09 干预面↔议题 4，10 轨迹↔议题 3，11 动态插件↔议题 6）。</p>
+
+<div class="footer">
+体系化报告 · 首页（阅读地图 + 四维对照表）<br>
+旧版完整报告保留于本目录（DEEPSEEK-HARNESS-DEEP-LEARNING-GUIDE.html）· 图表由 Mermaid.js 渲染，需联网加载 CDN
+</div>
+</main>
+</div>
+</body>
+</html>

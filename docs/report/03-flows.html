@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DeepSeek Harness 深度掌握指南 · 03 关键处理流程</title>
+<style>
+<style>
+  :root {
+    --bg: #f7f8fa;
+    --panel: #ffffff;
+    --ink: #1f2430;
+    --muted: #5c6474;
+    --line: #e3e7ef;
+    --brand: #1e3a8a;
+    --accent: #4f46e5;
+    --accent-soft: #eef2ff;
+    --code-bg: #0f172a;
+    --code-ink: #e2e8f0;
+    --green: #047857;
+    --green-soft: #ecfdf5;
+    --amber: #b45309;
+    --amber-soft: #fffbeb;
+    --rose: #be123c;
+    --rose-soft: #fff1f2;
+    --mono: "SFMono-Regular", Consolas, "JetBrains Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    line-height: 1.7;
+    font-size: 15px;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .layout { display: flex; }
+  nav.sidebar {
+    position: fixed; inset: 0 auto 0 0;
+    width: 280px;
+    background: #111827; color: #d1d5db;
+    overflow-y: auto;
+    padding: 20px 0 40px;
+  }
+  nav.sidebar .brand { padding: 0 20px 16px; border-bottom: 1px solid #1f2937; }
+  nav.sidebar .brand .logo { font-size: 17px; font-weight: 700; color: #fff; }
+  nav.sidebar .brand .sub { font-size: 12px; color: #9ca3af; margin-top: 4px; }
+  nav.sidebar a.slink {
+    display: block; padding: 7px 20px 7px 24px;
+    color: #cbd5e1; font-size: 13px; border-left: 3px solid transparent;
+  }
+  nav.sidebar a.slink:hover { background: #1f2937; color: #fff; text-decoration: none; }
+  nav.sidebar a.l2 { padding-left: 38px; font-size: 12.5px; color: #9ca3af; }
+  nav.sidebar .sec { padding: 14px 20px 4px; font-size: 11px; letter-spacing: .08em; color: #6b7280; text-transform: uppercase; font-weight: 600; }
+
+  main { margin-left: 280px; padding: 32px 48px 80px; max-width: 1000px; }
+  @media (max-width: 900px) {
+    .layout { display: block; }
+    nav.sidebar { position: static; width: 100%; }
+    main { margin-left: 0; padding: 24px 16px 60px; }
+  }
+
+  h1 { font-size: 28px; line-height: 1.3; margin: 0 0 8px; }
+  h2 { font-size: 22px; margin: 56px 0 14px; padding-bottom: 8px; border-bottom: 2px solid var(--line); }
+  h2 .no { display: inline-block; background: var(--brand); color: #fff; border-radius: 6px; font-size: 13px; padding: 2px 9px; margin-right: 10px; vertical-align: 3px; }
+  h3 { font-size: 17px; margin: 30px 0 10px; }
+  h4 { font-size: 15px; margin: 22px 0 8px; color: var(--brand); }
+  p { margin: 10px 0; }
+  ul, ol { margin: 8px 0; padding-left: 24px; }
+  li { margin: 4px 0; }
+  code { font-family: var(--mono); font-size: 13px; background: #f1f5f9; padding: 2px 6px; border-radius: 4px; }
+  pre {
+    background: var(--code-bg); color: var(--code-ink);
+    padding: 16px 18px; border-radius: 10px; overflow-x: auto;
+    font-size: 13px; line-height: 1.6;
+  }
+  pre code { background: none; color: inherit; padding: 0; font-size: 13px; }
+  .lead { font-size: 16px; color: var(--muted); }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 18px 22px; margin: 16px 0;
+  }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+  .tag { display: inline-block; font-size: 11px; padding: 2px 9px; border-radius: 20px; margin-right: 6px; }
+  .t-blue { background: var(--accent-soft); color: var(--accent); }
+  .t-green { background: var(--green-soft); color: var(--green); }
+  .t-amber { background: var(--amber-soft); color: var(--amber); }
+  .t-rose { background: var(--rose-soft); color: var(--rose); }
+
+  table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 13.5px; }
+  th, td { border: 1px solid var(--line); padding: 8px 12px; text-align: left; vertical-align: top; }
+  th { background: #f3f4f8; font-weight: 600; }
+  tr:nth-child(even) td { background: #fafbfc; }
+
+  .flow { font-family: var(--mono); font-size: 12.5px; line-height: 1.55; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; overflow-x: auto; white-space: pre; }
+  .callout { border-left: 4px solid var(--accent); background: var(--accent-soft); border-radius: 0 10px 10px 0; padding: 12px 18px; margin: 16px 0; }
+  .callout.warn { border-left-color: var(--amber); background: var(--amber-soft); }
+  .callout.ok { border-left-color: var(--green); background: var(--green-soft); }
+  .callout b { color: var(--brand); }
+  .path { font-family: var(--mono); font-size: 12.5px; color: var(--muted); background: #f1f5f9; padding: 1px 6px; border-radius: 4px; }
+  .kbd { border: 1px solid var(--line); border-bottom-width: 2px; background: #fff; border-radius: 5px; padding: 1px 7px; font-size: 12px; font-family: var(--mono); }
+  .pill-row { margin: 8px 0; }
+  .toc-hint { color: var(--muted); font-size: 13px; }
+  hr { border: none; border-top: 1px solid var(--line); margin: 32px 0; }
+  .footer { color: var(--muted); font-size: 12.5px; margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line); }
+  .checklist { list-style: none; padding-left: 0; }
+  .checklist li { padding-left: 26px; position: relative; }
+  .checklist li::before { content: "▢"; position: absolute; left: 2px; color: var(--accent); font-weight: 700; }
+  .mermaid-note { font-size: 12.5px; color: var(--muted); font-style: italic; }
+  .mermaid { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 20px; margin: 14px 0 6px; overflow-x: auto; }
+  .fig-cap { font-size: 13px; font-weight: 600; color: var(--brand); margin: 18px 0 0; }
+  .walkthrough { background: var(--panel); border: 1px dashed var(--line); border-left: 4px solid var(--green); border-radius: 0 10px 10px 0; padding: 12px 18px; margin: 14px 0 20px; font-size: 14px; }
+  .walkthrough b { color: var(--brand); }
+</style>
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.3/dist/mermaid.min.js"></script>
+<script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.3/dist/mermaid.min.js"></script>
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: "base",
+    themeVariables: {
+      primaryColor: "#eef2ff",
+      primaryBorderColor: "#4f46e5",
+      primaryTextColor: "#1f2430",
+      secondaryColor: "#ecfdf5",
+      secondaryBorderColor: "#047857",
+      tertiaryColor: "#f8fafc",
+      lineColor: "#94a3b8",
+      fontSize: "13px",
+      fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif"
+    },
+    flowchart: { curve: "basis", htmlLabels: true, nodeSpacing: 45, rankSpacing: 42 },
+    sequence: { mirrorActors: false, actorMargin: 45, messageMargin: 30 }
+  });
+</script>
+</script>
+</head>
+<body>
+<div class="layout">
+<nav class="sidebar">
+  <div class="brand">
+    <div class="logo">DeepSeek Harness</div>
+    <div class="sub">深度掌握指南 · 体系化报告</div>
+    <div class="sub">基于仓库源码 + docs/ 的深入研读</div>
+  </div>
+  <a class="slink" href="index.html">&larr; 报告首页（阅读地图）</a>
+  <div class="sec">其他页面</div>
+  <a class="slink" href="01-overview.html">01 项目全景与分层架构</a>
+  <a class="slink" href="02-architecture.html">02 系统架构与内核</a>
+  <a class="slink" href="03-flows.html">03 关键处理流程</a>
+  <a class="slink" href="04-product-surface.html">04 产品面全解读</a>
+  <a class="slink" href="05-roadmap.html">05 路线图与 Python 复现</a>
+  <a class="slink" href="06-appendix.html">06 附录与 HOWTO</a>
+  <a class="slink" href="DEEPSEEK-HARNESS-DEEP-LEARNING-GUIDE.html">旧版完整报告（归档保留）</a>
+<div class="sec">本页目录</div>
+  <a class="slink" href="#s5">5. 关键处理流程</a>
+  <a class="slink l2" href="#s5-1">5.1 Turn/Step 循环</a>
+  <a class="slink l2" href="#s5-2">5.2 工具执行管线</a>
+  <a class="slink l2" href="#s5-3">5.3 会话持久化</a>
+  <a class="slink l2" href="#s5-4">5.4 LLM 流式适配</a>
+  <a class="slink l2" href="#s5-5">5.5 启动与组合</a>
+</nav>
+<main>
+
+<h1>03 · 关键处理流程</h1>
+<p class="lead">五条核心时序：Turn/Step 循环、工具执行管线、会话持久化、LLM 流式适配、启动与组合。每条给出事件序列与源码路径。</p>
+<div class="pill-row">
+  <span class="tag t-blue">everything is a plugin</span>
+  <span class="tag t-blue">event-sourcing</span>
+  <span class="tag t-blue">capability seams</span>
+  <span class="tag t-green">TypeScript strict</span>
+  <span class="tag t-green">Cordis vendored</span>
+  <span class="tag t-amber">Python SDK 存在</span>
+</div>
+
+<h2 id="s5"><span class="no">5</span>关键处理流程</h2>
+
+<h3 id="s5-1">5.1 Turn / Step 循环</h3>
+<p><b>step</b> = 一次模型请求 + 它调用的工具；<b>turn</b> = 零或多个 step，打开于首次输入被认领前，关闭于再无未偿之责。输入经唯一 inbox 送达，部分消息立即唤醒 driver，注入上下文在 inbox 等待。</p>
+
+<p class="fig-cap">图 11：Turn / Step 完整时序（含 reject 与 turn-stopping 分支）</p>
+<div class="mermaid">
+sequenceDiagram
+  participant U as 用户 / UI
+  participant A as Agent
+  participant D as agent-loop Driver
+  participant S as Session 日志
+  participant LLM as ctx.llm 扩展口
+  participant T as ctx.tools 注册表
+  U->>A: followup(content)
+  A->>D: 排队输入唤醒 driver
+  A->>S: turn/start [durable]
+  D->>D: claim 一个排队消息 + next-step 输入
+  D->>D: agent/pre-step (waterfall)
+  alt 被 reject 或空 enter
+    D->>S: turn/end（零 step 关闭）[durable]
+  else 进入 step
+    D->>S: step/start [durable]
+    D->>S: user/message [durable]
+    D->>D: deriveMessages() 派生模型历史
+    D->>LLM: agent/request (waterfall) → llm/stream
+    LLM-->>D: StreamChunk 流（assistant/chunk*）
+    D->>S: assistant/message [durable]
+    D->>T: tool/call → 工具执行管线 [durable]
+    T-->>D: tool/result [durable]
+    D->>S: step/end [durable]
+    alt 还有工具请求或 next-step 输入
+      D->>D: 再次 claim → 下一步
+    else 无未偿之责
+      D->>D: agent/turn-stopping (serial)
+    end
+  end
+  D->>S: turn/end [durable]
+  A->>A: status: idle
+</div>
+<p class="mermaid-note">完整时序见 docs/agent-lifecycle.md（同款 Mermaid sequenceDiagram）；<code>turn/start</code> 在认领输入前就打开，因此"被拒绝的尝试"也会留下持久化记录。</p>
+
+<div class="walkthrough">
+<b>示例走查（一次被拒绝的 turn）</b>：用户 <code>followup("删除 /etc")</code> → driver 认领输入 → <code>turn/start</code> 先落盘 → <code>agent/pre-step</code> 上的守卫插件不调用 <code>next()</code>，直接返回 <code>reject</code> → driver 不产生任何 step，直接 <code>turn/end</code>（零 step 关闭）。日志里留下了 <code>turn/start + turn/end</code> 两条记录——"被拒绝的尝试"也是事实，必须可审计。
+</div>
+
+<h3 id="s5-2">5.2 工具执行管线（可扩展 waterfall + 单调守卫）</h3>
+<p class="fig-cap">图 12：工具执行管线全流程（策略 → 守卫 → 执行 → 后处理 → 权威结果）</p>
+<div class="mermaid">
+flowchart TD
+  M["assistant 消息含 tool-call block"]
+  TC["Session: tool/call&lt;br/&gt;执行前先记录 [durable]"]
+  PC["UI 挂起卡片 presentCall(args)"]
+  PRE["tools/pre-execute waterfall&lt;br/&gt;hooks / 权限 / 沙箱"]
+  ASK["ask → ctx.approval 一次性询问&lt;br/&gt;absent / unanswerable → deny"]
+  DEN["denied&lt;br/&gt;工具体被跳过"]
+  G["注册的单调守卫&lt;br/&gt;只能减权 · 乱序无法撤销"]
+  EX["tools/execute waterfall&lt;br/&gt;超时 / 重试 / 度量（around-dispatch）"]
+  BODY["工具 execute() 体&lt;br/&gt;自有事件：todo/write · fs/observed · tool/code-dispatch"]
+  POST["tools/post-execute waterfall&lt;br/&gt;accept / replace / block(+feedback)"]
+  NORM["注册表外层规范化&lt;br/&gt;snapshot 异常 → isError"]
+  FIN["finalizeContent&lt;br/&gt;最后一个内容只读硬性规定"]
+  RES["tools/result 同步通知&lt;br/&gt;冻结的权威结果"]
+  TR["Session: tool/result&lt;br/&gt;唯一模型面向结果 [durable]"]
+  PR["UI 完成卡片 presentResult"]
+  M --> TC
+  TC --> PC
+  TC --> PRE
+  PRE -->|allow| G
+  PRE -->|deny| DEN
+  PRE -->|ask| ASK
+  ASK -->|allowed-once| G
+  ASK -->|拒绝 / 取消| DEN
+  G -->|allow| EX
+  G -->|deny| DEN
+  EX --> BODY
+  BODY --> POST
+  POST --> NORM
+  NORM --> FIN
+  FIN --> RES
+  RES --> TR
+  TR --> PR
+</div>
+
+<div class="walkthrough">
+<b>示例走查（一次 bash 调用）</b>：模型流式返回 <code>tool-call(bash)</code> → 先落 <code>tool/call</code> 事件，UI 挂起卡片 → <code>pre-execute</code> 权限插件返回 allow → 单调守卫（30s 超时 wrapper 挂在 <code>execute</code> 上）→ 工具体执行 → <code>post-execute</code> 接受结果 → 注册表规范化（异常统一 <code>isError</code>）→ <code>tools/result</code> 通知冻结结果 → 落 <code>tool/result</code>，UI 渲染完成卡片。全程参数只物化一次并深度冻结，任何一步抛错都不会让回合中断。
+</div>
+<ul>
+  <li>参数在策略前一次性<b>无损 JSON 物化并冻结</b>；结果 <code>value</code> 是执行局部的，持久层只存 <code>content</code>/<code>error</code>/<code>meta</code>。</li>
+  <li>工具可声明 <code>isConcurrencySafe</code> 加入并行组；否则 <code>exclusive</code> 形成串行屏障；<code>timeoutMs</code> 由 <code>tools/execute</code> wrapper 强制，绝不发给模型。</li>
+  <li>内置 JSON Schema DSL（16 层容器精确推断后回退 <code>JsonValue</code>）与受强制子集的 raw schema 校验器（<code>assertSupportedJsonSchema</code>）。</li>
+</ul>
+
+<h3 id="s5-3">5.3 会话持久化（durability seam）</h3>
+<p>常规做法是"每次变化立刻写库"；dsh 把持久化做成订阅者，异步成批写入。四个要点：</p>
+<ul>
+  <li><b>扩展口</b>：<code>ctx.sessionPersistence</code> 抽象（locate / create / append / 逻辑 load/inspect / 物理后缀读）+ 两个可互换后端：<b>JSONL</b>（每会话一个文件，支持 packed chunk 行）与 <b>SQLite</b>（多会话一库，单调 <code>SCHEMA_VERSION</code>）。</li>
+  <li><b>flush 检查点</b>：<code>session/event</code> 是同步通知，持久化插件先复制事件再异步成批写入；<code>session/flush</code> 是等待的并行栅栏，用于认领下一个普通 turn 前的排序与错误观察点。</li>
+  <li><b>格式拒绝，不迁移</b>：版本落后 = "升级 harness"；版本超前 = "使用更新的 harness 打开"。未知事件类型若未带 <code>ignorable: true</code> 则整体拒绝加载（防止静默丢事件改变后续解读）。</li>
+  <li><b>崩溃恢复</b>：关闭孤儿 turn（合成 <code>interrupted</code>），只作用于冷会话；活会话 <code>load</code> 等待权威内存快照持久化。</li>
+</ul>
+
+<p class="fig-cap">图 13：会话持久化——双后端、flush 栅栏与崩溃恢复</p>
+<div class="mermaid">
+flowchart LR
+  S["Session 内存日志"]
+  EVT["session/event 同步广播"]
+  P["持久化插件：先复制事件"]
+  Q["异步成批写入队列"]
+  J["JSONL 后端&lt;br/&gt;每会话一个文件 · packed chunk 行"]
+  QL["SQLite 后端&lt;br/&gt;多会话一库 · 单调 SCHEMA_VERSION"]
+  F["session/flush 并行栅栏&lt;br/&gt;下一 turn 前等待 + 错误观察点"]
+  NEXT["认领下一个普通 turn"]
+  LOAD["load()：未知事件类型 fail-closed&lt;br/&gt;版本落后 / 超前 = 拒绝，不迁移"]
+  INT["崩溃恢复&lt;br/&gt;合成 turn/end interrupted&lt;br/&gt;保持括号平衡"]
+  S --> EVT --> P --> Q
+  Q --> J
+  Q --> QL
+  J --> F
+  QL --> F
+  F --> NEXT
+  LOAD -.冷会话重载.-> INT
+</div>
+
+<div class="walkthrough">
+<b>示例走查（进程崩溃）</b>：<code>turn/start</code> 已落库但 <code>turn/end</code> 未及写入时进程被杀 → 重启后 JSONL/SQLite 后端的 <code>load()</code> 发现括号不平衡 → 不截断日志，而是追加合成 <code>turn/end { reason: "interrupted" }</code> → 会话回到可继续状态。若日志里混入未知事件类型（未带 <code>ignorable: true</code>），则整体拒绝加载——宁可不打开，也不能静默丢事件改变后续解读。
+</div>
+
+<h3 id="s5-4">5.4 LLM 流式适配扩展口</h3>
+<p>常规做法是"官方 SDK 直接调用，错误各自处理"；dsh 把模型厂商差异收敛到统一流协议里。四个要点：</p>
+<ul>
+  <li><b>统一流协议 <code>StreamChunk</code></b>：<code>block-start / text-delta / reasoning-delta / tool-call-delta / block-end / usage / finish</code>。块索引关联交错增量；<code>block-end</code> 携带完整块；<code>usage</code> 必须在 <code>finish</code> 前、之后不再有值。</li>
+  <li><b>DeepSeek 官方适配器</b>（<code>dsh-llm-deepseek</code>）：直接 <code>fetch</code> + SSE（eventsource-parser）翻译官方 wire 格式。支持 thinking / reasoningEffort / contextWindow / maxTokens 输出上限 / 重试策略（normal|always + 退避）。</li>
+  <li><b>动态配置</b>：baseURL、目录、请求默认值经 thunk <b>每次操作</b>重读；<code>ctx.settings</code> 支持无重启覆盖；<code>ctx.credentials</code> 让 API key <b>每次调用</b>解析（配置只存 <code>apiKeyEnv</code> 引用，绝无明文）。</li>
+  <li><b>两种授权错误路径统一为 <code>LlmFailure</code></b>；上下文溢出统一编码 <code>CONTEXT_WINDOW_EXCEEDED</code>；空响应视为可重试错误 <code>EMPTY_RESPONSE</code>；每次请求携带 app attribution 头。</li>
+</ul>
+
+<p class="fig-cap">图 14：LLM 流式适配——统一 StreamChunk 协议与官方适配器</p>
+<div class="mermaid">
+sequenceDiagram
+  participant D as Driver
+  participant AD as llm-deepseek 适配器
+  participant API as DeepSeek API（SSE）
+  participant S as Session 日志
+  D->>AD: 构造请求（baseURL / 目录 / 默认值每次操作重读）
+  AD->>API: fetch + SSE（eventsource-parser）
+  loop 流式
+    API-->>AD: data: text / reasoning / tool-call delta
+    AD-->>D: StreamChunk：block-start / text-delta / reasoning-delta / tool-call-delta / block-end
+    D->>S: assistant/chunk [durable]
+  end
+  API-->>AD: usage（必须在 finish 之前）
+  API-->>AD: finish（之后不再有值）
+  AD-->>D: 收尾并落 assistant/message
+  D->>S: assistant/message [durable]
+</div>
+
+<div class="walkthrough">
+<b>示例走查（一次带思考的流式回合）</b>：driver 每次请求都经 thunk 重读 <code>ctx.settings</code> 与 <code>ctx.credentials</code>（配置只存 <code>apiKeyEnv</code> 引用，绝无明文）→ 适配器 <code>fetch</code> 官方 SSE 端点 → 逐块翻译成统一 <code>StreamChunk</code>：<code>block-start</code> → <code>reasoning-delta</code>* → <code>text-delta</code>* → <code>tool-call-delta</code> → <code>block-end</code>（携带完整块）→ <code>usage</code> → <code>finish</code>。每次 delta 同步落 <code>assistant/chunk</code>，最后合并成一条 <code>assistant/message</code>。键过期与余额不足两条错误路径统一收口为 <code>LlmFailure</code>，上下文溢出编码 <code>CONTEXT_WINDOW_EXCEEDED</code>。
+</div>
+
+<h3 id="s5-5">5.5 启动与组合（profile / bundle / patch 层）</h3>
+<p class="fig-cap">图 15：boot() 启动流程与组合层叠顺序</p>
+<div class="mermaid">
+flowchart TD
+  BOOT["boot()"]
+  ROOT["创建 root context&lt;br/&gt;暴露 dshHomePath 给 !!js 表达式"]
+  LDR["安装 Loader&lt;br/&gt;mountRootInclude：cordis:include + cordis:group 内建"]
+  PREP["prepare hook（可选，宿主准备）"]
+  MNT["挂载 include 树（并发挂载条目）"]
+  CHK{"断言条目已加载 + 已激活"}
+  OK["返回 root context"]
+  FAIL["dispose 部分 context&lt;br/&gt;标签化错误 + exit(1)"]
+  BOOT --> ROOT --> LDR --> PREP --> MNT --> CHK
+  CHK -->|成功| OK
+  CHK -->|失败| FAIL
+  subgraph LAYERS["组合顺序（层叠到空条目列表）"]
+    L1["各 bundle 层（按 profile 列表顺序）"]
+    L2["profile 级 cordis.patch.yml"]
+    L3["home 级 cordis.patch.yml（压过 profile 级）"]
+    L4["任何 --patch overlay"]
+  end
+  L1 --> L2 --> L3 --> L4
+  L4 --> SEM["补丁语义&lt;br/&gt;按 id 定位整段替换 / insert 插入 / !!js 挂载时插值"]
+</div>
+<p><b>关键设计</b>：组合、配置导出（<code>--dump-config</code>）、标志派发共用同一个补丁算法（include 的 <code>applyEntryPatches</code> 导出为纯函数），因此三者永不漂移。</p>
+
+<hr>
+
+<!-- ============ PART 2 ============ -->
+
+<div class="footer">
+体系化报告子页 · 内容迁移自 DEEPSEEK-HARNESS-DEEP-LEARNING-GUIDE.html（旧版完整报告保留于本目录）<br>
+配套教程手册：docs/chapters/（从 0 到 1 实现核心系统）· 图表由 Mermaid.js 渲染，需联网加载 CDN
+</div>
+</main>
+</div>
+</body>
+</html>

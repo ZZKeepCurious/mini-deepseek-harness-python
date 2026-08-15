@@ -23,22 +23,30 @@
 
 | 能力 | 状态 | 上游对应 |
 |---|---|---|
-| 事件溯源会话（seq、deep-freeze、`derive_messages`、interrupted 修复） | ✅ | `packages/core/session` |
-| 持久化（JSONL / SQLite、flush 栅栏、fail-closed 加载、崩溃恢复） | ✅ | `packages/session/session-persistence` |
+| 事件溯源会话（信封 `{type,seq,time,data}`、1 起 turn/step、deep-freeze、`derive_messages`、interrupted 修复） | ✅ | `packages/core/session` |
+| 持久化（JSONL / SQLite、header + `SESSION_FORMAT_VERSION=0` fail-closed、flush 栅栏、崩溃恢复） | ✅ | `packages/session/session-persistence` |
 | 插件事件总线（emit / waterfall / parallel / serial、作用域、依赖驱动激活） | ✅ | `vendor/cordis` + `core/scope` |
 | 工具注册表 + 执行管线（schema 校验、pre/execute/post、timeout） | ✅ | `packages/core/tools` |
 | Agent Loop（turn/step 状态机、pre-step 拒绝、工具回灌续跑） | ✅ | `core/agent-loop` |
 | LLM 扩展口（StreamChunk 协议、假模型、DeepSeek 官方 SSE 适配器） | ✅ | `llm/llm` + `llm/llm-deepseek` |
-| boot 与组合（`apply_patch` 补丁层叠、启动断言） | ✅ | `packages/boot` |
-| 能力扩展口基础版（沙箱 / 凭据 / 子 agent） | ◐ | capability seams 文档 |
-| 异步总线、真并行工具 + 屏障 | ⏳ | `core/agent-loop` |
-| CLI、YAML 配置、官方 SDK 互操作 | ⏳ | `apps/dsh`、`python/` |
+| 模型请求重试/退避（normal/always 策略、`agent/request-error`、`llm/retry` 审计对） | ✅ | `llm/llm-retry` + `llm/llm-retry-policy` |
+| boot 与组合（YAML/JSON 补丁、`!!js` 环境变量插值、启动断言） | ✅ | `packages/boot` |
+| headless 一次性任务入口（`--profile headless "task"`：stdout 最终文本、退出码按 turn/end reason） | ✅ | `bundle/headless` + `apps/cli` |
+| 启动器选项（`--patch`、`--dump-config` / `--dump-default-config`、只读组合导出） | ✅ | `apps/cli/src/args.ts` |
+| 会话管理 CLI（`miniharness sessions` 列表/恢复/删除；mini 教学扩展） | ✅ | web 表面（上游） |
+| 能力扩展口（沙箱后端 / 凭据四层 / 子 agent ACP+SDK+fork 三通道） | ✅ | capability seams 文档 |
+| 预设 / Agent 干预 / 轨迹折叠 / 动态插件 / 审批 | ✅ | `packages/preset` + `core/agent` + `interaction` |
+| 协议入口（ACP / JSON-RPC SDK / hooks 桥） | ✅ | `acp` + `sdk` + `hooks` |
+| 异步事件总线、真并行工具 + 屏障 | ✅ | `core/agent-loop` |
+| CI（GitHub Actions、Python 3.10~3.13、integration 标签真实 API 测试） | ✅ | — |
+| 官方 SDK 互操作测试 | ⏳ | `python/sdk` |
 
-状态：**63 个单元测试全部通过**（仅标准库）。
+状态：**398 个单元测试全部通过**（纯标准库；YAML 配置需可选 `pyyaml`）。
+
 
 ## 快速开始
 
-要求：Python 3.10+，无需安装任何第三方包。
+要求：Python 3.10+，纯标准库（可选 `pyyaml` 用于 YAML 配置）。
 
 ```sh
 # 跑全部测试
@@ -49,6 +57,15 @@ python -m miniharness.demo
 
 # 假模型多轮对话
 python examples/chat_demo.py
+# 一次性任务（对齐 `dsh --profile headless "task"`，需 DEEPSEEK_API_KEY）
+python -m miniharness.cli --profile headless "run the tests"
+
+# 只读组合导出（对齐 `dsh --dump-config`）
+python -m miniharness.cli --dump-config
+
+# 会话列表 / 恢复 / 删除
+python -m miniharness.cli sessions
+
 ```
 
 ### 接真实 DeepSeek API（可选）
@@ -79,7 +96,7 @@ mini-deepseek-harness-python/
 │   ├── boot.py           # 启动 + 补丁层叠
 │   ├── seams.py          # 沙箱 / 凭据 / 子 agent 扩展口
 │   └── demo.py           # 端到端演示
-├── tests/                # 63 个验收测试（unittest）
+├── tests/                # 84 个验收测试（unittest）
 ├── examples/             # 对话 & 真实 API 示例
 └── docs/
     ├── README.md         # 手册索引（学习地图）

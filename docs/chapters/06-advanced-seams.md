@@ -166,7 +166,23 @@ python -m unittest tests.test_seams -v
 | 凭据 | `CredentialProvider.resolve(key)` | `resolve(ref): ResolvedCredential`（值 + 来源层）+ `describe(ref)`；本地 provider 层：`env` / `file` / `project-env` / `user-env` | 引用是带 brand 的 POSIX 环境变量名语法；每次操作重新解析 ✓ |
 | 子 agent | `SubAgentProvider.spawn(name, prompt)` | `SubagentProvider.start(...)` + `prepareContinuable`（可继续对话）+ `SubagentCapabilities` 能力门（不支持则 `UNSUPPORTED_CAPABILITY` 拒绝） | 六个真实 Provider：in-process / fork / ACP / Codex / Claude Code / dsh-sdk |
 
-## 6.9 手册收尾
+## 6.9 进阶实现：真后端 / 四层凭据 / 远程三通道
+
+基础三件套讲清"换 Provider 不改 Consumer"；进阶三件把每个接缝推向与 dsh 对齐的形态（产出：`miniharness/sandbox_local.py` + `credentials_local.py` + `subagent_providers.py` + `subagent_worker.py`，`tests/test_stage6.py` 49 测试）。
+
+**沙箱真后端**（`sandbox_local.py`，对应上游 `sandbox/sandbox-local`）：按平台选链（linux `bwrap → landlock`、darwin `seatbelt`、win32 `windows-acl`），多候选由功能探测仲裁、单候选免探测；候选全不可用 → `SandboxUnavailableError`（`SANDBOX_UNAVAILABLE`）fail closed，命令绝不裸跑。`confine(argv, policy)` 返回 `ConfinedArgv`：包裹后的 argv + `enforcement`（full/partial）+ 该后端专属的 denial 方言与 runner 失败规则——"命令没跑起来"与"被沙箱拦住"可区分。三个 profile 生成器与上游 `profiles.ts` 逐条对齐（bwrap 挂载、landlock grant、seatbelt SBPL 剖面，可写根与进程内 fs fence 共用 `writable_roots` 同一推导）。Windows 宿主机上 windows-acl runner 缺省探测恒失败（fail-closed 与真实宿主一致）；约定测试经 `internals` 注入钩子验证各链选择、探测仲裁与包裹形状（同上游 `SandboxInternals` 思路）。
+
+**凭据四层**（`credentials_local.py`，对应上游 `credentials-local`）：`env > file > project-env > user-env` 按信任度排序——继承环境只读胜出（CI secret / `-e` 是显式意图且进程内不可编辑）、管理文件层可写（`set`/`unset` 读-改-写补丁单键，外部编辑合并、删掉的条目不残留）、project `.env` 优先于 user `.env`。文档解析严格：非映射根 / 非 POSIX 标识符 key / 非字符串 / 空串值整体拒绝，绝不静默跳过；`describe` 报告 `{configured, source, writable}`（只有 env 层不可写）；env 已提供时 `set`/`unset` 拒绝（写了也被遮蔽成无效果）；POSIX 上组/其他可读的文档读前直接拒绝（Windows 无 mode 可查则跳过）。载体简化：文档用 JSON 替代 YAML（解析语义不变），无跨进程锁与文件 watch。
+
+**子 agent 远程三通道**（`subagent_providers.py` + `subagent_worker.py`，对应上游 `subagent-fork-in-process` / `subagent-acp` / `subagent-dsh-sdk`）：
+
+- **fork**（进程内）：子 agent 以父会话日志的 completed-turn 前缀作 seed（到最后一个 `turn/end` 为止，in-flight 工具回合不平衡不能重放），`Session(seed=...)` 回放 + 自动补 `session/end-seed` 标记——子会话直接继承父上下文。
+- **ACP**（真子进程）：`python -m miniharness.subagent_worker acp` 起独立进程，newline-delimited JSON-RPC over stdio（与上游 `ndJsonStream` 同帧形状）；`initialize → newSession → prompt → cancel → shutdown`；唯一从父读的是 workspace cwd；permission 策略自动应答（reject 默认 / allow），不上报人；事件通知先于响应帧写出（mini 同步载体约定，上游为并发流）。
+- **SDK**（真子进程）：`subagent_worker sdk` 承载 `SdkRuntime`，`initialize → session/prompt`（懒创建会话）→ `shutdown`；assistant 输出经 `session.event` 通知收集。
+
+三者保持同一 Consumer 接口 `spawn(name, prompt) -> SubAgent`：换通道只改 Provider 构造，消费方代码不动。
+
+## 6.10 手册收尾
 
 全部 6 章做完，你应该能用 Python 亲手证明这三件事（报告第 12 节同样强调）：
 
@@ -176,6 +192,6 @@ python -m unittest tests.test_seams -v
 
 如果这三件事你现在都能不查资料写出来，对 dsh 的理解就已经到位了。接下来可以：
 
-- 把 MiniHarness 换成异步（`asyncio` + 真正的 parallel / parallel barrier）
+- 继续第 12 章：把 MiniHarness 换成异步（`asyncio` + 真正的 parallel / parallel barrier）——已完成，见第 12 章
 - 用官方 Python SDK（`deepseek-harness-sdk`）驱动真实 harness，对照你的约定
 - 给 dsh 仓库提第一个插件 PR（`docs/cookbook/adding-a-tool.md`）
