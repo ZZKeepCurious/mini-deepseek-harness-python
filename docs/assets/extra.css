@@ -47,9 +47,9 @@
   margin: 6px 0 0;
 }
 
-/* Mermaid 容器悬停提示 */
-.md-typeset .mermaid { cursor: zoom-in; position: relative; }
-.md-typeset .mermaid:hover::after {
+/* Mermaid 容器悬停提示（渲染前后都生效） */
+.md-typeset .mermaid-source, .md-typeset .mermaid { cursor: zoom-in; position: relative; }
+.md-typeset .mermaid-source:hover::after, .md-typeset .mermaid:hover::after {
   content: "点击放大";
   position: absolute;
   top: 8px;
