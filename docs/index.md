@@ -12,7 +12,6 @@
   - [04 产品面全解读](report/04-product-surface.html)（模式设计、外部入口、Trajectory、干预面、审批、自我修改、resume、plan/goal、压缩与后台）
   - [05 路线图与 Python 复现](report/05-roadmap.html)
   - [06 附录与 HOWTO](report/06-appendix.html)
-  - 旧版完整报告（归档保留）：[DEEPSEEK-HARNESS-DEEP-LEARNING-GUIDE.html](report/DEEPSEEK-HARNESS-DEEP-LEARNING-GUIDE.html)
 - 图表由 Mermaid.js 渲染，需联网加载 CDN。
 
 ## 教程手册（step-by-step · 施工图纸层）

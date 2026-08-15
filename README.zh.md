@@ -14,7 +14,7 @@
 
 两份互补文档：
 
-- **[分析报告](docs/report/DEEPSEEK-HARNESS-DEEP-LEARNING-GUIDE.html)**——对上游仓库的深度剖析：五层架构、`ctx` 服务地图、技术核心、关键流程，全部配 Mermaid 图。
+- **[分析报告](docs/report/index.html)**——对上游仓库的深度剖析：五层架构、`ctx` 服务地图、技术核心、关键流程，全部配 Mermaid 图（首页阅读地图 + 六个主题子页）。
 - **[step-by-step 手册](docs/chapters/)**——系统如何从 0 长出来，一章一个主题：概念 → 最小可运行代码 → 硬性规定/测试 → 检查点练习。
 
 完整路线图见 [ROADMAP.md](ROADMAP.md)。
