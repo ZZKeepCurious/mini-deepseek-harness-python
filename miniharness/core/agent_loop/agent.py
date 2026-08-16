@@ -110,9 +110,14 @@ class AgentLoop:
 
     # ---------- 对外入口 ----------
 
-    def followup(self, content: str, source: str = "user") -> None:
-        """用户输入：先进 inbox，待 pre-step 通过后才 append 进日志。"""
-        message = create_message(
+    def followup(self, content: str | dict, source: str = "user") -> None:
+        """用户输入：先进 inbox，待 pre-step 通过后才 append 进日志。
+
+        content 为字符串时构造文本 user 消息；为 dict 时按预建消息逐字入队
+        （goal 轮次的 goal 来源消息经此喂入，对齐上游 followup(message:
+        UserMessage) 全消息语义；字符串形态是 mini 简化）。
+        """
+        message = content if isinstance(content, dict) else create_message(
             "user", [text_block(content)],
             {"kind": "user"} if source == "user" else {"kind": "plugin", "plugin": source},
         )

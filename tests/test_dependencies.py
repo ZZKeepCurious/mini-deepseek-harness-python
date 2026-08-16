@@ -3,7 +3,7 @@
 用 stdlib AST 静态检查 miniharness/ 包内模块的导入边，钉死分层规则：
 L0 地基  = core/session、core/scope            （两者互不依赖）
 L1 领域  = llm/*、core/tools、core/system_prompt、boot/*   （仅 L0）
-L2 编排  = core/agent_loop、compaction、jobs、plan   （L0 + L1）
+L2 编排  = core/agent_loop、compaction、commands、goal、jobs、plan、skills   （L0 + L1）
 L3 应用  = cli/*、protocol/*、seams/*、preset、extensions、interaction、client
   （L0 ~ L2）
   教学层   = demo.py、example_plugins.py（任意层，但不得被业务模块导入）
@@ -33,8 +33,11 @@ LAYER_UNITS = [
     ("boot", 1),
     ("core.agent_loop", 2),
     ("compaction", 2),
+    ("commands", 2),
+    ("goal", 2),
     ("jobs", 2),
     ("plan", 2),
+    ("skills", 2),
     ("cli", 3),
     ("protocol", 3),
     ("seams", 3),

@@ -8,7 +8,7 @@
 
     - **产出位置**：本章演示的单文件 `session.py` 实为 `core/session/` 包（`session.py` + `invariant.py` + `types.py` + `surface.py` + `repair.py`）。
     - **`Session.append` 签名**：本章为 `append(event: dict)`；实现为 `append(type_, data=None, surfaceOp=None, sourceEventSeqs=None)`（`core/session/session.py:39`），信封 `{type, seq, time, data}` 由 `seq == len(log)` 自动编号。
-    - **事件词汇表**：本章只讲 8 个核心类型；实现 `KNOWN_TYPES` 共 **21 个**（`core/session/types.py`），另含 `request/header`、`session/end-seed`、`approval/asked|decided|policy`、`hook/invoked|result`、`llm/retry|retry-started`、`compaction/start|summary|end`（读真实上游日志遇超集类型时 fail-closed 拒读）。
+    - **事件词汇表**：本章只讲 8 个核心类型；实现 `KNOWN_TYPES` 共 **25 个**（`core/session/types.py`），另含 `request/header`、`session/end-seed`、`approval/asked|decided|policy`、`hook/invoked|result`、`llm/retry|retry-started`、`compaction/start|summary|end`、`plan/mode`、`command/run|done`、`goal/change`（读真实上游日志遇超集类型时 fail-closed 拒读）。
     - **`derive_messages`**：本章是"扁平字符串消息 + 按 role 替换"；实现是 `ContentBlock` 消息对象 + `surfaceOp: {op:'replace', start, end}` 区间遮蔽（`core/session/surface.py:38-59`），replace 遮蔽被替换区间为一个新节点。
     - **`repair_interrupted_turn`**：本章只补 `turn/end` 字符串 reason；实现先为未匹配 tool call 合成 error 结果（`TOOL_NOT_STARTED` / `TOOL_OUTCOME_UNKNOWN`），再补 `step/end` + `turn/end {kind:'interrupted'}`，时间戳复用最后真实事件（`core/session/repair.py:27`）。
     - **"五个硬性规定"**：replace 遮蔽、`session/end-seed` 标记、repair 合成（`{kind:'interrupted'}`）等已由 `tests/test_session.py` 钉死，以测试为最终验收。

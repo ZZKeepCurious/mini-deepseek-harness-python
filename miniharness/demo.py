@@ -18,6 +18,7 @@ from .core.session import Session, create_message, derive_messages, text_block, 
 from .core.system_prompt import install_system_prompt
 from .core.tools import Tool, ToolRegistry
 from .jobs import install_jobs, register_job_tools
+from .skills import install_skills, register_skill_tools
 
 
 def main() -> None:
@@ -38,9 +39,11 @@ def main() -> None:
     apply_retry_planner(ctx)
     install_compaction(ctx)
     install_jobs(ctx)
+    install_skills(ctx)
     install_system_prompt(ctx)
     reg = ToolRegistry(ctx)
     register_job_tools(reg, ctx.inject("jobs"))
+    register_skill_tools(reg, ctx.inject("skills"))
     reg.register(Tool(
         name="bash",
         description="Run a shell command.",

@@ -1,6 +1,6 @@
 # 04 · 产品面全解读
 
-<p class="lead">前三个子页回答"系统是什么、怎么运转"；本页回答"<b>用户/宿主看到的是什么、哪些设计塑造了使用体验</b>"。九个议题，每个都按固定四段式展开：<b>产品体验</b>（使用者看到什么）→ <b>机制</b>（怎么实现）→ <b>源码证据</b>（文件:行号）→ <b>mini 对照</b>（已复现 / 简化 / 规划）。</p>
+<p class="lead">前三个子页回答"系统是什么、怎么运转"；本页回答"<b>用户/宿主看到的是什么、哪些设计塑造了使用体验</b>"。十个议题，每个都按固定四段式展开：<b>产品体验</b>（使用者看到什么）→ <b>机制</b>（怎么实现）→ <b>源码证据</b>（文件:行号）→ <b>mini 对照</b>（已复现 / 简化 / 规划）。</p>
 
 !!! note "定位说明"
     本页内容全部可定位到上游源码或 docs；产品体验的归纳（如四种模式中文名）来自 `apps/cli/config/agent-presets/*/preset.yml` 的 description 字段直译，属上游真实存在。上游存在多处*命名换代*（如审批词汇、包路径），相关澄清见各议题。
@@ -96,7 +96,7 @@ headless 一次性任务入口（`miniharness/cli/headless.py` + `cli/main.py`�
 
 模型请求重试/退避（`miniharness/llm/retry_policy.py` + `miniharness/llm/retry.py` + `core/agent_loop/agent.py` 接线，36 测试，手册 04 章 §4.10）——`agent/request-error` waterfall 扩展点、normal/always 策略、有界指数退避 + 对称抖动、`providerRetryAfterMs`（429 Retry-After）优先、durable `llm/retry` + `llm/retry-started` 审计对；上下文溢出/认证不在默认可重试白名单 → 终局降级，对齐上游 `llm-retry/src/index.ts` 与 `retry-policy.ts`。
 
-YAML 配置 + `!!js` 插值子集（`miniharness/boot/composition.py`，23 测试）——pyyaml 可选依赖双载体、`process.env.<NAME>` 子集（其它表达式 fail loud，简化为不求值 JS）、`.env` 加载（ENOENT 静默/其它 warn/已存在不覆盖）、组合 dump 渲染；启动器选项（`miniharness/cli/main.py`，16 测试）——`--patch` 可重复、`--dump-config`/`--dump-default-config` 互斥且 boot-free、dump 不接受任务参数、default 不接受 `--patch`，行级 `# ==` 来源注释 + `!!js` 原样未求值 + skipped patch warn 不失败 + 单文档可再加载；会话管理子命令（`miniharness/cli/session_cmds.py`，8 测试，mini 教学扩展——上游会话管理在 web 表层；以上 24 项均在 `tests/test_cli.py`）；CI（`.github/workflows/ci.yml`：unittest + Python 3.10~3.13 matrix × ubuntu/windows + demo 冒烟）+ integration 标签真实 API 测试（`tests/test_real_api.py`，`MINIHARNESS_INTEGRATION=1` + key 缺一即跳过）。当前 414 个测试全绿。
+YAML 配置 + `!!js` 插值子集（`miniharness/boot/composition.py`，23 测试）——pyyaml 可选依赖双载体、`process.env.<NAME>` 子集（其它表达式 fail loud，简化为不求值 JS）、`.env` 加载（ENOENT 静默/其它 warn/已存在不覆盖）、组合 dump 渲染；启动器选项（`miniharness/cli/main.py`，16 测试）——`--patch` 可重复、`--dump-config`/`--dump-default-config` 互斥且 boot-free、dump 不接受任务参数、default 不接受 `--patch`，行级 `# ==` 来源注释 + `!!js` 原样未求值 + skipped patch warn 不失败 + 单文档可再加载；会话管理子命令（`miniharness/cli/session_cmds.py`，8 测试，mini 教学扩展——上游会话管理在 web 表层；以上 24 项均在 `tests/test_cli.py`）；CI（`.github/workflows/ci.yml`：unittest + Python 3.10~3.13 matrix × ubuntu/windows + demo 冒烟）+ integration 标签真实 API 测试（`tests/test_real_api.py`，`MINIHARNESS_INTEGRATION=1` + key 缺一即跳过）。当前 625 个测试全绿。
 
 ## 议题 3：Trajectory 轨迹台账
 
@@ -341,18 +341,33 @@ mini 持久化层已复现（JSONL + fail-closed + interrupted 修复），且 `
 
 ### 8.4 mini 对照
 
-mini 已实现 plan 的"log-only 状态 + prompt section 注入"（`miniharness/plan/`，见下方 §8.5）。goal 后置。与手册 09/11 章协同。
+mini 已实现 plan 全链路（状态机 + 审查 UI，`miniharness/plan/`，见下方 §8.5）与 goal 域（事件溯源 + 自动续跑驱动 + 三工具 + `/goal` 命令，`miniharness/goal/`，见 §8.6）。与手册 09/11 章协同。
 
-### 8.5 mini 实现：plan mode 状态机（`miniharness/plan/`，A5）
+### 8.5 mini 实现：plan mode 状态机 + 审查 UI（`miniharness/plan/`，A5 + 议题 8 收官）
 
 对齐上游 `packages/plan/plan-mode/` 的 wire/契约核心：
 
 - **状态只写日志**：唯一事实来源是 `plan/mode {active:boolean}`（log-only、非 surface、整值替换），生效状态 = `fold_plan_mode` 沿日志前缀折叠、最后一条胜出；resume/fork 无需 live mirror。`plan/mode` 已入 KNOWN_TYPES（22/39），seed 回放 fail-closed。
-- **set() 四态**（index.ts:425-445）：`committed`（idle 立即 append）/ `queued`（turn 运行中记 pending，在下一个被接受的 in-turn pre-step 提交）/ `cancelled`（对已 pending 同状态重复选择）/ `noop`（对生效状态重复选择）；被拒绝（reject）或中止的 step 不提交。
+- **set() 四态**（index.ts:425-445）：`committed`（idle 立即 append）/ `queued`（turn 运行中记 pending，在下一个被接受的 in-turn pre-step 提交）/ `cancelled`（反向 pending 选择被清除、生效状态已匹配目标）/ `noop`（选择与生效或已 pending 状态一致）；被拒绝（reject）或中止的 step 不提交。上游同语义：先记 pending 再判 open turn，commit 一律 append。
 - **plan:policy 节**（order 50，index.ts:225-233）：plan mode 生效（含 pending 选择）期间向每次模型请求注入部署方指引；实现经 `core/system_prompt.py` 分节渲染（基底 + 有序非空节，`\n\n` 连接，对齐上游 renderPrompt）。
 - **叙述**：仅当最近一次 request/header 描述另一模式时注入一句 user 消息（idle 经 `agent.inject` 入 inbox，queued 经 pre-step 决策 messages）；模型可见 ⟺ 已记录。
+- **审查 UI**（review.py + projection.py）：`exit_plan_mode` 工具（跨模式保持注册、要求 `# ` 标题的非空 markdown、批准 → 排队 silent 退出在下一个被接受的 in-turn pre-step 提交、Keep planning 是带反馈的失败调用、取消则提示等待）；`/plan` 命令四态文案逐字对齐（index.ts:274-301）；userQuestions 审查通道（ctx 服务 `userQuestions`，`.ask(question, agent)` 回调）；plan 投影单元（session-projection 的 `plan` 键，纯双事件折叠：`command/run`(name='plan') 记录已落盘选择、`plan/mode` 清空 pending）。
+- **命令契约**（`miniharness/commands/`）：`command/run` + `command/done` 按 commandId 配对（log-only 非 surface），命令进入 handler 前先落 run（durable before dispatch）；未命中已注册命令的斜杠行是普通文本；handler 抛错结算为 `kind:'error'`。`command/run|done` 已入 KNOWN_TYPES（24/39）。
 
-mini 简化（教学范围，报告 04 §8 后置）：`/plan` 命令、`exit_plan_mode` 审查工具、session-projection 的 plan 投影单元、userQuestions 均未复现；`set()` 是唯一写入口（编程调用 `install_plan_mode(ctx, config)` 返回的控制器）。`system-prompt` 的 assemble waterfall、contexts/tools 提供器、variables 插值、scope 层叠未复现（仅保留 section 注册/渲染）。`install_plan_mode` 要求 ctx 已提供 systemPrompt 服务（缺失抛 KeyError，fail loud）；装配序：`install_system_prompt` → `install_plan_mode`。
+mini 简化（教学范围，须在文档中标注）：无 canonical value（review 工具直接返回模型可见文本，即上游 output.render 文案）；无 presentCall/presentResult（无 UI 渲染层）；审查为同步回调（上游 async interaction.ask + signal）；userQuestions 无完整 async 对象形状（mini 收敛为 `.ask` 回调契约）。`system-prompt` 的 assemble waterfall、contexts/tools 提供器、variables 插值、scope 层叠未复现（仅保留 section 注册/渲染）。`install_plan_mode` 要求 ctx 已提供 systemPrompt 服务（缺失抛 KeyError，fail loud）；装配序：`install_system_prompt` → `install_plan_mode` →（可选）`install_plan_review`。
+
+### 8.6 mini 实现：goal 域（`miniharness/goal/`，议题 8 收官）
+
+对齐上游 `packages/goal/{goal, goal-round-driver, tool-goal, command-goal}` 的 wire/契约核心：
+
+- **事件溯源**：唯一 durable 事实是 `goal/change`（全快照或 clear 墓碑，version 1）+ 进程内通知 `goal/changed`（`{change: notification}`）；`goal/change` 已入 KNOWN_TYPES（25/39），seed 回放 fail-closed。严格重放 fold：decode 校验 kind/version/操作/字段集，非 create 操作要求精确推进一个 revision 且保持计数器/时间戳（对齐 domain.ts / fold.ts）。
+- **round 驱动**（pull 式 GoalDriver）：宿主在回合边界显式 `continue_rounds(loop)`；每条 round 是 goal 来源 user 消息（`source:{kind:'goal', goalId, revision, round}`）经 `agent.followup()` 入 inbox；pre-step 做 fail-closed reservation 校验（active/armed、revision、round==roundsStarted+1、预算），校验失败 reject → turn 以 `{kind:'blocked'}` 闭合；round 预算用尽自动 block（code `round-limit`）、被拒 block `prompt-rejected`、max-tokens → disarm、aborted → pause。
+- **服务**（GoalService，ctx.goals）：compare-and-set 变更全族（create/edit/pause/resume/complete/block/clear）；错误码与上游一致（GOAL_ALREADY_EXISTS / GOAL_STALE_REVISION / GOAL_INVALID_TRANSITION / GOAL_INVALID_OBJECTIVE / GOAL_INVALID_MAX_ROUNDS / GOAL_INVALID_BLOCK_REASON / GOAL_INVALID_EDIT / GOAL_INVALID_STATE / GOAL_NOT_FOUND）；create 仅当前无目标或 complete 时允许；resume 校验 round 预算余量。
+- **模型工具**（tool-goal）：`get_goal` / `create_goal` / `update_goal`（description、参数 schema、canonical 输出 JSON 逐字对齐）；update 是 compare-and-set（stale ref → GOAL_STALE_REVISION，非法引用 → GOAL_TOOL_INVALID_UPDATE）；blocked 需 `{code:'model-reported', message}` 且 goal 轮次内未达连续轮数阈值（默认 3）时拒绝（GOAL_TOOL_BLOCK_THRESHOLD）；`tool:goal` prompt section（order 114）。
+- **人类命令**（command-goal）：`/goal [<objective>|clear|edit <objective>|pause|resume]`，文案逐字对齐（show / create / edit / pause / resume / clear / 错误提示）。
+- **装配序**（示例 `examples/plan_goal_demo.py`）：`install_system_prompt` → `install_commands` → `install_plan_mode` → `install_plan_review` → `install_goals` → `register_goal_tools` → `install_goal_driver` → `install_goal_commands`。
+
+mini 简化（教学范围，须在文档中标注）：无 agent registry 与 assertLive（不存在 registry 内实例身份检查）；无 Typert remote 边界（remoteExport* 未复现）；push→pull 重构（宿主必须显式调 continue_rounds，上游 turn/end 事件自动续跑）；无 reserved attempt 集与 deferred wrapup 摘要注入；权威判定用"当前 step 在 goal 轮次中"近似（authority.kind==='goal-round'，completionAuthority 模块未复现）；execute 直接返回模型可见 JSON 文本（无 canonical value + native renderer 分离）。
 
 ## 议题 9：上下文压缩与后台作业
 
@@ -407,3 +422,98 @@ mini 简化（教学范围，报告 04 §8 后置）：`/plan` 命令、`exit_pl
 mini 已实现 token 计量与压缩最小版（`llm/token_meter.py` + `compaction/`，装配在 demo/headless/ACP/SDK 入口）：TokenMeter 增量 fold + usage 折入锚（无 system/tools → estimateHeader 恒 0）；BasicCompactionEngine 的 pre-step 压力检查（阈值取 adapter.contextWindow，缺省返回 None 而非抛 TargetPressureConfigError）与 request-error overflow 减容（仅 surface.replaceGeneration 前进才 retry，上限 maxOverflowRetries，成功/回合结束边界惰性复位）；事务 compaction/start→前缀重放摘要→user/message 检查点（surfaceOp replace + sourceEventSeqs）→compaction/end，任何失败恰好补一次带 error 的 compaction/end。简化标注：摘要前缀重放无 KV cache 语义、崩溃孤儿锁 repair 不自动恢复、无 toolResultPruner 可选阶段、`_log_result` 经 print 而非 ctx.logger。
 
 mini 已实现后台作业（`jobs/`，进程内注册表 + 三工具 + 完成 notice，装配在 demo/headless/session_cmds/ACP/SDK 入口）：`LocalJobRegistry` 提供 `ctx.jobs` 服务（start/list/get/read/kill/wait、onJobDone/onJobsChanged、attachController），id 为 `<kind>-N`，owned 作业按会话 id 栅栏、unowned 对任何调用方开放，结算 first-wins 且 waiters/kill/终态 read 置 reported 抑制 notice，`maxConcurrentJobsPerOwner` 默认 10（按精确 owner / unowned 桶计 running+stopping），owner 销毁时 cancel 在飞作业 + 限时排干 + 删除（teardown cancel 抛错 force-fail 只改记录）。模型侧 `job_output`（默认非阻塞读流式增量 / wait 有界、响应以 `[status: ...]` 结尾）、`job_list`（`<id> [<kind>] <status> — <label>`）、`job_kill`（requested / already-finished）；完成 notice 按 `completionDelivery` wakeup（idle owner 开 turn，预算 maxConsecutiveWakes=3，user 输入认领恢复）或 quiet（一律 inject），输出与 notice 按 outputLimitBytes 做 UTF-8 字节封顶。与上游一致：**无 `job/*` 会话事件**、不新增事件类型。简化标注（AGENTS.md 简化清单）：无 scope 链与 agent registry（controller/监听器全局层）、teardown 排干为限时轮询、无 canonical value + native renderer 分离（execute 直接返回模型可见文本）、run_in_background 触发入口未复现（producer 用 JobDoneBox 手动挂账）。
+
+## 议题 10：skills 能力家族——按需加载的指令
+
+### 10.1 产品体验
+
+**模型侧**：会话打开时，若存在模型可调用的 skill 且 `skill` 工具可见，agent 会先收到一条 durable 的目录消息——`<system-reminder>` 里的 `<available_skills>` 块，只列出每个 skill 的名字与一句简介（description 最长 500 字符，超长截断）。模型按名调用 `skill` 工具，拿到该 skill 的全文 `<skill_content>`（正文 + 资源指引），再照做。
+
+**用户侧**：用户可以直接在输入里写 `/名字`（词边界匹配）。命中可用户调用的 skill 时，系统把它的全文渲染成一条 user 消息注入对话，模型直接跟随，无需再走工具。
+
+**渐进披露**：目录只放摘要（省钱），正文按需加载（省事），资源（脚本/素材/URL）由指令内的相对引用按需解析。模型不会在一开始就看到所有 skill 的正文。这与 Anthropic 生态的 Claude Code Agent Skills 同构——`~/.claude/skills/<name>/SKILL.md` + frontmatter + 渐进披露；dsh 的差异在于：多了一层**分层注册表**（host + per-scope）、目录消息是**事件溯源出的 durable 会话消息**（resume/fork/compaction 后仍在），以及**双调用表面**（模型工具 vs 用户手势，可分别开关）。
+
+### 10.2 机制：四包四角色
+
+skills 家族由四个包组成，职责分得很清楚：
+
+- **`dsh-skill`**（Service Definition）：只提供 `ctx.skills` 注册表与渲染原语，不落地任何具体 skill；
+- **`dsh-skill-filesystem`**（Provider）：把本地目录变成 skill 源，注册进 `ctx.skills`；
+- **`dsh-tool-skill`**（Consumer）：目录消息 + `skill` 工具 + `/名字` 手势，模型/用户面对的消费端；
+- **`dsh-skill-badge`**（Provider）：一个内置的"dsh 徽章"skill，示范 source `'bundled'`（rank 600）。
+
+#### 分层注册表（`packages/skill/skill/src/index.ts`）
+
+`ctx.skills` 与 `ctx.tools` 同构：一个 global 层 + 每条 scope 链一层，按"离调用会话最近优先"合并，同名冲突由最近层胜出（index.ts:507-512）。provider 注册进调用方所在的层（host 组合挂的插件进 global，preset 挂的进 preset 层）。`SkillSource` 七桶：`project-dsh` / `project-agents` / `runtime` / `user-dsh` / `user-agents` / `custom` / `bundled`（+ 字符串扩张），`skill` 名字必须是 kebab-case 小写（`^[a-z0-9]+(?:-[a-z0-9]+)*$`，index.ts:20）。
+
+三个观察接口（这是 A6 的核心契约）：
+
+1. `list()`：每个 provider 的候选摘要，**期望是一个"完整发现"的数组**，而不是增量补丁；
+2. `snapshot()`：`{skills, complete}`，complete 为 true 才缓存复用；collect 期间 revision 变动且重试一次（MAX_COLLECT_ATTEMPTS=2）仍不稳定 → 返回 incomplete 且不缓存（index.ts:525-546）；
+3. `get(name)`：全文，不缓存正文（每次重新从 provider 取），所以**正文变更无需版本号/hash/失效通知**。
+
+provider 返回的候选必须通过严格校验（name 合法、description 是字符串等），**非法候选直接抛错 fail fast**（index.ts:642-646），而不是静默过滤。`get()` 若返回的定义名与候选名不符，会精确失效该 provider 并拒绝该条（invalidateEntry，index.ts:629-639）。
+
+#### invocation 策略（双布尔）
+
+每个 skill 携带 `invocation = {modelInvocable, userInvocable}`（index.ts:48），四态齐全：两 false = 禁用；只 model = 模型工具可调、用户手势不可；只 user = 手势可调、目录与工具隐去（`disable-model-invocation` 的 skill 唯一入口）；两 true = 双表面。`get()` 是策略中立的加载原语，由消费方自行判谓词——所以工具与手势对同一个 skill 的可见性可以不同。
+
+#### 渲染（renderSkillContent）
+
+```markdown
+<skill_content name="<escaped-name>">
+<skill_resources>
+<resource-guidance>
+</skill_resources>
+
+<skill_instructions>
+<provider-owned-instruction-body>
+</skill_instructions>
+</skill_content>
+```
+
+XML 转义（escapeText/escapeAttr，index.ts:217-234），资源指引按 provider 类型四种形态：managed（"Resources ... managed by provider"）、directory（"Base directory for this skill: <path>"）、URL、opaque。
+
+#### 文件系统 provider（`packages/skill/skill-filesystem/src/index.ts`）
+
+- **六个 rank 源**（README 表格）：project-dsh `.dsh/skills`（rank 100）、project-agents `.agents/skills`（200）、custom 配置目录（300）、user-dsh `$DSH_HOME/skills`（400）、user-agents `$DSH_AGENTS_HOME/skills`（500）、bundled `$DSH_BUNDLED_SKILL_DIR`（600）；
+- **两种载体**：目录 bundle `<name>/SKILL.md`，或扁平 `<name>.md`；刻意排除嵌套 `**/SKILL.md`（只挖一层）；
+- **frontmatter**（YAML）：必填 `name` / `description`，可选 `whenToUse` / `metadata` / `disable-model-invocation` / `user-invocable`；布尔字段接受 `true/false/yes/no/on/off/1/0`；**camelCase 旧键或非法布尔 → 整条 skill 丢弃（fail-closed）+ warn**（README:57），而不是丢弃该字段退回宽松默认；
+- **主体与目录分离生命周期**：目录由发现时解析 frontmatter 得到；`get()` 每次重读文件取正文，正文改动无需 hash/缓存失效；
+- **watch**：chokidar 观察直接成员增减与 `SKILL.md` 变化，`references/scripts/assets` 等资源目录变化不触发失效；缺失根目录用 `fs.watchFile` 逐段探测；首访工具 `write`/`edit` 会通过 `fs/observed` 同步失效 provider（index.ts:228-234）；
+- **ctx.fs 优先**：有 fs 服务时 listDir/readText/`.git` 探测全走 `ctx.fs`（沙箱/远程落地），无则回退 Node fs（README:43）。
+
+#### 消费端（`packages/skill/tool-skill/src/index.ts`）
+
+- **pre-step 目录**：每个 eligible pre-step 调 `ctx.skills.snapshot()`（index.ts:231-250）；首次非空且 `skill` 工具可见 → 向 enter 决策注入 durable user 消息（`<system-reminder>` 目录模板，index.ts:254-277）；
+- **digest 判变**：目录消息带 `skill-catalog` source（catalog form，`{entries, update?}`），entries 的 sha256 作为 digest 基准（index.ts:328-337）；成员/描述/可见性变化 → append 一条完整替换目录；删光 → 空目录显式退役旧名字（tombstone）；
+- **incomplete 不发**：snapshot 不完整 → 本 pre-step 不发，保留 last-good 目录（index.ts:233-236）；
+- **工具可见性参与 digest**：`skill` 工具被限制/被同名 scoped 影子覆盖时目录整体省略——身份比较用"本插件注册的定义"而不是按名查找（README:15），保证全局挂载与 per-agent 挂载行为一致；
+- **`/名字` 手势**：SKILL_GESTURE 正则只扫 claimed user 消息（index.ts:409, 177-204），命中可 user 调用的 skill 则 `get()` 全文渲染为 user instructions 注入（`skill-invocation` source），同一步内重复手势只注入一次；未知或 user 禁用的名字保持普通文本；
+- **`skill` 工具**：`name` 参数 kebab 校验；错误三态严格区分：`Error: invalid skill name "<name>"` / `Error: skill "<name>" is unknown or no longer available` / `Error: skill "<name>" is not available for model invocation`（index.ts:130-156）。
+
+#### 装配点
+
+- base 组合（host plane）：`skill`（dsh-skill）+ `skill-filesystem` + `skill-badge`（**disabled:true**，packages/bundle/base/cordis.patch.yml:243-245）+ `tool-skill`（237-248）；
+- standard preset 层：`skill-filesystem` + `tool-skill`（standard/agent.cordis.yml:83-87）——provider 与消费端成对进 preset 层；
+- web-app 组合：host 的 `skill-filesystem` 禁用，由 preset 自己拥有本地发现（packages/bundle/web-app/cordis.patch.yml:323-333）。
+
+### 10.3 源码证据
+
+- `packages/skill/skill/src/index.ts:20-34,39,48,147-234,232-271,279-330,391-454,471-546,622-646` —— 注册表、三接口、渲染、校验、失效
+- `packages/skill/skill-filesystem/src/index.ts:36-40,49-89,130,182-234,241` 与 `README.md:15-27,33-59,69-75` —— rank 表、frontmatter、watch、已知局限
+- `packages/skill/tool-skill/src/index.ts:34,61-69,81-160,177-251,254-277,328-337,409` 与 `README.md:11-31,39-63,148-168` —— 目录生命周期、工具错误三态、手势、模板
+- `packages/skill/skill-badge/src/index.ts:17,25,58` 与 `assets/dsh-badge.md` —— bundled 示例 provider
+- `packages/bundle/base/cordis.patch.yml:237-248`、`packages/bundle/web-app/cordis.patch.yml:323-333`、`apps/cli/config/agent-presets/standard/agent.cordis.yml:83-87` —— 装配
+- `docs/subsystems/skills.md` 与 `packages/skill/skill/README.md` —— 设计意图（社区实现按 progressive disclosure，同 Anthropic Agent Skills 理念，见 deepseekdocs.com/en/docs/features/skills）
+
+### 10.4 mini 对照
+
+**已复现**（`miniharness/skills/`，L2 编排层，70 测试；装配在 demo/headless/ACP/SDK 入口）。对上四包的落地：
+
+- `registry.py` —— `SkillRegistry`（`ctx.skills` 服务）：global + scope 链分层注册、`list`/`snapshot`/`get` 三接口、候选校验 fail fast、incomplete 不缓存 + revision 抖动重试一次、collect 缓存按 (cwd, scope 链, revision) 键控 LRU、`invalidate_cache`（revision++ + 清缓存 + `skills/change` 事件，监听器异常容错）、`get()` 定义名不符 → 精确失效该 provider 条目；`renderSkillContent`/escapeText/escapeAttr、digest 均逐字对齐。register_provider 同时接受"create 工厂返回 dict 或对象"两种形态。
+- `filesystem.py` —— `FileSystemSkillProvider`：六类根（project-dsh 100 / project-agents 200 / custom 300 / user-dsh 400 / user-agents 500 / bundled 600，同根 rank 一致靠 providerOrder+localOrder 决胜）、目录 bundle `<name>/SKILL.md` + 扁平 `<name>.md`、`find_project_root`（向上找 `.git`）、user-dsh 根跳过 `.system`；frontmatter 用 pyyaml 可选（无 pyyaml 时用内置极简 YAML 子集解析器，fail-closed：标量/引号/嵌套映射/`-` 列表/块标量，不支持语法抛错→整条忽略）；camelCase 旧键或非法布尔 → fail-closed 丢弃 + warn；`get()` 每次重读文件取正文。
+- `tool_skill.py` —— 消费端：pre-step 目录注入（首次非空且 `skill` 工具可见 → durable user 消息）、digest 判变（成员/描述/可见性变化 → 完整替换目录）、空目录退役 tombstone、incomplete 不发、工具可见性参与 digest（身份比较用本插件注册的定义）、`skill` 工具（错误三态逐字）、`/名字` 手势（skill-invocation source、去重保序、未知/user 禁用名保持普通文本）；手势 listener 先注册、catalog 后注册（waterfall 顺序保证目录在前、手势离答案最近）。
+- 装配：`install_skills(ctx)`（幂等；创建注册表 + 挂 filesystem provider + 两个 pre-step listener），`register_skill_tools(reg, registry)` 把 `skill` 工具注册进现有 ToolRegistry；demo/headless/ACP/SDK 均已接线，standard preset 的 tools 列表保留 `"skills"` 与实现对齐。
+
+**简化标注（AGENTS.md 简化清单）**：无 chokidar watch（每次 pre-step 同步全量扫描，无热失效与正文/目录分离缓存）；无 `ctx.fs` 服务适配（直接 os 读取）；lookup cwd 取 `getattr(agent,'cwd',None)`（mini AgentLoop 无 cwd，None → 不扫项目根）；工具错误经管线捕获后带 `ValueError: ` 前缀（上游 `Error: `）；execute 直接返回渲染文本（无 canonical value + native renderer 分离）；badge 不内置（bundled source 语义保留在 registry，rank 600 由 bundle 根承担）。目录注入为每个会话增加 durable 消息——与 `skill` 工具的可见性联动（digest 含工具可见性）已对齐，不存在"目录与工具不一致"的偏差。

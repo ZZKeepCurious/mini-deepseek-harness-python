@@ -32,6 +32,7 @@ from ..llm import FakeLlmAdapter
 from ..llm.retry import apply_retry_planner
 from ..compaction import install_compaction
 from ..jobs import install_jobs, register_job_tools
+from ..skills import install_skills, register_skill_tools
 from ..core.system_prompt import install_system_prompt
 from ..core.session import Session
 from ..core.tools import ToolRegistry
@@ -206,9 +207,11 @@ class SdkRuntime:
                 apply_retry_planner(ctx)
                 install_compaction(ctx)
                 install_jobs(ctx)
+                install_skills(ctx)
                 install_system_prompt(ctx)
                 reg = ToolRegistry(Context(name="sdk"))
                 register_job_tools(reg, ctx.inject("jobs"))
+                register_skill_tools(reg, ctx.inject("skills"))
                 loop = AgentLoop(Session(session_id), self._adapter, reg, ctx)
                 self._sessions[session_id] = loop
             blocks = params.get("contentBlocks")

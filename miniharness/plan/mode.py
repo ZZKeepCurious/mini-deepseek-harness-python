@@ -14,9 +14,12 @@
   * plan:policy prompt section（order 50）：plan mode 生效期间向每次模型请求
     注入部署方指引文本（index.ts:225-233）。
 
-mini 简化（教学范围，须在文档中标注）：/plan 命令、exit_plan_mode 审查工具、
-session-projection 的 plan 投影单元均未复现（审查 UI 后置，见报告 04 议题 8）；
-set() 是唯一写入口，须编程调用 install_plan_mode 返回的控制器。
+mini 简化（教学范围，须在文档中标注）：审查 UI（/plan 命令、exit_plan_mode 工具、
+userQuestions 审查通道、plan 投影单元）见 review.py / projection.py（install_plan_review
+装配；headless/ACP/SDK 自动化表面不接线）；本模块仍只负责状态机与 prompt section。
+system-prompt 的 assemble waterfall、contexts/tools 提供器、variables 插值、
+scope 层叠未复现（仅保留 section 注册/渲染）。install_plan_mode 要求 ctx 已提供
+systemPrompt 服务（缺失抛 KeyError，fail loud）。
 """
 from __future__ import annotations
 
@@ -165,28 +168,41 @@ class PlanModeController:
             return {"active": active}
         return {"active": active, "pending": pending["active"]}
 
+    def _queue_exit(self, agent: Any) -> None:
+        """exit_plan_mode 批准后排队 silent 选择（narrate=False，结果已叙述）。
+
+        上游 index.ts:379（this.pendingIntents.set(agent.session,
+        {active:false, narrate:false})）：本次 assistant 工具批次的剩余步骤
+        保持 plan 指引，下次被接受的 in-turn pre-step 提交。
+        """
+        self._pending[id(agent.session)] = {"active": False, "narrate": False}
+
     def set(self, agent: Any, active: bool) -> str:
         """选择 plan mode 状态；返回 committed/queued/cancelled/noop（上游 index.ts:425-445）。
 
-        idle 时立即 append（committed）；turn 运行中记 pending，下次被接受的
-        in-turn pre-step 提交（queued）；对已生效状态重复选择为 noop、对已
-        pending 的同状态重复选择为 cancelled。
+        noop = 选择与当前（生效或已 pending）状态一致；
+        queued = turn 运行中记 pending，下次被接受的 in-turn pre-step 提交；
+        cancelled = 反向 pending 选择被清除、生效状态已匹配目标（上游同语义）；
+        committed = 无 open turn，立即 append 并叙述。
         """
         session = agent.session
         fold = fold_plan_mode(session.events)
         pending = self._pending_for(session)
-        if pending is None and fold == active:
+        target = pending["active"] if pending is not None else fold
+        if active == target:
             return "noop"
-        if pending is not None and pending["active"] == active:
-            return "cancelled"
-        self._pending[id(session)] = {"active": active, "narrate": True}
         if _has_open_turn(session.events):
-            return "queued"
-        # 无 open turn：立即提交。pending 覆盖场景（如中止回合后改选回 fold 状态）
-        # 无需再 append，但保留叙述逻辑，与上游一致。
-        if fold != active:
-            session.append("plan/mode", {"active": active})
-        del self._pending[id(session)]
+            self._pending[id(session)] = {"active": active, "narrate": True}
+            return "cancelled" if fold == active else "queued"
+        # 无 open turn
+        if active == fold:
+            if pending is not None:
+                del self._pending[id(session)]
+            return "cancelled"
+        session.append("plan/mode", {"active": active})
+        # 追加成功才清 pending：失败的 durable 写在下次 accepted pre-step 可重试
+        if pending is not None:
+            del self._pending[id(session)]
         narration = self._narration(session, active)
         if narration is not None:
             agent.inject(narration["content"][0]["text"], source="plan-mode")

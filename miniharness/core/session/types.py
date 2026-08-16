@@ -32,6 +32,13 @@ KNOWN_TYPES = frozenset({
     # 计划模式（上游 plan/plan-mode/src/index.ts SessionEventMap，
     # log-only 非 surface、整值替换：{active: boolean}，最后一条胜出）
     "plan/mode",
+    # 斜杠命令生命周期配对（上游 interaction/commands/src/types.ts
+    # SessionEventMap：command/run {commandId, name, args?, source} +
+    # command/done {commandId, kind, text?, sourceEventSeq?}，log-only 非 surface）
+    "command/run", "command/done",
+    # 目标域变更（上游 goal/goal/src/domain.ts SessionEventMap：
+    # goal/change 全快照或 clear 墓碑，version 1，log-only 非 surface）
+    "goal/change",
 })
 
 # 只有这三种事件产生模型消息，可带 surfaceOp（上游 types.ts SurfaceEventType）

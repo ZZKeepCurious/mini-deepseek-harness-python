@@ -42,7 +42,7 @@ flowchart LR
 | [01 项目全景与分层架构](01-overview.md) | 仓库构成、五层架构（应用/组合/能力/框架/外部 SDK） | 14 KB |
 | [02 系统架构与内核](02-architecture.md) | 核心包脊柱、ctx 服务地图、事件体系、外围接入面；技术核心六节（Cordis 模型/事件溯源/扩展口/类型/作用域/门禁） | 35 KB |
 | [03 关键处理流程](03-flows.md) | Turn/Step、工具管线、持久化、LLM 流式、启动组合五条时序 | 21 KB |
-| [04 产品面全解读](04-product-surface.md) | **九大议题**：模式设计、外部入口、Trajectory、干预面、审批、自我修改、resume、plan/goal、压缩与后台 | 60 KB |
+| [04 产品面全解读](04-product-surface.md) | **十大议题**：模式设计、外部入口、Trajectory、干预面、审批、自我修改、resume、plan/goal、压缩与后台、skills | 60 KB |
 | [05 路线图与 Python 复现](05-roadmap.md) | 学习路线、概念映射表、迷你复现清单、实操资源索引 | 26 KB |
 | [06 附录与 HOWTO](06-appendix.md) | Python SDK、添加插件、HOWTO、参考速查、结语 | 25 KB |
 
@@ -77,6 +77,7 @@ flowchart LR
 | `web 表面会话管理（上游无 CLI）` | `cli/session_cmds.py` | 07 | 04 议题 2 |
 | （工程化） | `.github/workflows/ci.yml + tests/test_real_api.py` | 00 | — |
 | `packages/bundle/web-app` | （观察清单，见 ROADMAP） | 07（入口总览） | 04 议题 2 |
+| `packages/skill/（skill + skill-filesystem + tool-skill + skill-badge）` | `skills/`（registry + filesystem + tool_skill） | 13 | 04 议题 10 |
 
 ## 与教程手册的关系
 

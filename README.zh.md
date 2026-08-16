@@ -32,6 +32,9 @@
 | 上下文压缩（pre-step 压力 + `CONTEXT_WINDOW_EXCEEDED` 恢复、surface-replace 检查点事务） | `compaction/compaction-basic` |
 | 后台作业（`job_output`/`job_list`/`job_kill`、完成 notice、per-owner 上限；无 `job/*` 会话事件） | `packages/jobs`（jobs-local + tool-jobs） |
 | plan 模式（log-only `plan/mode` 状态、plan:policy prompt 分节注入、in-turn queued 提交） | `packages/plan/plan-mode` |
+| plan 审查 UI（`/plan` 命令、`exit_plan_mode` 审查工具、userQuestions 通道、plan 投影单元） | `packages/plan/plan-mode` |
+| 命令表面（`/` 命令注册表、`command/run` + `command/done` 配对） | `packages/interaction/commands` |
+| 目标（`goal/change` 事件溯源 fold、GoalService、自动续跑 goal round、`get_goal`/`create_goal`/`update_goal` 三工具、`/goal` 命令） | `packages/goal`（goal + goal-round-driver + tool-goal + command-goal） |
 | system prompt 分节（有序节注册 + 渲染进每次请求） | `core/system-prompt` |
 | boot 与组合（YAML/JSON 补丁、`!!js` 环境变量插值、启动断言） | `packages/boot` |
 | headless 一次性任务入口（`--profile headless "task"`：stdout 最终文本、退出码按 turn/end reason） | `packages/bundle/headless` + `apps/cli` |
@@ -43,9 +46,9 @@
 | 异步事件总线、真并行工具 + 屏障 | `core/agent-loop` |
 | CI（GitHub Actions、Python 3.10~3.13、integration 标签真实 API 测试） | — |
 
-规划中（Agent 层主线）：plan 审查 UI（`/plan`、`exit_plan_mode`）与 goal 后置；SDK 互操作测试与 web 表面降级后置。
+规划中：SDK 互操作测试与 web 表面降级后置。
 
-状态：**555 个单元测试全绿**（纯标准库；可选 `pyyaml` 用于 YAML 配置）。
+状态：**697 个单元测试全绿**（纯标准库；可选 `pyyaml` 用于 YAML 配置）。
 
 ## 快速开始
 
@@ -60,6 +63,9 @@ python -m miniharness.demo
 
 # 假模型多轮对话
 python examples/chat_demo.py
+
+# plan + goal 演示（/plan、exit_plan_mode 审查、/goal、goal round 自动续跑）
+python examples/plan_goal_demo.py --approve
 # 一次性任务（对齐 `dsh --profile headless "task"`，需 DEEPSEEK_API_KEY）
 python -m miniharness.cli --profile headless "run the tests"
 

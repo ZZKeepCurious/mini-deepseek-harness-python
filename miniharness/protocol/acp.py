@@ -37,6 +37,7 @@ from ..llm import FakeLlmAdapter
 from ..llm.retry import apply_retry_planner
 from ..compaction import install_compaction
 from ..jobs import install_jobs, register_job_tools
+from ..skills import install_skills, register_skill_tools
 from ..core.system_prompt import install_system_prompt
 from ..core.agent_loop.agent import AgentLoop
 from ..core.session import Session, text_block, create_message
@@ -154,9 +155,11 @@ class AcpServer:
         apply_retry_planner(ctx)
         install_compaction(ctx)
         install_jobs(ctx)
+        install_skills(ctx)
         install_system_prompt(ctx)
         reg = ToolRegistry(ctx)
         register_job_tools(reg, ctx.inject("jobs"))
+        register_skill_tools(reg, ctx.inject("skills"))
         return AgentLoop(Session(session_id), self._adapter, reg, ctx)
 
     # ---------- prompt ----------

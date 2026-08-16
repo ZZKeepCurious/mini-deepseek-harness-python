@@ -34,6 +34,9 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 | Context compaction (pre-step pressure + `CONTEXT_WINDOW_EXCEEDED` recovery, surface-replace checkpoint transaction) | `compaction/compaction-basic` |
 | Background jobs (`job_output`/`job_list`/`job_kill`, completion notices, per-owner cap; no `job/*` session events) | `packages/jobs` (jobs-local + tool-jobs) |
 | Plan mode (log-only `plan/mode` state, plan:policy prompt-section injection, queued in-turn commit) | `packages/plan/plan-mode` |
+| Plan review UI (`/plan` command, `exit_plan_mode` tool, user-questions channel, plan projection) | `packages/plan/plan-mode` |
+| Command surface (`/`-command registry, `command/run` + `command/done` pairing) | `packages/interaction/commands` |
+| Goals (`goal/change` event-sourced fold, `GoalService`, automatic goal-round continuation, `get_goal`/`create_goal`/`update_goal` tools, `/goal` command) | `packages/goal` (goal + goal-round-driver + tool-goal + command-goal) |
 | System prompt sections (ordered section registration + rendering into each request) | `core/system-prompt` |
 | Boot & composition (YAML/JSON overlays, `!!js` env interpolation, startup assertions) | `packages/boot` |
 | Headless one-shot entry (`--profile headless "task"`: stdout final text, exit code by turn/end reason) | `packages/bundle/headless` + `apps/cli` |
@@ -45,9 +48,9 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 | Async event bus, true parallel tools + barrier | `core/agent-loop` |
 | CI (GitHub Actions, Python 3.10~3.13, integration-tagged real-API tests) | — |
 
-Planned (agent-layer focus): plan-mode review UI (`/plan`, `exit_plan_mode`) and goal are deferred; SDK interop tests and web surface are deprioritized.
+Planned: SDK interop tests and web surface are deprioritized.
 
-Status: **555 unit tests passing** (stdlib only; optional `pyyaml` for YAML config).
+Status: **697 unit tests passing** (stdlib only; optional `pyyaml` for YAML config).
 
 ## Getting started
 
@@ -62,6 +65,9 @@ python -m miniharness.demo
 
 # multi-turn chat with the fake model
 python examples/chat_demo.py
+
+# plan mode + goal demo (/plan, exit_plan_mode review, /goal, goal-round continuation)
+python examples/plan_goal_demo.py --approve
 
 # one-shot task, like `dsh --profile headless "task"` (needs DEEPSEEK_API_KEY)
 python -m miniharness.cli --profile headless "run the tests"

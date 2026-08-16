@@ -213,10 +213,10 @@ class PlanModeControllerTest(unittest.TestCase):
         _seed_open_turn(loop.session)
         self.assertEqual(controller.set(loop, True), "noop")
         self.assertEqual(controller.set(loop, False), "queued")
-        # 对已 pending 的同状态重复选择 → cancelled
-        self.assertEqual(controller.set(loop, False), "cancelled")
-        # pending 覆盖：同 turn 内改选 True → queued
-        self.assertEqual(controller.set(loop, True), "queued")
+        # 对已 pending 的同状态重复选择 → noop（上游：target==active）
+        self.assertEqual(controller.set(loop, False), "noop")
+        # pending 覆盖回 fold 生效态：同 turn 内改选 True → cancelled（上游同语义）
+        self.assertEqual(controller.set(loop, True), "cancelled")
 
     def test_reject_does_not_commit(self):
         ctx, controller, loop, _ = self._make()

@@ -44,9 +44,24 @@ miniharness/
 │   ├── types.py           # 终态 / 常量 / JobDoneBox（done 的 Promise 替身）
 │   ├── registry.py        # LocalJobRegistry（ctx.jobs 服务 + owner 栅栏 + 结算/上限/teardown）
 │   └── tools.py           # job_output / job_list / job_kill + 完成 notice 投递 + 字节封顶
-├── plan/                  # packages/plan/plan-mode
+├── plan/                  # packages/plan/plan-mode（状态机 + 审查 UI + 投影）
 │   ├── config.py          # plan-mode 规格解析（section 校验，fail loud）
-│   └── mode.py            # PlanModeController（log-only plan/mode + plan:policy 节 + pre-step 提交）
+│   ├── mode.py            # PlanModeController（log-only plan/mode + plan:policy 节 + pre-step 提交）
+│   ├── review.py          # exit_plan_mode 工具 + /plan 命令 + userQuestions 审查通道
+│   └── projection.py      # plan 投影单元（command/run ↔ plan/mode 双事件折叠）
+├── commands/              # packages/interaction/commands（命令契约）
+│   └── __init__.py        # CommandRegistry + command/run|done 配对 + parse/route
+├── goal/                  # packages/goal（goal + goal-round-driver + tool-goal + command-goal）
+│   ├── domain.py          # goal/change 事件严格重放 fold + GoalError
+│   ├── service.py         # GoalService（ctx.goals：compare-and-set 变更 + 激活）
+│   ├── prompt.py          # goal round 提示词
+│   ├── driver.py          # pull 式 GoalDriver（pre-step reservation 校验 + continue_rounds）
+│   ├── tools.py           # get_goal / create_goal / update_goal + tool:goal 节
+│   └── commands.py        # /goal 命令表面
+├── skills/                # packages/skill（skill + skill-filesystem + tool-skill）
+│   ├── registry.py        # SkillRegistry（ctx.skills 服务 + 分层注册 + 渲染/digest）
+│   ├── filesystem.py      # FileSystemSkillProvider（六类根 + frontmatter）
+│   └── tool_skill.py      # skill 工具 + /名字 手势 + durable catalog 注入
 ├── boot/                  # packages/boot
 │   ├── boot.py            # 启动 + patch overlay
 │   ├── composition.py     # YAML 配置 / !!js 插值 / dump 渲染
@@ -104,7 +119,10 @@ miniharness/
 | `llm/token_meter.py` | `packages/llm/token-meter/src/` | |
 | `compaction/`（config + region + summarizer + engine） | `packages/compaction/compaction-basic/src/`（config / region / summarizer / index.ts） | 前缀重放无 KV cache 语义、无 toolResultPruner（简化标注见模块 docstring） |
 | `jobs/`（types + registry + tools） | `packages/jobs/`（seam + jobs-local + tool-jobs） | `run_in_background` 触发入口未复现；无 scope 链/agent registry；execute 直接返回渲染文本（简化标注见模块 docstring） |
-| `plan/`（config + mode） | `packages/plan/plan-mode/src/` | 仅 log-only `plan/mode` 状态 + plan:policy 节注入；/plan 命令、exit_plan_mode 审查 UI 未复现（简化标注见模块 docstring） |
+| `plan/`（config + mode + review + projection） | `packages/plan/plan-mode/src/` | 状态机 + plan:policy 节 + 审查 UI（exit_plan_mode / /plan / userQuestions）+ plan 投影；无 canonical value / presentCall（简化标注见模块 docstring） |
+| `commands/` | `packages/interaction/commands/src/` | 命令注册/派发 + `command/run|done` 配对；无 commands/change 通知（简化标注见模块 docstring） |
+| `goal/`（domain + service + prompt + driver + tools + commands） | `packages/goal/`（goal + goal-round-driver + tool-goal + command-goal） | 无 agent registry / Typert remote；push→pull 驱动；权威判定近似（简化标注见模块 docstring） |
+| `skills/`（registry + filesystem + tool_skill） | `packages/skill/`（skill + skill-filesystem + tool-skill） | 无 chokidar watch、无 ctx.fs 适配、错误 `ValueError: ` 前缀、execute 直接返回渲染文本（简化标注见模块 docstring） |
 | `boot/boot.py` | `packages/boot/app-boot` | |
 | `boot/composition.py` | `packages/boot/app-boot` + `apps/cli/src/args.ts` | |
 | `boot/dotenv.py` | `packages/boot/app-boot`（loadEnv） | |
@@ -133,7 +151,7 @@ miniharness/
 |---|---|---|
 | L0 地基 | `core/session`、`core/scope` | 无（两者互不依赖） |
 | L1 领域 | `llm/*`、`core/tools`、`core/system_prompt`、`core/session`、`boot/*` | 仅 L0 |
-| L2 编排 | `core/agent_loop`、`compaction`、`jobs`、`plan` | L0 + L1 |
+| L2 编排 | `core/agent_loop`、`compaction`、`jobs`、`plan`、`commands`、`goal`、`skills` | L0 + L1 |
 | L3 应用与入口 | `cli/*`、`protocol/*`、`seams/*`、`preset`、`extensions`、`interaction`、`client` | L0 ~ L2 |
 | 教学层 | `demo.py`、`example_plugins.py` | 任意层，但不得被业务模块依赖 |
 
@@ -155,4 +173,4 @@ miniharness/
 
 顶层 `__all__` 收敛至 28 项（白名单 + `FakeLlmAdapter`），由 `tests/test_dependencies.py` 断言钉死；白名单每一项都能在 §2 映射表里找到上游对应。
 
-**深路径契约（不在顶层 `__all__`，仅经子包深路径暴露，由 `tests/test_token_meter.py`、`tests/test_compaction.py`、`tests/test_jobs.py`、`tests/test_plan.py` 钉死行为）**：`TokenMeter`、`install_compaction`、`CompactionEngine`、`compact_surface_region`、`select_compactable_range`、`inspect_compaction_entry_state`、`frame_summary`、`install_jobs`、`register_job_tools`、`LocalJobRegistry`、`JobDoneBox`、`fit_with_suffix`、`fit_completion_notice`、`install_system_prompt`、`SystemPromptService`、`install_plan_mode`、`PlanModeController`、`fold_plan_mode`、`resolve_config`。装配约定：`apply_retry_planner(ctx)` → `install_compaction(ctx)` → `install_jobs(ctx)` → `install_system_prompt(ctx)` →（可选）`install_plan_mode(ctx, config)`（均幂等；`CONTEXT_WINDOW_EXCEEDED` 不在重试白名单，由压缩接管；作业工具注册经 `register_job_tools(reg, ctx.inject("jobs"))`，`default_tools` 在 `ctx.jobs` 存在时自动收编；plan 依赖 systemPrompt 服务，缺失 fail loud）。
+**深路径契约（不在顶层 `__all__`，仅经子包深路径暴露，由 `tests/test_token_meter.py`、`tests/test_compaction.py`、`tests/test_jobs.py`、`tests/test_plan.py`、`tests/test_skills.py` 钉死行为）**：`TokenMeter`、`install_compaction`、`CompactionEngine`、`compact_surface_region`、`select_compactable_range`、`inspect_compaction_entry_state`、`frame_summary`、`install_jobs`、`register_job_tools`、`LocalJobRegistry`、`JobDoneBox`、`fit_with_suffix`、`fit_completion_notice`、`install_system_prompt`、`SystemPromptService`、`install_plan_mode`、`PlanModeController`、`fold_plan_mode`、`resolve_config`、`install_skills`、`register_skill_tools`、`SkillRegistry`、`FileSystemSkillProvider`、`SkillTool`、`SKILL_GESTURE`、`render_skill_content`、`parse_skill_file`、`digest_catalog_entries`。装配约定：`apply_retry_planner(ctx)` → `install_compaction(ctx)` → `install_jobs(ctx)` → `install_system_prompt(ctx)` →（可选）`install_plan_mode(ctx, config)` →（可选）`install_skills(ctx)`（均幂等；`CONTEXT_WINDOW_EXCEEDED` 不在重试白名单，由压缩接管；作业工具注册经 `register_job_tools(reg, ctx.inject("jobs"))`，`default_tools` 在 `ctx.jobs` 存在时自动收编；skill 工具注册经 `register_skill_tools(reg, ctx.inject("skills"))`，`default_tools` 在 `ctx.skills` 存在时自动收编；plan 依赖 systemPrompt 服务，缺失 fail loud）。

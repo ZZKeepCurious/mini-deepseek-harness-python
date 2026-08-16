@@ -32,4 +32,12 @@ def default_tools(ctx: Context) -> ToolRegistry:
     if jobs is not None:
         from ..jobs import register_job_tools
         register_job_tools(reg, jobs)
+    # ctx.skills 服务存在时收编 `skill` 工具（catalog/手势注入已由 install_skills 接线）
+    try:
+        skills = ctx.inject("skills")
+    except KeyError:
+        skills = None
+    if skills is not None:
+        from ..skills import register_skill_tools
+        register_skill_tools(reg, skills)
     return reg
