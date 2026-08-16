@@ -27,9 +27,9 @@
 | 工具注册表 + 执行管线（schema 校验、pre/execute/post、timeout） | `packages/core/tools` |
 | Agent Loop（turn/step 状态机、pre-step 拒绝、工具回灌续跑） | `core/agent-loop` |
 | LLM 扩展口（StreamChunk 协议、假模型、DeepSeek 官方 SSE 适配器） | `llm/llm` + `llm/llm-deepseek` |
-| 模型请求重试/退避（normal/always 策略、`agent/request-error`、`llm/retry` 审计对） | `llm/llm-retry` + `llm/llm-retry-policy` |
+| 模型请求重试/退避（normal/always 策略、`agent/request-error`、`llm/retry` 审计对） | `llm/llm-retry` + `llm/llm/src/retry-policy.ts` |
 | boot 与组合（YAML/JSON 补丁、`!!js` 环境变量插值、启动断言） | `packages/boot` |
-| headless 一次性任务入口（`--profile headless "task"`：stdout 最终文本、退出码按 turn/end reason） | `bundle/headless` + `apps/cli` |
+| headless 一次性任务入口（`--profile headless "task"`：stdout 最终文本、退出码按 turn/end reason） | `packages/bundle/headless` + `apps/cli` |
 | 启动器选项（`--patch`、`--dump-config` / `--dump-default-config`、只读组合导出） | `apps/cli/src/args.ts` |
 | 会话管理 CLI（`miniharness sessions` 列表/恢复/删除；mini 教学扩展） | web 表面（上游） |
 | 能力扩展口（沙箱后端 / 凭据四层 / 子 agent ACP+SDK+fork 三通道） | capability seams 文档 |
@@ -114,10 +114,10 @@ mini-deepseek-harness-python/
 ├── tests/                   # 验收测试（unittest）
 ├── examples/                # 对话 & 真实 API 示例
 └── docs/
-    ├── README.md            # 手册索引（学习地图）
+    ├── index.md            # 手册索引（学习地图）
     ├── architecture.md      # 架构说明与上游对应
     ├── chapters/            # 00-setup ~ 12-handbook 教程
-    └── report/              # 分析报告（Mermaid 图）
+    └── report/              # 分析报告（MkDocs Markdown + Mermaid 图）
 ```
 
 ## 致谢

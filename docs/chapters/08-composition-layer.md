@@ -36,7 +36,7 @@ realm 规则的直接后果（`apps/cli/config/agent-presets/standard/agent.cord
 
 1. **include 展开**：组合里 `include: 'file.yml'` 的行先被替换成目标文件的内容（递归），这是"一个 preset 引用共享片段"的机制；
 2. **插件加载**：每条 entry 的 `plugin` 字段导入真实模块，取回 `inject`/`provides`/`apply` 元数据；
-3. **结算**：把整棵树交给插件管理器，按依赖激活——这正是 mini 第 2 章 `PluginManager` 做的事（`miniharness/bus.py`），只是上游还有 scope/fiber/carrier 的完整实现。
+3. **结算**：把整棵树交给插件管理器，按依赖激活——这正是 mini 第 2 章 `PluginManager` 做的事（`miniharness/core/scope.py`），只是上游还有 scope/fiber/carrier 的完整实现。
 
 ### 8.2.3 preset roster：目录列表即名单
 
@@ -49,10 +49,10 @@ realm 规则的直接后果（`apps/cli/config/agent-presets/standard/agent.cord
 
 ## 8.3 mini 复现：preset roster 与挂载
 
-mini 没有 YAML 解析器（纯 stdlib），所以 preset 用 JSON 承载（载体简化，契约对齐）。目录结构：
+mini 组合层支持 YAML（`boot/composition.py` 的 pyyaml 可选依赖，缺省退化 JSON）；preset 清单用 JSON 承载（载体简化，契约对齐）。目录结构：
 
 ```
-miniharness/presets/
+miniharness/preset/
 ├── standard/preset.json    # 标准模式：8 工具 + 运行时上下文
 └── minimal/preset.json     # 极简模式：2 工具 + fixed-prompt（complete: true）
 ```

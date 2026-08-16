@@ -91,13 +91,18 @@ class Tool:
 
 @dataclass(frozen=True)
 class ToolResult:
-    """冻结的权威结果：ok / content 是执行局部的，isError 是规范化的。"""
+    """冻结的权威结果：ok / content 是执行局部的，isError 是规范化的。
+
+    error_info：可选 {name, code}，仅当存在时写入 tool/result 的 error
+    字段（对齐上游 llm/src/types.ts:295 —— error.info 存在才携带）。
+    """
     ok: bool
     content: Any = None
     is_error: bool = False
     error: str | None = None
     meta: dict = field(default_factory=dict)
     _aborted: bool = field(default=False, repr=False, compare=False)
+    error_info: dict | None = field(default=None, repr=False, compare=False)
 
 
 # ---------- 作用域化注册表 ----------
@@ -189,7 +194,9 @@ def pipeline_policy(
         return ToolResult(ok=False, is_error=True, error="; ".join(schema_errors))
 
     decision = ctx.waterfall("tools/pre-execute", {"tool": tool.name, "args": frozen_args})
-    verdict = decision.get("verdict", "allow") if isinstance(decision, dict) else "allow"
+    # 对齐上游 PreToolDecision：{kind:'allow'} / {kind:'deny', reason} / {kind:'ask', reason?}
+    # （tools/src/index.ts:588-591；hooks 插件产出的正是 kind 形状）
+    verdict = decision.get("kind", "allow") if isinstance(decision, dict) else "allow"
     if verdict == "deny":
         return ToolResult(ok=False, is_error=True, error="denied by tools/pre-execute")
     if verdict == "ask":
@@ -198,7 +205,7 @@ def pipeline_policy(
             return ToolResult(ok=False, is_error=True, error="approval refused")
 
     guard = ctx.waterfall("tools/guards", {"tool": tool.name, "args": frozen_args})
-    guard_verdict = guard.get("verdict", "allow") if isinstance(guard, dict) else "allow"
+    guard_verdict = guard.get("kind", "allow") if isinstance(guard, dict) else "allow"
     if guard_verdict == "deny":
         return ToolResult(ok=False, is_error=True, error="denied by monotonic guard")
     return None
@@ -214,7 +221,8 @@ async def pipeline_policy_async(
         return ToolResult(ok=False, is_error=True, error="; ".join(schema_errors))
 
     decision = await ctx.awaterfall("tools/pre-execute", {"tool": tool.name, "args": frozen_args})
-    verdict = decision.get("verdict", "allow") if isinstance(decision, dict) else "allow"
+    # 对齐上游 PreToolDecision：{kind:'allow'} / {kind:'deny', reason} / {kind:'ask', reason?}
+    verdict = decision.get("kind", "allow") if isinstance(decision, dict) else "allow"
     if verdict == "deny":
         return ToolResult(ok=False, is_error=True, error="denied by tools/pre-execute")
     if verdict == "ask":
@@ -223,7 +231,7 @@ async def pipeline_policy_async(
             return ToolResult(ok=False, is_error=True, error="approval refused")
 
     guard = await ctx.awaterfall("tools/guards", {"tool": tool.name, "args": frozen_args})
-    guard_verdict = guard.get("verdict", "allow") if isinstance(guard, dict) else "allow"
+    guard_verdict = guard.get("kind", "allow") if isinstance(guard, dict) else "allow"
     if guard_verdict == "deny":
         return ToolResult(ok=False, is_error=True, error="denied by monotonic guard")
     return None
@@ -256,8 +264,16 @@ def pipeline_body(
     raw = box.get("value")
     post = ctx.waterfall("tools/post-execute", {"tool": tool.name, "result": raw})
     if isinstance(post, dict) and post.get("action") == "block":
-        return None, RuntimeError(post.get("feedback", "blocked by tools/post-execute"))
+        # 对齐上游：block decision 的 feedback 是 ContentBlock[]（text 块）
+        return None, RuntimeError(_feedback_text(post.get("feedback", "blocked by tools/post-execute")))
     return raw, box.get("error")
+
+
+def _feedback_text(feedback: Any) -> str:
+    """post_tool block feedback（ContentBlock[] 或字符串）→ 错误文本。"""
+    if isinstance(feedback, (list, tuple)):
+        return "".join(b.get("text", "") for b in feedback if isinstance(b, dict) and b.get("type") == "text") or str(feedback)
+    return str(feedback)
 
 
 def run_pipeline(ctx: Context, tool: Tool, args: dict, exec_: ToolExec | None = None) -> ToolResult:
@@ -326,7 +342,8 @@ async def pipeline_async_body(
     # post-execute 回事件循环（与上游 finalize 在事件循环跑一致）
     post = await ctx.awaterfall("tools/post-execute", {"tool": tool.name, "result": raw})
     if isinstance(post, dict) and post.get("action") == "block":
-        error = RuntimeError(post.get("feedback", "blocked by tools/post-execute"))
+        # 对齐上游：block decision 的 feedback 是 ContentBlock[]（text 块）
+        error = RuntimeError(_feedback_text(post.get("feedback", "blocked by tools/post-execute")))
 
     if error is not None:
         e = error

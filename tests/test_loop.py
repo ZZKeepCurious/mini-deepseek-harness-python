@@ -78,7 +78,7 @@ class TestLoop(unittest.TestCase):
 
     def test_rejected_pre_step_blocked_turn(self):
         session, loop, _ = _make_env()
-        loop.ctx.on("agent/pre-step", lambda p, nxt: {"verdict": "reject"})
+        loop.ctx.on("agent/pre-step", lambda p, nxt: {"kind": "reject"})
         loop.followup("危险操作")
         types = [e["type"] for e in session.events]
         self.assertIn("turn/start", types)
@@ -86,6 +86,32 @@ class TestLoop(unittest.TestCase):
         self.assertNotIn("step/start", types)
         # 上游：pre-step 拒绝 → turn 以 {kind:'blocked'} 结束（agent.ts）
         self.assertEqual(session.events[-1]["data"]["reason"], {"kind": "blocked"})
+        self.assertEqual(loop.status, "idle")
+
+    def test_reject_after_tool_call_resets_continue(self):
+        """pre-step 拒绝必须复位 _continue：先前有工具调用（_continue=True）
+        时拒绝即终局，泵循环不得再跑无输入 step（上游 agent.ts:267-269）。"""
+        session, loop, adapter = _make_env(
+            tool_call={"name": "bash", "arguments": {"cmd": "ls"}}
+        )
+
+        def reject_when(p, nxt):
+            msgs = p.get("messages") or []
+            if msgs and msgs[0]["content"][0]["text"] == "危险操作":
+                return {"kind": "reject"}
+            return nxt()
+
+        loop.ctx.on("agent/pre-step", reject_when)
+
+        def execute(args, e):
+            loop.inject("危险操作")  # 工具执行期间注入 → reject 时 _continue 仍为 True
+            return "ok"
+
+        loop.tools.resolve("bash").execute = execute
+        loop.followup("先跑个命令")
+        # 回合以 blocked 闭合，不再跑无输入 step（修复前会再请求模型一次）
+        self.assertEqual(session.events[-1]["data"]["reason"], {"kind": "blocked"})
+        self.assertEqual(adapter.calls, 1)
         self.assertEqual(loop.status, "idle")
 
     def test_unknown_tool_produces_error_result(self):
@@ -130,7 +156,7 @@ class TestLoop(unittest.TestCase):
     def test_stream_chunk_protocol_invariants(self):
         adapter = FakeLlmAdapter(tool_call={"name": "bash", "arguments": {}})
         chunks = list(adapter.stream([], []))
-        kinds = [c["kind"] for c in chunks]
+        kinds = [c["type"] for c in chunks]
         self.assertIn("finish", kinds)
         self.assertEqual(kinds[-1], "finish")
         for c in chunks:
@@ -154,7 +180,7 @@ class TestLoop(unittest.TestCase):
         types = [e["type"] for e in session.events]
         self.assertEqual(types[-1], "turn/end")
         self.assertEqual(session.events[-1]["data"]["reason"]["kind"], "error")
-        self.assertEqual(session.events[-1]["data"]["reason"]["failure"]["code"], "RATE_LIMIT")
+        self.assertEqual(session.events[-1]["data"]["reason"]["error"]["code"], "RATE_LIMIT")
         self.assertEqual(types.count("step/end"), 1)
         self.assertEqual(turn_balance(session.events), 0)
 

@@ -63,7 +63,7 @@
 !!! success "升级说明"
     本节已升级为独立的引导式手册：从 0 到 1 实现核心系统的完整 step-by-step 教程（每章 = 概念讲解 → 最小可运行 Python 代码 → 逐段解释 → 硬性规定/测试 → 检查点练习）位于仓库的 <span class="path">docs/chapters/</span>（索引见 <span class="path">docs/index.md</span> 首页章节表），配套可运行代码包 <span class="path">miniharness/</span>。本表是手册的骨架索引。
 
-建议用 5 个递进的项目把核心吃透。每个项目都要**配测试 + 配 README**，最后能跑通一个"文本 + 一个工具 + 会话持久化"的端到端 demo。
+建议用 6 个递进的项目把核心吃透。每个项目都要**配测试 + 配 README**，最后能跑通一个"文本 + 一个工具 + 会话持久化"的端到端 demo。
 
 <div class="grid2">
 

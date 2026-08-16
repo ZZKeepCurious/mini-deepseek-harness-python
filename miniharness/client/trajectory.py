@@ -9,7 +9,7 @@
   * 保留边界：Turn / Step / Request 边界保留因果结构（不拍平成裸记录流）
   * 产物 TrajectorySnapshot = { eventNodes, eventLocations, requests,
     callSchemas, partial, runningCalls }（trajectory-contract.ts:60-68）
-  * headless 的 summarize（miniharness/headless.py）是最简投影（只拼 text 块），
+  * headless 的 summarize（miniharness/cli/headless.py）是最简投影（只拼 text 块），
     本模块是其向完整折叠的演进
 
 载体简化说明：上游在浏览器端折叠并物化每 target 快照（虚拟化/增量索引属 UI）；

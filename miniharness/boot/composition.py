@@ -1,4 +1,4 @@
-"""第 5/9 章补充：YAML 配置载体 + !!js 表达式子集 + 组合 dump 渲染。
+"""第 5/7 章补充：YAML 配置载体 + !!js 表达式子集 + 组合 dump 渲染。
 
 对应 dsh 真实源码：
 - packages/boot/app-boot/src/index.ts（loadEnv / loadOverlayPatches）

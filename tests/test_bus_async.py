@@ -58,7 +58,7 @@ class TestAWaterfall(unittest.TestCase):
         ctx = Context()
 
         async def blocker(p, nxt):
-            return {"verdict": "deny"}
+            return {"kind": "deny"}
 
         async def never_reached(p, nxt):
             raise AssertionError("短路后不应被调用")
@@ -66,7 +66,7 @@ class TestAWaterfall(unittest.TestCase):
         ctx.on("w", blocker)
         ctx.on("w", never_reached)
         result = asyncio.run(ctx.awaterfall("w", {"v": 1}))
-        self.assertEqual(result, {"verdict": "deny"})
+        self.assertEqual(result, {"kind": "deny"})
 
     def test_async_delegation_and_sync_middleware(self):
         ctx = Context()

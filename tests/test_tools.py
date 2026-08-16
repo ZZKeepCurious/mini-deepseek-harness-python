@@ -92,7 +92,7 @@ class TestPipeline(unittest.TestCase):
 
     def test_deny_by_pre_execute(self):
         ctx = Context()
-        ctx.on("tools/pre-execute", lambda p, nxt: {"verdict": "deny"})
+        ctx.on("tools/pre-execute", lambda p, nxt: {"kind": "deny"})
         tool = _make(lambda a, e: "ran")
         result = run_pipeline(ctx, tool, {})
         self.assertTrue(result.is_error)
@@ -100,12 +100,12 @@ class TestPipeline(unittest.TestCase):
 
     def test_ask_approval_flow(self):
         ctx = Context()
-        ctx.on("tools/pre-execute", lambda p, nxt: {"verdict": "ask"})
+        ctx.on("tools/pre-execute", lambda p, nxt: {"kind": "ask"})
         ctx.on("tools/ask", lambda p, nxt: True)
         result = run_pipeline(ctx, _make(lambda a, e: "ok"), {})
         self.assertTrue(result.ok)
         ctx2 = Context()
-        ctx2.on("tools/pre-execute", lambda p, nxt: {"verdict": "ask"})
+        ctx2.on("tools/pre-execute", lambda p, nxt: {"kind": "ask"})
         ctx2.on("tools/ask", lambda p, nxt: False)
         result2 = run_pipeline(ctx2, _make(lambda a, e: "ok"), {})
         self.assertTrue(result2.is_error)

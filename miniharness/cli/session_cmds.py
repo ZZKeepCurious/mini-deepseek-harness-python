@@ -119,8 +119,8 @@ def resume_session(
     text, reason = summarize(session.events, first_seq)
     stdout.write(text + "\n")
     if reason is not None and reason.get("kind") == "error":
-        failure = reason.get("failure") or {}
-        stderr.write(f"dsh: {failure.get('code', 'UNKNOWN')}: {failure.get('message', '')}\n")
+        error = reason.get("error") or {}
+        stderr.write(f"dsh: {error.get('code', 'UNKNOWN')}: {error.get('message', '')}\n")
     exit_fn(0 if (reason is not None and reason.get("kind") == "completed") else 1)
 
 

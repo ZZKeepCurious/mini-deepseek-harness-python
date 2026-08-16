@@ -34,11 +34,23 @@ class TestDynamicPlugin(unittest.TestCase):
         with self.assertRaises(KeyError):
             self.registry.run("pkg-999")
 
-    def test_run_twice_rejected(self):
-        self.registry.define("new", "s", provides=["svc"], apply=lambda ctx: None)
-        self.registry.run("pkg-1")
-        with self.assertRaises(RuntimeError):
-            self.registry.run("pkg-1")
+    def test_run_twice_replaces_old_run(self):
+        # 对齐上游 cordis-host-runner（index.ts:842）：运行中再 run =
+        # retract 旧 run 再激活新 run（replace 语义，非拒绝）
+        calls = {"n": 0}
+        self.registry.define("new", "s", provides=["svc"],
+                             apply=lambda ctx: ctx.provide(
+                                 "svc", lambda: (calls.__setitem__("n", calls["n"] + 1) or calls["n"])))
+        run1 = self.registry.run("pkg-1")
+        self.assertEqual(self.registry.invoke(run1["runId"], "svc"), 1)
+        run2 = self.registry.run("pkg-1")
+        self.assertNotEqual(run1["runId"], run2["runId"])
+        # 旧 run 已 retract：服务消失
+        with self.assertRaises(KeyError):
+            self.registry.invoke(run1["runId"], "svc")
+        # 新 run 生效
+        self.assertEqual(self.registry.invoke(run2["runId"], "svc"), 2)
+        self.assertEqual(self.registry.query("pkg-1")["running"], True)
 
     def test_stop_disposes_scope_and_service_vanishes(self):
         self.registry.define("new", "s", provides=["svc"],
@@ -49,16 +61,23 @@ class TestDynamicPlugin(unittest.TestCase):
         with self.assertRaises(KeyError):
             self.registry.invoke(run["runId"], "svc")
 
-    def test_undefine_requires_stop_first(self):
-        self.registry.define("new", "s", provides=["svc"], apply=lambda ctx: None)
+    def test_undefine_auto_retracts_running(self):
+        # 对齐上游（index.ts:215-218）：运行中 undefine = 自动 retract 后删除，
+        # 返回 {ok:true, wasRunning}
+        self.registry.define("new", "s", provides=["svc"],
+                             apply=lambda ctx: ctx.provide("svc", lambda: "alive"))
         self.registry.run("pkg-1")
-        with self.assertRaises(RuntimeError):
-            self.registry.undefine("pkg-1")
-        self.registry.stop("run-1")
-        self.registry.undefine("pkg-1")
+        outcome = self.registry.undefine("pkg-1")
+        self.assertEqual(outcome, {"ok": True, "wasRunning": True})
         self.assertNotIn("pkg-1", self.registry.list())
         with self.assertRaises(KeyError):
             self.registry.run("pkg-1")
+
+    def test_undefine_missing_returns_plugin_missing(self):
+        # 对齐上游：缺失不抛错，返回 {ok:false, reason:'plugin-missing'}
+        outcome = self.registry.undefine("pkg-999")
+        self.assertEqual(outcome["ok"], False)
+        self.assertEqual(outcome["reason"], "plugin-missing")
 
     def test_process_global_conflict_rejected(self):
         self.host.provide("session-persistence", object())

@@ -30,7 +30,6 @@
   - [04 产品面全解读](report/04-product-surface.md)（模式设计、外部入口、Trajectory、干预面、审批、自我修改、resume、plan/goal、压缩与后台）
   - [05 路线图与 Python 复现](report/05-roadmap.md)
   - [06 附录与 HOWTO](report/06-appendix.md)
-- 原始 HTML 版已存档：`mini-report-html-archive/`（工作区同级）。
 
 ## 教程手册（step-by-step · 施工图纸层）
 
@@ -90,7 +89,7 @@ python -m miniharness.demo
 - **报告**（Markdown 体系，站点已统一为 MkDocs）回答"系统长什么样、为什么这样设计"：分层架构、ctx 服务地图、技术核心、关键流程、**产品面九大议题**（模式/preset、外部入口、Trajectory、干预面、审批、自我修改、resume、plan/goal、压缩与后台）——全部配 Mermaid 图，按主题分页。
 - **本手册**回答"系统怎么从零长出来"：一章一个主题，代码逐步构建，测试即硬性规定。
 - 报告 `index.md` 的四维对照表（上游包 ↔ mini 模块 ↔ 手册章节 ↔ 报告页面）是定位各主题的索引。
-- 报告第二部分 §7.3 的 5 个复现项目清单，就是本手册 01~05 章的骨架索引。
+- 报告第二部分 §7.3 的 6 个复现项目清单，就是本手册 01~05 章的骨架索引。
 
 ## 学完你能做到什么
 

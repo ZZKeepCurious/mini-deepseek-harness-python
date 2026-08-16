@@ -67,7 +67,7 @@ flowchart LR
 | Web | `ctx.web` | search / fetch | `web_search` 等 |
 | Skills | `ctx.skills` | local | `skill` 目录/加载工具 |
 | 持久化 | `ctx.sessionPersistence` | JSONL / SQLite | —（订阅 `session/event`） |
-| 审批/交互 | `ctx.approval` / `ctx.askUser` | — | —（`tools/pre-execute` 拦截） |
+| 审批/交互 | `ctx.approval` / `ctx.userQuestions`（`ask()` API） | — | —（`tools/pre-execute` 拦截） |
 | 凭据 | `ctx.credentials` | env-over-.env | —（按操作解析） |
 | 设置 | `ctx.settings` | file 后端 | —（配置热更新） |
 | 后台任务 | `ctx.jobs` | — | `job_*` 控制工具 |

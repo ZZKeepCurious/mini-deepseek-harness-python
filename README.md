@@ -29,9 +29,9 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 | Tool registry + execution pipeline (schema validation, pre/execute/post, timeout) | `packages/core/tools` |
 | Agent loop (turn/step state machine, pre-step rejection, tool-feedback continuation) | `core/agent-loop` |
 | LLM seam (StreamChunk protocol, fake adapter, official DeepSeek SSE adapter) | `llm/llm` + `llm/llm-deepseek` |
-| Model request retry / backoff (normal/always policy, `agent/request-error`, `llm/retry` audit pair) | `llm/llm-retry` + `llm/llm-retry-policy` |
+| Model request retry / backoff (normal/always policy, `agent/request-error`, `llm/retry` audit pair) | `llm/llm-retry` + `llm/llm/src/retry-policy.ts` |
 | Boot & composition (YAML/JSON overlays, `!!js` env interpolation, startup assertions) | `packages/boot` |
-| Headless one-shot entry (`--profile headless "task"`: stdout final text, exit code by turn/end reason) | `bundle/headless` + `apps/cli` |
+| Headless one-shot entry (`--profile headless "task"`: stdout final text, exit code by turn/end reason) | `packages/bundle/headless` + `apps/cli` |
 | Launcher options (`--patch`, `--dump-config` / `--dump-default-config`, read-only composition dump) | `apps/cli/src/args.ts` |
 | Session management CLI (`miniharness sessions` list/resume/delete; mini teaching extension) | web surface (upstream) |
 | Capability seams (sandbox backends / credential layers / subagent ACP+SDK+fork channels) | capability seams docs |
@@ -116,10 +116,10 @@ mini-deepseek-harness-python/
 ├── tests/                   # acceptance tests (unittest)
 ├── examples/                # chat & real-API demos
 └── docs/
-    ├── README.md            # handbook index (learning map)
+    ├── index.md            # handbook index (learning map)
     ├── architecture.md      # architecture + upstream mapping
     ├── chapters/            # 00-setup ~ 12-handbook tutorials
-    └── report/              # analysis report (HTML, Mermaid diagrams)
+    └── report/              # analysis report (MkDocs Markdown, Mermaid diagrams)
 ```
 
 ## Acknowledgements

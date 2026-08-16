@@ -1,7 +1,17 @@
 ﻿# 第 1 章：事件溯源会话（Event-Sourced Session）
 
 > 对应 dsh 真实源码：`packages/core/session`（`docs/subsystems/session.md`）
-> 前置：第 00 章。产出文件：`miniharness/miniharness/session.py` + `tests/test_session.py`
+> 前置：第 00 章。产出文件：`miniharness/core/session/`（包）+ `tests/test_session.py`
+
+!!! warning "早期简化形态"
+    本章代码为**教学简化形态**，与当前实现存在以下差异（学习时以当前实现为准，见 00-setup §0.5 简化表与 AGENTS.md 已核实清单）：
+
+    - **产出位置**：本章演示的单文件 `session.py` 实为 `core/session/` 包（`session.py` + `invariant.py` + `types.py` + `surface.py` + `repair.py`）。
+    - **`Session.append` 签名**：本章为 `append(event: dict)`；实现为 `append(type_, data=None, surfaceOp=None, sourceEventSeqs=None)`（`core/session/session.py:39`），信封 `{type, seq, time, data}` 由 `seq == len(log)` 自动编号。
+    - **事件词汇表**：本章只讲 8 个核心类型；实现 `KNOWN_TYPES` 共 **16 个**（`core/session/types.py`），另含 `request/header`、`session/end-seed`、`approval/asked|decided|policy`、`hook/invoked|result`、`llm/retry|retry-started`（读真实上游日志遇超集类型时 fail-closed 拒读）。
+    - **`derive_messages`**：本章是"扁平字符串消息 + 按 role 替换"；实现是 `ContentBlock` 消息对象 + `surfaceOp: {op:'replace', start, end}` 区间遮蔽（`core/session/surface.py:38-59`），replace 遮蔽被替换区间为一个新节点。
+    - **`repair_interrupted_turn`**：本章只补 `turn/end` 字符串 reason；实现先为未匹配 tool call 合成 error 结果（`TOOL_NOT_STARTED` / `TOOL_OUTCOME_UNKNOWN`），再补 `step/end` + `turn/end {kind:'interrupted'}`，时间戳复用最后真实事件（`core/session/repair.py:27`）。
+    - **"五个硬性规定"**：replace 遮蔽、`session/end-seed` 标记、repair 合成（`{kind:'interrupted'}`）等已由 `tests/test_session.py` 钉死，以测试为最终验收。
 
 ## 1.1 这一章要做什么，以及为什么它是整个框架的地基
 

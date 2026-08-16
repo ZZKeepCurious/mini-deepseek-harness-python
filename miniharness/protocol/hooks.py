@@ -1,4 +1,4 @@
-"""第 12 章：hooks 桥 —— Claude Code 钩子翻译成拦截决策。
+"""第 7 章：hooks 桥 —— Claude Code 钩子翻译成拦截决策。
 
 对应 dsh 真实源码：packages/hooks/（hook-protocol + hooks-claude-code）。
 
@@ -343,12 +343,14 @@ class ClaudeCodeBridge:
         return None
 
     def stop(self, session=None, run_fn: Callable | None = None) -> dict | None:
-        """Stop → 阻塞钩子强制继续（continue:true + reason）。"""
+        """Stop → 阻塞钩子强制继续（continue:true + reason）。
+
+        对齐上游 index.ts:274：reason 只用合并结果的 reason（不走 stopReason）。
+        """
         merged = self._run_point("Stop", "", {}, session, run_fn)
         if merged["decision"] == "deny":
             return {"continue": True,
-                    "reason": merged.get("stopReason") or merged.get("reason")
-                    or "continue: blocked by Stop hook"}
+                    "reason": merged.get("reason") or "continue: blocked by Stop hook"}
         return None
 
     # ---------- 内部 ----------
@@ -368,13 +370,15 @@ class ClaudeCodeBridge:
                     **({"matcher": group["matcher"]} if group.get("matcher") else {}),
                 })
                 output, duration = (run_fn or _run_default)(hook, payload)
-                decision = "stop" if output.get("continue") is False else \
-                    output.get("decision") or "pass"
+                # 对齐上游 events.ts:99：decision 优先，未提供才按
+                # continue:false → 'stop' 推断（null 语义，非 falsy）
+                decision = output.get("decision") if output.get("decision") is not None else \
+                    ("stop" if output.get("continue") is False else "pass")
                 _audit(session, "hook/result", {
                     "turn": turn, "point": point, "handlerId": handler_id,
                     "decision": decision, "durationMs": duration,
                     **({"exitCode": output["exitCode"]} if output.get("exitCode") is not None else {}),
-                    **({"stderrSummary": output["stderr"][:200]} if output.get("stderr") else {}),
+                    **({"stderrSummary": _stderr_summary(output.get("stderr"))} if output.get("stderr") else {}),
                 })
                 outputs.append(output)
         return merge_hook_outputs(outputs)
@@ -386,6 +390,11 @@ class ClaudeCodeBridge:
             if event["type"] == "turn/start":
                 return event["data"].get("turn", 0)
         return 0
+
+
+def _stderr_summary(stderr: str) -> str:
+    """上游 stderrSummary（hooks-claude-code/index.ts 同构）：默认 500 字符 + 省略号。"""
+    return stderr[:500] + ("…" if len(stderr) > 500 else "")
 
 
 def _run_default(hook: dict, payload: dict) -> tuple[dict, float]:

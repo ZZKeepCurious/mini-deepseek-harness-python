@@ -30,8 +30,11 @@ __all__ = [
     "BlockAssembler",
     "CONTEXT_WINDOW_EXCEEDED",
     "EMPTY_RESPONSE",
+    "INVALID_REQUEST",
     "LlmAdapter",
     "LlmFailure",
+    "MALFORMED_RESPONSE",
+    "QUOTA",
     "RATE_LIMIT",
     "REQUEST_ERROR",
     "SERVER",
@@ -51,21 +54,28 @@ STREAM_CHUNK_KINDS = frozenset({
 AUTH = "AUTH"
 RATE_LIMIT = "RATE_LIMIT"
 CONTEXT_WINDOW_EXCEEDED = "CONTEXT_WINDOW_EXCEEDED"
+QUOTA = "QUOTA"
+INVALID_REQUEST = "INVALID_REQUEST"
 SERVER = "SERVER"
 TIMEOUT = "TIMEOUT"
 TRANSPORT = "TRANSPORT"
 STREAM_CLOSED = "STREAM_CLOSED"
 EMPTY_RESPONSE = "EMPTY_RESPONSE"
-REQUEST_ERROR = "REQUEST_ERROR"
+MALFORMED_RESPONSE = "MALFORMED_RESPONSE"
+REQUEST_ERROR = "REQUEST_ERROR"   # mini 教学扩展：非 4xx/5xx 归类的兜底码（上游无此常量）
 
 
 class StreamChunk(dict):
-    """统一流协议：kind + payload。dict 子类，天然可 JSON 序列化。"""
+    """统一流协议：判别键 `type` + payload（对齐上游 StreamChunk，llm/src/types.ts）。
+
+    dict 子类，天然可 JSON 序列化；构造函数参数名保留 kind 以匹配
+    STREAM_CHUNK_KINDS 词汇，但落盘键与上游一致为 "type"。
+    """
 
     def __init__(self, kind: str, **payload: Any):
         if kind not in STREAM_CHUNK_KINDS:
             raise ValueError(f"未知 chunk kind: {kind}")
-        super().__init__({"kind": kind, **payload})
+        super().__init__({"type": kind, **payload})
 
 
 class LlmFailure(Exception):
@@ -121,6 +131,9 @@ class BlockAssembler:
 
     block-end 携带组装好的块，所以本实现只收集块与终态
     （usage / finish）；流式 UI 可改为逐片转发 delta。
+
+    对齐上游 assembler.ts:136-138：finish.kind == 'max-tokens' 时过滤
+    tool-call 块（"cannot be executed safely"，未完成的调用不可执行）。
     """
 
     def __init__(self):
@@ -129,7 +142,7 @@ class BlockAssembler:
         self.finish: dict | None = None
 
     def push(self, chunk: dict) -> None:
-        kind = chunk["kind"]
+        kind = chunk["type"]
         if kind == "block-end":
             self.blocks.append(chunk["block"])
         elif kind == "usage":
@@ -137,5 +150,9 @@ class BlockAssembler:
         elif kind == "finish":
             self.finish = chunk["reason"]
 
-    def message(self) -> dict:
-        return create_message("assistant", self.blocks, {"kind": "model"})
+    def message(self, source: dict | None = None) -> dict:
+        blocks = self.blocks
+        if self.finish is not None and self.finish.get("kind") == "max-tokens":
+            # 上游：max-tokens 下模型产出的 tool-call 不可安全执行，丢弃
+            blocks = [b for b in blocks if b.get("type") != "tool-call"]
+        return create_message("assistant", blocks, source or {"kind": "model"})

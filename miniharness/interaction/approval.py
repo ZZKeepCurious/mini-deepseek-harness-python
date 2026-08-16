@@ -1,4 +1,4 @@
-"""第 13 章：审批 —— ApprovalPolicy 两档 + 审计事件对。
+"""第 9 章：审批 —— ApprovalPolicy 两档 + 审计事件对。
 
 对应 dsh 真实源码：packages/interaction/user-approval（ApprovalService）。
 

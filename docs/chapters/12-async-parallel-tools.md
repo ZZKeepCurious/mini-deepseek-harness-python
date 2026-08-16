@@ -40,7 +40,7 @@ return concurrencySafe === true ? { kind: 'parallel' } : { kind: 'exclusive' }
 - **abort**：停止启动，排干已启动的；未启动的按模型序补 `TOOL_ABORTED_BEFORE_DISPATCH` 合成错误（先 `tool/call` 再 `tool/result`，replay 才有效）；
 - **调度器失败**：停止新派发，`Promise.allSettled` 排干，抛第一个错误，**不编造结果**（已记录的 `tool/call` 保留）。
 
-## 12.3 代码 step-by-step（`miniharness/bus.py`）
+## 12.3 代码 step-by-step（`miniharness/core/scope.py`）
 
 ### 步骤 1：`_maybe_await` 与 async 派发
 
@@ -70,7 +70,7 @@ async def awaterfall(self, event, payload=None):
 
 短路语义与同步 `waterfall` 完全一致：不调 `next()` 就停在当前中间件。`aparallel` 用 `asyncio.gather` 真并发，结果按注册序。
 
-## 12.4 代码 step-by-step（`miniharness/tools.py`）
+## 12.4 代码 step-by-step（`miniharness/core/tools.py`）
 
 ### 步骤 2：`Tool.is_concurrency_safe` 可调用化 + 分类器
 
@@ -121,7 +121,7 @@ except asyncio.TimeoutError:
 
 线程无法取消：置位 signal（工具自己检查）后必须 `shield` 等它到达静止点。
 
-## 12.5 代码 step-by-step（`miniharness/scheduler.py`）
+## 12.5 代码 step-by-step（`miniharness/core/agent_loop/tool_calls.py`）
 
 调度器与上游 `tool-calls.ts` 逐条对照：
 
@@ -141,7 +141,7 @@ except asyncio.TimeoutError:
 
 合成错误结果的落盘顺序与上游 `appendSkippedToolCall` 一致：先 `tool/call`（引用 seq），再 `tool/result`（`sourceEventSeqs=[seq]` + `error: {name: "AbortError", code: TOOL_ABORTED_BEFORE_DISPATCH}`）。
 
-## 12.6 代码 step-by-step（`miniharness/loop.py`）
+## 12.6 代码 step-by-step（`miniharness/core/agent_loop/agent.py`）
 
 同步路径**一字未动**（第 4 章的 `_run_step` → `_stream_step` + `_execute_tools_sync`），新增异步路径：
 

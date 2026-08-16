@@ -29,7 +29,8 @@ from ..tools import (
     pipeline_policy_async,
 )
 
-TOOL_ABORTED_BEFORE_DISPATCH = "TOOL_ABORTED_BEFORE_DISPATCH"
+# 对齐上游常量值（tools/src/index.ts:472）：TOOL_ABORTED_BEFORE_DISPATCH = 'ABORTED_BEFORE_DISPATCH'
+TOOL_ABORTED_BEFORE_DISPATCH = "ABORTED_BEFORE_DISPATCH"
 DEFAULT_MAX_PARALLEL_TOOL_CALLS = 10
 
 
@@ -56,7 +57,8 @@ def append_tool_call(session: Session, turn: int, step: int, call_id: str,
 def _aborted_result() -> ToolResult:
     """未派发调用在 abort 时的合成错误结果（对齐 appendSkippedToolCall）。"""
     return ToolResult(ok=False, is_error=True, error="tool call aborted before dispatch",
-                      _aborted=True)
+                      _aborted=True,
+                      error_info={"name": "AbortError", "code": TOOL_ABORTED_BEFORE_DISPATCH})
 
 
 def emit_tool_result(session: Session, turn: int, step: int, call_id: str,
@@ -72,10 +74,11 @@ def emit_tool_result(session: Session, turn: int, step: int, call_id: str,
     )
     data: dict[str, Any] = {"turn": turn, "step": step, "message": message}
     if result.is_error:
-        if getattr(result, "_aborted", False):
-            data["error"] = {"name": "AbortError", "code": TOOL_ABORTED_BEFORE_DISPATCH}
-        else:
-            data["error"] = {"name": "ToolExecutionError", "code": "TOOL_EXECUTION_ERROR"}
+        # 对齐上游 tool/result error 字段（llm/src/types.ts:295）：
+        # 仅当 error.info 存在才携带 {name, code}；普通工具体错误不带
+        info = getattr(result, "error_info", None)
+        if info is not None:
+            data["error"] = info
     session.append("tool/result", data, surfaceOp="append", sourceEventSeqs=[call_seq])
 
 
@@ -151,7 +154,9 @@ async def _run_group(
         started += 1
         tool = tools.resolve(call["name"])
         if tool is None:
-            slots[index] = ToolResult(ok=False, is_error=True, error=f"未知工具: {call['name']}")
+            # 上游 ToolNotFoundError：code 'UNKNOWN_TOOL'（tools/src/index.ts:494-510）
+            slots[index] = ToolResult(ok=False, is_error=True, error=f"未知工具: {call['name']}",
+                                      error_info={"name": "ToolNotFoundError", "code": "UNKNOWN_TOOL"})
             return
         try:
             frozen = deep_freeze(_parse_args(call["arguments"]))

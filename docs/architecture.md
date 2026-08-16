@@ -90,7 +90,7 @@ miniharness/
 | `boot/composition.py` | `packages/boot/app-boot` + `apps/cli/src/args.ts` | |
 | `boot/dotenv.py` | `packages/boot/app-boot`（loadEnv） | |
 | `cli/main.py` | `apps/cli/src/args.ts` | |
-| `cli/headless.py` | `bundle/headless` + `apps/cli` | |
+| `cli/headless.py` | `packages/bundle/headless` + `apps/cli` | |
 | `cli/default_tools.py` | 无 | 教学扩展（上游是工具插件注册） |
 | `cli/session_cmds.py` | 无 | 教学扩展（上游会话管理在 web 表层） |
 | `preset/presets.py` | `packages/preset` + `apps/cli/config/agent-presets` | 数据目录 `preset/{minimal,standard}` |
@@ -103,7 +103,7 @@ miniharness/
 | `seams/sandbox_local.py` | `packages/sandbox/sandbox-local` + `sandbox-windows-acl` | |
 | `seams/credentials_local.py` | `packages/credentials/credentials-local` | |
 | `seams/subagent/`（`__init__.py` + `providers.py` + `worker.py`） | `packages/subagent/subagent` + `subagent-fork-in-process` + `-acp` + `-dsh-sdk` | |
-| `demo.py` | `examples/agent-spine-demo` | 教学入口，保留顶层（`python -m miniharness.demo`） |
+| `demo.py` | `packages/examples/agent-spine-demo` | 教学入口，保留顶层（`python -m miniharness.demo`） |
 | `example_plugins.py` | `examples/` | 教学示例，保留顶层 |
 
 ## 3. 依赖方向规则
@@ -133,6 +133,6 @@ miniharness/
 
 **黑名单（内部工具，不在顶层 `__all__`，只允许深路径 import）**：`deep_freeze`、`thaw`、`is_json_safe`、`now_ms`、`_http_error_code`、`_map_finish_reason`、`load_events_checked`、`repair_and_replay`、`balanced_after_replay`。
 
-**教学扩展（上游无对应，标注于此）**：`cli/default_tools.py`、`cli/session_cmds.py`（含 `--config` 子命令）、`llm/fake.py`、`demo.py`、`example_plugins.py`。
+**教学扩展（上游无对应，标注于此）**：`cli/default_tools.py`、`cli/session_cmds.py`（会话管理子命令；`--config` 属 `cli/main.py` 启动器标志，同为教学扩展）、`llm/fake.py`、`demo.py`、`example_plugins.py`。
 
 顶层 `__all__` 收敛至 28 项（白名单 + `FakeLlmAdapter`），由 `tests/test_dependencies.py` 断言钉死；白名单每一项都能在 §2 映射表里找到上游对应。

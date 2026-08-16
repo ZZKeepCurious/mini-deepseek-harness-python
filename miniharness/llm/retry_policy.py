@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+from types import MappingProxyType
 from typing import Any
 
 # Node setTimeout 上限（上游 @deepseek-ai/dsh-timeout MAX_TIMER_DELAY_MS）
@@ -26,13 +27,13 @@ DEFAULT_MAX_RETRIES = 2
 DEFAULT_INITIAL_DELAY_MS = 500
 DEFAULT_MAX_DELAY_MS = 10_000
 DEFAULT_JITTER_RATIO = 0.1
-DEFAULT_RETRYABLE_CODES = [
+DEFAULT_RETRYABLE_CODES = (
     "EMPTY_RESPONSE",
     "RATE_LIMIT",
     "SERVER",
     "TIMEOUT",
     "TRANSPORT",
-]
+)
 
 # LlmFailure code 常量（llm/src/error.ts 同名词典）
 CONTEXT_WINDOW_EXCEEDED = "CONTEXT_WINDOW_EXCEEDED"
@@ -63,22 +64,37 @@ def _resolve_backoff(config: dict | None, path: str) -> dict:
         raise ValueError(f"{path}.initialDelayMs must be less than or equal to maxDelayMs")
     if not (isinstance(jitter, (int, float)) and 0 <= jitter <= 1):
         raise ValueError(f"{path}.jitterRatio must be between 0 and 1")
-    return {"initialDelayMs": initial, "maxDelayMs": maximum, "jitterRatio": jitter}
+    return {
+        "initialDelayMs": initial, "maxDelayMs": maximum, "jitterRatio": jitter,
+    }
+
+
+def _freeze(policy: dict) -> dict:
+    """冻结策略：顶层只读（MappingProxyType），retryableCodes 为元组。
+
+    对齐上游 ResolvedRetryPolicy：backoff 展开平铺在顶层
+    （resolveBackoff 的 ... 展开），无嵌套 backoff 键。
+    """
+    frozen = dict(policy)
+    if "retryableCodes" in frozen:
+        frozen["retryableCodes"] = tuple(frozen["retryableCodes"])
+    return MappingProxyType(frozen)
 
 
 def resolve_retry_policy(config: dict | None = None, path: str = "retryPolicy") -> dict:
-    """校验、补默认并"冻结"provider 属地的重试策略。
+    """校验、补默认并冻结 provider 属地的重试策略。
 
     与上游 resolveRetryPolicy 同语义：config 省略 → normal 默认；
-    返回不可变策略（嵌套只读），供 provider 注册时捕获。
+    返回不可变策略（嵌套只读，MappingProxyType + 元组），供 provider
+    注册时捕获（每次请求决议时不可刷新）。
     """
     if config is None:
-        return {
+        return _freeze({
             "mode": "normal",
             "maxRetries": DEFAULT_MAX_RETRIES,
             "retryableCodes": list(DEFAULT_RETRYABLE_CODES),
             **_resolve_backoff(None, f"{path}.backoff"),
-        }
+        })
     mode = config.get("mode")
     if mode == "normal":
         _validate_keys(config, _NORMAL_KEYS, path)
@@ -92,15 +108,18 @@ def resolve_retry_policy(config: dict | None = None, path: str = "retryPolicy") 
             raise ValueError(f"{path}.retryableCodes must contain only non-empty strings")
         if len(set(codes)) != len(codes):
             raise ValueError(f"{path}.retryableCodes must not contain duplicates")
-        return {
+        return _freeze({
             "mode": "normal",
             "maxRetries": max_retries,
             "retryableCodes": list(codes),
             **_resolve_backoff(config.get("backoff"), f"{path}.backoff"),
-        }
+        })
     if mode == "always":
         _validate_keys(config, _ALWAYS_KEYS, path)
-        return {"mode": "always", **_resolve_backoff(config.get("backoff"), f"{path}.backoff")}
+        return _freeze({
+            "mode": "always",
+            **_resolve_backoff(config.get("backoff"), f"{path}.backoff"),
+        })
     raise ValueError(f'{path}.mode must be "normal" or "always"')
 
 

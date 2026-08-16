@@ -53,13 +53,13 @@ flowchart LR
 | 上游包 / 文件（唯一权威） | mini 模块 | 手册章节 | 报告页面 |
 |---|---|---|---|
 | `packages/core/session` | `core/session/` | 01 | 02 §3-4 |
-| `packages/core/context + vendor/cordis(core)` | `core/scope.py` | 02 | 02 §4.1 |
-| `packages/core/tools + tool-group` | `core/tools.py` | 03 | 03 §5.2 |
+| `packages/context + vendor/cordis(core)` | `core/scope.py` | 02 | 02 §4.1 |
+| `packages/core/tools` | `core/tools.py` | 03 | 03 §5.2 |
 | `packages/llm/llm + llm-deepseek` | `llm/` | 04 | 02 §3 + 03 §5.4 |
-| `packages/core/agent-loop + agent-invocation` | `core/agent_loop/agent.py` | 04 / 06 | 03 §5.1 |
-| `packages/core/session-persistence` | `core/session/persistence.py` | 05 | 03 §5.3 |
-| `packages/cordis-host + boot` | `boot/boot.py` | 05 | 03 §5.5 |
-| `bundle/headless + apps/cli/src` | `cli/headless.py + cli/main.py` | 07 | 04 议题 2 |
+| `packages/core/agent-loop` | `core/agent_loop/agent.py` | 04 / 06 | 03 §5.1 |
+| `packages/session/session-persistence` | `core/session/persistence.py` | 05 | 03 §5.3 |
+| `packages/extensions/cordis-host-runner + packages/boot` | `boot/boot.py` | 05 | 03 §5.5 |
+| `packages/bundle/headless + apps/cli/src` | `cli/headless.py + cli/main.py` | 07 | 04 议题 2 |
 | `apps/cli/config/agent-presets/*` | `preset/presets.py` | 08 | 04 议题 1 |
 | `packages/core/agent（runtime-types）` | `core/agent_loop/agent.py（干预面）` | 09 | 04 议题 4 |
 | `packages/interaction/user-approval` | `interaction/approval.py` | 09 | 04 议题 5 |

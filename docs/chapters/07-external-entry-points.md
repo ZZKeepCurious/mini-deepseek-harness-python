@@ -28,9 +28,10 @@
 
 ### mini 复现现状（launcher 层）
 
-`miniharness/cli.py` 复现了启动器的选项语义（对齐 `apps/cli/src/args.ts`，已核实）：
+`miniharness/cli/main.py` 复现了启动器的选项语义（对齐 `apps/cli/src/args.ts`，已核实）：
 
 - `--profile headless "task"`：一次性任务（§7.2 全部语义）；未知 profile fail loud。
+- 无任何参数（无 `--profile`/`--config`/`--patch`）时回退运行 `demo_main()`（无 key 端到端演示，main.py:180-184）。
 - `--patch <path>`（可重复）：YAML/JSON overlay 补丁，参与组合层叠与 dump。
 - `--dump-config`：只读打印最终组合（boot-free，不启动任何应用）；`--dump-default-config`：只打印内置默认组合。两者互斥（`program.error` 同语义）；dump 不接受任务参数；`--dump-default-config` 不接受 `--patch`/`--config`。输出带行级 `# == <label>` 来源注释、`!!js` 表达式原样未求值、skipped patch warn 不失败、单文档可再加载（对齐 `renderConfigDump`）。
 - mini 教学扩展（上游没有，须标注）：`--config <path>` 指定组合文件（上游用 profile 目录机制）；`miniharness sessions` 子命令（会话列表 / 恢复 / 删除 —— 上游会话管理在 web 表层，见 `miniharness/cli/session_cmds.py`）。
@@ -160,7 +161,7 @@ mini 的同步近似：上游是字节流 + async，mini 是"行馈送 + 内存�
 
 | 方法 | 语义（上游） | mini |
 |---|---|---|
-| `initialize` | cwd/provider/model + 可选 maxTokens → `serverInfo` | 记录参数，返回 `{name: 'deepseek-harness-sdk-runtime', version: '0.0.1'}`（name 是 wire 稳定标识） |
+| `initialize` | cwd/provider/model + 可选 maxTokens → `serverInfo` | 记录参数，返回 `{"serverInfo": {"name": "deepseek-harness-sdk-runtime", "version": "0.0.1"}}`（name 是 wire 稳定标识） |
 | `session/prompt` | 未知 sessionId **懒创建** agent+session；返回 durable enqueue 回执 `messageId` | 懒创建 `AgentLoop`，跑一个回合，返回 `msg-N` |
 | `shutdown` | → `{}` | `{}` |
 
@@ -175,7 +176,7 @@ mini 的同步近似：上游是字节流 + async，mini 是"行馈送 + 内存�
 5. `session/prompt` 未知 sessionId 懒创建会话，`messageId` 递增签发。
 
 验证：`python -m unittest tests.test_sdk_protocol -v`（21 个用例，含端到端 stdio 行仿真）。
-## 7.7 复现：ACP 最小子集（`miniharness/acp.py`）
+## 7.7 复现：ACP 最小子集（`miniharness/protocol/acp.py`）
 
 > 对应 dsh 真实源码：`packages/acp/acp`（`apply()` + `codec.ts`）。自动化专用契约全对齐，跑在假模型上。
 
@@ -205,7 +206,7 @@ mini 的同步近似：上游是字节流 + async，mini 是"行馈送 + 内存�
 3. prompt：未知 session / inflight / 空 prompt / 非 text·resource_link 内容 → 拒绝；回合真实跑完（turn/start + turn/end 落日志）。
 4. stopReason 映射表逐项与上游一致。
 5. 审批桥：callId 缺失委派；allow-once/reject-once/cancelled 三态映射；默认 answerer 允许（测试注入可换）。
-6. close 后一切请求 → internal error（-32603，"disposed"）。
+6. close 后一切请求 → internal error（-32603，文案 "the ACP bridge has been disposed"，acp.py:226）。
 
 验证：`python -m unittest tests.test_acp -v`（26 个用例）。
 
@@ -215,7 +216,7 @@ mini 的同步近似：上游是字节流 + async，mini 是"行馈送 + 内存�
 - 上游经 cordis 插件挂载（`inject: ['agents']`）+ ACP SDK 的 stdio 连接；mini 直接操作服务对象；
 - inflight 拒绝在同步模型下只能手动置标志触发（真并发不存在）。
 
-## 7.8 复现：hooks 桥（`miniharness/hooks.py`）
+## 7.8 复现：hooks 桥（`miniharness/protocol/hooks.py`）
 
 > 对应 dsh 真实源码：`packages/hooks/hook-protocol`（`codec.ts` + `matcher.ts` + `merge.ts` + `types.ts`）与 `hooks-claude-code/src/config.ts`。mini 复现 claude-code 一条桥，把既有 CC 钩子配置翻译成 harness 的四类拦截决策；审计以 `hook/invoked` + `hook/result` 配对入日志（log-only 非 surface）。
 
@@ -231,8 +232,8 @@ parsed["skipped"]                               # [{"event": ..., "type": ...}, 
 
 逐条对齐上游 `config.ts` 的约定：
 
-- 事件名限定在 CLAUDE_EVENTS 七事件（UserPromptSubmit / PreToolUse / PostToolUse / PreCompact / PostCompact / Notification / Stop），事件名不存在视为整段无效；
-- 钩子条目必须带 `type: "command"`，否则进 `skipped`；
+- 事件名限定在 CLAUDE_EVENTS 七事件（SessionStart / UserPromptSubmit / PreToolUse / PostToolUse / Stop / SubagentStart / SubagentStop，上游 `hooks-claude-code/src/config.ts:11-19`），事件名不存在视为整段无效；
+- 钩子条目的 `type` 非字符串时**缺省按 `"command"` 处理**（不进 skipped，hooks.py:247）；字符串且非 `"command"` 才进 `skipped`；
 - `UserPromptSubmit` 与 `Stop` 的 matcher 无意义（前者必然匹配、后者是声明式配置），解析时直接丢弃；
 - matcher 在**解析期**就用与运行时同一套校验：无效正则直接抛 `SyntaxError` 拒掉整份配置（fail-closed，和上游 `parseMatcher` 抛错一致）；
 - command 里的 `${CLAUDE_PLUGIN_ROOT}` / `${CLAUDE_PROJECT_DIR}` 变量在解析期替换（`substitute_command`），未提供的变量原样保留。
@@ -254,8 +255,8 @@ matches_matcher(None, "Bash", "codex")                # True：match-all 哨兵
 上游 `codec.ts` 的约定，mini 逐条复刻：
 
 - `exitCode == 0` 且 stdout 以 `{` 开头：尝试解析 JSON，失败则把 stdout 原样当文本（干净退出的解析错误是宽容的，不阻断）；
-- `exitCode == 2`（`BLOCKING_EXIT_CODE`）：**block**，reason 取 stderr（空则 `"blocked"`）；
-- 其他非零码：**error**，reason 取 stderr（空则 `"error"`）；
+- `exitCode == 2`（`BLOCKING_EXIT_CODE`）：**block**；reason 取 stderr（**stderr 为空则不设 reason 字段**，上游 `codec.ts:66-69` 只在非空时设置）；
+- 其他非零码：**不产生 decision**（落 pass），output 仅携带 `exitCode/stderr/stdout`（上游 `codec.ts:63`）；"spawn 失败"的 `exitCode == None` 同样无 decision；
 - JSON 顶层只有 `approve` / `block` 两种决策有效，越界值忽略；
 - 事件域（`hookSpecificOutput`）里的 `permissionDecision: allow|deny|ask` **覆盖**顶层决策（这是 PreToolUse 钩子表达 `ask` 的唯一途径）；`hookEventName` 与期望事件不符时，整个事件域丢弃（保留判别符，丢决策字段）；
 - `updatedInput` 解析但不执行——拦截决策由调用方决定是否采纳。
@@ -275,9 +276,9 @@ matches_matcher(None, "Bash", "codex")                # True：match-all 哨兵
 | 拦截点 | 输入 | 阻断 | 委派（放行） |
 |---|---|---|---|
 | `pre_step` | 用户提示文本 | `{"kind": "reject"}`（deny 时） | `None` |
-| `pre_tool` | 工具名 | `{"kind": "deny"|"ask", "reason"}`（deny/ask 时） | `None`（allow） |
+| `pre_tool` | 工具名 | `{"kind": "deny", "reason"}` 或 `{"kind": "ask"}`（ask 仅当合并结果带 reason 时才带 `reason` 字段，hooks.py:328-331） | `None`（allow） |
 | `post_tool` | 工具结果 | `{"kind": "block", "feedback"}`（deny 时，feedback 为 reason） | `None` |
-| `stop` | — | `{"continue": True, "reason"}`（deny 时强制继续，reason 缺省 `"blocked by Stop hook"`） | `None` |
+| `stop` | — | `{"continue": True, "reason"}`（deny 时强制继续，reason 缺省 `"continue: blocked by Stop hook"`，hooks.py:353；reason 只用合并结果，不走 stopReason） | `None` |
 
 执行经 `run_fn`（可注入，默认 `run_hook`：`subprocess` shell 执行 + 超时；超时 `exitCode` 为 `None` 并给出 stderr 说明）。每次钩子执行都落一对审计事件 `hook/invoked` → `hook/result`（同一 `handlerId` 配对，含 point/dialect/turn 上下文；事件在 turn 内包围，log-only 不带 surfaceOp），对应上游 `hooksRuntime` 的 `audit` 集成。
 
@@ -287,7 +288,7 @@ matches_matcher(None, "Bash", "codex")                # True：match-all 哨兵
 
 - 只复现 claude-code 方言（codex 桥的 stdin 载荷与 `MessageContext` 解码未做，matcher 方言已支持）；
 - 上游经 cordis 插件注入 + `ctx.shell` 执行；mini 用 `subprocess` + 注入点；
-- 上游 PreCompact/PostCompact/Notification 在 harness 循环里挂接；mini 只落桥未挂循环（循环侧扩展口见第 6 章）。
+- 上游 CLAUDE_EVENTS 七事件中 SessionStart / SubagentStart / SubagentStop 在 harness 循环里另有挂接；mini 只落桥未挂循环（循环侧扩展口见第 6 章）。
 
 ## 7.9 一张表看懂全部入口
 
@@ -296,8 +297,8 @@ matches_matcher(None, "Bash", "codex")                # True：match-all 哨兵
 | `dsh --profile web` | 人（浏览器） | HTTP + 浏览器客户端 | （观察清单） |
 | `dsh --profile headless "task"` | 人（shell 一次性任务） | 进程（stdout/退出码） | `miniharness/cli/headless.py` |
 | `dsh --profile <自定义>` | 组合层自定义 | 任意 | （可经 boot/patch 扩展） |
-| ACP 服务器 | 自动化程序 | stdio JSON-RPC | `miniharness/acp.py`（握手/会话/prompt/取消/审批桥，26 测试） |
+| ACP 服务器 | 自动化程序 | stdio JSON-RPC | `miniharness/protocol/acp.py`（握手/会话/prompt/取消/审批桥，26 测试） |
 | JSON-RPC SDK | 编程客户端（官方 Python SDK 的线） | stdio JSON-RPC | `miniharness/protocol/sdk.py`（信封子集 + 三方法，21 测试） |
-| hooks 桥 | 用户既有 CC/Codex 钩子 | 子进程 | `miniharness/hooks.py`（CC 配置 → 四类拦截决策 + 审计配对，40 测试） |
+| hooks 桥 | 用户既有 CC/Codex 钩子 | 子进程 | `miniharness/protocol/hooks.py`（CC 配置 → 四类拦截决策 + 审计配对，40 测试） |
 
 价值排序建议：headless → JSON-RPC 信封最小子集（复用 `miniharness.cli` 的进程壳，价值最高）→ ACP 最小子集 → hooks 桥。真正的取舍在第 4 行：自定义 profile 是"组合层的事"，它不需要新的协议，只需要 `boot()` 已经支持的 patch 层叠——第 5 章的 `apply_patch` 就是干这个的。

@@ -79,7 +79,10 @@ def run_headless(
     """
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
-    exit_fn = exit_fn or sys.exit
+    if exit_fn is None:
+        # 对齐上游（bundle/headless/src/index.ts）：ctx.appExit 由启动器持有，
+        # 缺失即宿主错误 → fail loud（B8 边界）
+        raise ValueError("appExit is required: host must provide the exit hook")
     if task.strip() == "":
         raise ValueError("task is required")
     ctx = ctx or Context(name="headless")
@@ -102,8 +105,8 @@ def run_headless(
     text, reason = summarize(session.events, first_seq)
     stdout.write(text + "\n")
     if reason is not None and reason.get("kind") == "error":
-        failure = reason.get("failure") or {}
-        stderr.write(f"dsh: {failure.get('code', 'UNKNOWN')}: {failure.get('message', '')}\n")
+        error = reason.get("error") or {}
+        stderr.write(f"dsh: {error.get('code', 'UNKNOWN')}: {error.get('message', '')}\n")
     exit_fn(0 if (reason is not None and reason.get("kind") == "completed") else 1)
 
 
@@ -120,7 +123,7 @@ def headless_main(task: str) -> None:
         sys.exit(1)
     home = Path(os.environ.get("MINIHARNESS_HOME", Path.home() / ".miniharness"))
     persistence = JsonlPersistence(home / "sessions")
-    run_headless(task, adapter=adapter, ctx=ctx, persistence=persistence)
+    run_headless(task, adapter=adapter, ctx=ctx, persistence=persistence, exit_fn=sys.exit)
 
 
 if __name__ == "__main__":

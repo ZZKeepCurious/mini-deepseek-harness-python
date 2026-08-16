@@ -273,7 +273,7 @@ class TestPipelineAsync(unittest.TestCase):
             return "never"
         t = Tool(name="t", description="d", execute=execute, is_concurrency_safe=True)
         reg.register(t)
-        ctx.on("tools/pre-execute", lambda p, nxt: {"verdict": "deny"})
+        ctx.on("tools/pre-execute", lambda p, nxt: {"kind": "deny"})
         result = asyncio.run(run_pipeline_async(ctx, t, {"x": 1}))
         self.assertTrue(result.is_error)
         self.assertFalse(ran["hit"])
@@ -378,7 +378,7 @@ class TestLoopAsync(unittest.TestCase):
             await task
 
         asyncio.run(driver())
-        self.assertEqual(session.events[-1]["data"]["reason"], {"kind": "aborted"})
+        self.assertEqual(session.events[-1]["data"]["reason"], {"kind": "aborted", "reason": {"kind": "user"}})
         results = [e["data"]["message"]["source"]["callId"]
                    for e in session.events if e["type"] == "tool/result"]
         errors = [e["data"]["error"]["code"] for e in session.events
@@ -391,7 +391,7 @@ class TestLoopAsync(unittest.TestCase):
 
     def test_run_async_rejects_pre_step(self):
         session, loop = self._loop(FakeLlmAdapter(final_text="x"))
-        loop.ctx.on("agent/pre-step", lambda p, nxt: {"verdict": "reject"})
+        loop.ctx.on("agent/pre-step", lambda p, nxt: {"kind": "reject"})
         asyncio.run(loop.run_async("危险"))
         self.assertEqual(session.events[-1]["data"]["reason"], {"kind": "blocked"})
 

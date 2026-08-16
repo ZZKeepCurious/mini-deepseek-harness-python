@@ -1,4 +1,4 @@
-"""第 12 章：ACP 最小子集 —— 自动化专用 Agent Client Protocol 服务。
+"""第 7 章：ACP 最小子集 —— 自动化专用 Agent Client Protocol 服务。
 
 对应 dsh 真实源码：packages/acp/acp（apply + codec.ts）。
 
@@ -172,10 +172,16 @@ class AcpServer:
         finally:
             record["inflight"] = False
         reason = self._last_turn_end(record["loop"])
-        if reason is None or reason.get("kind") == "error":
-            msg = (reason.get("error", {}).get("message", "unknown")
-                   if reason else "no turn ended")
-            raise internal_error(f"turn failed: {msg}")
+        if reason is None:
+            # turnless：无回合结束记录 → 'cancelled'（上游 index.ts:331 同语义）
+            return {"stopReason": "cancelled"}
+        if reason.get("kind") == "error":
+            # 对齐上游：error turn 立即以 internalError 拒绝（turn failed: <message>）
+            error = reason.get("error") or {}
+            raise internal_error(f"turn failed: {error.get('message', 'unknown')}")
+        if reason.get("kind") == "max-tokens":
+            # 对齐上游 index.ts:326：max-tokens 非终局，映射到 end_turn
+            return {"stopReason": "end_turn"}
         return {"stopReason": turn_end_to_stop_reason(reason)}
 
     def _last_turn_end(self, loop) -> dict | None:

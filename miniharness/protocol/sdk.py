@@ -1,4 +1,4 @@
-"""第 12 章：SDK 线协议 —— newline-delimited JSON-RPC 2.0 信封 + 最小运行服务。
+"""第 7 章：SDK 线协议 —— newline-delimited JSON-RPC 2.0 信封 + 最小运行服务。
 
 对应 dsh 真实源码：packages/sdk/protocol（JsonRpcLineTransport + types.ts）。
 

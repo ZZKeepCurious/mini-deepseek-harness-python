@@ -1,7 +1,7 @@
 ﻿# 第 3 章：工具执行管线（Tool Execution Pipeline）
 
 > 对应 dsh 真实源码：`packages/core/tools`（`docs/subsystems/tools.md`、`docs/tool-execution-pipeline.md`）
-> 前置：第 1、2 章。产出文件：`miniharness/miniharness/tools.py` + `tests/test_tools.py`
+> 前置：第 1、2 章。产出文件：`miniharness/core/tools.py` + `tests/test_tools.py`
 
 ## 3.1 这一章要做什么
 
@@ -74,7 +74,7 @@ class Tool:
     execute: Callable[[dict, ToolExec], Any]
     parameters: dict = field(default_factory=dict)   # JSON Schema
     output: dict = field(default_factory=dict)       # canonical schema
-    is_concurrency_safe: bool = False                # False = 串行屏障
+    is_concurrency_safe: Callable[[dict], bool] | bool = False  # True/恒真 → 可并行（第 12 章支持 callable）
     timeout_ms: int | None = None                    # 由管线 wrapper 强制
     present_call: Callable | None = None             # UI 挂起卡片（纯函数）
     present_result: Callable | None = None           # UI 完成卡片（纯函数）
@@ -182,6 +182,7 @@ def run_pipeline(ctx, tool, args, exec_=None):
         t.join(tool.timeout_ms / 1000)
         if t.is_alive():
             exec_.signal.set()      # 通知工具体"你超时了"
+            t.join()                # 排干：等线程真正退出，避免悬挂（实现见 core/tools.py:245-252）
             return ToolResult(ok=False, is_error=True, error=f"timeout after {tool.timeout_ms}ms")
     else:
         target()

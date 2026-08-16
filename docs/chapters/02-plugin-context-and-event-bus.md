@@ -1,7 +1,7 @@
 ﻿# 第 2 章：插件上下文 + 事件总线（Cordis 的核心思想）
 
 > 对应 dsh 真实源码：`vendor/cordis`（`docs/cordis-primer.md`）+ `packages/core/scope`
-> 前置：第 1 章。产出文件：`miniharness/miniharness/bus.py` + `tests/test_bus.py`
+> 前置：第 1 章。产出文件：`miniharness/core/scope.py` + `tests/test_bus.py`
 
 ## 2.1 这一章要做什么
 
@@ -15,7 +15,7 @@
 
 > **(1) 注册 = 可逆副作用**：一切贡献经 `ctx.effect()` 登记，`dispose()` 时按注册逆序回滚。这是热重载、插件卸载、故障清理能可靠工作的根基。相比之下，常规的"直接往全局表里塞"没有回滚能力。
 >
-> **(2) waterfall 短路即决策**：流水线事件（pre-step、request、tools/*）必须 `next()` 委派；不调 `next` 就短路，返回值就是最终决策。这是"策略插件可以否决"的机制——普通事件广播做不到否决，它没有返回值通道。
+> **(2) waterfall 短路即决策**：流水线事件（`agent/pre-step`、`agent/request-error`、`tools/pre-execute|ask|guards|post-execute`）必须 `next()` 委派；不调 `next` 就短路，返回值就是最终决策。这是"策略插件可以否决"的机制——普通事件广播做不到否决，它没有返回值通道。
 
 ## 2.2 概念：四种派发模式
 

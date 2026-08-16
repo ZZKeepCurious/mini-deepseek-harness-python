@@ -77,6 +77,7 @@ class AgentLoop:
         # 重试规划器（agent/request-error 监听器）由装配方显式挂载：
         # AgentLoop 构造无副作用（迁移步骤 3，对齐上游插件 apply 时挂载）
         self._abort_proxy = _AbortProxy(self)
+        self._header_baseline: dict | None = None   # request/header 频次基线（上游 requestHeaderLogged）
 
     # ---------- 对外入口 ----------
 
@@ -116,7 +117,8 @@ class AgentLoop:
 
         同步路径中无法中断正在执行的 step，取消在 step 边界生效：
         当前 step 跑完后不再继续（工具回调内调用也可），turn 以
-        {kind:'aborted'} 闭合；无活跃回合且 inbox 为空 → idle no-op。
+        {kind:'aborted', reason:{kind: cause}} 闭合；无活跃回合且 inbox
+        为空 → idle no-op。
         阶段 7 async 路径：置位共享 signal，并行调度器检测后停止补池、
         排干已启动调用、未启动的按模型序补 TOOL_ABORTED_BEFORE_DISPATCH
         合成错误结果（与上游 appendSkippedToolCall 一致）。
@@ -127,7 +129,9 @@ class AgentLoop:
             self.inbox.clear()
         if self._turn_open:
             self._cancelled = True
-            self._turn_end = {"kind": "aborted"}
+            # 对齐上游：turn/end {kind:'aborted', reason: AgentCancelCause}
+            # （session/types.ts:158；cause 默认 user，与上游 cancel() 默认一致）
+            self._turn_end = {"kind": "aborted", "reason": {"kind": cause or "user"}}
             if self._step_signal is not None:
                 self._step_signal.signal.set()
 
@@ -202,10 +206,10 @@ class AgentLoop:
                 claimed = self.inbox.popleft() if self.inbox else None
                 self._run_step(claimed)
         except LlmFailure as e:
-            self._turn_end = {"kind": "error", "failure": e.failure}
+            self._turn_end = {"kind": "error", "error": e.failure}
             raise
         except Exception as e:
-            self._turn_end = {"kind": "error", "failure": {"code": "UNKNOWN", "message": str(e)}}
+            self._turn_end = {"kind": "error", "error": {"code": "UNKNOWN", "message": str(e)}}
             raise
         finally:
             # turn/end 必定落日志（与上游 agent.ts finally 一致）
@@ -225,10 +229,10 @@ class AgentLoop:
                 claimed = self.inbox.popleft() if self.inbox else None
                 await self._run_step_async(claimed)
         except LlmFailure as e:
-            self._turn_end = {"kind": "error", "failure": e.failure}
+            self._turn_end = {"kind": "error", "error": e.failure}
             raise
         except Exception as e:
-            self._turn_end = {"kind": "error", "failure": {"code": "UNKNOWN", "message": str(e)}}
+            self._turn_end = {"kind": "error", "error": {"code": "UNKNOWN", "message": str(e)}}
             raise
         finally:
             if self._turn_open:
@@ -238,7 +242,8 @@ class AgentLoop:
         """一个 step：pre-step → 落日志 → LLM 流式 → 工具管线 → step/end（finally）。"""
         if claimed is not None:
             decision = self.ctx.waterfall("agent/pre-step", {"messages": [claimed]})
-            if isinstance(decision, dict) and decision.get("verdict") == "reject":
+            if isinstance(decision, dict) and decision.get("kind") == "reject":
+                self._continue = False  # 复位：拒绝即终局（上游 agent.ts:267-269），避免泵循环跑无输入 step
                 self._turn_end = {"kind": "blocked"}
                 return  # 零 step 尝试：不留 step/start，turn 以 blocked 闭合
 
@@ -256,7 +261,8 @@ class AgentLoop:
         """阶段 7：async 版 step。pre-step 走 awaterfall，工具走并行调度器。"""
         if claimed is not None:
             decision = await self.ctx.awaterfall("agent/pre-step", {"messages": [claimed]})
-            if isinstance(decision, dict) and decision.get("verdict") == "reject":
+            if isinstance(decision, dict) and decision.get("kind") == "reject":
+                self._continue = False  # 复位：拒绝即终局（上游 agent.ts:267-269），避免泵循环跑无输入 step
                 self._turn_end = {"kind": "blocked"}
                 return
 
@@ -283,14 +289,23 @@ class AgentLoop:
         if claimed is not None:
             self.session.append("user/message", claimed, surfaceOp="append")
 
-        # 请求配置入日志（模型可见 ⟺ 已记录；上游 request/header 的简化版）
-        self.session.append("request/header", {
-            "header": {
-                "model": getattr(self.adapter, "model", None),
-                "provider": self.adapter.provider,
-            },
-            "reason": "initial",
-        })
+        # 请求配置入日志（模型可见 ⟺ 已记录；对齐上游 requestHeaderLogged：
+        # 首次落 initial（已存在 request/header 的重放会话落 resume），
+        # 之后仅 header 变化时落 change，attempt/重试不重复落）
+        header = {
+            "model": getattr(self.adapter, "model", None),
+            "provider": self.adapter.provider,
+        }
+        if self._header_baseline is None:
+            resume = any(e["type"] == "request/header" for e in self.session.events)
+            self.session.append("request/header", {
+                "header": header, "reason": "resume" if resume else "initial",
+            })
+        elif header != self._header_baseline:
+            self.session.append("request/header", {
+                "header": header, "reason": "change",
+            })
+        self._header_baseline = header
 
         history = derive_messages(self.session.events)
         system = create_message("system", [text_block(self.system_prompt)],
@@ -326,11 +341,39 @@ class AgentLoop:
                     continue
                 raise
 
-            assistant_message = assembler.message()
             if assembler.finish is None:
                 assembler.finish = {"kind": "stop"}
             if assembler.finish["kind"] == "max-tokens":
                 self._turn_end = {"kind": "max-tokens"}   # max-tokens 粘滞
+            # 对齐上游：finish {kind:'error'|'aborted', failure} 是带内失败路径，
+            # 与异常路径同走 agent/request-error waterfall（失败 attempt 不落日志）
+            if assembler.finish["kind"] in ("error", "aborted"):
+                failure = assembler.finish.get("failure") or {}
+                exc = LlmFailure(
+                    failure.get("code", "UNKNOWN"),
+                    failure.get("message", "模型流在 finish 处失败"),
+                    status=failure.get("status"),
+                    provider_retry_after_ms=failure.get("providerRetryAfterMs"),
+                    request_id=failure.get("requestId"),
+                )
+                action = self.ctx.waterfall("agent/request-error", {
+                    "agent": self,
+                    "turn": self._turn,
+                    "step": self._step,
+                    "provider": self.adapter.provider,
+                    "failure": exc,
+                    "retryPolicy": getattr(self.adapter, "retry_policy", None),
+                    "signal": self._abort_proxy,
+                })
+                if isinstance(action, dict) and action.get("kind") == "retry":
+                    continue
+                raise exc
+            # assistant/message 的 source 对齐上游 {kind:'model', provider, model}
+            assistant_message = assembler.message({
+                "kind": "model",
+                "provider": self.adapter.provider,
+                "model": getattr(self.adapter, "model", None),
+            })
             self.session.append("assistant/message", {
                 "turn": self._turn, "step": self._step, "message": assistant_message,
                 **({"usage": assembler.usage} if assembler.usage is not None else {}),
@@ -380,7 +423,9 @@ class AgentLoop:
         })
         tool = self.tools.resolve(name)
         if tool is None:
-            result = ToolResult(ok=False, is_error=True, error=f"未知工具: {name}")
+            # 上游 ToolNotFoundError：code 'UNKNOWN_TOOL'（tools/src/index.ts:494-510）
+            result = ToolResult(ok=False, is_error=True, error=f"未知工具: {name}",
+                                error_info={"name": "ToolNotFoundError", "code": "UNKNOWN_TOOL"})
         else:
             try:
                 parsed = json.loads(arguments) if arguments else {}
@@ -400,5 +445,9 @@ class AgentLoop:
             "turn": self._turn, "step": self._step, "message": message,
         }
         if result.is_error:
-            data["error"] = {"name": "ToolExecutionError", "code": "TOOL_EXECUTION_ERROR"}
+            # 对齐上游 tool/result error 字段（llm/src/types.ts:295）：
+            # 仅当 error.info 存在才携带 {name, code}；普通工具体错误不带
+            info = getattr(result, "error_info", None)
+            if info is not None:
+                data["error"] = info
         self.session.append("tool/result", data, surfaceOp="append")

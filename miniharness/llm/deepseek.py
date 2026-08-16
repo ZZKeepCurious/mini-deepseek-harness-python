@@ -6,14 +6,16 @@ sse.ts + translate.ts）。
   * 请求体 stream:true + stream_options.include_usage
   * SSE 必须出现字面 [DONE]，EOF 未到 [DONE] 抛 STREAM_CLOSED（截断响应不可信）
   * finish reason 与 usage 在 [DONE] 之后发射；空响应抛 EMPTY_RESPONSE
-  * 错误映射：401/403→AUTH、429→RATE_LIMIT、400 上下文超限→CONTEXT_WINDOW_EXCEEDED、
-    500+→SERVER；LlmError facts（status / providerRetryAfterMs / requestId）
+  * 错误映射：401/403→AUTH、quota 措辞→QUOTA、429→RATE_LIMIT、
+    400 上下文超限→CONTEXT_WINDOW_EXCEEDED（否则 INVALID_REQUEST）、500+→SERVER、
+    其余→HTTP_<status>；LlmError facts（status / providerRetryAfterMs / requestId）
 """
 from __future__ import annotations
 
 import email.utils
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -24,8 +26,10 @@ from .protocol import (
     AUTH,
     CONTEXT_WINDOW_EXCEEDED,
     EMPTY_RESPONSE,
+    INVALID_REQUEST,
+    MALFORMED_RESPONSE,
+    QUOTA,
     RATE_LIMIT,
-    REQUEST_ERROR,
     SERVER,
     STREAM_CLOSED,
     TIMEOUT,
@@ -88,25 +92,72 @@ def serialize_messages(messages: list[dict]) -> list[dict]:
     return wire
 
 
+# 上游 error.ts 的正则集合（isContextWindowExceededError / isQuotaExceededError）
+# 匹配 error.code+type+message 拼接串；mini 以 body 为待测串（stdlib 载体简化）。
+_STRUCTURED_CONTEXT_OVERFLOW = re.compile(
+    r"(?:^|[^a-z0-9])context[\s_-](?:length|window)[\s_-]"
+    r"(?:exceed(?:ed|s)?|overflow(?:ed)?|limit[\s_-]exceeded)(?:$|[^a-z0-9])",
+    re.I,
+)
+_CONTEXT_LENGTH_WINDOW = re.compile(
+    r"\b(?:maximum|max)(?:\s+(?:allowed|supported))?\s+context\s+(?:length|window)\b", re.I
+)
+_TOO_LARGE_FOR_CONTEXT = re.compile(
+    r"\b(?:request|prompt|input|messages?)\s+(?:is\s+|are\s+)?"
+    r"too\s+(?:large|long)\s+for\s+(?:(?:this|the)\s+)?"
+    r"(?:model(?:'s)?\s+)?context(?:\s+window)?\b",
+    re.I,
+)
+_TOO_LONG_FOR_MODEL = re.compile(
+    r"\b(?:input|prompt|request)\s+(?:is\s+)?too\s+(?:long|large)\s+for\s+(?:this|the)\s+model\b",
+    re.I,
+)
+_EXCEEDS_MODEL_CONTEXT = re.compile(
+    r"\b(?:input|prompt|request|messages?)\b.{0,40}"
+    r"\b(?:exceed(?:s|ed)?|overflows?|is\s+larger\s+than)\b.{0,40}"
+    r"\b(?:the\s+)?(?:model(?:'s)?\s+)?context(?:\s+(?:length|window))?\b",
+    re.I,
+)
+_QUOTA_INSUFFICIENT = re.compile(r"\binsufficient[\s_-]+(?:quota|balance|credits?)\b", re.I)
+_QUOTA_EXCEEDED = re.compile(r"\b(?:quota|usage[\s_-]+limit)[\s_-]+(?:exceeded|exhausted|reached)\b", re.I)
+
+
 def _http_error_code(status: int, body: str) -> str:
-    """上游 httpErrorCode 映射：401/403→AUTH、429→RATE_LIMIT、
-    400 上下文超限→CONTEXT_WINDOW_EXCEEDED、500+→SERVER。"""
+    """上游 httpErrorCode 映射（llm-deepseek/src/adapter.ts:138-149）：
+    401/403→AUTH；quota 措辞（任意状态，先于 429）→QUOTA；429→RATE_LIMIT；
+    400 上下文超限→CONTEXT_WINDOW_EXCEEDED、否则→INVALID_REQUEST；
+    ≥500→SERVER；其余→HTTP_<status>。
+
+    上下文/quota 判定复刻上游 error.ts 正则集（isContextWindowExceededError /
+    isQuotaExceededError），避免裸子串误判。
+    """
     if status in (401, 403):
         return AUTH
+    text = body.lower()
+    if _QUOTA_INSUFFICIENT.search(text) or _QUOTA_EXCEEDED.search(text):
+        return QUOTA
     if status == 429:
         return RATE_LIMIT
     if status >= 500:
         return SERVER
-    if status == 400 and ("context" in body.lower() or "maximum context" in body.lower()):
-        return CONTEXT_WINDOW_EXCEEDED
-    return REQUEST_ERROR
+    if status == 400:
+        if (
+            _STRUCTURED_CONTEXT_OVERFLOW.search(text)
+            or _CONTEXT_LENGTH_WINDOW.search(text)
+            or _TOO_LARGE_FOR_CONTEXT.search(text)
+            or _TOO_LONG_FOR_MODEL.search(text)
+            or _EXCEEDS_MODEL_CONTEXT.search(text)
+        ):
+            return CONTEXT_WINDOW_EXCEEDED
+        return INVALID_REQUEST
+    return f"HTTP_{status}"
 
 
 def provider_retry_after_ms(value: str | None) -> int | None:
-    """上游 providerRetryAfterMs（llm-deepseek/src/adapter.ts 同构）。
+    """上游 providerRetryAfterMs（llm-deepseek/src/adapter.ts:117-125 同构）。
 
-    纯数字秒 → ×1000；否则尝试 HTTP-date（RFC 7231）解析为相对毫秒；
-    无效/非正 → None（视为未提供）。
+    纯数字秒 → ×1000；否则尝试 ISO 8601（Date.parse 兼容集）或
+    HTTP-date（RFC 7231）解析为相对毫秒；无效/非正 → None（视为未提供）。
     """
     if value is None or len(value.strip()) == 0:
         return None
@@ -115,9 +166,12 @@ def provider_retry_after_ms(value: str | None) -> int | None:
         delay = int(text) * 1000
         return delay if delay > 0 else None
     try:
-        parsed = email.utils.parsedate_to_datetime(text)
-    except (TypeError, ValueError):
-        return None
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            parsed = email.utils.parsedate_to_datetime(text)
+        except (TypeError, ValueError):
+            return None
     delay = int((parsed.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds() * 1000)
     return delay if delay > 0 else None
 
@@ -131,15 +185,38 @@ def request_id(headers) -> str | None:
 
 
 def _map_finish_reason(reason: str | None) -> dict:
-    """上游 mapFinishReason：stop→stop、tool_calls→tool-calls、length→max-tokens、
-    其它→{kind:'error'}。"""
-    if reason == "stop":
+    """上游 mapFinishReason（translate.ts:31-43）：stop→stop、
+    tool_calls→tool-calls、length→max-tokens；缺省 → {kind:'stop'}
+    （translate.ts:107）；其它 → {kind:'error', failure:
+    {message: "model stopped: <reason>", code: <reason 大写>}}。"""
+    if reason is None or reason == "stop":
         return {"kind": "stop"}
     if reason == "tool_calls":
         return {"kind": "tool-calls"}
     if reason == "length":
         return {"kind": "max-tokens"}
-    return {"kind": "error", "failure": {"code": reason.upper() if reason else "UNKNOWN", "message": f"provider finish_reason: {reason}"}}
+    return {"kind": "error", "failure": {
+        "message": f"model stopped: {reason}", "code": reason.upper(),
+    }}
+
+
+def _map_usage(usage: dict) -> dict:
+    """上游 mapUsage（translate.ts 同构）：TokenUsage 子集。
+
+    inputTokens = prompt_tokens - cacheReadTokens；cacheReadTokens 来自
+    prompt_cache_hit_tokens；reasoningTokens 来自
+    completion_tokens_details.reasoning_tokens。
+    """
+    cache_read = usage.get("prompt_cache_hit_tokens")
+    input_tokens = int(usage.get("prompt_tokens") or 0) - int(cache_read or 0)
+    mapped = {"inputTokens": input_tokens,
+              "outputTokens": int(usage.get("completion_tokens") or 0)}
+    if cache_read:
+        mapped["cacheReadTokens"] = int(cache_read)
+    details = usage.get("completion_tokens_details") or {}
+    if details.get("reasoning_tokens"):
+        mapped["reasoningTokens"] = int(details["reasoning_tokens"])
+    return mapped
 
 
 class DeepSeekAdapter(LlmAdapter):
@@ -217,9 +294,13 @@ class DeepSeekAdapter(LlmAdapter):
             if data == "[DONE]":
                 saw_done = True
                 break
-            piece = json.loads(data)
+            try:
+                piece = json.loads(data)
+            except json.JSONDecodeError:
+                # 对齐上游：SSE 载荷非 JSON → MALFORMED_RESPONSE（截断/损坏不可信）
+                raise LlmFailure(MALFORMED_RESPONSE, f"malformed SSE payload: {data[:120]}") from None
             if piece.get("usage"):
-                usage = piece["usage"]
+                usage = _map_usage(piece["usage"])
             for choice in piece.get("choices", []):
                 delta = choice.get("delta", {})
                 finish_reason = choice.get("finish_reason") or finish_reason

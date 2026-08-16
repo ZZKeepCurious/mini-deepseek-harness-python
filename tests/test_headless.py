@@ -147,7 +147,7 @@ class TestHeadlessRun(unittest.TestCase):
         ctx = Context(name="headless")
 
         def reject(payload, next=None):
-            return {"verdict": "reject"}
+            return {"kind": "reject"}
 
         ctx.on("agent/pre-step", reject)
         run_headless(

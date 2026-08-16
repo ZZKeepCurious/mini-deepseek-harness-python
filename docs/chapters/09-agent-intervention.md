@@ -2,7 +2,7 @@
 
 > 本章回答一个问题：宿主（web UI、hooks 桥、ACP 客户端、编排程序）怎么干预一个运行中的 agent？第 04 章只实现了"喂一条消息"（followup）；上游把干预做成了七个方法的完整接口面。我们逐一对齐语义，在 mini 的 `AgentLoop` 上补齐 `steer` / `inject` / `cancel` / `when_idle` / `run_maintenance`。
 >
-> 对应 dsh 真实源码：`packages/core/agent`（Agent 接口，`src/runtime-types.ts:64-144`）+ `packages/core/agent-loop`（pre-step 瀑布与 turn 闭合，`src/agent.ts:225-269`）。mini 复现于 `miniharness/loop.py` 干预面一节。
+> 对应 dsh 真实源码：`packages/core/agent`（Agent 接口，`src/runtime-types.ts:64-144`）+ `packages/core/agent-loop`（pre-step 瀑布与 turn 闭合，`src/agent.ts:225-269`）。mini 复现于 `miniharness/core/agent_loop/agent.py` 干预面一节。
 
 ## 9.1 上游接口全景
 

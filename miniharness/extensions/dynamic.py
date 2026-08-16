@@ -81,11 +81,15 @@ class DynamicPluginRegistry:
         return pkg_id
 
     def run(self, pkg_id: str) -> dict:
-        """激活：隔离 scope + apply + 提供服务。返回 {runId, status, pkgId}。"""
+        """激活：隔离 scope + apply + 提供服务。返回 {runId, status, pkgId}。
+
+        对齐上游 cordis-host-runner（index.ts:842）：已在运行时 = 先
+        retract 旧 run 再激活新 run（replace 语义，非拒绝）。
+        """
         if pkg_id not in self._defs:
             raise KeyError(f"未知包: {pkg_id}（先 define）")
         if pkg_id in self._pkg_runs:
-            raise RuntimeError(f"包 {pkg_id} 已在运行")
+            self._retract(pkg_id)
         p = self._defs[pkg_id]
         # 进程级冲突检查：声明的 provides 不得已存在于祖先链（apply 负责实际 provide）
         for key in p.provides:
@@ -115,13 +119,23 @@ class DynamicPluginRegistry:
         if run_id not in self._runs:
             raise KeyError(f"未知 run: {run_id}")
         pkg_id = next(p for p, r in self._pkg_runs.items() if r == run_id)
-        del self._pkg_runs[pkg_id]
-        self._runs.pop(run_id).dispose()
+        self._retract(pkg_id)
 
-    def undefine(self, pkg_id: str) -> None:
-        """回收定义：若在运行先拒绝（fail loud）。"""
-        if pkg_id in self._pkg_runs:
-            raise RuntimeError(f"包 {pkg_id} 仍在运行，先 stop 再 undefine")
+    def _retract(self, pkg_id: str) -> None:
+        """回收一次运行（上游 retract：dispose scope，副作用逆序回滚）。"""
+        run_id = self._pkg_runs.pop(pkg_id, None)
+        if run_id is not None:
+            self._runs.pop(run_id).dispose()
+
+    def undefine(self, pkg_id: str) -> dict:
+        """回收定义。对齐上游 cordis-host-runner（index.ts:215-218）：
+        运行中 → 自动 retract 后删除，返回 {ok:true, wasRunning}；
+        缺失 → {ok:false, reason:'plugin-missing', message}（不抛错）。"""
         if pkg_id not in self._defs:
-            raise KeyError(f"未知包: {pkg_id}")
+            return {"ok": False, "reason": "plugin-missing",
+                    "message": f"plugin {pkg_id} not found"}
+        was_running = pkg_id in self._pkg_runs
+        if was_running:
+            self._retract(pkg_id)
         del self._defs[pkg_id]
+        return {"ok": True, "wasRunning": was_running}

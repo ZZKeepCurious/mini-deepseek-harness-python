@@ -24,7 +24,7 @@
 | 与运行时的连接 | 进程内直接调用插件 | 启动 `dsh-jsonrpc-agent` 子进程，走 stdio JSON-RPC；**同一协议在 TS 侧的对应实现是 `packages/sdk`（protocol/client/server）** |
 | 配置方式 | profile / bundle / patch 组合树（cordis.yml） | 内置默认组合（stdio JSON-RPC 服务器 + agent core + DeepSeek 适配器 + JSONL 持久化 + 本地 bash）；传 `cordis=` 指向自己的 cordis.yml 即可换组合（需保留 `@deepseek-ai/dsh-sdk-jsonrpc-server` 条目） |
 | 环境变量 | 继承 `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` / `DSH_HOME` 等 | 运行时继承同一套 `DEEPSEEK_*`；`DSH_SESSION_ROOT` 由 `session_root=` 参数设置；自定义组合经 `DSH_CORDIS_CONFIG` 注入 |
-| 平台 | macOS / Linux 为主（Windows 部分支持） | Linux x64 / arm64、macOS 14+ arm64；持久 PTY bash 需 POSIX，**不支持 Windows agent**；内置组合是 `danger-full-access`，只能在可丢弃的 checkout/容器里跑 |
+| 平台 | macOS / Linux 为主（Windows 部分支持） | Linux x64 / arm64、macOS 14+ arm64；持久 PTY bash 需 POSIX，**不支持 Windows agent**；内置组合（`sdk-runtime/.../cordis.yml`）**不含 permission 层**，bash/fs 无路径限制——行为等价于 `danger-full-access`（**学习归纳**：该名仅见于上游 `app-boot.spec.ts:130` 的 `.env` 拒绝名单 `DSH_PERMISSION_MODE=danger-full-access`，非正式组合名），只能在可丢弃的 checkout/容器里跑 |
 
 ### 9.2 上手步骤（step-by-step）
 
@@ -80,7 +80,7 @@
 6. **session id 复用语义**：复用同一 harness + 同一 `session_id` 会**保留该会话的 Bash 进程**（工作目录、已导出的变量、shell 函数）。独立任务用新 id；只有需要延续同一段持久化对话才复用。
 
 !!! warning "安全边界"
-    内置组合是 `danger-full-access`——bash 与编辑器可改任何路径，且上下文压缩关闭。只应在可丢弃的 checkout 或容器内运行。仓库内置示例：`python examples/jsonrpc-agent/minimal.py --workspace <dir> --session-root <dir> --session-id example-001 "task"`。
+    内置组合（`sdk-runtime/.../cordis.yml`）不含 permission 层——bash 与编辑器可改任何路径，且上下文压缩关闭。行为等价于 `danger-full-access`（**学习归纳**：该名仅见于上游 `app-boot.spec.ts:130` 的 `.env` 拒绝名单 `DSH_PERMISSION_MODE=danger-full-access`，非正式组合名）。只应在可丢弃的 checkout 或容器内运行。仓库内置示例：`python examples/jsonrpc-agent/minimal.py --workspace <dir> --session-root <dir> --session-id example-001 "task"`。
 
 ## 10. 添加插件与贡献
 

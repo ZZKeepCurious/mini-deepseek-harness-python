@@ -101,7 +101,8 @@ class TestIntervention(unittest.TestCase):
         loop.run("跑命令")
         self.assertEqual(calls, ["ran"])
         end = [e for e in loop.session.events if e["type"] == "turn/end"][-1]
-        self.assertEqual(end["data"]["reason"], {"kind": "aborted"})
+        # 对齐上游：aborted 带 reason（AgentCancelCause，cause 传原值）
+        self.assertEqual(end["data"]["reason"], {"kind": "aborted", "reason": {"kind": "用户叫停"}})
         # 取消后不再继续 step：只有一个 step/start
         starts = [e for e in loop.session.events if e["type"] == "step/start"]
         self.assertEqual(len(starts), 1)

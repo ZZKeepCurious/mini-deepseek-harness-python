@@ -50,7 +50,7 @@
 
 | 上游 | mini 现状 | 规划 |
 |---|---|---|
-| preset roster + per-agent mount | `boot/boot.py`/`apply_patch` 已有组合与 patch 层叠基础；无 preset 概念 | 最小版 preset roster：标准/极简两个 preset 的组合差异 = 工具目录 + prompt 来源，与手册 08 章同步 |
+| preset roster + per-agent mount | `miniharness/preset/{standard,minimal}/preset.json` + `preset/presets.py`：目录列表即名单、per-agent 挂载视图、host 缺工具 fail loud、进程级冲突拒绝挂载（手册 08 章） | — |
 
 ## 议题 2：外部入口全景
 
@@ -62,7 +62,7 @@
 
 ```text
 启动链路（每个入口相同）：
-bin.ts → args 解析（--profile/--task/--session） → profile-boot 层
+bin.ts → args 解析（--profile/--patch/--dump-config，task 为位置参数透传） → profile-boot 层
   → loadProfile：定位 profile.yml（内置 bundle 根 + home 用户根双锚点）
   → composeEntries：bundle 栈 + 用户 patch 层叠（header 行 + 增量行）
   → boot()：loader 结算组合树（插件加载、include 展开）
@@ -73,7 +73,7 @@ bin.ts → args 解析（--profile/--task/--session） → profile-boot 层
 | 入口 | 形态 | 协议/载体 | 说明 |
 |---|---|---|---|
 | web surface | 浏览器 GUI | HTTP + SSE（`host/apiproxy`）+ JSON-RPC 会话协议（`core/session-jsonrpc`） | 完整产品体验：Trajectory、审批、命令、配置等 |
-| headless | CLI 一次性任务 | `bundle/headless` | stdout 最后一条非空 assistant 文本；退出码按 turn/end reason；**不支持会话恢复**（见议题 7） |
+| headless | CLI 一次性任务 | `packages/bundle/headless` | stdout 最后一条非空 assistant 文本；退出码按 turn/end reason；**不支持会话恢复**（见议题 7） |
 | ACP 协议 | 自动化客户端协议 | `packages/acp/acp`（stdio JSON-RPC） | 机器到 agent 的规范接口（会话/审批/工具调用） |
 | SDK 协议 | 官方 SDK | `packages/sdk/protocol` | Python/TS 官方客户端，全会话操控 |
 | hooks 桥接 | Claude Code / Codex hooks | `packages/hooks` | 把 harness 作为这些 IDE agent 的后端工具执行器 |
@@ -83,7 +83,7 @@ bin.ts → args 解析（--profile/--task/--session） → profile-boot 层
 ### 2.3 源码证据
 
 - `apps/cli/src/{bin.ts,args.ts,profile-boot/*,boot.ts}` —— 启动与 profile 加载链路
-- `bundle/headless/src/{index,startup}.ts` —— headless 语义（mini 已对齐并复现）；startup.ts:31-56 只解析 task 位置参数与 --help，无 --session
+- `packages/bundle/headless/src/{index,startup}.ts` —— headless 语义（mini 已对齐并复现）；startup.ts:31-56 只解析 task 位置参数与 --help，无 --session
 - `docs/architecture.md` 与 `packages/sdk/protocol` —— 协议契约
 
 ### 2.4 mini 对照
@@ -96,7 +96,7 @@ headless 一次性任务入口（`miniharness/cli/headless.py` + `cli/main.py`�
 
 模型请求重试/退避（`miniharness/llm/retry_policy.py` + `miniharness/llm/retry.py` + `core/agent_loop/agent.py` 接线，36 测试，手册 04 章 §4.10）——`agent/request-error` waterfall 扩展点、normal/always 策略、有界指数退避 + 对称抖动、`providerRetryAfterMs`（429 Retry-After）优先、durable `llm/retry` + `llm/retry-started` 审计对；上下文溢出/认证不在默认可重试白名单 → 终局降级，对齐上游 `llm-retry/src/index.ts` 与 `retry-policy.ts`。
 
-YAML 配置 + `!!js` 插值子集（`miniharness/boot/composition.py`，23 测试）——pyyaml 可选依赖双载体、`process.env.<NAME>` 子集（其它表达式 fail loud，简化为不求值 JS）、`.env` 加载（ENOENT 静默/其它 warn/已存在不覆盖）、组合 dump 渲染；启动器选项（`miniharness/cli/main.py`，24 测试）——`--patch` 可重复、`--dump-config`/`--dump-default-config` 互斥且 boot-free、dump 不接受任务参数、default 不接受 `--patch`，行级 `# ==` 来源注释 + `!!js` 原样未求值 + skipped patch warn 不失败 + 单文档可再加载；会话管理子命令（`miniharness/cli/session_cmds.py`，8 测试，mini 教学扩展——上游会话管理在 web 表层）；CI（`.github/workflows/ci.yml`：unittest + Python 3.10~3.13 matrix × ubuntu/windows + demo 冒烟）+ integration 标签真实 API 测试（`tests/test_real_api.py`，`MINIHARNESS_INTEGRATION=1` + key 缺一即跳过）。当前 413 个测试全绿。
+YAML 配置 + `!!js` 插值子集（`miniharness/boot/composition.py`，23 测试）——pyyaml 可选依赖双载体、`process.env.<NAME>` 子集（其它表达式 fail loud，简化为不求值 JS）、`.env` 加载（ENOENT 静默/其它 warn/已存在不覆盖）、组合 dump 渲染；启动器选项（`miniharness/cli/main.py`，16 测试）——`--patch` 可重复、`--dump-config`/`--dump-default-config` 互斥且 boot-free、dump 不接受任务参数、default 不接受 `--patch`，行级 `# ==` 来源注释 + `!!js` 原样未求值 + skipped patch warn 不失败 + 单文档可再加载；会话管理子命令（`miniharness/cli/session_cmds.py`，8 测试，mini 教学扩展——上游会话管理在 web 表层；以上 24 项均在 `tests/test_cli.py`）；CI（`.github/workflows/ci.yml`：unittest + Python 3.10~3.13 matrix × ubuntu/windows + demo 冒烟）+ integration 标签真实 API 测试（`tests/test_real_api.py`，`MINIHARNESS_INTEGRATION=1` + key 缺一即跳过）。当前 414 个测试全绿。
 
 ## 议题 3：Trajectory 轨迹台账
 
@@ -131,9 +131,9 @@ Trajectory 是 **web 专属**的"Agent 的 DevTools"：一个按 turn 组织的�
 ### 3.3 源码证据
 
 - `packages/client/ui-trajectory/README.md:5` —— Trajectory 定义（turn 组织的可检查回放）
-- `packages/client/ui-trajectory/src/client/conversation-assembler.ts:133-150` —— 折叠窗口与 per-target 物化
-- `packages/client/ui-trajectory/src/shared/trajectory-contract.ts:60-68` —— TrajectorySnapshot 结构
-- `packages/client/ui-trajectory/src/shared/trajectory-*-definition.ts` —— 纯函数折叠定义（match/update/finalNode）
+- `packages/client/runtime/src/client/sessions/conversation-assembler.ts:133-150` —— 折叠窗口与 per-target 物化
+- `packages/client/ui-trajectory/src/client/trajectory-contract.ts:60-68` —— TrajectorySnapshot 结构
+- `packages/client/ui-trajectory/src/client/trajectory-*-definition.ts` —— 纯函数折叠定义（match/update/finalNode）
 - `packages/client/ui-trajectory/src/client/trajectory-search-index.ts` —— 浏览器内增量搜索索引
 - `apps/web/tests/trajectory-virtualization.e2e.ts` —— 虚拟化行窗口契约
 - `.agents/notes/implemented/feature/2026-07-27-trajectory-inspection-ledger.md:44` —— 不扁平化、保留边界的决策
@@ -142,7 +142,7 @@ Trajectory 是 **web 专属**的"Agent 的 DevTools"：一个按 turn 组织的�
 
 | 上游 | mini 现状 | 规划 |
 |---|---|---|
-| 折叠引擎（纯函数） | `headless.py::summarize` 是最简投影（只拼 text 块） | 完整折叠：turn:step 聚合 chunk→message→timing、callId 树、steering 判定、compaction request、request header 继承 → TrajectorySnapshot 等价物（手册 10 章） |
+| 折叠引擎（纯函数） | `client/trajectory.py`：turn/step 聚合 chunk→message→timing、callId 树、tool-call 节点只来自 `tool/call` 事件、崩溃尾部 partial 标记、纯函数（手册 10 章） | turn 摘要为教学扩展（上游 trajectory-contract 无 turns 摘要） |
 | 虚拟化 / Overview / 搜索 | 无（终端输出） | 终端渲染或 JSON dump 简化版；不复制浏览器 UI |
 
 ## 议题 4：Agent 干预面
@@ -185,7 +185,7 @@ Agent 接口定义于 `packages/core/agent/src/runtime-types.ts:64-144`：
 
 ### 4.4 mini 对照
 
-mini loop 现有：`followup` + inbox + pre-step blocked + finally 闭合。**缺口**：steer/inject/cancel/whenIdle 语义。规划：手册 09 章 + loop 代码对齐（steer 改向、cancel 清 inbox+abort、quiescence 判定）。
+mini loop（`core/agent_loop/agent.py`）已复现完整干预面：`followup` + inbox + pre-step blocked + finally 闭合，以及 `steer`（下一 step 唤醒）/ `inject`（非唤醒入 inbox）/ `cancel`（清 inbox + aborted 闭合边界生效）/ `when_idle`（quiescence）/ `run_maintenance`（仅 true idle）（手册 09 章）。
 
 ## 议题 5：一次性审批体验
 
@@ -230,7 +230,7 @@ tools/pre-execute 瀑布（core/tools）→ 返回 {kind:'ask'}（PreToolDecisio
 
 ### 5.4 mini 对照
 
-mini 无审批层。规划：pre-execute 瀑布已复现（tools.py），可加最小 `ask/never` 两档 + 审计事件 `approval/asked|decided`（日志语义对齐），与手册 09 章合并推进。
+mini 已复现审批层：`ask/never` 两档、'never' 在派发前由服务自身确定性拒绝、审计事件 `approval/asked|decided` turn-enclosed 且 log-only 非 surface、`approval/policy` 最后一条胜出纯 fold、无 answerer/抛错/非词汇表返回值归一化 'unavailable' fail closed、'allowed-once' 无跨调用豁免（手册 09 章）。
 
 ## 议题 6：运行时自我修改
 
@@ -254,11 +254,11 @@ mini 无审批层。规划：pre-execute 瀑布已复现（tools.py），可加�
 - `packages/extensions/tool-cordis/README.md:19` —— 进程内存、不写 cordis.yml 的明示
 - `packages/extensions/cordis-host-runner/tests/runner.spec.ts:150-176` —— 端到端示例全流程
 - `packages/extensions/cordis-host-runner/src/index.ts:1019-1117` —— inspect_self 诊断与 steer 回喂
-- `.agents/notes/implemented/2026-08-11-repository-naming-contract-and-rename-ledger.md:260` —— 改名记录
+- `.agents/notes/implemented/architecture/2026-08-11-repository-naming-contract-and-rename-ledger.md:260` —— 改名记录
 
 ### 6.4 mini 对照
 
-规划（手册 11 章）：在 Context/PluginManager 上做"动态插件"简化版——进程内存 define/run/stop，生命周期事件对齐（define 后 run、stop 回收、重启不恢复）。价值排序靠后。
+mini 已复现（`extensions/dynamic.py`）：进程内存 define/run/stop/undefine 生命周期，define 仅登记、run 才生效、运行中 run = retract 旧 run 后 replace、undefine 运行中自动 retract、进程级冲突 fail loud、重启不恢复（手册 11 章）。
 
 ## 议题 7：会话恢复 / resume
 
@@ -304,7 +304,7 @@ sidebar 搜索 → ctx.sessions.search（runtime manager.ts:518-527）→ RPC se
 
 ### 7.4 mini 对照
 
-mini 持久化层已复现（JSONL + fail-closed + interrupted 修复）。**缺口**：resume 会话选择、history 分页窗口。规划：分页语义（消息边界切页）与 headless `--session` 恢复的取舍——建议先复现"读历史窗口"语义，headless 保持不支持恢复（对齐上游）。
+mini 持久化层已复现（JSONL + fail-closed + interrupted 修复），且 `sessions` 子命令（`cli/session_cmds.py`）提供 CLI 版会话管理（list / resume / delete，教学扩展）。**缺口**：resume 会话选择与 history 分页窗口的 web 表层形态。headless 保持不支持恢复（对齐上游 startup.ts:31-56 只解析 task 位置参数）。
 
 ## 议题 8：plan mode 与 goal
 

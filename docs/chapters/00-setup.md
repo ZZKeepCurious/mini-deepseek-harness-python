@@ -67,14 +67,13 @@ MiniHarness 是教学实现，不是移植。下面是简化清单，每一条�
 |---|---|
 | 同步事件总线（parallel 用 list 模拟） | 异步（`@deepseek-ai/cordis` 基于 fiber/async） |
 | `provides` 声明式依赖 | apply 期间动态注册 |
-| 工具并发执行退化为串行 | `isConcurrencySafe` 并行池 + 串行屏障 |
-| 不逐 chunk 落 `assistant/chunk` | 每个 chunk 都是 durable 事件 |
-| JSON 配置 + 补丁 | YAML cordis.yml（同样的 id/insert/replace 语义） |
-| LLM 失败只抛异常，无 `finish {kind:'error'\|'aborted'}` 带内失败路径 | 规范错误编码 `CONTEXT_WINDOW_EXCEEDED` / `EMPTY_RESPONSE`（可重试） |
-| 无 `agent/turn-stopping`、`agent/request-error`、`system-prompt/assemble` waterfall | 上游都有（turn-stopping 是串行终点检查点） |
-| 事件无 `time` 字段、无 `sourceEventSeqs`、无 `session/seed`（`firstLiveSeq`） | 上游均有（`time` epoch 毫秒；`sourceEventSeqs` 引用 chunk 来源） |
+| 同步路径工具逐工具串行执行（async 路径为并行池 + 串行屏障，第 12 章） | `isConcurrencySafe` 并行池 + 串行屏障 |
+| 请求/回合同步阻塞式流式（不与在飞任务交错） | 逐 chunk durable 事件 |
+| JSON/YAML 配置 + 补丁（pyyaml 可选，缺省退化 JSON；`!!js` 仅 `process.env.<NAME>` 子集） | YAML cordis.yml（同样的 id/insert/replace 语义） |
+| LLM 失败以异常抛出（finish 带内 `{kind:'error'|'aborted'}` 与异常同走 `agent/request-error` waterfall） | `LlmError` 编码 `CONTEXT_WINDOW_EXCEEDED` / `EMPTY_RESPONSE`（可重试）等 |
+| 无 `agent/turn-stopping`、`system-prompt/assemble` waterfall | 上游都有（turn-stopping 是串行终点检查点） |
 | JSONL 明文行；SQLite 列 `(session_id, seq, type, data)` | JSONL 默认 checksum+Zstandard 压缩；SQLite 列 `(session_id, seq, type, time, data, source_event_seqs, surface_op)` |
-| 事件 `reason` 用字符串（`"completed"` / `"interrupted"`） | `TurnEndReason` 判别联合（`{ kind: 'interrupted' }` 等，可扩展） |
+| `assistant/message` source 带 `{kind, provider, model}`（消息无 `id` 语义差异待核） | 消息 `{id, role, content, source}` 全字段 |
 
 ## 检查点
 

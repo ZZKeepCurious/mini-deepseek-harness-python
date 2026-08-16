@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from miniharness.core.scope import Context
 from miniharness.llm import (
     AUTH,
+    CONTEXT_WINDOW_EXCEEDED,
     EMPTY_RESPONSE,
     LlmAdapter,
     LlmFailure,
@@ -57,7 +58,7 @@ class ResolveRetryPolicyTest(unittest.TestCase):
             "backoff": {"initialDelayMs": 100, "maxDelayMs": 900, "jitterRatio": 0.5},
         })
         self.assertEqual(p["maxRetries"], 5)
-        self.assertEqual(p["retryableCodes"], ["RATE_LIMIT"])
+        self.assertEqual(p["retryableCodes"], ("RATE_LIMIT",))
         self.assertEqual(p["initialDelayMs"], 100)
         self.assertEqual(p["jitterRatio"], 0.5)
 
@@ -358,10 +359,10 @@ class FlakyAdapter(LlmAdapter):
         if self.fail_times > 0:
             self.fail_times -= 1
             raise LlmFailure(self.code, f"HTTP 429: {self.code}")
-        yield {"kind": "block-start", "index": 0, "blockType": "text"}
-        yield {"kind": "text-delta", "index": 0, "text": "恢复成功。"}
-        yield {"kind": "block-end", "index": 0, "block": {"type": "text", "text": "恢复成功。"}}
-        yield {"kind": "finish", "reason": {"kind": "stop"}}
+        yield {"type": "block-start", "index": 0, "blockType": "text"}
+        yield {"type": "text-delta", "index": 0, "text": "恢复成功。"}
+        yield {"type": "block-end", "index": 0, "block": {"type": "text", "text": "恢复成功。"}}
+        yield {"type": "finish", "reason": {"kind": "stop"}}
 
 
 class LoopRetryTest(unittest.TestCase):
@@ -402,7 +403,7 @@ class LoopRetryTest(unittest.TestCase):
         self.assertEqual(cm.exception.code, RATE_LIMIT)
         turn_end = next(e for e in loop.session.events if e["type"] == "turn/end")["data"]["reason"]
         self.assertEqual(turn_end["kind"], "error")
-        self.assertEqual(turn_end["failure"]["code"], RATE_LIMIT)
+        self.assertEqual(turn_end["error"]["code"], RATE_LIMIT)
         retries = [e for e in loop.session.events if e["type"] == "llm/retry"]
         self.assertEqual(len(retries), 2)   # maxRetries=2 → 两次后放弃
         self.assertEqual([e["data"]["retry"] for e in retries], [1, 2])
@@ -417,7 +418,7 @@ class LoopRetryTest(unittest.TestCase):
         self.assertEqual(cm.exception.code, AUTH)
         turn_end = next(e for e in loop.session.events if e["type"] == "turn/end")["data"]["reason"]
         self.assertEqual(turn_end["kind"], "error")
-        self.assertEqual(turn_end["failure"]["code"], AUTH)
+        self.assertEqual(turn_end["error"]["code"], AUTH)
         self.assertNotIn("llm/retry", [e["type"] for e in loop.session.events])
 
     def test_no_policy_adapter_terminal(self):
@@ -445,6 +446,55 @@ class LoopRetryTest(unittest.TestCase):
     def test_empty_response_is_retryable(self):
         policy = resolve_retry_policy()
         self.assertIn(EMPTY_RESPONSE, policy["retryableCodes"])
+
+
+class TestHttpErrorCode(unittest.TestCase):
+    """_http_error_code：复刻上游 error.ts 正则集（adapter.ts:138-149），
+    400 上下文判定不做裸子串误判（"context" 普通参数名 → INVALID_REQUEST）。"""
+
+    def _code(self, status, body):
+        from miniharness.llm.deepseek import _http_error_code
+        return _http_error_code(status, body)
+
+    def test_400_context_window_exceeded(self):
+        cases = [
+            "This model's maximum context length is 16385 tokens. However, "
+            "your messages resulted in 17000 tokens.",
+            '{"error":{"code":"context_length_exceeded","message":"..."}}',
+            "Please reduce the length of the messages. input is too long for the model",
+            "The request is too large for the model's context window",
+            "Your input message exceeds the model context length",
+        ]
+        for body in cases:
+            self.assertEqual(self._code(400, body), CONTEXT_WINDOW_EXCEEDED, body)
+
+    def test_400_plain_context_word_is_invalid_request(self):
+        # 裸 "context" 子串不得判上下文超限（U2#8）
+        self.assertEqual(
+            self._code(400, "Invalid parameter: context is not a valid field"),
+            "INVALID_REQUEST",
+        )
+        self.assertEqual(
+            self._code(400, "temperature must be between 0 and 2"), "INVALID_REQUEST"
+        )
+        self.assertEqual(
+            self._code(400, "Malformed JSON in request body"), "INVALID_REQUEST"
+        )
+
+    def test_quota_wording_wins_over_status(self):
+        # quota 措辞任意状态先于 429/500（adapter.ts:141）
+        self.assertEqual(self._code(429, "insufficient_quota"), "QUOTA")
+        self.assertEqual(self._code(429, "Quota exceeded"), "QUOTA")
+        self.assertEqual(self._code(500, "insufficient balance"), "QUOTA")
+        self.assertEqual(self._code(400, "usage limit reached"), "QUOTA")
+
+    def test_remaining_status_mapping(self):
+        self.assertEqual(self._code(401, "x"), AUTH)
+        self.assertEqual(self._code(403, "x"), AUTH)
+        self.assertEqual(self._code(429, "Rate limit reached"), RATE_LIMIT)
+        self.assertEqual(self._code(500, "boom"), "SERVER")
+        self.assertEqual(self._code(503, "boom"), "SERVER")
+        self.assertEqual(self._code(418, "teapot"), "HTTP_418")
 
 
 if __name__ == "__main__":

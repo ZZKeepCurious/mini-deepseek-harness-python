@@ -2,7 +2,17 @@
 
 > 对应 dsh 真实源码：`packages/core/agent-loop` + `packages/llm/llm` + `packages/llm/llm-deepseek`
 >（`docs/agent-lifecycle.md`、`docs/subsystems/llm-streaming.md`）
-> 前置：第 1~3 章。产出文件：`miniharness/miniharness/llm.py`、`loop.py` + `tests/test_loop.py`
+> 前置：第 1~3 章。产出文件：`miniharness/llm/`、`miniharness/core/agent_loop/` + `tests/test_loop.py`
+
+!!! warning "早期简化形态"
+    本章代码为**教学简化形态**，与当前实现存在以下差异（学习时以当前实现为准，见 00-setup §0.5 简化表与 AGENTS.md 已核实清单）：
+
+    - **`FakeLlmAdapter` finish reason**：本章为字符串（`"stop"` / `"tool-calls"`）；实现为对象 `{"kind": "stop"}` / `{"kind": "tool-calls"}`（`llm/fake.py:38,45`）。
+    - **`DeepSeekAdapter` SSE**：实现要求字面 `[DONE]` 必须出现（EOF 未到 `[DONE]` 抛 `STREAM_CLOSED`）、畸形 SSE 载荷抛 `MALFORMED_RESPONSE`、HTTP 错误映射完整（401/403→AUTH、quota 措辞→QUOTA、429→RATE_LIMIT、400 上下文→CONTEXT_WINDOW_EXCEEDED 否则 INVALID_REQUEST、≥500→SERVER、其余 `HTTP_<status>`）、`usage` 归一为 `TokenUsage`（`llm/deepseek.py`，见 `llm/protocol.py` 的 `StreamChunk` 判别字段 `type`）。本章的 `AUTH_ERROR`/`REQUEST_ERROR` 二元映射已过时。
+    - **空响应**：本章 §4.4 声称"空响应未实现"与同章 §4.8/§4.10 自相矛盾——实现已产出 `EMPTY_RESPONSE` 错误且默认可重试（`llm/retry_policy.py` 白名单）。
+    - **loop 片段**：本章 `loop.py` 的 `_append` 方法、字符串 reason、扁平 `assistant/message` 形态均已过时；实现是 ContentBlock 消息对象 + 显式编号 + `request/header` 事件 + 每 chunk 落 `assistant/chunk`（`core/agent_loop/agent.py`）。
+    - **重试接线**：真实调用入口必须挂载 `apply_retry_planner`（`llm/retry.py:196`），否则 `agent/request-error` 瀑布不生效（本章 §4.11 真实 API 示例未调用，已修正纪律见 AGENTS.md）。
+    - **时序图**：完整时序含 `request/header` 事件与逐 chunk `assistant/chunk` 落盘（见 `core/agent_loop/agent.py` 的 requestHeaderLogged 语义）。
 
 ## 4.1 这一章要做什么
 
