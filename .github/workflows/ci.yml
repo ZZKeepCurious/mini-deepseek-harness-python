@@ -19,8 +19,12 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install dependencies
-        run: pip install pyyaml
-      - name: Run unit tests
-        run: python -m unittest discover -s tests -t .
+        run: pip install pyyaml coverage
+      - name: Compile all sources
+        run: python -m compileall -q miniharness tests examples
+      - name: Run unit tests with coverage
+        run: python -m coverage run --source=miniharness -m unittest discover -s tests -t .
+      - name: Coverage gate
+        run: python -m coverage report --fail-under=85
       - name: Demo smoke test
         run: python -m miniharness.demo

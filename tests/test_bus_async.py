@@ -4,7 +4,7 @@ import asyncio
 import time
 import unittest
 
-from miniharness.bus import Context
+from miniharness.core.scope import Context
 
 
 class TestAEmit(unittest.TestCase):

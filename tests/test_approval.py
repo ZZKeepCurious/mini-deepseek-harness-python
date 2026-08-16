@@ -1,7 +1,7 @@
 """第 13 章测试：审批 —— 策略两档 + 审计事件对。"""
 import unittest
 
-from miniharness.approval import (
+from miniharness.interaction.approval import (
     APPROVAL_OUTCOMES,
     APPROVAL_POLICIES,
     ApprovalService,
@@ -9,8 +9,8 @@ from miniharness.approval import (
     has_open_turn,
     set_approval_policy,
 )
-from miniharness.bus import Context
-from miniharness.session import Session
+from miniharness.core.scope import Context
+from miniharness.core.session import Session
 
 
 def open_turn(session: Session) -> None:
@@ -135,7 +135,7 @@ class TestApprovalPolicy(unittest.TestCase):
     def test_policy_event_is_log_only_not_surface(self):
         session = Session("policy")
         set_approval_policy(session, "never")
-        from miniharness.session import derive_messages
+        from miniharness.core.session import derive_messages
         self.assertEqual(derive_messages(session.events), [])   # 不产生模型消息
 
     def test_has_open_turn(self):

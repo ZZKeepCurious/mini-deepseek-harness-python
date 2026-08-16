@@ -3,9 +3,9 @@
 import os
 import unittest
 
-from miniharness.bus import Context
+from miniharness.core.scope import Context
 from miniharness.llm import FakeLlmAdapter
-from miniharness.loop import AgentLoop
+from miniharness.core.agent_loop.agent import AgentLoop
 from miniharness.seams import (
     CommandConsumer,
     EnvCredentialProvider,
@@ -13,8 +13,8 @@ from miniharness.seams import (
     PassthroughSandbox,
     ReadOnlySandbox,
 )
-from miniharness.session import Session
-from miniharness.tools import Tool, ToolRegistry
+from miniharness.core.session import Session
+from miniharness.core.tools import Tool, ToolRegistry
 
 
 class TestSandboxSeam(unittest.TestCase):

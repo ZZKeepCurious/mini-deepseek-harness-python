@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch as mock_patch
 
-from miniharness import cli, sessions
+from miniharness import cli
 
 
 def _run_cli(argv, env=None):
@@ -195,15 +195,15 @@ class TestCompositionValidation(unittest.TestCase):
 class TestSessions(unittest.TestCase):
     def _make_session(self, root: Path) -> str:
         from miniharness.llm import FakeLlmAdapter
-        from miniharness.loop import AgentLoop
-        from miniharness.session import Session
-        from miniharness.bus import Context
-        from miniharness.headless import _default_tools
-        from miniharness.persistence import JsonlPersistence
+        from miniharness.core.agent_loop.agent import AgentLoop
+        from miniharness.core.session import Session
+        from miniharness.core.scope import Context
+        from miniharness.cli.default_tools import default_tools
+        from miniharness.core.session.persistence import JsonlPersistence
 
         pers = JsonlPersistence(root / "sessions")
         session = Session("sess-test-1")
-        loop = AgentLoop(session, FakeLlmAdapter(), _default_tools(Context(name="t")), Context(name="t"))
+        loop = AgentLoop(session, FakeLlmAdapter(), default_tools(Context(name="t")), Context(name="t"))
         loop.followup("hello")
         for ev in session.events:
             pers.append(session.session_id, dict(ev))
@@ -241,7 +241,7 @@ class TestSessions(unittest.TestCase):
 
     def test_resume_with_task_continues(self):
         from miniharness.llm import FakeLlmAdapter
-        from miniharness.sessions import sessions_main
+        from miniharness.cli.session_cmds import sessions_main
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -260,8 +260,8 @@ class TestSessions(unittest.TestCase):
                 except SystemExit:
                     pass
             self.assertIn("任务完成", "".join(out))
-            pers = sessions.JsonlPersistence(root)
-            from miniharness.persistence import balanced_after_replay
+            from miniharness.core.session.persistence import JsonlPersistence, balanced_after_replay
+            pers = JsonlPersistence(root)
             self.assertTrue(balanced_after_replay(pers, sid))
 
     def test_delete(self):

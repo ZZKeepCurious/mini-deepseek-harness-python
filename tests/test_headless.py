@@ -5,12 +5,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from miniharness.bus import Context
-from miniharness.headless import run_headless, summarize
+from miniharness.core.scope import Context
+from miniharness.cli.headless import run_headless, summarize
 from miniharness.llm import FakeLlmAdapter, LlmFailure
-from miniharness.persistence import JsonlPersistence
-from miniharness.session import Session, create_message, text_block, tool_call_block
-from miniharness.tools import Tool, ToolRegistry
+from miniharness.core.session.persistence import JsonlPersistence
+from miniharness.core.session import Session, create_message, text_block, tool_call_block
+from miniharness.core.tools import Tool, ToolRegistry
 
 
 class _IO:

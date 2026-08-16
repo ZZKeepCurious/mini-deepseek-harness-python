@@ -6,14 +6,14 @@ import unittest
 from pathlib import Path
 
 from miniharness.boot import apply_patch, boot
-from miniharness.persistence import (
+from miniharness.core.session.persistence import (
     JsonlPersistence,
     SqlitePersistence,
     balanced_after_replay,
     load_events_checked,
     repair_and_replay,
 )
-from miniharness.session import (
+from miniharness.core.session import (
     SESSION_FORMAT_VERSION,
     Session,
     create_message,

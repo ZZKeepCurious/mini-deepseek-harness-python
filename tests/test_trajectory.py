@@ -2,12 +2,12 @@
 import json
 import unittest
 
-from miniharness.bus import Context
+from miniharness.core.scope import Context
 from miniharness.llm import FakeLlmAdapter
-from miniharness.loop import AgentLoop
-from miniharness.session import Session
-from miniharness.tools import Tool, ToolRegistry
-from miniharness.trajectory import TrajectoryNode, fold_events_json, fold_trajectory
+from miniharness.core.agent_loop.agent import AgentLoop
+from miniharness.core.session import Session
+from miniharness.core.tools import Tool, ToolRegistry
+from miniharness.client.trajectory import TrajectoryNode, fold_events_json, fold_trajectory
 
 
 def ev(type_, data, seq, time):

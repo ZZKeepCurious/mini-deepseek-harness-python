@@ -8,14 +8,14 @@ import os
 import tempfile
 import unittest
 
-from miniharness.credentials_local import (
+from miniharness.seams.credentials_local import (
     LocalCredentialProvider,
     _assert_owner_only,
     parse_credentials_document,
     parse_dotenv,
     resolve_dsh_home,
 )
-from miniharness.sandbox_local import (
+from miniharness.seams.sandbox_local import (
     DENIAL_SIGNATURES,
     RUNNER_FAILURE_RULES,
     SANDBOX_UNAVAILABLE,
@@ -29,17 +29,17 @@ from miniharness.sandbox_local import (
     windows_acl_runner_args,
     writable_roots,
 )
-from miniharness.session import Session, thaw
-from miniharness.subagent_providers import (
+from miniharness.core.session import Session, thaw
+from miniharness.seams.subagent.providers import (
     AcpSubAgentProvider,
     ForkSubAgentProvider,
     SdkSubAgentProvider,
     completed_turn_prefix,
 )
-from miniharness.bus import Context
+from miniharness.core.scope import Context
 from miniharness.llm import FakeLlmAdapter
-from miniharness.loop import AgentLoop
-from miniharness.tools import Tool, ToolRegistry
+from miniharness.core.agent_loop.agent import AgentLoop
+from miniharness.core.tools import Tool, ToolRegistry
 
 
 # ==================== 1) 真沙箱后端 ====================
@@ -325,14 +325,14 @@ class TestLocalCredentialProvider(unittest.TestCase):
 
     def test_world_readable_rejected_on_posix(self):
         import unittest.mock as mock
-        with mock.patch("miniharness.credentials_local.os.name", "posix"):
+        with mock.patch("miniharness.seams.credentials_local.os.name", "posix"):
             with self.assertRaises(ValueError):
                 _assert_owner_only("missing-file", lambda p: type("S", (), {
                     "st_mode": 0o644})( ))
 
     def test_owner_only_passes(self):
         import unittest.mock as mock
-        with mock.patch("miniharness.credentials_local.os.name", "posix"):
+        with mock.patch("miniharness.seams.credentials_local.os.name", "posix"):
             _assert_owner_only("f", lambda p: type("S", (), {"st_mode": 0o600})())
 
 

@@ -18,6 +18,7 @@ from miniharness import (
     ToolRegistry,
     turn_balance,
 )
+from miniharness.llm.retry import apply_retry_planner
 
 
 def make_calc(args, env):
@@ -27,6 +28,7 @@ def make_calc(args, env):
 def main():
     session = Session("chat-demo")
     ctx = Context()
+    apply_retry_planner(ctx)
     reg = ToolRegistry(ctx)
     reg.register(Tool(
         name="calc",

@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from miniharness.boot import apply_patch, boot
-from miniharness.composition import (
+from miniharness.boot.composition import (
     compose_with_origins,
     evaluate_js_expr,
     load_composition,

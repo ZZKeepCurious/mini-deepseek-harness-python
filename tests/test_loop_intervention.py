@@ -1,11 +1,11 @@
 """第 9 章测试：Agent 干预面 —— steer / inject / cancel / when_idle / run_maintenance。"""
 import unittest
 
-from miniharness.bus import Context
+from miniharness.core.scope import Context
 from miniharness.llm import FakeLlmAdapter
-from miniharness.loop import AgentLoop
-from miniharness.session import Session, derive_messages
-from miniharness.tools import Tool, ToolRegistry
+from miniharness.core.agent_loop.agent import AgentLoop
+from miniharness.core.session import Session, derive_messages
+from miniharness.core.tools import Tool, ToolRegistry
 
 
 def make_session():

@@ -2,7 +2,7 @@
 
 import unittest
 
-from miniharness.bus import Context, PluginManager
+from miniharness.core.scope import Context, PluginManager
 
 
 class TestBus(unittest.TestCase):

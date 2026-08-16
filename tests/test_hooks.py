@@ -2,7 +2,7 @@
 import json
 import unittest
 
-from miniharness.hooks import (
+from miniharness.protocol.hooks import (
     ClaudeCodeBridge,
     matches_matcher,
     matcher_diagnostic,
@@ -12,7 +12,7 @@ from miniharness.hooks import (
     run_hook,
     substitute_command,
 )
-from miniharness.session import Session
+from miniharness.core.session import Session
 
 
 def fake_run(exit_code=0, stdout="", stderr="", expected_event=None):

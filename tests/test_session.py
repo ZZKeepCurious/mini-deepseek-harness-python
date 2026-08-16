@@ -2,7 +2,7 @@
 
 import unittest
 
-from miniharness.session import (
+from miniharness.core.session import (
     TOOL_NOT_STARTED,
     TOOL_OUTCOME_UNKNOWN,
     Session,

@@ -5,17 +5,17 @@ import json
 import time
 import unittest
 
-from miniharness.bus import Context
+from miniharness.core.scope import Context
 from miniharness.llm import FakeLlmAdapter, LlmAdapter, StreamChunk
-from miniharness.loop import AgentLoop
-from miniharness.scheduler import (
+from miniharness.core.agent_loop.agent import AgentLoop
+from miniharness.core.agent_loop.tool_calls import (
     DEFAULT_MAX_PARALLEL_TOOL_CALLS,
     TOOL_ABORTED_BEFORE_DISPATCH,
     ParallelBarrier,
     schedule_tool_calls,
 )
-from miniharness.session import Session
-from miniharness.tools import (
+from miniharness.core.session import Session
+from miniharness.core.tools import (
     Tool,
     ToolExec,
     ToolRegistry,

@@ -2,7 +2,7 @@
 import os
 import unittest
 
-from miniharness.acp import (
+from miniharness.protocol.acp import (
     AcpRequestError,
     AcpServer,
     acp_prompt_to_text,

@@ -2,7 +2,7 @@
 import json
 import unittest
 
-from miniharness.sdk_protocol import (
+from miniharness.protocol.sdk import (
     JsonRpcLineTransport,
     JsonRpcResponseError,
     SdkRuntime,

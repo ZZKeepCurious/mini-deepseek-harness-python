@@ -1,8 +1,8 @@
 """第 11 章测试：运行时自我修改 —— 动态插件生命周期。"""
 import unittest
 
-from miniharness.bus import Context
-from miniharness.dynamic import DynamicPluginRegistry
+from miniharness.core.scope import Context
+from miniharness.extensions.dynamic import DynamicPluginRegistry
 
 
 class TestDynamicPlugin(unittest.TestCase):

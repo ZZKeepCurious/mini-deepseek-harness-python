@@ -8,7 +8,7 @@ import random
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from miniharness.bus import Context
+from miniharness.core.scope import Context
 from miniharness.llm import (
     AUTH,
     EMPTY_RESPONSE,
@@ -18,15 +18,15 @@ from miniharness.llm import (
     provider_retry_after_ms,
     request_id,
 )
-from miniharness.llm_retry import (
+from miniharness.llm.retry import (
     apply_retry_planner,
     cancellable_delay,
     local_delay,
     recover_llm_failure,
     retry_policy_key,
 )
-from miniharness.loop import AgentLoop
-from miniharness.retry_policy import (
+from miniharness.core.agent_loop.agent import AgentLoop
+from miniharness.llm.retry_policy import (
     DEFAULT_INITIAL_DELAY_MS,
     DEFAULT_MAX_DELAY_MS,
     DEFAULT_MAX_RETRIES,
@@ -34,8 +34,8 @@ from miniharness.retry_policy import (
     MAX_TIMER_DELAY_MS,
     resolve_retry_policy,
 )
-from miniharness.session import Session
-from miniharness.tools import ToolRegistry
+from miniharness.core.session import Session
+from miniharness.core.tools import ToolRegistry
 
 
 # ---------- retry-policy 解析 ----------

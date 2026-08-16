@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mini-deepseek-harness-python"
-version = "0.1.0"
+dynamic = ["version"]
 description = "用 Python 标准库从 0 到 1 复现 DeepSeek Harness 核心能力的教学实现（stdlib only）"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -29,5 +29,8 @@ miniharness = "miniharness.cli:main"
 [project.optional-dependencies]
 yaml = ["pyyaml>=6"]
 
-[tool.setuptools]
-packages = ["miniharness"]
+[tool.setuptools.packages.find]
+include = ["miniharness*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "miniharness.__version__" }

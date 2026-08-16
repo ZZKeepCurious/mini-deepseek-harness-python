@@ -1,9 +1,9 @@
 """第 8 章测试：preset roster —— 组合选择与挂载。"""
 import unittest
 
-from miniharness.bus import Context
-from miniharness.presets import Preset, PresetRoster, builtin_roster
-from miniharness.tools import Tool, ToolRegistry
+from miniharness.core.scope import Context
+from miniharness.preset.presets import Preset, PresetRoster, builtin_roster
+from miniharness.core.tools import Tool, ToolRegistry
 
 
 def make_tool(name: str) -> Tool:

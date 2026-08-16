@@ -2,11 +2,11 @@
 
 import unittest
 
-from miniharness.bus import Context
+from miniharness.core.scope import Context
 from miniharness.llm import FakeLlmAdapter, LlmFailure, StreamChunk
-from miniharness.loop import AgentLoop
-from miniharness.session import Session, derive_messages, turn_balance
-from miniharness.tools import Tool, ToolRegistry
+from miniharness.core.agent_loop.agent import AgentLoop
+from miniharness.core.session import Session, derive_messages, turn_balance
+from miniharness.core.tools import Tool, ToolRegistry
 
 
 def _make_env(tool_call=None, final="搞定。", extra=None):

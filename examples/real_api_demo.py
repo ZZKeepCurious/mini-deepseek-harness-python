@@ -12,6 +12,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from miniharness import AgentLoop, Context, DeepSeekAdapter, Session, Tool, ToolRegistry
+from miniharness.llm.retry import apply_retry_planner
 
 
 def shell(args, env):
@@ -25,6 +26,7 @@ def main():
 
     session = Session("real-api-demo")
     ctx = Context()
+    apply_retry_planner(ctx)
     reg = ToolRegistry(ctx)
     reg.register(Tool(
         name="bash",

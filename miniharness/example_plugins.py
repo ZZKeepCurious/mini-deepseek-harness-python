@@ -1,6 +1,6 @@
 """示例插件模块：被 boot() 通过 'module' 字段动态加载（第 5 章用）。"""
 
-from .bus import Context
+from .core.scope import Context
 
 
 def apply(ctx: Context, greeting: str = "hello", service_name: str = "greeter") -> None:

@@ -3,8 +3,8 @@
 import time
 import unittest
 
-from miniharness.bus import Context
-from miniharness.tools import Tool, ToolRegistry, run_pipeline, validate_schema
+from miniharness.core.scope import Context
+from miniharness.core.tools import Tool, ToolRegistry, run_pipeline, validate_schema
 
 
 def _make(execute, name="t", **kw):

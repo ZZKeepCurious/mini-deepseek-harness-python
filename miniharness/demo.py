@@ -8,12 +8,13 @@ import sys
 import tempfile
 from pathlib import Path
 
-from .bus import Context
+from .core.scope import Context
 from .llm import FakeLlmAdapter
-from .loop import AgentLoop
-from .persistence import JsonlPersistence, repair_and_replay
-from .session import Session, create_message, derive_messages, text_block, turn_balance
-from .tools import Tool, ToolRegistry
+from .llm.retry import apply_retry_planner
+from .core.agent_loop.agent import AgentLoop
+from .core.session.persistence import JsonlPersistence, repair_and_replay
+from .core.session import Session, create_message, derive_messages, text_block, turn_balance
+from .core.tools import Tool, ToolRegistry
 
 
 def main() -> None:
@@ -31,6 +32,7 @@ def main() -> None:
     # ---- 组装：Session + Context + 工具 + 假模型 + Loop ----
     session = Session("demo-001")
     ctx = Context(name="root")
+    apply_retry_planner(ctx)
     reg = ToolRegistry(ctx)
     reg.register(Tool(
         name="bash",
