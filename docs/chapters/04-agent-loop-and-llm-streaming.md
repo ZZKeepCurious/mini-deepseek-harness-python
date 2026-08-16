@@ -388,14 +388,14 @@ print([e["type"] for e in session.events])
 
 下面这些真实扩展点简化版没有实现，对照时不要找"上游为什么多这些东西"，它们是刻意省略的：
 
-| 上游事件/扩展点 | 用途 | 我们的状态 |
+| 上游事件/扩展点 | 用途 | mini 对应 |
 |---|---|---|
 | `system-prompt/assemble` waterfall | 提示词按片段组装（hook 可注入上下文） | 直接拼接，无扩展点 |
 | `agent/request` waterfall → `llm/stream` | 请求构造拦截（steering） | 未实现 waterfall，直连 adapter |
-| `agent/request-error` waterfall | 规范错误（如上下文溢出）后的重试决策 | ✅ 已实现（§4.10 重试/退避） |
+| `agent/request-error` waterfall | 规范错误（如上下文溢出）后的重试决策 | 已实现（§4.10 重试/退避） |
 | `agent/turn-stopping` serial | turn 结束前串行终点检查（compaction 压力等） | 未实现（报告图 11 有此环节，代码暂无） |
 | `finish {kind:'error'\|'aborted'}` 带内失败 | 流中途失败也可经协议传递 | 只在 `stream()` 抛 `LlmFailure` |
-| `EMPTY_RESPONSE` 编码 | 空响应 = 规范错误，可重试 | ✅ 已实现且默认可重试（§4.10） |
+| `EMPTY_RESPONSE` 编码 | 空响应 = 规范错误，可重试 | 已实现且默认可重试（§4.10） |
 
 ## 4.10 重试/退避与上下文溢出降级
 
@@ -404,9 +404,11 @@ print([e["type"] for e in session.events])
 **扩展点**：loop 在适配器抛 `LlmFailure` 时派发 `agent/request-error` waterfall，
 payload `{agent, turn, step, provider, failure, retryPolicy, signal}`（与上游逐字段
 一致）。监听器返回 `{kind:'retry'}` 且不调 `next()` = 自己接管恢复；调 `next()` 委派；
-默认 `undefined` 失败终局。`AgentLoop` 构造时幂等挂载重试规划器（`apply_retry_planner`）。
+默认 `undefined` 失败终局。重试规划器由**装配方显式挂载**（`AgentLoop` 构造无副作用，
+对齐上游插件 apply 时挂载）：headless / sessions / acp / sdk / demo / 示例在构造
+loop 前调用 `apply_retry_planner(ctx)`（幂等，可重复调用）。
 
-**策略解析**（`retry_policy.py`，对齐 retry-policy.ts）：
+**策略解析**（`llm/retry_policy.py`，对齐 retry-policy.ts）：
 
 - 两种模式：`normal`（`maxRetries` + `retryableCodes` 白名单）/ `always`（无限重试）
 - 默认：`maxRetries 2`、`initialDelayMs 500`、`maxDelayMs 10000`、`jitterRatio 0.1`、
@@ -414,7 +416,7 @@ payload `{agent, turn, step, provider, failure, retryPolicy, signal}`（与上�
 - 严格校验：未知键拒绝、backoff 正有限且 `initial ≤ max`、jitter ∈ [0,1]、
   `maxRetries` 非负整数、codes 非空无重复；解析结果冻结，provider 注册时捕获
 
-**恢复决策**（`llm_retry.py`，对齐 llm-retry/index.ts）：
+**恢复决策**（`llm/retry.py`，对齐 llm-retry/index.ts）：
 
 1. 策略 `undefined` → 直接委派（不重试）
 2. `always`：先委派下游——下游给出 retry 决策即采用；失败/未接管则自己无限重试（不判 code）

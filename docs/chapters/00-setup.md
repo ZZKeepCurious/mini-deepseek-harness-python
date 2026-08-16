@@ -16,16 +16,16 @@
 mini-deepseek-harness-python/        ← 仓库根
 ├── README.md                        ← 项目总览
 ├── ROADMAP.md                       ← 完整路线图（从 0 到 1 复现 dsh）
-├── miniharness/                     ← 可运行代码包（随章节逐步构建）
-│   ├── __init__.py              ← 汇总导出
-│   ├── session.py               ← 第 1 章：事件溯源会话
-│   ├── bus.py                   ← 第 2 章：Context + 事件总线 + 作用域
-│   ├── tools.py                 ← 第 3 章：工具注册表 + 执行管线
-│   ├── llm.py                   ← 第 4 章：StreamChunk 协议 + 适配器
-│   ├── loop.py                  ← 第 4 章：Agent Loop 状态机
-│   ├── persistence.py           ← 第 5 章：JSONL / SQLite + 恢复
-│   ├── boot.py                  ← 第 5 章：启动与组合
-│   ├── seams.py                 ← 第 6 章：进阶扩展口
+├── miniharness/                     ← 可运行代码包（随章节逐步构建，家族布局见 architecture.md §1）
+│   ├── core/
+│   │   ├── session/             ← 第 1 章：事件溯源会话
+│   │   ├── scope.py             ← 第 2 章：Context + 事件总线 + 作用域
+│   │   ├── tools.py             ← 第 3 章：工具注册表 + 执行管线
+│   │   └── agent_loop/          ← 第 4 章：Agent Loop 状态机
+│   ├── llm/                     ← 第 4 章：StreamChunk 协议 + 适配器 + 重试
+│   ├── boot/                    ← 第 5 章：启动与组合
+│   ├── seams/                   ← 第 6 章：进阶扩展口
+│   ├── cli/ protocol/ preset/ extensions/ interaction/ client/
 │   ├── example_plugins.py       ← 第 5 章 boot 演示插件
 │   └── demo.py                  ← 端到端演示（无 key 可跑）
 ├── tests/                       ← 每章验收测试（unittest）
@@ -78,6 +78,6 @@ MiniHarness 是教学实现，不是移植。下面是简化清单，每一条�
 
 ## 检查点
 
-- [ ] `python -m unittest discover -s tests -t .` 全部通过（398 个）
+- [ ] `python -m unittest discover -s tests -t .` 全部通过
 - [ ] `python -m miniharness.demo` 输出一次完整的回合日志
-- [ ] 能说出 `session.py / bus.py / tools.py / llm.py / loop.py / persistence.py / boot.py` 各自管什么
+- [ ] 能说出 `core/session`、`core/scope`、`core/tools`、`llm/`、`core/agent_loop`、`core/session/persistence`、`boot/` 各自管什么

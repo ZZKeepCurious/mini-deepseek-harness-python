@@ -2,7 +2,7 @@
 
 > 本章回答一个问题：agent 能"给自己加插件"吗？上游的答案克制而有边界——能，但**临时插件只存在于进程内存**，明确不写配置文件、重启即失。我们复现这套生命周期语义本身（define → run → stop → undefine + 检查族），模型侧与审批往返不做。
 >
-> 对应 dsh 真实源码：`packages/extensions/`（`tool-cordis` 七工具 + `cordis-host-runner` 宿主）。mini 复现于 `miniharness/dynamic.py`。
+> 对应 dsh 真实源码：`packages/extensions/`（`tool-cordis` 七工具 + `cordis-host-runner` 宿主）。mini 复现于 `miniharness/extensions/dynamic.py`。
 
 ## 11.1 上游的边界设计
 

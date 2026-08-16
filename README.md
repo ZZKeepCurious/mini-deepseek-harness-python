@@ -21,27 +21,28 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 
 ## What's inside
 
-| Capability | Status | Upstream counterpart |
-|---|---|---|
-| Event-sourced session (envelope `{type,seq,time,data}`, 1-based turn/step, deep-freeze, `derive_messages`, interrupted repair) | done | `packages/core/session` |
-| Durable storage (JSONL / SQLite, header + `SESSION_FORMAT_VERSION=0` fail-closed, flush barrier, crash recovery) | done | `packages/session/session-persistence` |
-| Plugin event bus (emit / waterfall / parallel / serial, scopes, dependency-driven activation) | done | `vendor/cordis` + `core/scope` |
-| Tool registry + execution pipeline (schema validation, pre/execute/post, timeout) | done | `packages/core/tools` |
-| Agent loop (turn/step state machine, pre-step rejection, tool-feedback continuation) | done | `core/agent-loop` |
-| LLM seam (StreamChunk protocol, fake adapter, official DeepSeek SSE adapter) | done | `llm/llm` + `llm/llm-deepseek` |
-| Model request retry / backoff (normal/always policy, `agent/request-error`, `llm/retry` audit pair) | done | `llm/llm-retry` + `llm/llm-retry-policy` |
-| Boot & composition (YAML/JSON overlays, `!!js` env interpolation, startup assertions) | done | `packages/boot` |
-| Headless one-shot entry (`--profile headless "task"`: stdout final text, exit code by turn/end reason) | done | `bundle/headless` + `apps/cli` |
-| Launcher options (`--patch`, `--dump-config` / `--dump-default-config`, read-only composition dump) | done | `apps/cli/src/args.ts` |
-| Session management CLI (`miniharness sessions` list/resume/delete; mini teaching extension) | done | web surface (upstream) |
-| Capability seams (sandbox backends / credential layers / subagent ACP+SDK+fork channels) | done | capability seams docs |
-| Presets / agent intervention / trajectory / dynamic plugins / approval | done | `packages/preset` + `core/agent` + `interaction` |
-| Protocol entries (ACP / JSON-RPC SDK / hooks bridge) | done | `acp` + `sdk` + `hooks` |
-| Async event bus, true parallel tools + barrier | done | `core/agent-loop` |
-| CI (GitHub Actions, Python 3.10~3.13, integration-tagged real-API tests) | done | — |
-| Official SDK interop tests | planned | `python/sdk` |
+| Capability | Upstream counterpart |
+|---|---|
+| Event-sourced session (envelope `{type,seq,time,data}`, 1-based turn/step, deep-freeze, `derive_messages`, interrupted repair) | `packages/core/session` |
+| Durable storage (JSONL / SQLite, header + `SESSION_FORMAT_VERSION=0` fail-closed, flush barrier, crash recovery) | `packages/session/session-persistence` |
+| Plugin event bus (emit / waterfall / parallel / serial, scopes, dependency-driven activation) | `vendor/cordis` + `core/scope` |
+| Tool registry + execution pipeline (schema validation, pre/execute/post, timeout) | `packages/core/tools` |
+| Agent loop (turn/step state machine, pre-step rejection, tool-feedback continuation) | `core/agent-loop` |
+| LLM seam (StreamChunk protocol, fake adapter, official DeepSeek SSE adapter) | `llm/llm` + `llm/llm-deepseek` |
+| Model request retry / backoff (normal/always policy, `agent/request-error`, `llm/retry` audit pair) | `llm/llm-retry` + `llm/llm-retry-policy` |
+| Boot & composition (YAML/JSON overlays, `!!js` env interpolation, startup assertions) | `packages/boot` |
+| Headless one-shot entry (`--profile headless "task"`: stdout final text, exit code by turn/end reason) | `bundle/headless` + `apps/cli` |
+| Launcher options (`--patch`, `--dump-config` / `--dump-default-config`, read-only composition dump) | `apps/cli/src/args.ts` |
+| Session management CLI (`miniharness sessions` list/resume/delete; mini teaching extension) | web surface (upstream) |
+| Capability seams (sandbox backends / credential layers / subagent ACP+SDK+fork channels) | capability seams docs |
+| Presets / agent intervention / trajectory / dynamic plugins / approval | `packages/preset` + `core/agent` + `interaction` |
+| Protocol entries (ACP / JSON-RPC SDK / hooks bridge) | `acp` + `sdk` + `hooks` |
+| Async event bus, true parallel tools + barrier | `core/agent-loop` |
+| CI (GitHub Actions, Python 3.10~3.13, integration-tagged real-API tests) | — |
 
-Status: **398 unit tests passing** (stdlib only; optional `pyyaml` for YAML config).
+Planned: official Python SDK (`python/sdk`) interop tests.
+
+Status: **413 unit tests passing** (stdlib only; optional `pyyaml` for YAML config).
 
 ## Getting started
 
@@ -85,36 +86,40 @@ miniharness
 
 ```
 mini-deepseek-harness-python/
-├── miniharness/          # core package (stdlib only)
-│   ├── session.py        # event-sourced session, projection, invariants
-│   ├── bus.py            # Context registry / event bus / scopes / plugin activation
-│   ├── tools.py          # tool registry + execution pipeline
-│   ├── llm.py            # StreamChunk protocol + fake / DeepSeek adapters
-│   ├── retry_policy.py   # retry policy parsing (normal/always)
-│   ├── llm_retry.py      # agent/request-error recovery + backoff
-│   ├── loop.py           # agent loop state machine
-│   ├── scheduler.py      # async scheduling + parallel barrier
-│   ├── persistence.py    # JSONL / SQLite backends + crash recovery
-│   ├── boot.py           # startup + patch overlays
-│   ├── composition.py    # YAML config / !!js interpolation / dump rendering
-│   ├── cli.py            # launcher options (profile / patch / dump)
-│   ├── headless.py       # one-shot task entry
-│   ├── sessions.py       # session list / resume / delete
-│   ├── seams.py          # sandbox / credentials / subagent seams
-│   ├── presets.py        # preset rosters
-│   ├── approval.py       # approval policy + audit events
-│   ├── trajectory.py     # trajectory folding
-│   ├── dynamic.py        # dynamic plugin lifecycle
-│   ├── acp.py            # ACP protocol subset
-│   ├── sdk_protocol.py   # JSON-RPC SDK protocol subset
-│   ├── hooks.py          # hooks bridge
-│   └── demo.py           # end-to-end demo
-├── tests/                # 398 acceptance tests (unittest)
-├── examples/             # chat & real-API demos
+├── miniharness/             # core package (stdlib only, family layout, see docs/architecture.md)
+│   ├── core/                # upstream packages/core
+│   │   ├── session/         # types / json / message / invariant / repair / surface / session
+│   │   │   └── persistence.py
+│   │   ├── scope.py         # Context / PluginManager
+│   │   ├── tools.py         # tool registry + execution pipeline
+│   │   └── agent_loop/      # agent.py + tool_calls.py
+│   ├── llm/                 # upstream packages/llm
+│   │   ├── protocol.py      # StreamChunk / LlmAdapter / LlmFailure / BlockAssembler
+│   │   ├── deepseek.py      # DeepSeek wire serialization + SSE adapter
+│   │   ├── fake.py          # FakeLlmAdapter (no API key)
+│   │   ├── retry_policy.py  # retry policy parsing (normal/always)
+│   │   └── retry.py         # agent/request-error recovery + backoff
+│   ├── boot/                # upstream packages/boot
+│   │   ├── boot.py          # startup + patch overlays
+│   │   ├── composition.py   # YAML config / !!js interpolation / dump rendering
+│   │   └── dotenv.py        # .env parsing (parse_dotenv)
+│   ├── cli/                 # apps/cli
+│   │   ├── main.py          # launcher options (profile / patch / dump)
+│   │   ├── headless.py      # one-shot task entry
+│   │   ├── default_tools.py # default toolset for headless
+│   │   └── session_cmds.py  # session list / resume / delete
+│   ├── protocol/            # acp / sdk / hooks bridges
+│   ├── seams/               # sandbox / credentials / subagent seams
+│   ├── preset/  extensions/  interaction/  client/
+│   ├── demo.py              # end-to-end demo
+│   └── example_plugins.py   # boot demo plugins
+├── tests/                   # acceptance tests (unittest)
+├── examples/                # chat & real-API demos
 └── docs/
-    ├── README.md         # handbook index (learning map)
-    ├── chapters/         # 00-setup ~ 12-handbook tutorials
-    └── report/           # analysis report (HTML, Mermaid diagrams)
+    ├── README.md            # handbook index (learning map)
+    ├── architecture.md      # architecture + upstream mapping
+    ├── chapters/            # 00-setup ~ 12-handbook tutorials
+    └── report/              # analysis report (HTML, Mermaid diagrams)
 ```
 
 ## Acknowledgements

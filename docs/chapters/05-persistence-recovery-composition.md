@@ -2,7 +2,7 @@
 
 > 对应 dsh 真实源码：`packages/session/session-persistence` + `packages/boot`
 >（`docs/subsystems/persistence.md`、`docs/subsystems/session-projection.md`）
-> 前置：第 1~4 章。产出文件：`miniharness/miniharness/persistence.py`、`boot.py`、`example_plugins.py` + `tests/test_persistence_boot.py`
+> 前置：第 1~4 章。产出文件：`miniharness/core/session/persistence.py`、`boot.py`、`example_plugins.py` + `tests/test_persistence_boot.py`
 
 ## 5.1 这一章要做什么
 

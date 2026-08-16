@@ -50,7 +50,7 @@
 
 | 上游 | mini 现状 | 规划 |
 |---|---|---|
-| preset roster + per-agent mount | `boot.py`/`apply_patch` 已有组合与 patch 层叠基础；无 preset 概念 | 最小版 preset roster：标准/极简两个 preset 的组合差异 = 工具目录 + prompt 来源，与手册 08 章同步 |
+| preset roster + per-agent mount | `boot/boot.py`/`apply_patch` 已有组合与 patch 层叠基础；无 preset 概念 | 最小版 preset roster：标准/极简两个 preset 的组合差异 = 工具目录 + prompt 来源，与手册 08 章同步 |
 
 ## 议题 2：外部入口全景
 
@@ -88,15 +88,15 @@ bin.ts → args 解析（--profile/--task/--session） → profile-boot 层
 
 ### 2.4 mini 对照
 
-headless 一次性任务入口（`miniharness/headless.py` + `cli.py`）：stdout 最后一条非空 assistant 文本、退出码按 turn/end reason、空任务拒绝、未知 profile fail loud、不开端口、`ctx.appExit` 宿主钩子。9 个测试，手册 07 章。
+headless 一次性任务入口（`miniharness/cli/headless.py` + `cli/main.py`）：stdout 最后一条非空 assistant 文本、退出码按 turn/end reason、空任务拒绝、未知 profile fail loud、不开端口、`ctx.appExit` 宿主钩子。9 个测试，手册 07 章。
 
-协议入口最小子集：JSON-RPC 信封（`miniharness/sdk_protocol.py`，21 测试，07 章 §7.6）、ACP（`miniharness/acp.py`，26 测试，07 章 §7.7）、hooks 桥（`miniharness/hooks.py`，40 测试，07 章 §7.8）；web 表面留在观察清单。
+协议入口最小子集：JSON-RPC 信封（`miniharness/protocol/sdk.py`，21 测试，07 章 §7.6）、ACP（`miniharness/protocol/acp.py`，26 测试，07 章 §7.7）、hooks 桥（`miniharness/protocol/hooks.py`，40 测试，07 章 §7.8）；web 表面留在观察清单。
 
-异步化与并行工具执行（`miniharness/scheduler.py` + bus async 变体 + `execution_mode` 分类器，36 测试，手册 12 章）——屏障/滚动池/模型序提交/取消排干与上游 `agent-loop/src/tool-calls.ts` 逐条对齐。
+异步化与并行工具执行（`miniharness/core/agent_loop/tool_calls.py` + core/scope async 变体 + `execution_mode` 分类器，36 测试，手册 12 章）——屏障/滚动池/模型序提交/取消排干与上游 `agent-loop/src/tool-calls.ts` 逐条对齐。
 
-模型请求重试/退避（`miniharness/retry_policy.py` + `miniharness/llm_retry.py` + `loop.py` 接线，36 测试，手册 04 章 §4.10）——`agent/request-error` waterfall 扩展点、normal/always 策略、有界指数退避 + 对称抖动、`providerRetryAfterMs`（429 Retry-After）优先、durable `llm/retry` + `llm/retry-started` 审计对；上下文溢出/认证不在默认可重试白名单 → 终局降级，对齐上游 `llm-retry/src/index.ts` 与 `retry-policy.ts`。
+模型请求重试/退避（`miniharness/llm/retry_policy.py` + `miniharness/llm/retry.py` + `core/agent_loop/agent.py` 接线，36 测试，手册 04 章 §4.10）——`agent/request-error` waterfall 扩展点、normal/always 策略、有界指数退避 + 对称抖动、`providerRetryAfterMs`（429 Retry-After）优先、durable `llm/retry` + `llm/retry-started` 审计对；上下文溢出/认证不在默认可重试白名单 → 终局降级，对齐上游 `llm-retry/src/index.ts` 与 `retry-policy.ts`。
 
-YAML 配置 + `!!js` 插值子集（`miniharness/composition.py`，23 测试）——pyyaml 可选依赖双载体、`process.env.<NAME>` 子集（其它表达式 fail loud，简化为不求值 JS）、`.env` 加载（ENOENT 静默/其它 warn/已存在不覆盖）、组合 dump 渲染；启动器选项（`miniharness/cli.py`，24 测试）——`--patch` 可重复、`--dump-config`/`--dump-default-config` 互斥且 boot-free、dump 不接受任务参数、default 不接受 `--patch`，行级 `# ==` 来源注释 + `!!js` 原样未求值 + skipped patch warn 不失败 + 单文档可再加载；会话管理子命令（`miniharness/sessions.py`，8 测试，mini 教学扩展——上游会话管理在 web 表层）；CI（`.github/workflows/ci.yml`：unittest + Python 3.10~3.13 matrix × ubuntu/windows + demo 冒烟）+ integration 标签真实 API 测试（`tests/test_real_api.py`，`MINIHARNESS_INTEGRATION=1` + key 缺一即跳过）。当前 398 个测试全绿。
+YAML 配置 + `!!js` 插值子集（`miniharness/boot/composition.py`，23 测试）——pyyaml 可选依赖双载体、`process.env.<NAME>` 子集（其它表达式 fail loud，简化为不求值 JS）、`.env` 加载（ENOENT 静默/其它 warn/已存在不覆盖）、组合 dump 渲染；启动器选项（`miniharness/cli/main.py`，24 测试）——`--patch` 可重复、`--dump-config`/`--dump-default-config` 互斥且 boot-free、dump 不接受任务参数、default 不接受 `--patch`，行级 `# ==` 来源注释 + `!!js` 原样未求值 + skipped patch warn 不失败 + 单文档可再加载；会话管理子命令（`miniharness/cli/session_cmds.py`，8 测试，mini 教学扩展——上游会话管理在 web 表层）；CI（`.github/workflows/ci.yml`：unittest + Python 3.10~3.13 matrix × ubuntu/windows + demo 冒烟）+ integration 标签真实 API 测试（`tests/test_real_api.py`，`MINIHARNESS_INTEGRATION=1` + key 缺一即跳过）。当前 413 个测试全绿。
 
 ## 议题 3：Trajectory 轨迹台账
 

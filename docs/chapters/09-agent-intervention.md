@@ -113,7 +113,7 @@ loop.run("跑命令")
 
 验证：`python -m unittest tests.test_loop_intervention -v`（11 个用例）。
 
-## 9.5 审批：干预通道之一（`miniharness/approval.py`）
+## 9.5 审批：干预通道之一（`miniharness/interaction/approval.py`）
 
 > 对应 dsh 真实源码：`packages/interaction/user-approval`。报告 04 页议题 5 已做全解读；这里落实可运行的最小版。
 

@@ -46,40 +46,37 @@ flowchart LR
 | [05 路线图与 Python 复现](05-roadmap.md) | 学习路线、概念映射表、迷你复现清单、实操资源索引 | 26 KB |
 | [06 附录与 HOWTO](06-appendix.md) | Python SDK、添加插件、HOWTO、参考速查、结语 | 25 KB |
 
-## 四维对照表（解读完整性检查清单）
+## 四维对照表（主题索引）
 
-每一行代表一个解读主题；"解读了 + 注释了 + 对照了"三者齐备才算完成。
+每一行是一个解读主题；mini 模块列给出对应实现位置，手册/报告列给出深入阅读的入口。
 
-| 上游包 / 文件（唯一权威） | mini 模块 | 手册章节 | 报告页面 | 状态 |
-|---|---|---|---|---|
-| `packages/core/session` | `session.py` | 01 | 02 §3-4 | ✔ 已解读已对齐 |
-| `packages/core/context + vendor/cordis(core)` | `bus.py / context.py` | 02 | 02 §4.1 | ✔ 基础版；loader 未拆 |
-| `packages/core/tools + tool-group` | `tools.py` | 03 | 03 §5.2 | ✔ 已对齐 |
-| `packages/llm/llm + llm-deepseek` | `llm.py` | 04 | 02 §3 + 03 §5.4 | ✔ 已对齐（简化标注） |
-| `packages/core/agent-loop + agent-invocation` | `loop.py / agent.py` | 04 / 06 | 03 §5.1 | ✔ 已对齐；干预面缺失 |
-| `packages/core/session-persistence` | `persistence.py` | 05 | 03 §5.3 | ✔ 已对齐 |
-| `packages/cordis-host + boot` | `boot.py` | 05 | 03 §5.5 | ✔ 已对齐 |
-| `bundle/headless + apps/cli/src` | `headless.py / cli.py` | 07 | 04 议题 2 | ✔ 已复现（9 测试） |
-| `apps/cli/config/agent-presets/*` | `presets.py` | 08 | 04 议题 1 | ✔ 已解读 + 已复现（roster/挂载） |
-| `packages/core/agent（runtime-types）` | `loop.py（干预面）` | 09 | 04 议题 4 | ✔ 已解读 + 已复现（steer/inject/cancel/whenIdle/maintenance） |
-| `packages/interaction/user-approval` | `approval.py` | 09 | 04 议题 5 | ✔ 已解读 + 已复现（策略/审计对，18 测试） |
-| `packages/client/ui-trajectory` | `trajectory.py` | 10 | 04 议题 3 | ✔ 已解读 + 已复现（折叠引擎，9 测试） |
-| `packages/extensions（tool-cordis 等）` | `dynamic.py` | 11 | 04 议题 6 | ✔ 已解读 + 已复现（生命周期，10 测试） |
-| `packages/sdk/protocol（transport + types）` | `sdk_protocol.py` | 07 §7.6 | 04 议题 2 | ✔ 已解读 + 已复现（信封子集 + 三方法，21 测试） |
-| `packages/acp/acp` | `acp.py` | 07 §7.7 | 04 议题 2 | ✔ 已解读 + 已复现（握手/会话/prompt/取消/审批桥，26 测试） |
-| `packages/hooks（hook-protocol + hooks-claude-code）` | `hooks.py` | 07 §7.8 | 04 议题 2 | ✔ 已解读 + 已复现（CC 配置 → 四类拦截决策 + 审计配对，40 测试） |
-| `core/agent-loop 并行编排 + core/context 并发模型` | `scheduler.py / bus.py（async 变体）` | 12 | 02 §2 + 03 §5.1 | ✔ 已复现（屏障/滚动池/模型序提交/取消排干，36 测试） |
-| `packages/sandbox/sandbox + sandbox-local + sandbox-windows-acl` | `sandbox_local.py（+ seams.py 基础）` | 06 §6.9 | 02 §2 | ✔ 已复现（四后端 profile / 平台链探测 / fail-closed / ConfinedArgv，约定测试；真实二进制后端不在仓库） |
-| `packages/credentials/credentials-local` | `credentials_local.py（+ seams.py 基础）` | 06 §6.9 | 03 §5.4 | ✔ 已复现（env > file > project-env > user-env 四层；JSON 载体简化） |
-| `packages/subagent/subagent-fork-in-process + subagent-acp + subagent-dsh-sdk` | `subagent_providers.py + subagent_worker.py` | 06 §6.9 | 04 议题 2 | ✔ 已复现（fork 前缀 seed / ACP 子进程 / SDK 子进程三通道，49 测试） |
-| `packages/llm/llm-retry + llm/llm（retry-policy）+ core/agent（agent/request-error）` | `llm_retry.py + retry_policy.py（+ loop.py 接线）` | 04 §4.10 | 04 议题 2 | ✔ 已复现（normal/always 策略 / 指数退避 + 抖动 / providerRetryAfterMs / durable llm/retry 审计对 / 上下文溢出终局降级，36 测试） |
-| `packages/boot/app-boot（loadOverlayPatches / loadEnv / config-dump）+ apps/cli/src/args.ts` | `composition.py + cli.py（launcher 选项）` | 05 + 07 | 03 §5.5 | ✔ 已复现（YAML/JSON 双载体、!!js env 子集、.env 加载、--patch/--dump-config/--dump-default-config 互斥与 boot-free、行级来源注释、skipped patch warn、单文档可再加载，23 测试） |
-| `web 表面会话管理（上游无 CLI）` | `sessions.py（教学扩展）` | 07 | 04 议题 2 | ✔ 已复现（列表/恢复/删除；fail-closed 加载 + 崩溃修复 + 重放，8 测试） |
-| （工程化） | `.github/workflows/ci.yml + tests/test_real_api.py` | 00 | — | ✔ 已复现（unittest + Python 3.10~3.13 matrix × ubuntu/windows + demo 冒烟；integration 标签真实 API 测试，CI 默认跳过） |
-| `packages/bundle/web-app` | （观察清单） | 07（入口总览） | 04 议题 2 | ◐ 已解读未复现（web 表面，见 ROADMAP 阶段 12） |
-
-!!! success "状态图例"
-    **✔** 已解读已对齐 / **◐** 已解读未复现（代码待做）/ **○** 待解读。当前 398 个测试全绿（另有 2 个 integration 标签真实 API 测试，默认跳过）。
+| 上游包 / 文件（唯一权威） | mini 模块 | 手册章节 | 报告页面 |
+|---|---|---|---|
+| `packages/core/session` | `core/session/` | 01 | 02 §3-4 |
+| `packages/core/context + vendor/cordis(core)` | `core/scope.py` | 02 | 02 §4.1 |
+| `packages/core/tools + tool-group` | `core/tools.py` | 03 | 03 §5.2 |
+| `packages/llm/llm + llm-deepseek` | `llm/` | 04 | 02 §3 + 03 §5.4 |
+| `packages/core/agent-loop + agent-invocation` | `core/agent_loop/agent.py` | 04 / 06 | 03 §5.1 |
+| `packages/core/session-persistence` | `core/session/persistence.py` | 05 | 03 §5.3 |
+| `packages/cordis-host + boot` | `boot/boot.py` | 05 | 03 §5.5 |
+| `bundle/headless + apps/cli/src` | `cli/headless.py + cli/main.py` | 07 | 04 议题 2 |
+| `apps/cli/config/agent-presets/*` | `preset/presets.py` | 08 | 04 议题 1 |
+| `packages/core/agent（runtime-types）` | `core/agent_loop/agent.py（干预面）` | 09 | 04 议题 4 |
+| `packages/interaction/user-approval` | `interaction/approval.py` | 09 | 04 议题 5 |
+| `packages/client/ui-trajectory` | `client/trajectory.py` | 10 | 04 议题 3 |
+| `packages/extensions（tool-cordis 等）` | `extensions/dynamic.py` | 11 | 04 议题 6 |
+| `packages/sdk/protocol（transport + types）` | `protocol/sdk.py` | 07 §7.6 | 04 议题 2 |
+| `packages/acp/acp` | `protocol/acp.py` | 07 §7.7 | 04 议题 2 |
+| `packages/hooks（hook-protocol + hooks-claude-code）` | `protocol/hooks.py` | 07 §7.8 | 04 议题 2 |
+| `core/agent-loop 并行编排 + core/context 并发模型` | `core/agent_loop/tool_calls.py + core/scope.py` | 12 | 02 §2 + 03 §5.1 |
+| `packages/sandbox/sandbox + sandbox-local + sandbox-windows-acl` | `seams/sandbox_local.py` | 06 §6.9 | 02 §2 |
+| `packages/credentials/credentials-local` | `seams/credentials_local.py` | 06 §6.9 | 03 §5.4 |
+| `packages/subagent/subagent-fork-in-process + subagent-acp + subagent-dsh-sdk` | `seams/subagent/providers.py + seams/subagent/worker.py` | 06 §6.9 | 04 议题 2 |
+| `packages/llm/llm-retry + llm/llm（retry-policy）+ core/agent（agent/request-error）` | `llm/retry.py + llm/retry_policy.py（+ core/agent_loop/agent.py 接线）` | 04 §4.10 | 04 议题 2 |
+| `packages/boot/app-boot（loadOverlayPatches / loadEnv / config-dump）+ apps/cli/src/args.ts` | `boot/composition.py + cli/main.py` | 05 + 07 | 03 §5.5 |
+| `web 表面会话管理（上游无 CLI）` | `cli/session_cmds.py` | 07 | 04 议题 2 |
+| （工程化） | `.github/workflows/ci.yml + tests/test_real_api.py` | 00 | — |
+| `packages/bundle/web-app` | （观察清单，见 ROADMAP） | 07（入口总览） | 04 议题 2 |
 
 ## 与教程手册的关系
 

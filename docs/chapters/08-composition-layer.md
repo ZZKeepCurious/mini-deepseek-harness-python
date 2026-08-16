@@ -2,7 +2,7 @@
 
 > 本章回答一个问题：`agent.cordis.yml` 里那棵树是怎么长出来的，一个进程为什么能同时跑多个不同组成的 agent？这是前几章"内核"与第 07 章"入口"之间被跳过的中间层——**组合层**。我们会先拆上游的配置树三层归属与 loader 结算，然后在 mini 里实现一个最小的 preset roster（会话级 agent 组合的选择与挂载）。
 >
-> 对应 dsh 真实源码：`vendor/cordis`（loader/组合结算）+ `packages/preset`（per-session agent composition）+ `apps/cli/config/agent-presets/`（四种出厂 preset）。mini 复现了 roster + 挂载一条（`miniharness/presets.py`）。
+> 对应 dsh 真实源码：`vendor/cordis`（loader/组合结算）+ `packages/preset`（per-session agent composition）+ `apps/cli/config/agent-presets/`（四种出厂 preset）。mini 复现了 roster + 挂载一条（`miniharness/preset/presets.py`）。
 
 ## 8.1 直觉：为什么要有组合层
 
@@ -57,7 +57,7 @@ miniharness/presets/
 └── minimal/preset.json     # 极简模式：2 工具 + fixed-prompt（complete: true）
 ```
 
-### 8.3.1 领域对象（`miniharness/presets.py`）
+### 8.3.1 领域对象（`miniharness/preset/presets.py`）
 
 ```python
 @dataclass(frozen=True)

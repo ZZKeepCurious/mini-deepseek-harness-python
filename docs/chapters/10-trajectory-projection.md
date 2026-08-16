@@ -2,7 +2,7 @@
 
 > 本章回答一个问题：事件溯源日志是给机器读的，人怎么看一次会话？Trajectory 给出了答案——**投影**：把同一份日志在浏览器端折叠成按 turn 组织的可检查台账。我们复现折叠语义本身（事件流 → 结构化台账），headless 的 `summarize` 是它的最简版，本模块是向完整折叠的演进。
 >
-> 对应 dsh 真实源码：`packages/client/ui-trajectory`（Trajectory 是 web 专属视图；数据源 = 同一份事件溯源日志，经 `session.history` RPC 分页后在浏览器端投影）。mini 复现于 `miniharness/trajectory.py`。
+> 对应 dsh 真实源码：`packages/client/ui-trajectory`（Trajectory 是 web 专属视图；数据源 = 同一份事件溯源日志，经 `session.history` RPC 分页后在浏览器端投影）。mini 复现于 `miniharness/client/trajectory.py`。
 
 ## 10.1 直觉：为什么是"投影"而不是"第二份数据"
 

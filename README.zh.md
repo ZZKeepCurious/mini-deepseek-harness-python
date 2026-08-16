@@ -17,32 +17,30 @@
 - **[分析报告](docs/report/index.md)**——对上游仓库的深度剖析：五层架构、`ctx` 服务地图、技术核心、关键流程，全部配 Mermaid 图（首页阅读地图 + 六个主题子页）。站点由 MkDocs 构建并部署到 GitHub Pages：https://zzkeepcurious.github.io/mini-deepseek-harness-python/
 - **[step-by-step 手册](docs/chapters/)**——系统如何从 0 长出来，一章一个主题：概念 → 最小可运行代码 → 硬性规定/测试 → 检查点练习。
 
-完整路线图见 [ROADMAP.md](ROADMAP.md)。
-
 ## 已实现能力
 
-| 能力 | 状态 | 上游对应 |
-|---|---|---|
-| 事件溯源会话（信封 `{type,seq,time,data}`、1 起 turn/step、deep-freeze、`derive_messages`、interrupted 修复） | ✅ | `packages/core/session` |
-| 持久化（JSONL / SQLite、header + `SESSION_FORMAT_VERSION=0` fail-closed、flush 栅栏、崩溃恢复） | ✅ | `packages/session/session-persistence` |
-| 插件事件总线（emit / waterfall / parallel / serial、作用域、依赖驱动激活） | ✅ | `vendor/cordis` + `core/scope` |
-| 工具注册表 + 执行管线（schema 校验、pre/execute/post、timeout） | ✅ | `packages/core/tools` |
-| Agent Loop（turn/step 状态机、pre-step 拒绝、工具回灌续跑） | ✅ | `core/agent-loop` |
-| LLM 扩展口（StreamChunk 协议、假模型、DeepSeek 官方 SSE 适配器） | ✅ | `llm/llm` + `llm/llm-deepseek` |
-| 模型请求重试/退避（normal/always 策略、`agent/request-error`、`llm/retry` 审计对） | ✅ | `llm/llm-retry` + `llm/llm-retry-policy` |
-| boot 与组合（YAML/JSON 补丁、`!!js` 环境变量插值、启动断言） | ✅ | `packages/boot` |
-| headless 一次性任务入口（`--profile headless "task"`：stdout 最终文本、退出码按 turn/end reason） | ✅ | `bundle/headless` + `apps/cli` |
-| 启动器选项（`--patch`、`--dump-config` / `--dump-default-config`、只读组合导出） | ✅ | `apps/cli/src/args.ts` |
-| 会话管理 CLI（`miniharness sessions` 列表/恢复/删除；mini 教学扩展） | ✅ | web 表面（上游） |
-| 能力扩展口（沙箱后端 / 凭据四层 / 子 agent ACP+SDK+fork 三通道） | ✅ | capability seams 文档 |
-| 预设 / Agent 干预 / 轨迹折叠 / 动态插件 / 审批 | ✅ | `packages/preset` + `core/agent` + `interaction` |
-| 协议入口（ACP / JSON-RPC SDK / hooks 桥） | ✅ | `acp` + `sdk` + `hooks` |
-| 异步事件总线、真并行工具 + 屏障 | ✅ | `core/agent-loop` |
-| CI（GitHub Actions、Python 3.10~3.13、integration 标签真实 API 测试） | ✅ | — |
-| 官方 SDK 互操作测试 | ⏳ | `python/sdk` |
+| 能力 | 上游对应 |
+|---|---|
+| 事件溯源会话（信封 `{type,seq,time,data}`、1 起 turn/step、deep-freeze、`derive_messages`、interrupted 修复） | `packages/core/session` |
+| 持久化（JSONL / SQLite、header + `SESSION_FORMAT_VERSION=0` fail-closed、flush 栅栏、崩溃恢复） | `packages/session/session-persistence` |
+| 插件事件总线（emit / waterfall / parallel / serial、作用域、依赖驱动激活） | `vendor/cordis` + `core/scope` |
+| 工具注册表 + 执行管线（schema 校验、pre/execute/post、timeout） | `packages/core/tools` |
+| Agent Loop（turn/step 状态机、pre-step 拒绝、工具回灌续跑） | `core/agent-loop` |
+| LLM 扩展口（StreamChunk 协议、假模型、DeepSeek 官方 SSE 适配器） | `llm/llm` + `llm/llm-deepseek` |
+| 模型请求重试/退避（normal/always 策略、`agent/request-error`、`llm/retry` 审计对） | `llm/llm-retry` + `llm/llm-retry-policy` |
+| boot 与组合（YAML/JSON 补丁、`!!js` 环境变量插值、启动断言） | `packages/boot` |
+| headless 一次性任务入口（`--profile headless "task"`：stdout 最终文本、退出码按 turn/end reason） | `bundle/headless` + `apps/cli` |
+| 启动器选项（`--patch`、`--dump-config` / `--dump-default-config`、只读组合导出） | `apps/cli/src/args.ts` |
+| 会话管理 CLI（`miniharness sessions` 列表/恢复/删除；mini 教学扩展） | web 表面（上游） |
+| 能力扩展口（沙箱后端 / 凭据四层 / 子 agent ACP+SDK+fork 三通道） | capability seams 文档 |
+| 预设 / Agent 干预 / 轨迹折叠 / 动态插件 / 审批 | `packages/preset` + `core/agent` + `interaction` |
+| 协议入口（ACP / JSON-RPC SDK / hooks 桥） | `acp` + `sdk` + `hooks` |
+| 异步事件总线、真并行工具 + 屏障 | `core/agent-loop` |
+| CI（GitHub Actions、Python 3.10~3.13、integration 标签真实 API 测试） | — |
 
-状态：**398 个单元测试全部通过**（纯标准库；YAML 配置需可选 `pyyaml`）。
+规划中：官方 Python SDK（`python/sdk`）互操作测试。
 
+状态：**413 个单元测试全绿**（纯标准库；可选 `pyyaml` 用于 YAML 配置）。
 
 ## 快速开始
 
@@ -86,22 +84,40 @@ miniharness
 
 ```
 mini-deepseek-harness-python/
-├── miniharness/          # 核心包（仅标准库）
-│   ├── session.py        # 事件溯源会话、投影、硬性规定
-│   ├── bus.py            # Context 注册库 / 事件总线 / 作用域 / 插件激活
-│   ├── tools.py          # 工具注册表 + 执行管线
-│   ├── llm.py            # StreamChunk 协议 + 假模型 / DeepSeek 适配器
-│   ├── loop.py           # Agent Loop 状态机
-│   ├── persistence.py    # JSONL / SQLite 双后端 + 崩溃恢复
-│   ├── boot.py           # 启动 + 补丁层叠
-│   ├── seams.py          # 沙箱 / 凭据 / 子 agent 扩展口
-│   └── demo.py           # 端到端演示
-├── tests/                # 84 个验收测试（unittest）
-├── examples/             # 对话 & 真实 API 示例
+├── miniharness/             # 核心包（纯标准库，家族布局，见 docs/architecture.md）
+│   ├── core/                # 上游 packages/core
+│   │   ├── session/         # types / json / message / invariant / repair / surface / session
+│   │   │   └── persistence.py
+│   │   ├── scope.py         # Context / PluginManager
+│   │   ├── tools.py         # 工具注册表 + 执行管线
+│   │   └── agent_loop/      # agent.py + tool_calls.py
+│   ├── llm/                 # 上游 packages/llm
+│   │   ├── protocol.py      # StreamChunk / LlmAdapter / LlmFailure / BlockAssembler
+│   │   ├── deepseek.py      # DeepSeek wire 序列化 + SSE 适配器
+│   │   ├── fake.py          # FakeLlmAdapter（无 API key）
+│   │   ├── retry_policy.py  # retry policy 解析（normal/always）
+│   │   └── retry.py         # agent/request-error 恢复 + 退避
+│   ├── boot/                # 上游 packages/boot
+│   │   ├── boot.py          # 启动 + patch overlay
+│   │   ├── composition.py   # YAML 配置 / !!js 插值 / dump 渲染
+│   │   └── dotenv.py        # .env 解析（parse_dotenv）
+│   ├── cli/                 # apps/cli
+│   │   ├── main.py          # launcher 选项（profile / patch / dump）
+│   │   ├── headless.py      # 一次性任务入口
+│   │   ├── default_tools.py # headless 默认工具集
+│   │   └── session_cmds.py  # 会话 list / resume / delete
+│   ├── protocol/            # acp / sdk / hooks 桥
+│   ├── seams/               # 沙箱 / 凭据 / 子 agent 扩展口
+│   ├── preset/  extensions/  interaction/  client/
+│   ├── demo.py              # 端到端演示
+│   └── example_plugins.py   # boot 演示插件
+├── tests/                   # 验收测试（unittest）
+├── examples/                # 对话 & 真实 API 示例
 └── docs/
-    ├── README.md         # 手册索引（学习地图）
-    ├── chapters/         # 00-setup ~ 06-advanced-seams 教程
-    └── report/           # 分析报告（HTML，Mermaid 图）
+    ├── README.md            # 手册索引（学习地图）
+    ├── architecture.md      # 架构说明与上游对应
+    ├── chapters/            # 00-setup ~ 12-handbook 教程
+    └── report/              # 分析报告（Mermaid 图）
 ```
 
 ## 致谢

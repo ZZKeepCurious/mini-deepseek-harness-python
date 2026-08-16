@@ -2,7 +2,7 @@
 
 > 本章回答一个问题：使用者怎么把 dsh 跑起来？前六章讲的是内核（会话、总线、工具、loop、持久化、扩展口），这一章讲的是外壳——所有能"启动一个 dsh 进程"的路径，以及它们各自把什么约定暴露给外部。
 >
-> 对应 dsh 真实源码：`apps/cli` + `packages/boot/app-boot` + `packages/bundle/{headless,web-app}` + `packages/{acp,sdk,hooks}`。mini 复现了 headless 一条（`miniharness/headless.py`），其余入口在本章做系统解读并标注复现规划。
+> 对应 dsh 真实源码：`apps/cli` + `packages/boot/app-boot` + `packages/bundle/{headless,web-app}` + `packages/{acp,sdk,hooks}`。mini 复现了 headless 一条（`miniharness/cli/headless.py`），其余入口在本章做系统解读并标注复现规划。
 
 ## 7.1 总览：一切入口都是 profile
 
@@ -33,8 +33,8 @@
 - `--profile headless "task"`：一次性任务（§7.2 全部语义）；未知 profile fail loud。
 - `--patch <path>`（可重复）：YAML/JSON overlay 补丁，参与组合层叠与 dump。
 - `--dump-config`：只读打印最终组合（boot-free，不启动任何应用）；`--dump-default-config`：只打印内置默认组合。两者互斥（`program.error` 同语义）；dump 不接受任务参数；`--dump-default-config` 不接受 `--patch`/`--config`。输出带行级 `# == <label>` 来源注释、`!!js` 表达式原样未求值、skipped patch warn 不失败、单文档可再加载（对齐 `renderConfigDump`）。
-- mini 教学扩展（上游没有，须标注）：`--config <path>` 指定组合文件（上游用 profile 目录机制）；`miniharness sessions` 子命令（会话列表 / 恢复 / 删除 —— 上游会话管理在 web 表层，见 `miniharness/sessions.py`）。
-- mini 内置默认组合为空（headless 不走插件树，见 headless.py 简化标注）；组合层与 headless 运行时解耦：带 `--config/--patch` 跑任务时先 boot 验证（fail loud），headless 运行时仍为内置 adapter。
+- mini 教学扩展（上游没有，须标注）：`--config <path>` 指定组合文件（上游用 profile 目录机制）；`miniharness sessions` 子命令（会话列表 / 恢复 / 删除 —— 上游会话管理在 web 表层，见 `miniharness/cli/session_cmds.py`）。
+- mini 内置默认组合为空（headless 不走插件树，见 cli/headless.py 简化标注）；组合层与 headless 运行时解耦：带 `--config/--patch` 跑任务时先 boot 验证（fail loud），headless 运行时仍为内置 adapter。
 
 ## 7.2 headless：任务文本即命令行
 
@@ -93,7 +93,7 @@ io.exit(outcome.reason?.kind === 'completed' ? 0 : 1)
 
 ### mini 复现对照
 
-mini 的 `miniharness/headless.py` 复现了上面全部语义，载体差异有两处（诚实标注）：
+mini 的 `miniharness/cli/headless.py` 复现了上面全部语义，载体差异有两处（诚实标注）：
 
 1. 上游经 Cordis 服务（`agents` / `sessions` / `agentDefaultModel`）创建 Agent；mini 直接构造 `Session + AgentLoop`（stdlib 同步简化，契约不变）。
 2. 上游错误经 `finish {kind:'error'}` 带内失败或异常两条路；mini 的 `LlmFailure` 一律以异常抛出（`llm.py` 已声明该简化），所以 `dsh: code: message` 分支目前不可达，保留是为了对齐上游格式。
@@ -101,7 +101,7 @@ mini 的 `miniharness/headless.py` 复现了上面全部语义，载体差异有
 运行方式：
 
 ```sh
-python -m miniharness.headless "run the tests"          # 直接运行
+python -m miniharness.cli.headless "run the tests"          # 直接运行
 python -m miniharness.cli --profile headless "task"     # 走启动器（对齐 dsh CLI）
 miniharness --profile headless "run the tests"          # 安装后（pyproject scripts）
 ```
@@ -138,7 +138,7 @@ mini 未复现 web（前端工程量与教学目标不匹配），观察清单�
 
 hooks 的价值在于迁移成本：已经写好 Claude Code 钩子（安全策略、工作流检查）的用户，把这些钩子原样带进 dsh，而不是在 harness 里重写一遍。注意它只能挂在 harness 的**既有拦截点**上，不是新的独立入口。
 
-## 7.6 复现：JSON-RPC 信封最小子集（`miniharness/sdk_protocol.py`）
+## 7.6 复现：JSON-RPC 信封最小子集（`miniharness/protocol/sdk.py`）
 
 > 对应 dsh 真实源码：`packages/sdk/protocol`（`transport.ts` + `types.ts`）。信封层全对齐，三个方法（initialize / session/prompt / shutdown）接在内存假模型上，"可编程驱动 harness"成立。
 
@@ -289,15 +289,15 @@ matches_matcher(None, "Bash", "codex")                # True：match-all 哨兵
 - 上游经 cordis 插件注入 + `ctx.shell` 执行；mini 用 `subprocess` + 注入点；
 - 上游 PreCompact/PostCompact/Notification 在 harness 循环里挂接；mini 只落桥未挂循环（循环侧扩展口见第 6 章）。
 
-## 7.9 一张表看懂全部入口（复现状态更新）
+## 7.9 一张表看懂全部入口
 
-| 入口 | 对谁说话 | 载体 | mini 状态 |
+| 入口 | 对谁说话 | 载体 | mini 对应 |
 |---|---|---|---|
-| `dsh --profile web` | 人（浏览器） | HTTP + 浏览器客户端 | 未复现（观察清单） |
-| `dsh --profile headless "task"` | 人（shell 一次性任务） | 进程（stdout/退出码） | ✅ `miniharness/headless.py` |
-| `dsh --profile <自定义>` | 组合层自定义 | 任意 | 未复现（可经 boot/patch 扩展） |
-| ACP 服务器 | 自动化程序 | stdio JSON-RPC | ✅ `miniharness/acp.py`（握手/会话/prompt/取消/审批桥，26 测试） |
-| JSON-RPC SDK | 编程客户端（官方 Python SDK 的线） | stdio JSON-RPC | ✅ `miniharness/sdk_protocol.py`（信封子集 + 三方法，21 测试） |
-| hooks 桥 | 用户既有 CC/Codex 钩子 | 子进程 | ✅ `miniharness/hooks.py`（CC 配置 → 四类拦截决策 + 审计配对，40 测试） |
+| `dsh --profile web` | 人（浏览器） | HTTP + 浏览器客户端 | （观察清单） |
+| `dsh --profile headless "task"` | 人（shell 一次性任务） | 进程（stdout/退出码） | `miniharness/cli/headless.py` |
+| `dsh --profile <自定义>` | 组合层自定义 | 任意 | （可经 boot/patch 扩展） |
+| ACP 服务器 | 自动化程序 | stdio JSON-RPC | `miniharness/acp.py`（握手/会话/prompt/取消/审批桥，26 测试） |
+| JSON-RPC SDK | 编程客户端（官方 Python SDK 的线） | stdio JSON-RPC | `miniharness/protocol/sdk.py`（信封子集 + 三方法，21 测试） |
+| hooks 桥 | 用户既有 CC/Codex 钩子 | 子进程 | `miniharness/hooks.py`（CC 配置 → 四类拦截决策 + 审计配对，40 测试） |
 
-复现顺序建议：headless（已完成）→ JSON-RPC 信封最小子集（复用 `miniharness.cli` 的进程壳，价值最高）→ ACP 最小子集 → hooks 桥（已完成）。真正的取舍在第 4 行：自定义 profile 是"组合层的事"，它不需要新的协议，只需要 `boot()` 已经支持的 patch 层叠——第 5 章的 `apply_patch` 就是干这个的。
+价值排序建议：headless → JSON-RPC 信封最小子集（复用 `miniharness.cli` 的进程壳，价值最高）→ ACP 最小子集 → hooks 桥。真正的取舍在第 4 行：自定义 profile 是"组合层的事"，它不需要新的协议，只需要 `boot()` 已经支持的 patch 层叠——第 5 章的 `apply_patch` 就是干这个的。

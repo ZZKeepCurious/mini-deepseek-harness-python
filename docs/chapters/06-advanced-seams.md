@@ -168,7 +168,7 @@ python -m unittest tests.test_seams -v
 
 ## 6.9 进阶实现：真后端 / 四层凭据 / 远程三通道
 
-基础三件套讲清"换 Provider 不改 Consumer"；进阶三件把每个接缝推向与 dsh 对齐的形态（产出：`miniharness/sandbox_local.py` + `credentials_local.py` + `subagent_providers.py` + `subagent_worker.py`，`tests/test_stage6.py` 49 测试）。
+基础三件套讲清"换 Provider 不改 Consumer"；进阶三件把每个接缝推向与 dsh 对齐的形态（产出：`miniharness/seams/sandbox_local.py` + `credentials_local.py` + `subagent_providers.py` + `subagent_worker.py`，`tests/test_stage6.py` 49 测试）。
 
 **沙箱真后端**（`sandbox_local.py`，对应上游 `sandbox/sandbox-local`）：按平台选链（linux `bwrap → landlock`、darwin `seatbelt`、win32 `windows-acl`），多候选由功能探测仲裁、单候选免探测；候选全不可用 → `SandboxUnavailableError`（`SANDBOX_UNAVAILABLE`）fail closed，命令绝不裸跑。`confine(argv, policy)` 返回 `ConfinedArgv`：包裹后的 argv + `enforcement`（full/partial）+ 该后端专属的 denial 方言与 runner 失败规则——"命令没跑起来"与"被沙箱拦住"可区分。三个 profile 生成器与上游 `profiles.ts` 逐条对齐（bwrap 挂载、landlock grant、seatbelt SBPL 剖面，可写根与进程内 fs fence 共用 `writable_roots` 同一推导）。Windows 宿主机上 windows-acl runner 缺省探测恒失败（fail-closed 与真实宿主一致）；约定测试经 `internals` 注入钩子验证各链选择、探测仲裁与包裹形状（同上游 `SandboxInternals` 思路）。
 
@@ -177,7 +177,7 @@ python -m unittest tests.test_seams -v
 **子 agent 远程三通道**（`subagent_providers.py` + `subagent_worker.py`，对应上游 `subagent-fork-in-process` / `subagent-acp` / `subagent-dsh-sdk`）：
 
 - **fork**（进程内）：子 agent 以父会话日志的 completed-turn 前缀作 seed（到最后一个 `turn/end` 为止，in-flight 工具回合不平衡不能重放），`Session(seed=...)` 回放 + 自动补 `session/end-seed` 标记——子会话直接继承父上下文。
-- **ACP**（真子进程）：`python -m miniharness.subagent_worker acp` 起独立进程，newline-delimited JSON-RPC over stdio（与上游 `ndJsonStream` 同帧形状）；`initialize → newSession → prompt → cancel → shutdown`；唯一从父读的是 workspace cwd；permission 策略自动应答（reject 默认 / allow），不上报人；事件通知先于响应帧写出（mini 同步载体约定，上游为并发流）。
+- **ACP**（真子进程）：`python -m miniharness.seams.subagent.worker acp` 起独立进程，newline-delimited JSON-RPC over stdio（与上游 `ndJsonStream` 同帧形状）；`initialize → newSession → prompt → cancel → shutdown`；唯一从父读的是 workspace cwd；permission 策略自动应答（reject 默认 / allow），不上报人；事件通知先于响应帧写出（mini 同步载体约定，上游为并发流）。
 - **SDK**（真子进程）：`subagent_worker sdk` 承载 `SdkRuntime`，`initialize → session/prompt`（懒创建会话）→ `shutdown`；assistant 输出经 `session.event` 通知收集。
 
 三者保持同一 Consumer 接口 `spawn(name, prompt) -> SubAgent`：换通道只改 Provider 构造，消费方代码不动。
