@@ -43,7 +43,7 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 | Launcher options (`--patch`, `--dump-config` / `--dump-default-config`, read-only composition dump) | `apps/cli/src/args.ts` |
 | Session management CLI (`miniharness sessions` list/resume/delete; mini teaching extension) | web surface (upstream) |
 | Capability seams (sandbox backends / credential layers / subagent ACP+SDK+fork channels) | capability seams docs |
-| Continuable subagents (`start_continuable`/`send_message`, durable child session + cold resume, settlement delivery, `send_message`/`interrupt_agent`/`list_agents` control tools) | `packages/subagent` (subagent + subagent-in-process-driver + tool-subagent-control + tool-subagent-report) |
+| Continuable subagents (`start_continuable`/`send_message`, durable child session + cold resume, settlement delivery, async event-driven A8 (submit-and-return + watchSettlement + steer batch merge), `send_message`/`interrupt_agent`/`list_agents` control tools) | `packages/subagent` (subagent + subagent-in-process-driver + tool-subagent-control + tool-subagent-report) |
 | Presets / agent intervention / trajectory / dynamic plugins / approval | `packages/preset` + `core/agent` + `interaction` |
 | Protocol entries (ACP / JSON-RPC SDK / hooks bridge) | `acp` + `sdk` + `hooks` |
 | Async event bus, true parallel tools + barrier | `core/agent-loop` |

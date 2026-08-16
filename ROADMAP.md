@@ -5,19 +5,13 @@
 
 ## 已完成
 
-核心约定已全部落地，能力清单见 README"已实现能力"表：事件溯源会话、持久化与崩溃恢复、插件事件总线、工具管线、Agent Loop、LLM 扩展口与重试、boot 组合、headless 入口与启动器选项、能力扩展口三件套（沙箱/凭据/子 agent）、外部协议入口（ACP/SDK/hooks）、异步并行、preset/干预/轨迹/动态插件/审批、token 计量与上下文压缩（pre-step 压力检查 0.8/0.16、overflow 强制减容重试、surface replace 检查点事务）、后台作业（job_output/job_list/job_kill 三工具 + 完成 notice，进程内注册表、无会话事件）、plan（状态机 + 审查 UI：`/plan` 命令、`exit_plan_mode` 审查工具、userQuestions 通道、plan 投影单元）、命令表面（`command/run|done` 配对）、goal（`goal/change` 事件溯源 fold + GoalService + pull 式轮次驱动 + `get_goal`/`create_goal`/`update_goal` 三工具 + `/goal` 命令）、skills（分层注册表 + filesystem provider + skill 工具 + catalog-form 持久目录，报告 04 议题 10）、**可继续子代理**（`start_continuable`/`send_message` + durable 子会话 + 冷恢复 + 结算投递 + `send_message`/`interrupt_agent`/`list_agents` 控制工具，同步阻塞子回合模型）。发展史记录在工作区 `status/mini-harness/`。
+核心约定已全部落地，能力清单见 README"已实现能力"表：事件溯源会话、持久化与崩溃恢复、插件事件总线、工具管线、Agent Loop、LLM 扩展口与重试、boot 组合、headless 入口与启动器选项、能力扩展口三件套（沙箱/凭据/子 agent）、外部协议入口（ACP/SDK/hooks）、异步并行、preset/干预/轨迹/动态插件/审批、token 计量与上下文压缩（pre-step 压力检查 0.8/0.16、overflow 强制减容重试、surface replace 检查点事务）、后台作业（job_output/job_list/job_kill 三工具 + 完成 notice，进程内注册表、无会话事件）、plan（状态机 + 审查 UI：`/plan` 命令、`exit_plan_mode` 审查工具、userQuestions 通道、plan 投影单元）、命令表面（`command/run|done` 配对）、goal（`goal/change` 事件溯源 fold + GoalService + pull 式轮次驱动 + `get_goal`/`create_goal`/`update_goal` 三工具 + `/goal` 命令）、skills（分层注册表 + filesystem provider + skill 工具 + catalog-form 持久目录，报告 04 议题 10）、**可继续子代理**（`start_continuable`/`send_message` + durable 子会话 + 冷恢复 + 结算投递 + `send_message`/`interrupt_agent`/`list_agents` 控制工具；A7 同步阻塞子回合 → A8 升级为**异步事件驱动**：父有 driver 时投递即返回 message id、Activation 跨回合驻留、watchSettlement（when_idle_async + poke 竞速）、steer 批内合并、结算先于所有权释放、interrupt 缺省 no-op、disposal 竞速冷恢复重投不丢消息，无 driver 场景回退同步 pump）。发展史记录在工作区 `status/mini-harness/`。
 
 ## 规划中
 
 当前主线：**Agent 层补齐**（依报告 04 议题 8/9 缺口，按依赖序推进）：
 
-- **A8 可继续子代理异步化**：把 A7 的同步阻塞子回合模型升级为上游异步事件驱动
-  （`packages/subagent/subagent/src/continuation.ts`）——followup 投递即返回、
-  Activation 跨回合驻留、watchSettlement（whenIdle + ownedChildren）、ChildLock、
-  steer 批内合并多子结算、结算先于所有权释放投递。前置：AgentLoop 事件驱动化
-  （`_pump_async` 目前零调用方，需 whenIdle() 可等待版、inbox/claimed|discarded
-  通知、steer 批内语义）。工程量约 1200-1800 行（AgentLoop 基建 + Activation
-  状态机 + foldConsumedWork/droppedUnrun + 并发测试），独立里程碑。
+- **Agent 层补齐收尾**：`_pump_async` 已有 A8 driver 消费，事件驱动基建就绪；后续按报告 04 议题 8/9 缺口评估剩余扩展点（`agent/inbox/*`、`agent/status`、`agent/error`、`agent/turn-stopping`、双队列 followup→next-turn / steer→next-step 归属、concludesTurn、fuseToolSignals 隔离）。
 
 待续：会话管理服务（多会话并行、ACL）；官方 Python SDK 互操作测试（stdio JSON-RPC 客户端驱动真实 harness 子进程）。
 

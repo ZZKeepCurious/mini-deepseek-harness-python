@@ -111,7 +111,7 @@ class _InProcessSubAgent(SubAgent):
         return self._loop.last_response()
 
 
-# ---------- 可继续子代理（A7：durable 子会话 + 冷恢复） ----------
+# ---------- 可继续子代理（A7 durable 子会话 + 冷恢复；A8 异步事件驱动） ----------
 
 from .continuation import (  # noqa: E402
     CONTEXT_SUMMARY_MAX_CHARS,

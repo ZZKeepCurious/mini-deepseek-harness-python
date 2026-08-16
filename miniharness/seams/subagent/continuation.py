@@ -7,39 +7,47 @@ listChildren / listDescendants）+ subagent-in-process-driver（进程内
 tool-subagent-report + tool-subagent-control（send_message /
 interrupt_agent / list_agents）+ AgentLoop 干预面。
 
-mini 同步阻塞模型的落点（决策见 status/mini-harness/migration-log.md A7）：
+mini 的落点（决策见 status/mini-harness/migration-log.md A7/A8）：
   * startContinuable 只做 durable 创建（durable before dispatch）：header
     declare（meta）+ 父 completed-turn 前缀 seed + `subagent/descriptor`
     事件，全部先落盘；此后每次 sendMessage 冷恢复该子会话。
-  * sendMessage 在调用栈内同步跑完子回合（子 AgentLoop 复用父 _pump）；
-    激活只活在 _activations 内，结算在 pump 返回后计算并整体 flush 子会话。
-  * 投递规则（结算通知与 report wakeup 同规则）：父 running → inbox.append
-    （非唤醒，当前 pump 下一步边界捡起）；父 idle → followup（唤醒新回合）。
-    reportDelivery 'background' → 一律 inbox.append。
   * coldResume：inspect → meta.parentSession 校验（UNAUTHORIZED）→ 折叠
     描述符（mode != 'continuable' → NOT_RESUMABLE）→ 以持久化事件为 seed
     重建会话、上下文与组合。
+  * 结算措辞 / subagent-settled 消息格式逐字对齐上游（settlementSummary）。
 
-同步模型简化（须在文档标注；上游为异步事件驱动，对齐列为 A8 里程碑）：
-  * **执行模型差异（最大简化）**：上游 followup() 投递进 inbox 立即返回
-    message id，Activation 跨回合驻留（一次 residency epoch 可跑多个 FIFO
-    turns），watchSettlement 经 whenIdle()+ownedChildren 事件驱动判静默，
-    ChildLock 串行化每 child 投递/销毁，steer 批内合并多子结算，结算在
-    释放所有权之前投递；mini 的 sendMessage 同步跑完整个子回合，无跨会话
-    并发，"后台"坍缩为同步。
-  * activations 只存在于 sendMessage 调用栈内；interrupt 的真实可达路径是
-    "子回合内自中断"（子工具/钩子调 manager.interrupt(child_id)），父在
-    step 边界调用时子已 settle → NOT_FOUND。
-  * 子事件仅在 settle 时整体 flush（进程崩溃丢在途日志，未做到上游 commitRepair
-    的 torn 尾部修复）。
-  * 子会话不装 send_message 等控制工具 → 不支持嵌套续跑（delegationDepth
-    仍写入 meta 供诊断，恒为父深度 + 1）。
-  * 无 subagent/start|end 生命周期域事件（上游经 ctx.subagents 生命周期
-    发射器发布），结算经 user/message 消息投递。
+A8 起执行模型对齐上游异步事件驱动，由"父是否有 driver"自动路由双路径：
+  * **同步路径**（父无 driver，A7 行为保留）：sendMessage 在调用栈内同步
+    跑完子回合（子 AgentLoop 复用父 _pump）；激活只活在 _activations 内，
+    结算在 pump 返回后计算并整体 flush 子会话。
+  * **异步路径**（父有 driver，A8 语义）：sendMessage 投递即返回 message id；
+    子 driver 在事件循环上跑回合（一次 residency epoch 可跑多个 FIFO turns），
+    watchSettlement（when_idle_async + poke 竞速）在真静默后结算，结算投递
+    父（idle→followup / running→steer 批内合并）；interrupt 缺省 no-op；
+    再投递并入既有激活；与结算竞速的投递冷恢复新激活重投不丢消息。
+  * 投递规则（结算通知与 report wakeup 同规则）：父 idle → followup（唤醒
+    新回合）；父 running → driver 模式 steer / 同步模式 inbox.append（非唤醒，
+    下一步边界捡起）。reportDelivery 'background' → 一律 inbox.append。
+
+简化标注（须在文档中标注；对齐粒度见 AGENTS.md 差异清单）：
+  * **无 subagent/start|end 生命周期 emit 事件**（上游经 ctx.subagents 生命
+    周期发射器发布），结算经 user/message 消息投递。
+  * **droppedUnrun 恒 false**：mini 从不裁剪 inbox（无 agent/inbox/spliced），
+    结算照常进行，completed 不再被重判为 aborted。
+  * **无 sendWaking/admitWaking**：子会话不装 send_message 等控制工具 → 无
+    嵌套 → 父恒无激活（ownedChildren/acquireOwnership/releaseOwnership 为
+    占位，恒空/no-op）；结算投递直接 followup/steer。
+  * **interrupt 无授权矩阵**（上游 ancestor/user authority 校验），mini 仅父
+    调用方，无 UNAUTHORIZED。
+  * **子事件仅在 settle 时整体 flush**（上游 flushFinalState best-effort +
+    崩溃 torn 修复 commitRepair 仍不在 mini，A7 已注）。
+  * **LLM 流式同步阻塞**沿用：异步窗口只在工具 await 期间，不与流式交错。
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 import uuid
 from types import MappingProxyType
 from typing import Any, Callable
@@ -91,7 +99,7 @@ _REPORT_GUIDANCE = (
 
 class SubagentError(Exception):
     """子代理错误：携带上游错误码（UNAUTHORIZED / NOT_RESUMABLE /
-    ACTIVATION_CLOSING / NOT_FOUND / MAX_DEPTH_EXCEEDED / UNAVAILABLE）。"""
+    MAX_DEPTH_EXCEEDED / UNAVAILABLE）。"""
 
     def __init__(self, message: str, code: str = "SUBAGENT_ERROR"):
         super().__init__(message)
@@ -199,6 +207,9 @@ class SubagentContinuationManager:
         self._adapter_factory = adapter_factory or _default_adapter_factory
         self._activations: dict[str, dict] = {}
         self._persisted: dict[str, int] = {}
+        # 每 child 一把锁：串行化跨线程的 resume 与 settle 临界区
+        # （executor 线程的 send_message 与事件循环线程的 watcher 结算并发）
+        self._locks: dict[str, threading.Lock] = {}
 
     @property
     def activations(self) -> dict[str, dict]:
@@ -256,24 +267,69 @@ class SubagentContinuationManager:
         self._persisted[child_id] = len(child_session.events)
         return child_id
 
-    def send_message(self, child_id: str, message: str | dict, source: str = "parent") -> None:
-        """向子代理发一条消息并同步跑完子回合；结算通知投递父代理。
+    def send_message(self, child_id: str, message: str | dict, source: str = "parent") -> str:
+        """向子代理投递一条消息，返回 message id。
 
-        子回合失败不冒泡（失败已是子会话内的 error turn/end，结算通知
-        全量报告；对齐上游 sendMessage 不因子进程失败抛错）。
+        异步路径（父有 driver）：投递即返回，子回合由子 driver 在事件循环上
+        跑，watcher 异步结算后把通知投递回父（对齐上游 followup 立即返回 +
+        watchSettlement 事件驱动）。子回合失败不冒泡（失败已是子会话内的
+        error turn/end，结算通知全量报告；对齐上游 sendMessage 不因子进程
+        失败抛错）。
         """
         activation = self._get_or_resume(child_id)
-        child = activation["loop"]
-        boundary = len(child.session.events)
         msg = message if isinstance(message, dict) else create_message(
             "user", [text_block(message)], {"kind": "user"},
         )
+        if self.parent._driver is not None:
+            self.parent._loop.call_soon_threadsafe(self._submit_on_loop, child_id, activation, msg)
+        else:
+            self._submit_sync(child_id, activation, msg)
+        return msg["id"]
+
+    def _submit_sync(self, child_id: str, activation: dict, msg: dict) -> None:
+        """同步路径（A7）：子 followup 同步 pump 跑完整个回合，返回后结算。"""
+        child = activation["loop"]
         try:
             child.followup(msg)
         except Exception:
             pass
         finally:
-            self._settle(child_id, activation, boundary)
+            self._settle(child_id, activation)
+
+    def _submit_on_loop(self, child_id: str, activation: dict, msg: dict) -> None:
+        """异步路径（A8）：事件循环线程上的投递提交（call_soon_threadsafe 进入）。
+
+        与结算竞速（激活已被 watcher 结算弹出）→ 就地冷恢复新激活重投，不丢
+        消息（对齐上游 followup 对 disposal 的"等释放后冷恢复"）。首次投递时
+        装配 watcher + 子 driver + claimed 钩子。
+        """
+        if self._activations.get(child_id) is not activation or activation.get("disposal") is not None:
+            activation = self._get_or_resume(child_id)
+        if not activation["watched"]:
+            activation["watched"] = True
+            activation["poke"] = asyncio.Event()
+            activation["loop"].start_driver()
+            activation["loop"].on_message_claimed(self._claimed_hook(child_id))
+            activation["watcher"] = asyncio.ensure_future(self._watch_settlement(child_id))
+        activation["accepted"].add(msg["id"])
+        activation["poke"].set()            # 对齐 admitWaking 的 wake
+        activation["loop"].followup(msg)    # driver 模式：入队 + 唤醒，不阻塞
+        activation["status"] = "running"
+
+    def _claimed_hook(self, child_id: str) -> Callable[[dict | None], None]:
+        """认领钩子：消息被子回合认领 → 从 accepted 移除 + 唤醒 watcher
+        （对齐上游 agent/inbox/claimed → accepted.delete + wake）。"""
+        def hook(claimed: dict | None) -> None:
+            act = self._activations.get(child_id)
+            if act is None or not isinstance(claimed, dict):
+                return
+            msg_id = claimed.get("id")
+            if not msg_id:
+                return
+            act["accepted"].discard(msg_id)
+            if act["poke"] is not None:
+                act["poke"].set()
+        return hook
 
     def report_from(self, child_id: str, report: str, quiet: bool = False) -> None:
         """子代理 report 工具：把报告投递父代理（quiet → 非唤醒 inbox）。"""
@@ -294,21 +350,33 @@ class SubagentContinuationManager:
     def interrupt(self, child_id: str, cause: str = "user") -> None:
         """中断激活中的子代理（child.cancel(keep_inbox=True)）。
 
-        同步模型下仅子回合内可中断（调用栈内 _activations 存在）；子已
-        settle / 未激活 → NOT_FOUND。
+        对齐上游 continuation.ts:528-568：缺省目标是**接受性 no-op**（"An
+        absent target is an accepted no-op without consulting the durable
+        catalog"）——子未激活或已结算 → 直接返回，不抛 NOT_FOUND。
+        中断后 keep_inbox 置 _parked：driver 不再自动续跑，下次 send_message
+        （waking send）清 _parked 恢复驻留队列；watcher 见 aborted turn/end +
+        静默后照常结算（措辞 aborted）。
         """
         activation = self._activations.get(child_id)
-        if activation is None:
-            raise SubagentError(f"子代理 {child_id} 未激活，无法中断", "NOT_FOUND")
+        if activation is None or activation.get("disposal") is not None:
+            return
         activation["status"] = "stopping"
+        activation["interrupted"] = True
         activation["loop"].cancel(cause, keep_inbox=True)
 
     def state_of(self, child_id: str) -> dict:
-        """簿记查询（上游 stateOf 的 mini 形态：未激活视为 idle）。"""
+        """簿记查询（上游 stateOf：running = status running 或 accepted 非空；
+        waiting = ownedChildren 非空；否则 settled）。无激活 → idle。"""
         act = self._activations.get(child_id)
-        if act is not None:
-            return {"kind": act["status"], "id": child_id, "label": act.get("label") or child_id}
-        return {"kind": "idle", "id": child_id, "label": child_id}
+        if act is None:
+            return {"kind": "idle", "id": child_id, "label": child_id}
+        if act.get("owned_children"):
+            kind = "waiting"                    # 无嵌套 → 不可达（保留字段）
+        elif act["status"] == "running" or act["accepted"]:
+            kind = "running"
+        else:
+            kind = "settled"
+        return {"kind": kind, "id": child_id, "label": act.get("label") or child_id}
 
     # ---------- 枚举 ----------
 
@@ -354,12 +422,15 @@ class SubagentContinuationManager:
     # ---------- 冷恢复与激活 ----------
 
     def _get_or_resume(self, child_id: str) -> dict:
-        existing = self._activations.get(child_id)
-        if existing is not None:
-            # 同步模型下重复进入不可达（sendMessage 串行且激活在 settle 时
-            # 先行删除再投递）；命中即防御性拒绝。
-            raise SubagentError(f"子代理 {child_id} 正在激活中", "ACTIVATION_CLOSING")
-        return self._cold_resume(child_id)
+        lock = self._locks.setdefault(child_id, threading.Lock())
+        with lock:
+            existing = self._activations.get(child_id)
+            if existing is not None:
+                # A8 再投递并入既有激活（同一 residency epoch；对齐上游 followup
+                # 对已有激活直接 submitAdmitted）。同步模型下不可达（sendMessage
+                # 串行且激活在 settle 时弹出）。
+                return existing
+            return self._cold_resume(child_id)
 
     def _cold_resume(self, child_id: str) -> dict:
         info = self.persistence.inspect(child_id)
@@ -408,9 +479,17 @@ class SubagentContinuationManager:
             "registry": reg,
             "label": descriptor.get("label") or child_id,
             "status": "running",
-            "persisted": persisted,
+            "persisted": persisted,          # == epoch_start：结算 delta 起点
             "descriptor": descriptor,
+            # A8 事件驱动字段：
+            "interrupted": False,            # interrupt 已下达（诊断用）
+            "accepted": set(),               # 已投递未认领的 message id
+            "poke": None,                    # asyncio.Event，_submit_on_loop 首次装配
+            "disposal": None,                # 结算/关闭标记（已结算 → 不再投递）
+            "watched": False,                # watcher + driver + claimed 钩子已就绪
+            "owned_children": set(),         # 恒空（无嵌套，保留字段指向嵌套场景）
         }
+        self._locks.setdefault(child_id, threading.Lock())
         self._activations[child_id] = activation
         return activation
 
@@ -432,23 +511,70 @@ class SubagentContinuationManager:
 
     # ---------- 结算 ----------
 
-    def _settle(self, child_id: str, activation: dict, boundary: int) -> None:
-        child = activation["loop"]
-        child_ctx = activation["ctx"]
-        summary = None
-        output = None
-        try:
-            stop = epoch_stop_reason(child.session.events[boundary:])
-            output = final_assistant_output(child.session.events[boundary:])
+    async def _watch_settlement(self, child_id: str) -> None:
+        """异步结算观察者（对齐上游 watchSettlement）：when_idle_async 与 poke
+        竞速 → 真静默且 accepted 空 → _settle。
+
+        poke 置位（新投递 / 认领）→ 重观 quiescence；_settle 返回 False
+        （仍有 accepted 或子仍在跑）→ 等下一次 wake。
+        """
+        activation = self._activations[child_id]
+        while True:
+            if activation.get("disposal") is not None:
+                return
+            poke = activation["poke"]
+            poke.clear()
+            idle_fut = activation["loop"].when_idle_async()
+            poke_task = asyncio.ensure_future(poke.wait())
+            try:
+                await asyncio.wait({idle_fut, poke_task}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                poke_task.cancel()
+                if not idle_fut.done():
+                    idle_fut.cancel()
+            if activation.get("disposal") is not None:
+                return
+            if poke.is_set():
+                continue            # 有新投递/认领：重观 quiescence
+            if self._settle(child_id, activation):
+                return
+            await poke.wait()       # accepted 非空或仍在跑：等下一次 wake
+
+    def _settle(self, child_id: str, activation: dict) -> bool:
+        """结算临界区（同步、无 await；跨线程以 _locks 串行化）。
+
+        返回 True = 已结算（activation 弹出 + 结算投递）；False = 未到结算
+        时机（accepted 非空 / 子仍在跑）。
+        要点：
+          * epoch_start == persisted（激活物化时事件数）→ delta 只算新事件，
+            不误读父 seed（A7 已立教训）。
+          * accepted 排空判据：_settle 只在 idle_fut（= 驱动 _mark_quiescent，
+            inbox 已排空）之后进入；此刻所有投递消息必已认领（claimed hook
+            已 discard）。
+          * 结算先于所有权释放：_deliver_settlement（投递父）在 pop 之后但
+            "所有权释放"在 mini 是 no-op（无嵌套），投递即最后一步，顺序天然满足。
+        """
+        with self._locks.setdefault(child_id, threading.Lock()):
+            if activation.get("disposal") is not None:
+                return True
+            if activation["accepted"]:
+                return False                    # stateOf running：仍有未认领投递
+            if not activation["loop"].when_idle():
+                return False                    # 仍在跑（重启后的新回合）
+            activation["disposal"] = True
+            child = activation["loop"]
+            epoch = child.session.events[activation["persisted"]:]  # 整 epoch delta
+            stop = epoch_stop_reason(epoch)
+            output = final_assistant_output(epoch)
             summary = settlement_summary(stop, child_id)
             self._persist_delta(child.session, start=activation["persisted"])
             self._persisted[child_id] = len(child.session.events)
-        finally:
-            # 先摘激活再投递：投递可能唤醒父 pump，父工具可对同一子代理
-            # 再次 send_message（此时必须冷恢复而非撞 ACTIVATION_CLOSING）
-            child_ctx.dispose()
+            activation["ctx"].dispose()
             self._activations.pop(child_id, None)
+        # 锁外投递：先摘激活再投递，父 pump 可对同一子代理再次 send_message
+        # （此时必须冷恢复而非撞既有激活）
         self._deliver_settlement(child_id, summary, output)
+        return True
 
     def _persist_delta(self, session: Session, start: int) -> None:
         events = session.events[start:]
@@ -478,10 +604,19 @@ class SubagentContinuationManager:
         self._deliver(message)
 
     def _deliver(self, message: dict) -> None:
-        if self.parent.status == "idle":
-            self.parent.followup(message)
+        if self.parent._driver is not None:
+            # A8 异步路径：父 idle → followup（唤醒新回合）；父 running →
+            # steer（批内合并，下一步边界消费）——对齐上游 sendWaking。
+            if self.parent.status == "idle":
+                self.parent.followup(message)
+            else:
+                self.parent.steer(message)
         else:
-            self.parent.inbox.append(message)
+            # A7 同步路径：父 idle → followup；父 running → 非唤醒 inbox。
+            if self.parent.status == "idle":
+                self.parent.followup(message)
+            else:
+                self.parent.inbox.append(message)
 
     # ---------- 子专属 report 工具 ----------
 

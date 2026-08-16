@@ -1,9 +1,14 @@
-"""A7 可继续子代理验收：durable 子会话 + 冷恢复 + 结算投递 + 枚举 + 控制工具。
+"""A7/A8 可继续子代理验收：durable 子会话 + 冷恢复 + 结算投递 + 枚举 + 控制工具。
+
+A8：异步事件驱动执行（父有 driver 时 sendMessage 投递即返回、residency 跨回合、
+watchSettlement 结算、steer 批内合并、interrupt 缺省 no-op）。
 
 运行：python -m unittest tests.test_continuation -v
 """
+import asyncio
 import json
 import tempfile
+import time
 import unittest
 
 from miniharness.core.agent_loop.agent import AgentLoop
@@ -29,6 +34,22 @@ from miniharness.seams.subagent.descriptor import (
     seed_descriptor_turn,
     snapshot_subagent_descriptor,
 )
+
+
+def _settlement_notices(session):
+    """父会话里的 subagent-settled 结算通知列表。"""
+    return [e for e in session.events
+            if e["type"] == "user/message"
+            and e["data"].get("source", {}).get("kind") == "subagent-settled"]
+
+
+async def _wait_until(predicate, timeout=3.0):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not predicate():
+        if loop.time() > deadline:
+            raise TimeoutError("_wait_until timed out")
+        await asyncio.sleep(0.005)
 
 
 def _parent_loop(session_id="parent", adapter=None):
@@ -300,14 +321,15 @@ class TestContinuationManager(unittest.TestCase):
             mgr.send_message("orphan", "hi")
         self.assertEqual(cm.exception.code, "NOT_RESUMABLE")
 
-    def test_activation_closing_defensive_guard(self):
+    def test_resubmit_reuses_existing_activation(self):
+        # A8：激活内再投递并入同一 residency（对齐上游 followup 对已有激活
+        # 直接 submitAdmitted）；A7 的 ACTIVATION_CLOSING 防御守卫已移除。
         mgr = self._manager()
         cid = mgr.start_continuable(label="研")
         activation = mgr._get_or_resume(cid)
         try:
-            with self.assertRaises(SubagentError) as cm:
-                mgr._get_or_resume(cid)
-            self.assertEqual(cm.exception.code, "ACTIVATION_CLOSING")
+            self.assertIs(mgr._get_or_resume(cid), activation)
+            self.assertEqual(mgr.state_of(cid)["kind"], "running")
         finally:
             activation["ctx"].dispose()
             mgr._activations.pop(cid, None)
@@ -350,12 +372,13 @@ class TestContinuationManager(unittest.TestCase):
         self.assertEqual(events[-1]["type"], "turn/end")
         self.assertEqual(events[-1]["data"]["reason"]["kind"], "aborted")
 
-    def test_interrupt_inactive_not_found(self):
+    def test_interrupt_inactive_noop(self):
+        # A8：缺省目标是接受性 no-op（上游 continuation.ts:517-520 "An absent
+        # target is an accepted no-op"），不再抛 NOT_FOUND。
         mgr = self._manager()
         cid = mgr.start_continuable(label="研")
-        with self.assertRaises(SubagentError) as cm:
-            mgr.interrupt(cid)
-        self.assertEqual(cm.exception.code, "NOT_FOUND")
+        self.assertIsNone(mgr.interrupt(cid))
+        self.assertEqual(mgr.state_of(cid)["kind"], "idle")
 
     def test_max_depth(self):
         mgr = self._manager(max_depth=0)
@@ -432,15 +455,206 @@ class TestControlTools(unittest.TestCase):
         self.assertEqual(parsed[0]["label"], "研")
         self.assertEqual(parsed[0]["status"], "idle")
 
-    def test_interrupt_agent_tool_inactive_errors(self):
+    def test_interrupt_agent_tool_inactive_noop(self):
+        # A8：interrupt_agent 对缺省目标返回成功文案而非错误（上游 no-op）。
         self.parent.adapter = _ScriptedParent("interrupt_agent")
         self.parent.adapter.cid = self.mgr.start_continuable(label="研")
         self.parent.run("中断子代理")
         results = [e for e in self.parent.session.events if e["type"] == "tool/result"]
         self.assertEqual(len(results), 1)
         block = results[0]["data"]["message"]["content"][0]
-        self.assertIn("SubagentError", block["content"][0]["text"])
-        self.assertTrue(block.get("isError"))
+        self.assertIn("Interrupted subagent", block["content"][0]["text"])
+        self.assertFalse(block.get("isError"))
+
+
+class TestAsyncContinuation(unittest.TestCase):
+    """A8 异步事件驱动路径：父有 driver 时 sendMessage 投递即返回，
+    子 driver 跑回合 + watcher 结算 + 投递回父。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.persistence = JsonlPersistence(self.tmp.name)
+        self.parent, self.ctx, self.reg = _parent_loop()
+        self.mgr = SubagentContinuationManager(self.parent, self.persistence)
+
+    def test_async_two_submits_one_epoch_one_settlement(self):
+        # 两次快速投递并入同一 residency：子跑 2 turns、父恰收 1 条结算。
+        async def scenario():
+            self.parent.start_driver()
+            cid = self.mgr.start_continuable(label="研")
+            self.mgr.send_message(cid, "第一回合")
+            self.mgr.send_message(cid, "第二回合")
+            await _wait_until(lambda: len(_settlement_notices(self.parent.session)) == 1)
+            self.assertEqual(self.mgr.state_of(cid)["kind"], "idle")
+            await self.parent.when_idle_async()
+            events = self.persistence.inspect(cid)["events"]
+            # mini 泵模型：一次 residency epoch = 一条 pump 会话（多条消息为 step）
+            self.assertEqual([e["type"] for e in events].count("turn/start"), 1)
+            self.assertEqual([e["type"] for e in events].count("step/start"), 2)
+            user_texts = [e["data"]["content"][0]["text"] for e in events
+                          if e["type"] == "user/message"]
+            self.assertEqual(user_texts, ["第一回合", "第二回合"])
+        asyncio.run(scenario())
+
+    def test_async_settlement_steer_while_parent_running(self):
+        # 父 running（慢工具阻塞）时子结算 → steer 批内合并，下一步边界消费。
+        async def scenario():
+            self.parent.start_driver()
+            cid = self.mgr.start_continuable(label="研")
+
+            def blocking_send(_args, _exec):
+                self.mgr.send_message(cid, "慢着跑，我在忙")
+                time.sleep(0.4)   # 父阻塞窗口：子结算期间父 running
+                return "已派发"
+
+            self.reg.register(Tool(name="do_all", description="d",
+                                   parameters={"type": "object", "properties": {}, "required": []},
+                                   execute=blocking_send))
+            self.parent.adapter = _ScriptedParent("do_all")
+            await self.parent.run_async("开动")
+            self.assertEqual([e["data"]["source"]["kind"]
+                              for e in self.parent.session.events if e["type"] == "user/message"],
+                             ["user", "subagent-settled"])
+            await self.parent.when_idle_async()
+            self.assertEqual(self.parent.last_response(), "父响应")
+        asyncio.run(scenario())
+
+    def test_async_interrupt_parked_resumes_on_next_send(self):
+        # 子 mid-turn 中断（keep_inbox 驻留）→ 不结算；下次 send（waking send）
+        # 清 _parked 恢复驻留队列 → 跑完剩余消息 → 单次结算。
+        async def scenario():
+            self.parent.start_driver()
+            child_adapter = FakeLlmAdapter(tool_call={"name": "cancel_self", "arguments": {}})
+            mgr = SubagentContinuationManager(
+                self.parent, self.persistence, adapter_factory=lambda p, m: child_adapter)
+            cid = mgr.start_continuable(label="研")
+            self.reg.register(Tool(name="cancel_self", description="d",
+                                   parameters={"type": "object", "properties": {}, "required": []},
+                                   execute=lambda a, e: mgr.interrupt(cid, cause="parent")))
+            mgr.send_message(cid, "开始")
+            mgr.send_message(cid, "驻留")
+            await asyncio.sleep(0.2)
+            # 中断后 accepted 非空（驻留消息未认领）→ 不结算，仍 running
+            self.assertEqual(mgr.state_of(cid)["kind"], "running")
+            self.assertEqual(len(_settlement_notices(self.parent.session)), 0)
+            mgr.send_message(cid, "继续")   # waking send 恢复
+            await _wait_until(lambda: len(_settlement_notices(self.parent.session)) == 1)
+            events = self.persistence.inspect(cid)["events"]
+            user_texts = [e["data"]["content"][0]["text"] for e in events
+                          if e["type"] == "user/message"]
+            self.assertEqual(user_texts, ["开始", "驻留", "继续"])
+            # 整 epoch 最后一次 turn/end 是 completed
+            self.assertEqual(events[-1]["type"], "turn/end")
+            self.assertEqual(events[-1]["data"]["reason"]["kind"], "completed")
+        asyncio.run(scenario())
+
+    def test_async_send_during_disposal_cold_resumes(self):
+        # watcher 已结算后 send → 冷恢复新激活重投（不丢消息，新 epoch）。
+        async def scenario():
+            self.parent.start_driver()
+            cid = self.mgr.start_continuable(label="研")
+            self.mgr.send_message(cid, "第一回合")
+            await _wait_until(lambda: len(_settlement_notices(self.parent.session)) == 1)
+            self.mgr.send_message(cid, "第二回合")
+            await _wait_until(lambda: len(_settlement_notices(self.parent.session)) == 2)
+            self.assertEqual(self.mgr.state_of(cid)["kind"], "idle")
+            events = self.persistence.inspect(cid)["events"]
+            user_texts = [e["data"]["content"][0]["text"] for e in events
+                          if e["type"] == "user/message"]
+            self.assertEqual(user_texts, ["第一回合", "第二回合"])
+            self.assertEqual(len(_settlement_notices(self.parent.session)), 2)
+        asyncio.run(scenario())
+
+    def test_async_child_error_settles(self):
+        # 子回合 LlmFailure → error turn/end → 结算 "failed before it finished"。
+        class BoomAdapter(FakeLlmAdapter):
+            def stream(self, messages, tools):
+                raise LlmFailure("RATE_LIMIT", "429 Too Many Requests")
+
+        async def scenario():
+            self.parent.start_driver()
+            mgr = SubagentContinuationManager(
+                self.parent, self.persistence, adapter_factory=lambda p, m: BoomAdapter())
+            cid = mgr.start_continuable(label="研")
+            mgr.send_message(cid, "hi")
+            await _wait_until(lambda: len(_settlement_notices(self.parent.session)) == 1)
+            text = "".join(b["text"] for b in _settlement_notices(self.parent.session)[0]
+                           ["data"]["content"] if b["type"] == "text")
+            self.assertIn("failed before it finished.", text)
+            events = self.persistence.inspect(cid)["events"]
+            self.assertEqual(events[-1]["type"], "turn/end")
+            self.assertEqual(events[-1]["data"]["reason"]["kind"], "error")
+            self.assertEqual(events[-1]["data"]["reason"]["error"]["code"], "RATE_LIMIT")
+        asyncio.run(scenario())
+
+    def test_async_when_idle_async_roundtrip(self):
+        # driver 起停、idle waiters 结算、无忙循环（超时即失败）。
+        async def scenario():
+            self.parent.start_driver()
+            self.assertTrue(await asyncio.wait_for(self.parent.when_idle_async(), 0.5))
+            self.parent.followup("动一动")
+            await asyncio.wait_for(self.parent.when_idle_async(), 1.0)
+            self.assertTrue(self.parent.when_idle())
+            texts = [e["data"]["content"][0]["text"] for e in self.parent.session.events
+                     if e["type"] == "user/message"]
+            self.assertIn("动一动", texts)
+        asyncio.run(scenario())
+
+    def test_async_driver_swallows_turn_error(self):
+        # driver 模式回合错误被吞（error turn/end 在日志），when_idle_async 正常返回。
+        class BoomAdapter(FakeLlmAdapter):
+            def stream(self, messages, tools):
+                raise LlmFailure("SERVER", "500 boom")
+
+        async def scenario():
+            parent, _, _ = _parent_loop(adapter=BoomAdapter())
+            parent.start_driver()
+            parent.followup("会炸的输入")
+            await asyncio.wait_for(parent.when_idle_async(), 1.0)
+            self.assertTrue(parent.when_idle())
+            ends = [e for e in parent.session.events if e["type"] == "turn/end"]
+            self.assertEqual(ends[-1]["data"]["reason"]["kind"], "error")
+            self.assertEqual(ends[-1]["data"]["reason"]["error"]["code"], "SERVER")
+        asyncio.run(scenario())
+
+    def test_on_message_claimed_channel(self):
+        # 每条被认领消息（含 id）都经 on_message_claimed 回调。
+        async def scenario():
+            parent, _, _ = _parent_loop()
+            parent.start_driver()
+            claimed_ids = []
+            parent.on_message_claimed(lambda m: claimed_ids.append(m["id"] if m else None))
+            parent.followup("消息一")
+            await asyncio.wait_for(parent.when_idle_async(), 1.0)
+            self.assertEqual(len(claimed_ids), 1)
+            self.assertIsInstance(claimed_ids[0], str)
+        asyncio.run(scenario())
+
+    def test_fire_inbox_claimed_user_source_fix(self):
+        # {"kind":"user"} 消息触发零参钩子（A8 修复 source 比较后）。
+        async def scenario():
+            parent, _, _ = _parent_loop()
+            parent.start_driver()
+            fired = []
+            parent.on_inbox_claimed(lambda _loop: fired.append(True))
+            parent.followup("用户输入")
+            await asyncio.wait_for(parent.when_idle_async(), 1.0)
+            self.assertEqual(fired, [True])
+        asyncio.run(scenario())
+
+    def test_async_report_foreground_wakeup_idle_parent(self):
+        # 异步父 idle 时前台 report 唤醒新回合（_deliver → followup）。
+        async def scenario():
+            self.parent.start_driver()
+            cid = self.mgr.start_continuable(label="研")
+            self.mgr.report_from(cid, "进展报告", quiet=False)
+            await asyncio.wait_for(self.parent.when_idle_async(), 1.0)
+            self.assertEqual([e["data"]["source"]["kind"]
+                              for e in self.parent.session.events if e["type"] == "user/message"],
+                             ["subagent-report"])
+            self.assertEqual(self.parent.last_response(), "父响应")
+        asyncio.run(scenario())
 
 
 class TestInjectDict(unittest.TestCase):

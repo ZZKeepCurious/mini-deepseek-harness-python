@@ -1,4 +1,4 @@
-"""第 4 章：Agent Loop —— turn/step 状态机（同步简化版）。
+"""第 4 章：Agent Loop —— turn/step 状态机（同步简化版 + A8 事件驱动 driver）。
 
 对应 dsh 真实源码：packages/core/agent-loop。
 
@@ -10,6 +10,18 @@
   * 工具结果回灌后在同一 turn 内自动进入下一步（next-step 继续）
   * pre-step 拒绝 → turn 以 {kind:'blocked'} 结束；step/end 与 turn/end
     在 finally 中必定落日志（失败时 reason 为 {kind:'error'|'aborted'|...}）
+
+A8 事件驱动 driver（可继续子代理异步对齐的前置）：
+  * start_driver() 把本 loop 切换到 driver 模式：followup/steer 只入队 +
+    线程安全唤醒（_request_wake → call_soon_threadsafe），回合由 _drive
+    在事件循环上执行；非 driver 模式维持 A7 同步 pump。
+  * _drive 在"真静默"（无未消费 inbox / 无 _continue / work_event 未再置位）
+    时才 _mark_quiescent 并结算 when_idle_async 等待者（关闭"steer 结算通知
+    在 pump 退出后到达导致 idle waiters 早结算"的竞态）。
+  * _parked：interrupt keep_inbox 的驻留队列，仅下次唤醒 send（followup/steer
+    清 _parked）恢复（对齐上游"waking send resumes the parked queue"）。
+  * on_message_claimed 通道：每条被认领消息（含 id）回调，供 continuation
+    跟踪激活 accepted 集合（对齐上游 agent/inbox/claimed 会话事件）。
 """
 from __future__ import annotations
 
@@ -81,6 +93,21 @@ class AgentLoop:
         # 上游 agent/inbox/claimed 扩展点的 mini 简化：每 owner 钩子列表，
         # 在 user 输入被认领进 step 时触发（job 的 wake 预算据此恢复）
         self._inbox_claimed_hooks: list[Callable[["AgentLoop"], None]] = []
+        # A8：消息认领通道（携带被认领消息本身，含 id）——continuation 管理器
+        # 据此跟踪激活的 accepted 集合（对齐上游 agent/inbox/claimed 会话事件）
+        self._inbox_claimed_msg_hooks: list[Callable[[dict | None], None]] = []
+        # A8 事件驱动 driver：driver 任务在事件循环上消费 inbox；followup/steer
+        # 只入队 + 线程安全唤醒，_quiescent 表示真静默（inbox 排空），
+        # _idle_waiters 供 when_idle_async 的等待者（上游 whenIdle 可等待版）
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._work_event: asyncio.Event | None = None
+        self._driver: asyncio.Task | None = None
+        self._quiescent = False
+        self._idle_waiters: list[asyncio.Future] = []
+        # interrupt keep_inbox 的驻留队列：置位后 driver 不再自动续跑，
+        # 仅下次唤醒 send（followup/steer 清 _parked）恢复（上游"waking send
+        # resumes the parked queue"）
+        self._parked = False
 
     @property
     def id(self) -> str:
@@ -92,12 +119,28 @@ class AgentLoop:
         self._inbox_claimed_hooks.append(hook)
         return lambda: self._inbox_claimed_hooks.remove(hook) if hook in self._inbox_claimed_hooks else None
 
+    def on_message_claimed(self, hook: Callable[[dict | None], None]) -> Callable[[], None]:
+        """注册消息认领钩子：每一条被认领的消息（含 None 续步）都回调，携带消息
+        本身（含 id）。A8 continuation 用它跟踪激活 accepted 集合；区别于
+        on_inbox_claimed（零参、仅 user 输入、jobs 预算用）。"""
+        self._inbox_claimed_msg_hooks.append(hook)
+        return lambda: (self._inbox_claimed_msg_hooks.remove(hook)
+                        if hook in self._inbox_claimed_msg_hooks else None)
+
     def _fire_inbox_claimed(self, claimed: dict | None) -> None:
-        """user 输入被认领进 step 时触发钩子（job 的 wake 预算据此恢复）。"""
+        """消息被认领进 step 时触发钩子（job 的 wake 预算据此恢复；A8 的
+        accepted 跟踪据此排空投递集合）。"""
+        for hook in list(self._inbox_claimed_msg_hooks):
+            try:
+                hook(claimed)
+            except Exception as error:
+                logger = getattr(self.ctx, "logger", None)
+                if logger is not None and hasattr(logger, "warn"):
+                    logger.warn(f"on_message_claimed hook threw: {error}")
         if claimed is None:
             return
         source = claimed.get("source")
-        if source == "user" and self._inbox_claimed_hooks:
+        if isinstance(source, dict) and source.get("kind") == "user" and self._inbox_claimed_hooks:
             for hook in list(self._inbox_claimed_hooks):
                 try:
                     hook(self)
@@ -116,26 +159,41 @@ class AgentLoop:
         content 为字符串时构造文本 user 消息；为 dict 时按预建消息逐字入队
         （goal 轮次的 goal 来源消息经此喂入，对齐上游 followup(message:
         UserMessage) 全消息语义；字符串形态是 mini 简化）。
+
+        driver 模式（A8）：入队 + 线程安全唤醒，不阻塞；非 driver 模式维持
+        同步 pump。清 _parked（waking send 恢复 interrupt 驻留队列）。
         """
         message = content if isinstance(content, dict) else create_message(
             "user", [text_block(content)],
             {"kind": "user"} if source == "user" else {"kind": "plugin", "plugin": source},
         )
         self.inbox.append(message)
-        self._pump()
+        self._parked = False
+        if self._driver is not None:
+            self._request_wake()
+        else:
+            self._pump()
 
     # ---------- 干预面（第 9 章：Agent 干预面） ----------
 
-    def steer(self, content: str, source: str = "user") -> None:
+    def steer(self, content: str | dict, source: str = "user") -> None:
         """下一 step 唤醒（上游 steer）：idle 时立即开 turn；
         running 时入 inbox，当前 step 跑完后的边界消费（同步模型下
-        循环条件在每个 step 之后检查，等价"下个 step 边界"）。"""
-        message = create_message(
+        循环条件在每个 step 之后检查，等价"下个 step 边界"）。
+
+        content 为字符串时构造文本 user 消息；为 dict 时按预建消息逐字入队
+        （子代理结算通知经此送达 running 父，对齐上游 steer(message) 全消息
+        语义）。"""
+        message = content if isinstance(content, dict) else create_message(
             "user", [text_block(content)],
             {"kind": "user"} if source == "user" else {"kind": "plugin", "plugin": source},
         )
         self.inbox.append(message)
-        self._pump()
+        self._parked = False
+        if self._driver is not None:
+            self._request_wake()
+        else:
+            self._pump()
 
     def inject(self, content: str | dict, source: str = "plugin") -> None:
         """非唤醒注入（上游 inject(message)）：只入 inbox，不开 turn。
@@ -158,11 +216,16 @@ class AgentLoop:
         阶段 7 async 路径：置位共享 signal，并行调度器检测后停止补池、
         排干已启动调用、未启动的按模型序补 TOOL_ABORTED_BEFORE_DISPATCH
         合成错误结果（与上游 appendSkippedToolCall 一致）。
+        A8：keep_inbox 且 inbox 非空 → 置 _parked（驻留队列不自动续跑，
+        仅下次唤醒 send 恢复）。
         """
         if not self._turn_open and not self.inbox:
             return
-        if not keep_inbox:
+        if keep_inbox and self.inbox:
+            self._parked = True
+        else:
             self.inbox.clear()
+            self._parked = False
         if self._turn_open:
             self._cancelled = True
             # 对齐上游：turn/end {kind:'aborted', reason: AgentCancelCause}
@@ -175,6 +238,80 @@ class AgentLoop:
         """quiescence（上游 whenIdle）：无活跃回合即 idle。
         同步模型下没有"在飞 step"，status 检查即为整机静默判定。"""
         return self.status == "idle" and not self._turn_open
+
+    # ---------- 事件驱动 driver（A8：异步事件驱动对齐的前置） ----------
+
+    def start_driver(self) -> None:
+        """把本 loop 切换到事件驱动模式：driver 任务在事件循环上消费 inbox。
+
+        必须在事件循环内调用；幂等。driver 模式下 followup/steer 只入队 +
+        线程安全唤醒（不再同步 pump），回合由 _drive 在循环上执行。
+        """
+        self._loop = asyncio.get_running_loop()
+        self._work_event = asyncio.Event()
+        self._quiescent = True    # 启动即静默（无待处理工作）
+        if self._driver is None or self._driver.done():
+            self._driver = self._loop.create_task(self._drive())
+
+    def when_idle_async(self) -> asyncio.Future:
+        """驱动静默可等待版（上游 whenIdle）：驱动排空全部工作后 resolve。
+
+        返回可取消的 future（watcher 竞速用，asyncio.wait 会取消落败方）；
+        仅 driver 模式可用。错误回合不影响 resolve（回合已以 error turn/end
+        闭合，对齐上游 whenIdle 不受回合错误影响）。
+        """
+        if self._driver is None:
+            raise RuntimeError("when_idle_async 需要先调用 start_driver()")
+        if self.when_idle() and self._quiescent:
+            fut = self._loop.create_future()
+            fut.set_result(True)
+            return fut
+        fut = self._loop.create_future()
+        fut.add_done_callback(lambda f: (self._idle_waiters.remove(f)
+                                         if f in self._idle_waiters else None))
+        self._idle_waiters.append(fut)
+        return fut
+
+    def _request_wake(self) -> None:
+        """线程安全唤醒 driver（executor 线程的 followup/steer 也安全）。
+
+        同步清除 _quiescent：紧跟其后的 when_idle_async 不应在唤醒回调尚未
+        执行时走"已静默"快捷路径（关闭 followup 后立即等静默的竞态窗口）。
+        """
+        self._quiescent = False
+        loop = self._loop
+        if loop is not None:
+            loop.call_soon_threadsafe(self._wake_now)
+
+    def _wake_now(self) -> None:
+        self._quiescent = False
+        if self._work_event is not None:
+            self._work_event.set()
+
+    async def _drive(self) -> None:
+        """驱动主循环：等 work_event → 跑 pump 直至排空 → 结算 idle waiters。
+
+        仅在"真静默"（无未消费 inbox / 无 _continue / work_event 未再置位）
+        时机到 _mark_quiescent，避免 when_idle_async 在 turn 运行中到达的
+        steer/结算通知尚未被消费时提前返回（executor 先 append 后 wake 的
+        happens-before 关系保证 inbox 检查必然看到该消息）。
+        """
+        while True:
+            await self._work_event.wait()
+            self._work_event.clear()
+            self._quiescent = False
+            if (self.inbox or self._continue) and not self._cancelled and not self._parked:
+                try:
+                    await self._pump_async()
+                except Exception:
+                    pass   # 回合已以 {kind:'error'} turn/end 闭合；驱动不冒泡
+            if self.inbox or self._continue or self._work_event.is_set():
+                continue   # 还有未消费工作：不结算 quiescence
+            self._quiescent = True
+            waiters, self._idle_waiters = self._idle_waiters, []
+            for fut in waiters:
+                if not fut.done():
+                    fut.set_result(True)
 
     def run_maintenance(self, task: Callable[[], Any]) -> Any:
         """维护任务（上游 runMaintenance）：仅 true idle 下执行，
@@ -193,12 +330,22 @@ class AgentLoop:
         return self.last_response()
 
     async def run_async(self, content: str) -> str:
-        """阶段 7：async 跑完一次输入（真并行工具执行路径）。"""
+        """阶段 7：async 跑完一次输入（真并行工具执行路径）。
+
+        A8：driver 已起 → 经 driver（入队 + 唤醒 + 等静默；回合错误吞入
+        turn/end，不向上抛）；未起 → 直接 _pump_async（异常向上抛，对齐
+        test_parallel 既有语义）。
+        """
         message = create_message(
             "user", [text_block(content)], {"kind": "user"},
         )
         self.inbox.append(message)
-        await self._pump_async()
+        if self._driver is not None:
+            self._parked = False
+            self._request_wake()
+            await self.when_idle_async()
+        else:
+            await self._pump_async()
         return self.last_response()
 
     def last_response(self) -> str:
@@ -233,7 +380,7 @@ class AgentLoop:
     def _pump(self) -> None:
         steps = 0
         try:
-            while (self.inbox or self._continue) and not self._cancelled:
+            while (self.inbox or self._continue) and not self._cancelled and not self._parked:
                 steps += 1
                 if steps > self.max_steps:
                     raise RuntimeError(f"超过最大 step 数 {self.max_steps}，疑似死循环")
@@ -254,10 +401,11 @@ class AgentLoop:
                 self._close_turn(self._turn_end)
 
     async def _pump_async(self) -> None:
-        """阶段 7：async 主循环（语义与 _pump 相同，step 走并行调度器）。"""
+        """阶段 7：async 主循环（语义与 _pump 相同，step 走并行调度器；
+        A8 起为 driver 核心——由 _drive 在事件循环上驱动）。"""
         steps = 0
         try:
-            while (self.inbox or self._continue) and not self._cancelled:
+            while (self.inbox or self._continue) and not self._cancelled and not self._parked:
                 steps += 1
                 if steps > self.max_steps:
                     raise RuntimeError(f"超过最大 step 数 {self.max_steps}，疑似死循环")
