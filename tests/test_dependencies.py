@@ -1,10 +1,10 @@
 """步骤 4 验收：import 方向断言 + 顶层 API 收敛（对照 docs/architecture.md §3/§4）。
 
 用 stdlib AST 静态检查 miniharness/ 包内模块的导入边，钉死分层规则：
-  L0 地基  = core/session、core/scope            （两者互不依赖）
-  L1 领域  = llm/*、core/tools、boot/*           （仅 L0）
-  L2 编排  = core/agent_loop                     （L0 + L1）
-  L3 应用  = cli/*、protocol/*、seams/*、preset、extensions、interaction、client
+L0 地基  = core/session、core/scope            （两者互不依赖）
+L1 领域  = llm/*、core/tools、core/system_prompt、boot/*   （仅 L0）
+L2 编排  = core/agent_loop、compaction、jobs、plan   （L0 + L1）
+L3 应用  = cli/*、protocol/*、seams/*、preset、extensions、interaction、client
   （L0 ~ L2）
   教学层   = demo.py、example_plugins.py（任意层，但不得被业务模块导入）
 
@@ -28,9 +28,13 @@ LAYER_UNITS = [
     ("core.session", 0),
     ("core.scope", 0),
     ("core.tools", 1),
+    ("core.system_prompt", 1),
     ("llm", 1),
     ("boot", 1),
     ("core.agent_loop", 2),
+    ("compaction", 2),
+    ("jobs", 2),
+    ("plan", 2),
     ("cli", 3),
     ("protocol", 3),
     ("seams", 3),

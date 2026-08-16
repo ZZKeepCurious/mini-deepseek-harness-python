@@ -403,7 +403,7 @@ print([e["type"] for e in session.events])
 | `system-prompt/assemble` waterfall | 提示词按片段组装（hook 可注入上下文） | 直接拼接，无扩展点 |
 | `agent/request` waterfall → `llm/stream` | 请求构造拦截（steering） | 未实现 waterfall，直连 adapter |
 | `agent/request-error` waterfall | 规范错误（如上下文溢出）后的重试决策 | 已实现（§4.10 重试/退避） |
-| `agent/turn-stopping` serial | turn 结束前串行终点检查（compaction 压力等） | 未实现（报告图 11 有此环节，代码暂无） |
+| `agent/turn-stopping` serial | turn 结束前串行终点检查 | 未实现（mini 的压力检查在 `agent/pre-step`，即 §4.10 压缩接线；turn-stopping 扩展点本身未复现） |
 | `finish {kind:'error'\|'aborted'}` 带内失败 | 流中途失败也可经协议传递 | 只在 `stream()` 抛 `LlmFailure` |
 | `EMPTY_RESPONSE` 编码 | 空响应 = 规范错误，可重试 | 已实现且默认可重试（§4.10） |
 
@@ -449,11 +449,16 @@ loop 前调用 `apply_retry_planner(ctx)`（幂等，可重复调用）。
 `TIMEOUT`（原本混在 `TRANSPORT` 里）。
 
 **上下文溢出降级**：`CONTEXT_WINDOW_EXCEEDED`（400 上下文超限）不在默认白名单
-→ 终局不重试（重试只会以相同方式失败），`turn/end` reason 为 `{kind:'error'}`。
-这是刻意的降级语义：溢出该走压缩/剪枝路径（观察清单），而不是退避重试。
+→ 重试规划器不接管，委派下游。装配方在 `apply_retry_planner(ctx)` 之后挂载
+`install_compaction(ctx)`（幂等）：压缩引擎监听 `agent/request-error`，对
+`CONTEXT_WINDOW_EXCEEDED` 强制减容（见 `miniharness/compaction/` 与报告 04 §9.4），且**仅当** surface
+`replaceGeneration` 前进（检查点真实落盘）才返回 `{kind:'retry'}`，计数上限
+`maxOverflowRetries`，成功响应/回合结束边界复位。既无压缩也无接管 → 终局
+`turn/end` reason 为 `{kind:'error'}`。
 
 验证：`python -m unittest tests.test_retry -v`（36 项：策略解析、退避边界、
-Retry-After 解析、全部 recover 分支、loop 集成——重试成功/耗尽终局/非白名单终局）。
+Retry-After 解析、全部 recover 分支、loop 集成——重试成功/耗尽终局/非白名单终局）；
+压缩/溢出见 `tests/test_compaction.py`。
 
 ## 4.9 收尾
 

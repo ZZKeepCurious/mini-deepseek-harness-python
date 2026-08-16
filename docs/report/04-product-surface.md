@@ -341,7 +341,18 @@ mini 持久化层已复现（JSONL + fail-closed + interrupted 修复），且 `
 
 ### 8.4 mini 对照
 
-mini 无 plan/goal。规划：plan 先做"log-only 状态 + prompt section 注入"（最简，不引入审查 UI）；goal 后置。与手册 09/11 章协同。
+mini 已实现 plan 的"log-only 状态 + prompt section 注入"（`miniharness/plan/`，见下方 §8.5）。goal 后置。与手册 09/11 章协同。
+
+### 8.5 mini 实现：plan mode 状态机（`miniharness/plan/`，A5）
+
+对齐上游 `packages/plan/plan-mode/` 的 wire/契约核心：
+
+- **状态只写日志**：唯一事实来源是 `plan/mode {active:boolean}`（log-only、非 surface、整值替换），生效状态 = `fold_plan_mode` 沿日志前缀折叠、最后一条胜出；resume/fork 无需 live mirror。`plan/mode` 已入 KNOWN_TYPES（22/39），seed 回放 fail-closed。
+- **set() 四态**（index.ts:425-445）：`committed`（idle 立即 append）/ `queued`（turn 运行中记 pending，在下一个被接受的 in-turn pre-step 提交）/ `cancelled`（对已 pending 同状态重复选择）/ `noop`（对生效状态重复选择）；被拒绝（reject）或中止的 step 不提交。
+- **plan:policy 节**（order 50，index.ts:225-233）：plan mode 生效（含 pending 选择）期间向每次模型请求注入部署方指引；实现经 `core/system_prompt.py` 分节渲染（基底 + 有序非空节，`\n\n` 连接，对齐上游 renderPrompt）。
+- **叙述**：仅当最近一次 request/header 描述另一模式时注入一句 user 消息（idle 经 `agent.inject` 入 inbox，queued 经 pre-step 决策 messages）；模型可见 ⟺ 已记录。
+
+mini 简化（教学范围，报告 04 §8 后置）：`/plan` 命令、`exit_plan_mode` 审查工具、session-projection 的 plan 投影单元、userQuestions 均未复现；`set()` 是唯一写入口（编程调用 `install_plan_mode(ctx, config)` 返回的控制器）。`system-prompt` 的 assemble waterfall、contexts/tools 提供器、variables 插值、scope 层叠未复现（仅保留 section 注册/渲染）。`install_plan_mode` 要求 ctx 已提供 systemPrompt 服务（缺失抛 KeyError，fail loud）；装配序：`install_system_prompt` → `install_plan_mode`。
 
 ## 议题 9：上下文压缩与后台作业
 
@@ -393,4 +404,6 @@ mini 无 plan/goal。规划：plan 先做"log-only 状态 + prompt section 注�
 
 ### 9.4 mini 对照
 
-mini 无压缩/作业/子代理续跑。规划（按价值排序）：① token 计量 fold（可先做固定启发式估算版）；② 压缩最小版（pre-step 压力检查 + summary replace 检查点 + 前缀重放标注简化）；③ 后台作业语义（进程内注册表，无会话事件——与上游一致）后置。
+mini 已实现 token 计量与压缩最小版（`llm/token_meter.py` + `compaction/`，装配在 demo/headless/ACP/SDK 入口）：TokenMeter 增量 fold + usage 折入锚（无 system/tools → estimateHeader 恒 0）；BasicCompactionEngine 的 pre-step 压力检查（阈值取 adapter.contextWindow，缺省返回 None 而非抛 TargetPressureConfigError）与 request-error overflow 减容（仅 surface.replaceGeneration 前进才 retry，上限 maxOverflowRetries，成功/回合结束边界惰性复位）；事务 compaction/start→前缀重放摘要→user/message 检查点（surfaceOp replace + sourceEventSeqs）→compaction/end，任何失败恰好补一次带 error 的 compaction/end。简化标注：摘要前缀重放无 KV cache 语义、崩溃孤儿锁 repair 不自动恢复、无 toolResultPruner 可选阶段、`_log_result` 经 print 而非 ctx.logger。
+
+mini 已实现后台作业（`jobs/`，进程内注册表 + 三工具 + 完成 notice，装配在 demo/headless/session_cmds/ACP/SDK 入口）：`LocalJobRegistry` 提供 `ctx.jobs` 服务（start/list/get/read/kill/wait、onJobDone/onJobsChanged、attachController），id 为 `<kind>-N`，owned 作业按会话 id 栅栏、unowned 对任何调用方开放，结算 first-wins 且 waiters/kill/终态 read 置 reported 抑制 notice，`maxConcurrentJobsPerOwner` 默认 10（按精确 owner / unowned 桶计 running+stopping），owner 销毁时 cancel 在飞作业 + 限时排干 + 删除（teardown cancel 抛错 force-fail 只改记录）。模型侧 `job_output`（默认非阻塞读流式增量 / wait 有界、响应以 `[status: ...]` 结尾）、`job_list`（`<id> [<kind>] <status> — <label>`）、`job_kill`（requested / already-finished）；完成 notice 按 `completionDelivery` wakeup（idle owner 开 turn，预算 maxConsecutiveWakes=3，user 输入认领恢复）或 quiet（一律 inject），输出与 notice 按 outputLimitBytes 做 UTF-8 字节封顶。与上游一致：**无 `job/*` 会话事件**、不新增事件类型。简化标注（AGENTS.md 简化清单）：无 scope 链与 agent registry（controller/监听器全局层）、teardown 排干为限时轮询、无 canonical value + native renderer 分离（execute 直接返回模型可见文本）、run_in_background 触发入口未复现（producer 用 JobDoneBox 手动挂账）。

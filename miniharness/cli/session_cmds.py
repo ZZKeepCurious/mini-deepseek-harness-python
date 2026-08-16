@@ -14,6 +14,9 @@ from typing import Any, Callable
 
 from ..core.scope import Context
 from ..llm.retry import apply_retry_planner
+from ..compaction import install_compaction
+from ..jobs import install_jobs
+from ..core.system_prompt import install_system_prompt
 from .default_tools import default_tools
 from .headless import summarize
 from ..llm import DeepSeekAdapter, LlmAdapter, LlmFailure
@@ -104,6 +107,9 @@ def resume_session(
     if adapter is None:
         raise ValueError("resume 继续对话需要 adapter")
     apply_retry_planner(ctx)
+    install_compaction(ctx)
+    install_jobs(ctx)
+    install_system_prompt(ctx)
     loop = AgentLoop(session, adapter, default_tools(ctx), ctx)
     first_seq = session.seq
     try:

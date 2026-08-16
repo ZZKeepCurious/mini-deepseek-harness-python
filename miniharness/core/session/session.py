@@ -11,6 +11,7 @@ from typing import Any
 
 from .invariant import validate_event
 from .json import deep_freeze, is_json_safe, now_ms, thaw
+from .surface import _surface_nodes
 from .types import KNOWN_TYPES, SURFACE_TYPES
 
 __all__ = ["Session"]
@@ -23,6 +24,7 @@ class Session:
         self.session_id = session_id
         self.created_at = created_at or now_ms()
         self._events: list[dict[str, Any]] = []
+        self._replace_count = 0
 
         if seed:
             self._replay_seed(seed)
@@ -36,6 +38,23 @@ class Session:
         """只读视图：外部永远拿不到可变的内部列表。"""
         return tuple(self._events)
 
+    @property
+    def replace_generation(self) -> int:
+        """已提交的 surface 位置替换次数（上游 surface.ts SurfaceManager.replaceGeneration）。
+
+        替换使 surface 上可见 seq 非单调；压缩的 overflow 恢复以此判断
+        "surface 是否真的前进过"。
+        """
+        return self._replace_count
+
+    def surface_nodes(self) -> list[dict]:
+        """当前 surface 节点（含 seq，模型可见顺序）。
+
+        沿日志折叠（上游 Session.surface.nodes），O(n)；token 计量与
+        压缩据此选区间与验界。
+        """
+        return _surface_nodes(self._events)
+
     def append(self, type_: str, data: dict | None = None, surfaceOp=None,
                sourceEventSeqs: list[int] | None = None) -> dict[str, Any]:
         """源头校验 + 冻结：坏事件永远进不了日志。
@@ -47,6 +66,8 @@ class Session:
         payload = validate_event(type_, data, surfaceOp, sourceEventSeqs)
         record = deep_freeze({"seq": self.seq, "time": now_ms(), **payload})
         self._events.append(record)
+        if surfaceOp is not None and surfaceOp != "append":
+            self._replace_count += 1
         return record
 
     def _replay_seed(self, seed: list) -> None:
@@ -66,6 +87,8 @@ class Session:
                 op = ev.get("surfaceOp")
                 if op not in ("append",) and not (isinstance(op, dict) and op.get("op") == "replace"):
                     raise ValueError(f"surface 事件 {etype} 必须带合法 surfaceOp")
+                if op != "append":
+                    self._replace_count += 1
             if not is_json_safe(thaw(ev)):
                 raise TypeError(f"seed 事件必须可无损 JSON 序列化: {ev!r}")
             self._events.append(deep_freeze(ev))

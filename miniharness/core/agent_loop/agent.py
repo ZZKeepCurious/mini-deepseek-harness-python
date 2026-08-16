@@ -78,6 +78,35 @@ class AgentLoop:
         # AgentLoop 构造无副作用（迁移步骤 3，对齐上游插件 apply 时挂载）
         self._abort_proxy = _AbortProxy(self)
         self._header_baseline: dict | None = None   # request/header 频次基线（上游 requestHeaderLogged）
+        # 上游 agent/inbox/claimed 扩展点的 mini 简化：每 owner 钩子列表，
+        # 在 user 输入被认领进 step 时触发（job 的 wake 预算据此恢复）
+        self._inbox_claimed_hooks: list[Callable[["AgentLoop"], None]] = []
+
+    @property
+    def id(self) -> str:
+        """会话 id（上游 Agent.id 即 session id，作业按此栅栏）。"""
+        return self.session.session_id
+
+    def on_inbox_claimed(self, hook: Callable[["AgentLoop"], None]) -> Callable[[], None]:
+        """注册 user 输入认领钩子（对齐上游 agent/inbox/claimed 事件；mini 无会话事件总线）。"""
+        self._inbox_claimed_hooks.append(hook)
+        return lambda: self._inbox_claimed_hooks.remove(hook) if hook in self._inbox_claimed_hooks else None
+
+    def _fire_inbox_claimed(self, claimed: dict | None) -> None:
+        """user 输入被认领进 step 时触发钩子（job 的 wake 预算据此恢复）。"""
+        if claimed is None:
+            return
+        source = claimed.get("source")
+        if source == "user" and self._inbox_claimed_hooks:
+            for hook in list(self._inbox_claimed_hooks):
+                try:
+                    hook(self)
+                except Exception as error:
+                    logger = getattr(self.ctx, "logger", None)
+                    if logger is not None and hasattr(logger, "warn"):
+                        logger.warn(f"on_inbox_claimed hook threw: {error}")
+        if source is None:
+            self._inbox_claimed_hooks.clear()
 
     # ---------- 对外入口 ----------
 
@@ -204,6 +233,7 @@ class AgentLoop:
                 if not self._turn_open:
                     self._open_turn()
                 claimed = self.inbox.popleft() if self.inbox else None
+                self._fire_inbox_claimed(claimed)
                 self._run_step(claimed)
         except LlmFailure as e:
             self._turn_end = {"kind": "error", "error": e.failure}
@@ -227,6 +257,7 @@ class AgentLoop:
                 if not self._turn_open:
                     self._open_turn()
                 claimed = self.inbox.popleft() if self.inbox else None
+                self._fire_inbox_claimed(claimed)
                 await self._run_step_async(claimed)
         except LlmFailure as e:
             self._turn_end = {"kind": "error", "error": e.failure}
@@ -239,18 +270,31 @@ class AgentLoop:
                 self._close_turn(self._turn_end)
 
     def _run_step(self, claimed: dict | None) -> None:
-        """一个 step：pre-step → 落日志 → LLM 流式 → 工具管线 → step/end（finally）。"""
-        if claimed is not None:
-            decision = self.ctx.waterfall("agent/pre-step", {"messages": [claimed]})
-            if isinstance(decision, dict) and decision.get("kind") == "reject":
-                self._continue = False  # 复位：拒绝即终局（上游 agent.ts:267-269），避免泵循环跑无输入 step
-                self._turn_end = {"kind": "blocked"}
-                return  # 零 step 尝试：不留 step/start，turn 以 blocked 闭合
+        """一个 step：pre-step → 落日志 → LLM 流式 → 工具管线 → step/end（finally）。
+
+        pre-step 在每一步都派发（含工具续步），对齐上游 agent.ts:266；决策
+        messages 是 step 输入（上游 agent.ts:282-284 逐条落 user/message，
+        plan-mode 叙述经此注入）。reject → 终局 blocked，零 step。
+        """
+        decision = self.ctx.waterfall("agent/pre-step", {
+            "messages": [claimed] if claimed is not None else [],
+            "agent": self,
+            "signal": self._abort_proxy,
+        })
+        if isinstance(decision, dict) and decision.get("kind") == "reject":
+            self._continue = False  # 复位：拒绝即终局（上游 agent.ts:267-269），避免泵循环跑无输入 step
+            self._turn_end = {"kind": "blocked"}
+            return  # 零 step 尝试：不留 step/start，turn 以 blocked 闭合
+        messages = []
+        if isinstance(decision, dict):
+            candidate = decision.get("messages")
+            if isinstance(candidate, list):
+                messages = candidate
 
         self._step += 1
         self._continue = False
         try:
-            tool_calls = self._stream_step(claimed)
+            tool_calls = self._stream_step(messages)
             self._execute_tools_sync(tool_calls)
             self._continue = bool(tool_calls)
         finally:
@@ -259,35 +303,42 @@ class AgentLoop:
 
     async def _run_step_async(self, claimed: dict | None) -> None:
         """阶段 7：async 版 step。pre-step 走 awaterfall，工具走并行调度器。"""
-        if claimed is not None:
-            decision = await self.ctx.awaterfall("agent/pre-step", {"messages": [claimed]})
-            if isinstance(decision, dict) and decision.get("kind") == "reject":
-                self._continue = False  # 复位：拒绝即终局（上游 agent.ts:267-269），避免泵循环跑无输入 step
-                self._turn_end = {"kind": "blocked"}
-                return
+        decision = await self.ctx.awaterfall("agent/pre-step", {
+            "messages": [claimed] if claimed is not None else [],
+            "agent": self,
+            "signal": self._abort_proxy,
+        })
+        if isinstance(decision, dict) and decision.get("kind") == "reject":
+            self._continue = False  # 复位：拒绝即终局（上游 agent.ts:267-269），避免泵循环跑无输入 step
+            self._turn_end = {"kind": "blocked"}
+            return
+        messages = []
+        if isinstance(decision, dict):
+            candidate = decision.get("messages")
+            if isinstance(candidate, list):
+                messages = candidate
 
         self._step += 1
         self._continue = False
         try:
-            tool_calls = self._stream_step(claimed)
+            tool_calls = self._stream_step(messages)
             await self._execute_tools_async(tool_calls)
             self._continue = bool(tool_calls)
         finally:
             self.session.append("step/end", {"turn": self._turn, "step": self._step})
 
-    def _stream_step(self, claimed: dict | None) -> list[dict]:
+    def _stream_step(self, messages: list) -> list[dict]:
         """落日志 + LLM 流式（同步适配器阻塞事件循环，可接受：不与在飞任务交错）。
         返回模型产出的 tool-call 块列表（模型序）。
 
         失败恢复（阶段 4）：适配器抛 LlmFailure 时派发 agent/request-error
         waterfall（上游 agent-loop 同语义扩展点）；{kind:'retry'} → 同 step
         内重新发起模型请求（同一 messages，历史不因失败 attempt 改变；
-        request/header 只落一次——上游仅在 header 变化时追加）；其它/未
-        挂载监听器 → 失败终局（抛给 _pump 闭合 turn）。
+        request/header 只落一次——上游仅在 header 变化时追加、attempt/重试不重复落）
         """
         self.session.append("step/start", {"turn": self._turn, "step": self._step})
-        if claimed is not None:
-            self.session.append("user/message", claimed, surfaceOp="append")
+        for message in messages:
+            self.session.append("user/message", message, surfaceOp="append")
 
         # 请求配置入日志（模型可见 ⟺ 已记录；对齐上游 requestHeaderLogged：
         # 首次落 initial（已存在 request/header 的重放会话落 resume），
@@ -307,16 +358,40 @@ class AgentLoop:
             })
         self._header_baseline = header
 
-        history = derive_messages(self.session.events)
-        system = create_message("system", [text_block(self.system_prompt)],
+        return self._stream_attempt()
+
+    def _derive_history(self) -> list[dict]:
+        """Derive the full message list from the current session events.
+
+        System prompt + history (derived messages).  Callers should invoke this
+        inside each retry attempt so that newly‑added compaction checkpoint events
+        are immediately visible.
+
+        system 消息 = AgentLoop.system_prompt 基底 + ctx.systemPrompt 服务的
+        有序非空节（\n\n 连接，对齐上游 renderPrompt 连接语义；无该服务时仅基底）。
+        """
+        parts = [self.system_prompt]
+        try:
+            system_prompt = self.ctx.inject("systemPrompt")
+        except KeyError:
+            system_prompt = None
+        if system_prompt is not None:
+            parts.extend(section["text"] for section in
+                         system_prompt.render({"agent": self, "session": self.session}))
+        text = "\n\n".join(part for part in parts if part)
+        system = create_message("system", [text_block(text)],
                                 {"kind": "plugin", "plugin": "system-prompt"})
-        messages = [system] + history
+        history = derive_messages(self.session.events)
+        return [system] + history
 
-        return self._stream_attempt(messages)
+    def _stream_attempt(self) -> list[dict]:
+        """一次 step 内的模型请求 attempt 循环（上游 request → retry → 终局）。
 
-    def _stream_attempt(self, messages: list[dict]) -> list[dict]:
-        """一次 step 内的模型请求 attempt 循环（上游 request → retry → 终局）。"""
+        每次循环首次都会重新派生 messages，以便 compaction checkpoint
+        的 surface replace 生效。
+        """
         while True:
+            messages = self._derive_history()
             # 流式：逐 chunk 落 assistant/chunk，块组装，finish 时落 assistant/message
             assembler = BlockAssembler()
             chunk_seqs: list[int] = []
@@ -384,15 +459,22 @@ class AgentLoop:
             ]
 
     def _execute_tools_sync(self, tool_calls: list[dict]) -> None:
-        """同步路径：先记录 tool/call 再执行（durable before dispatch），逐个串行。"""
-        for block in tool_calls:
-            self._run_tool(block["id"], block["name"], block["arguments"])
+        """同步路径：先记录 tool/call 再执行（durable before dispatch），逐个串行。
+        共享 step signal（含 agent 身份）供工具按会话栅栏与 kill 中断。"""
+        if not tool_calls:
+            return
+        self._step_signal = ToolExec(agent=self)
+        try:
+            for block in tool_calls:
+                self._run_tool(block["id"], block["name"], block["arguments"])
+        finally:
+            self._step_signal = None
 
     async def _execute_tools_async(self, tool_calls: list[dict]) -> None:
         """阶段 7：并行调度器（exclusive 屏障 + 有界滚动池 + 模型序提交）。"""
         if not tool_calls:
             return
-        self._step_signal = ToolExec()
+        self._step_signal = ToolExec(agent=self)
         try:
             await schedule_tool_calls(
                 self.session, self.ctx, self.tools, self._turn, self._step,
@@ -431,7 +513,11 @@ class AgentLoop:
                 parsed = json.loads(arguments) if arguments else {}
             except json.JSONDecodeError:
                 parsed = {}
-            result = run_pipeline(self.ctx, tool, parsed)
+            if self._step_signal is not None:
+                exec_ = ToolExec(agent=self, signal=self._step_signal.signal)
+            else:
+                exec_ = ToolExec(agent=self)
+            result = run_pipeline(self.ctx, tool, parsed, exec_)
 
         content = result.content
         if result.is_error and result.error is not None:

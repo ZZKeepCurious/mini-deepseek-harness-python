@@ -99,11 +99,14 @@ async def schedule_tool_calls(
     signal: ToolExec,
     body_fn: Callable | None = None,
     max_parallel: int = DEFAULT_MAX_PARALLEL_TOOL_CALLS,
+    agent: Any = None,
 ) -> tuple[bool, bool]:
     """调度一个 step 的全部工具调用。返回 (concluded, aborted)。
 
     tool_calls: 模型序 [{id, name, arguments}]；signal: 共享取消信号容器。
     body_fn: 可注入的"政策通过后执行体"（默认 pipeline_async_body）。
+    agent: 所属 AgentLoop（上游 ToolExecution.agent），透传进 ToolExec 供
+    工具按会话 id 栅栏访问后台作业；None = 无 agent 调用方。
     """
     planned = list(tool_calls)
     next_ = 0
@@ -114,6 +117,7 @@ async def schedule_tool_calls(
         group = planned[next_:] if mode == "parallel" else [first]
         outcome = await _run_group(
             session, ctx, tools, turn, step, group, mode, signal, body_fn, max_parallel,
+            agent=agent,
         )
         next_ += outcome["consumed"]
         if outcome["aborted"]:
@@ -127,7 +131,7 @@ async def schedule_tool_calls(
 async def _run_group(
     session: Session, ctx: Context, tools: Any, turn: int, step: int,
     group: list[dict], mode: str, signal: ToolExec,
-    body_fn: Callable | None, max_parallel: int,
+    body_fn: Callable | None, max_parallel: int, agent: Any = None,
 ) -> dict:
     slots: list[ToolResult | None] = [None] * len(group)
     call_seqs: list[int] = [-1] * len(group)
@@ -171,7 +175,7 @@ async def _run_group(
         if rejected is not None:
             slots[index] = rejected
             return
-        exec_ = ToolExec(signal=signal.signal)
+        exec_ = ToolExec(signal=signal.signal, agent=agent)
         task = asyncio.create_task(body_fn(ctx, tool, frozen, exec_))
         in_flight[index] = task
 

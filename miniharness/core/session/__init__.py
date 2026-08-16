@@ -43,6 +43,7 @@ __all__ = [
     "TOOL_OUTCOME_UNKNOWN",
     "create_message",
     "deep_freeze",
+    "derive_event_message",
     "derive_messages",
     "is_json_safe",
     "now_ms",

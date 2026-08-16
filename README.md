@@ -30,6 +30,11 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 | Agent loop (turn/step state machine, pre-step rejection, tool-feedback continuation) | `core/agent-loop` |
 | LLM seam (StreamChunk protocol, fake adapter, official DeepSeek SSE adapter) | `llm/llm` + `llm/llm-deepseek` |
 | Model request retry / backoff (normal/always policy, `agent/request-error`, `llm/retry` audit pair) | `llm/llm-retry` + `llm/llm/src/retry-policy.ts` |
+| Token metering (incremental fold, usage anchor, 4 chars/token heuristic) | `llm/token-meter` |
+| Context compaction (pre-step pressure + `CONTEXT_WINDOW_EXCEEDED` recovery, surface-replace checkpoint transaction) | `compaction/compaction-basic` |
+| Background jobs (`job_output`/`job_list`/`job_kill`, completion notices, per-owner cap; no `job/*` session events) | `packages/jobs` (jobs-local + tool-jobs) |
+| Plan mode (log-only `plan/mode` state, plan:policy prompt-section injection, queued in-turn commit) | `packages/plan/plan-mode` |
+| System prompt sections (ordered section registration + rendering into each request) | `core/system-prompt` |
 | Boot & composition (YAML/JSON overlays, `!!js` env interpolation, startup assertions) | `packages/boot` |
 | Headless one-shot entry (`--profile headless "task"`: stdout final text, exit code by turn/end reason) | `packages/bundle/headless` + `apps/cli` |
 | Launcher options (`--patch`, `--dump-config` / `--dump-default-config`, read-only composition dump) | `apps/cli/src/args.ts` |
@@ -40,9 +45,9 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 | Async event bus, true parallel tools + barrier | `core/agent-loop` |
 | CI (GitHub Actions, Python 3.10~3.13, integration-tagged real-API tests) | — |
 
-Planned: official Python SDK (`python/sdk`) interop tests.
+Planned (agent-layer focus): plan-mode review UI (`/plan`, `exit_plan_mode`) and goal are deferred; SDK interop tests and web surface are deprioritized.
 
-Status: **413 unit tests passing** (stdlib only; optional `pyyaml` for YAML config).
+Status: **555 unit tests passing** (stdlib only; optional `pyyaml` for YAML config).
 
 ## Getting started
 
@@ -98,7 +103,13 @@ mini-deepseek-harness-python/
 │   │   ├── deepseek.py      # DeepSeek wire serialization + SSE adapter
 │   │   ├── fake.py          # FakeLlmAdapter (no API key)
 │   │   ├── retry_policy.py  # retry policy parsing (normal/always)
-│   │   └── retry.py         # agent/request-error recovery + backoff
+│   │   ├── retry.py         # agent/request-error recovery + backoff
+│   │   └── token_meter.py   # TokenMeter incremental fold + usage anchor
+│   ├── compaction/          # upstream packages/compaction
+│   │   ├── engine.py        # pre-step pressure + request-error overflow recovery
+│   │   ├── region.py        # selectCompactableRange + checkpoint transaction
+│   │   ├── summarizer.py    # prefix-replay summarization + checkpoint framing
+│   │   └── config.py        # spec parsing (threshold / retain / retries)
 │   ├── boot/                # upstream packages/boot
 │   │   ├── boot.py          # startup + patch overlays
 │   │   ├── composition.py   # YAML config / !!js interpolation / dump rendering

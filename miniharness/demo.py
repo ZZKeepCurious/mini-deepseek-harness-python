@@ -11,10 +11,13 @@ from pathlib import Path
 from .core.scope import Context
 from .llm import FakeLlmAdapter
 from .llm.retry import apply_retry_planner
+from .compaction import install_compaction
 from .core.agent_loop.agent import AgentLoop
 from .core.session.persistence import JsonlPersistence, repair_and_replay
 from .core.session import Session, create_message, derive_messages, text_block, turn_balance
+from .core.system_prompt import install_system_prompt
 from .core.tools import Tool, ToolRegistry
+from .jobs import install_jobs, register_job_tools
 
 
 def main() -> None:
@@ -33,7 +36,11 @@ def main() -> None:
     session = Session("demo-001")
     ctx = Context(name="root")
     apply_retry_planner(ctx)
+    install_compaction(ctx)
+    install_jobs(ctx)
+    install_system_prompt(ctx)
     reg = ToolRegistry(ctx)
+    register_job_tools(reg, ctx.inject("jobs"))
     reg.register(Tool(
         name="bash",
         description="Run a shell command.",

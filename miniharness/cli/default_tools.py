@@ -24,4 +24,12 @@ def default_tools(ctx: Context) -> ToolRegistry:
         },
         execute=lambda args, e: f"stdout: {args['cmd']}",
     ))
+    # ctx.jobs 服务存在时收编后台作业三工具（job_output/job_list/job_kill）
+    try:
+        jobs = ctx.inject("jobs")
+    except KeyError:
+        jobs = None
+    if jobs is not None:
+        from ..jobs import register_job_tools
+        register_job_tools(reg, jobs)
     return reg

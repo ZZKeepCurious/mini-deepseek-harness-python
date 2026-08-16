@@ -26,13 +26,27 @@ miniharness/
 │   │   └── persistence.py # JSONL / SQLite 持久化（简化标注：上游在独立包组 packages/session）
 │   ├── scope.py           # Context + PluginManager（vendor/cordis 语义）
 │   ├── tools.py           # 工具注册表 + 执行管线
+│   ├── system_prompt.py   # SystemPromptService（分节渲染，systemPrompt 服务）
 │   └── agent_loop/        # agent.py（turn/step 状态机）+ tool_calls.py（并行调度）
 ├── llm/                   # packages/llm
 │   ├── protocol.py        # StreamChunk / LlmAdapter / LlmFailure / BlockAssembler（协议层）
 │   ├── deepseek.py        # DeepSeek wire 序列化 + SSE 适配器
 │   ├── fake.py            # FakeLlmAdapter（教学扩展）
 │   ├── retry_policy.py    # retry policy 解析（normal/always）
-│   └── retry.py           # agent/request-error 恢复 + 退避
+│   ├── retry.py           # agent/request-error 恢复 + 退避
+│   └── token_meter.py     # TokenMeter 增量 fold + usage 折入锚
+├── compaction/            # packages/compaction
+│   ├── config.py          # 压缩规格解析（threshold / retain / retries）
+│   ├── region.py          # selectCompactableRange + 压缩事务（surface replace 检查点）
+│   ├── summarizer.py      # 前缀重放摘要 + 检查点框架
+│   └── engine.py          # BasicCompactionEngine（pre-step 压力 / request-error overflow 接线）
+├── jobs/                  # packages/jobs（seam + jobs-local + tool-jobs）
+│   ├── types.py           # 终态 / 常量 / JobDoneBox（done 的 Promise 替身）
+│   ├── registry.py        # LocalJobRegistry（ctx.jobs 服务 + owner 栅栏 + 结算/上限/teardown）
+│   └── tools.py           # job_output / job_list / job_kill + 完成 notice 投递 + 字节封顶
+├── plan/                  # packages/plan/plan-mode
+│   ├── config.py          # plan-mode 规格解析（section 校验，fail loud）
+│   └── mode.py            # PlanModeController（log-only plan/mode + plan:policy 节 + pre-step 提交）
 ├── boot/                  # packages/boot
 │   ├── boot.py            # 启动 + patch overlay
 │   ├── composition.py     # YAML 配置 / !!js 插值 / dump 渲染
@@ -81,11 +95,16 @@ miniharness/
 | `core/tools.py` | `packages/core/tools` | |
 | `core/agent_loop/agent.py` | `packages/core/agent-loop/src/agent.ts` | |
 | `core/agent_loop/tool_calls.py` | `packages/core/agent-loop/src/tool-calls.ts` | |
+| `core/system_prompt.py` | `packages/core/system-prompt/src/` | 仅 section 注册/渲染；assemble waterfall、提供器、插值、scope 层叠未复现（简化标注见模块 docstring） |
 | `llm/protocol.py` | `packages/llm/llm/src/` | |
 | `llm/deepseek.py` | `packages/llm/llm-deepseek/src/` | |
 | `llm/fake.py` | 无 | 教学扩展 |
 | `llm/retry_policy.py` | `packages/llm/llm/src/retry-policy.ts` | |
 | `llm/retry.py` | `packages/llm/llm-retry/src/` | |
+| `llm/token_meter.py` | `packages/llm/token-meter/src/` | |
+| `compaction/`（config + region + summarizer + engine） | `packages/compaction/compaction-basic/src/`（config / region / summarizer / index.ts） | 前缀重放无 KV cache 语义、无 toolResultPruner（简化标注见模块 docstring） |
+| `jobs/`（types + registry + tools） | `packages/jobs/`（seam + jobs-local + tool-jobs） | `run_in_background` 触发入口未复现；无 scope 链/agent registry；execute 直接返回渲染文本（简化标注见模块 docstring） |
+| `plan/`（config + mode） | `packages/plan/plan-mode/src/` | 仅 log-only `plan/mode` 状态 + plan:policy 节注入；/plan 命令、exit_plan_mode 审查 UI 未复现（简化标注见模块 docstring） |
 | `boot/boot.py` | `packages/boot/app-boot` | |
 | `boot/composition.py` | `packages/boot/app-boot` + `apps/cli/src/args.ts` | |
 | `boot/dotenv.py` | `packages/boot/app-boot`（loadEnv） | |
@@ -113,8 +132,8 @@ miniharness/
 | 层 | 内容 | 允许依赖 |
 |---|---|---|
 | L0 地基 | `core/session`、`core/scope` | 无（两者互不依赖） |
-| L1 领域 | `llm/*`、`core/tools`、`core/session`、`boot/*` | 仅 L0 |
-| L2 编排 | `core/agent_loop` | L0 + L1 |
+| L1 领域 | `llm/*`、`core/tools`、`core/system_prompt`、`core/session`、`boot/*` | 仅 L0 |
+| L2 编排 | `core/agent_loop`、`compaction`、`jobs`、`plan` | L0 + L1 |
 | L3 应用与入口 | `cli/*`、`protocol/*`、`seams/*`、`preset`、`extensions`、`interaction`、`client` | L0 ~ L2 |
 | 教学层 | `demo.py`、`example_plugins.py` | 任意层，但不得被业务模块依赖 |
 
@@ -130,9 +149,10 @@ miniharness/
 ## 4. 公共 API 面
 
 **白名单（契约层，改它需要对照上游 + 更新差异清单）**：`Session`、`Context`、`PluginManager`、`Tool`、`ToolRegistry`、`AgentLoop`、`StreamChunk`、`LlmAdapter`、`DeepSeekAdapter`、`LlmFailure`、`SessionPersistence`/`JsonlPersistence`/`SqlitePersistence`、`apply_patch`、`boot`、`run_headless`、`create_message` 与四个 block 构造、`derive_messages`、`turn_balance`、`repair_interrupted_turn`、`SESSION_FORMAT_VERSION`、`TOOL_NOT_STARTED`、`TOOL_OUTCOME_UNKNOWN`。
-
 **黑名单（内部工具，不在顶层 `__all__`，只允许深路径 import）**：`deep_freeze`、`thaw`、`is_json_safe`、`now_ms`、`_http_error_code`、`_map_finish_reason`、`load_events_checked`、`repair_and_replay`、`balanced_after_replay`。
 
 **教学扩展（上游无对应，标注于此）**：`cli/default_tools.py`、`cli/session_cmds.py`（会话管理子命令；`--config` 属 `cli/main.py` 启动器标志，同为教学扩展）、`llm/fake.py`、`demo.py`、`example_plugins.py`。
 
 顶层 `__all__` 收敛至 28 项（白名单 + `FakeLlmAdapter`），由 `tests/test_dependencies.py` 断言钉死；白名单每一项都能在 §2 映射表里找到上游对应。
+
+**深路径契约（不在顶层 `__all__`，仅经子包深路径暴露，由 `tests/test_token_meter.py`、`tests/test_compaction.py`、`tests/test_jobs.py`、`tests/test_plan.py` 钉死行为）**：`TokenMeter`、`install_compaction`、`CompactionEngine`、`compact_surface_region`、`select_compactable_range`、`inspect_compaction_entry_state`、`frame_summary`、`install_jobs`、`register_job_tools`、`LocalJobRegistry`、`JobDoneBox`、`fit_with_suffix`、`fit_completion_notice`、`install_system_prompt`、`SystemPromptService`、`install_plan_mode`、`PlanModeController`、`fold_plan_mode`、`resolve_config`。装配约定：`apply_retry_planner(ctx)` → `install_compaction(ctx)` → `install_jobs(ctx)` → `install_system_prompt(ctx)` →（可选）`install_plan_mode(ctx, config)`（均幂等；`CONTEXT_WINDOW_EXCEEDED` 不在重试白名单，由压缩接管；作业工具注册经 `register_job_tools(reg, ctx.inject("jobs"))`，`default_tools` 在 `ctx.jobs` 存在时自动收编；plan 依赖 systemPrompt 服务，缺失 fail loud）。

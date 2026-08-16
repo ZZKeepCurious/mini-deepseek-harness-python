@@ -24,9 +24,12 @@ from typing import Any, Callable
 from ..core.scope import Context
 from ..llm import DeepSeekAdapter, FakeLlmAdapter, LlmAdapter, LlmFailure
 from ..llm.retry import apply_retry_planner
+from ..compaction import install_compaction
+from ..jobs import install_jobs
 from ..core.agent_loop.agent import AgentLoop
 from ..core.session.persistence import JsonlPersistence
 from ..core.session import Session
+from ..core.system_prompt import install_system_prompt
 from ..core.tools import ToolRegistry
 from .default_tools import default_tools
 
@@ -87,6 +90,9 @@ def run_headless(
         raise ValueError("task is required")
     ctx = ctx or Context(name="headless")
     apply_retry_planner(ctx)
+    install_compaction(ctx)
+    install_jobs(ctx)
+    install_system_prompt(ctx)
     tools = tools or default_tools(ctx)
     session = Session(session_id or f"session-{os.urandom(8).hex()[:12]}")
     loop = AgentLoop(session, adapter, tools, ctx)

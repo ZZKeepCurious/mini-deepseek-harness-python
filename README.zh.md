@@ -28,6 +28,11 @@
 | Agent Loop（turn/step 状态机、pre-step 拒绝、工具回灌续跑） | `core/agent-loop` |
 | LLM 扩展口（StreamChunk 协议、假模型、DeepSeek 官方 SSE 适配器） | `llm/llm` + `llm/llm-deepseek` |
 | 模型请求重试/退避（normal/always 策略、`agent/request-error`、`llm/retry` 审计对） | `llm/llm-retry` + `llm/llm/src/retry-policy.ts` |
+| token 计量（增量 fold、usage 折入锚、4 字符/token 启发式） | `llm/token-meter` |
+| 上下文压缩（pre-step 压力 + `CONTEXT_WINDOW_EXCEEDED` 恢复、surface-replace 检查点事务） | `compaction/compaction-basic` |
+| 后台作业（`job_output`/`job_list`/`job_kill`、完成 notice、per-owner 上限；无 `job/*` 会话事件） | `packages/jobs`（jobs-local + tool-jobs） |
+| plan 模式（log-only `plan/mode` 状态、plan:policy prompt 分节注入、in-turn queued 提交） | `packages/plan/plan-mode` |
+| system prompt 分节（有序节注册 + 渲染进每次请求） | `core/system-prompt` |
 | boot 与组合（YAML/JSON 补丁、`!!js` 环境变量插值、启动断言） | `packages/boot` |
 | headless 一次性任务入口（`--profile headless "task"`：stdout 最终文本、退出码按 turn/end reason） | `packages/bundle/headless` + `apps/cli` |
 | 启动器选项（`--patch`、`--dump-config` / `--dump-default-config`、只读组合导出） | `apps/cli/src/args.ts` |
@@ -38,9 +43,9 @@
 | 异步事件总线、真并行工具 + 屏障 | `core/agent-loop` |
 | CI（GitHub Actions、Python 3.10~3.13、integration 标签真实 API 测试） | — |
 
-规划中：官方 Python SDK（`python/sdk`）互操作测试。
+规划中（Agent 层主线）：plan 审查 UI（`/plan`、`exit_plan_mode`）与 goal 后置；SDK 互操作测试与 web 表面降级后置。
 
-状态：**413 个单元测试全绿**（纯标准库；可选 `pyyaml` 用于 YAML 配置）。
+状态：**555 个单元测试全绿**（纯标准库；可选 `pyyaml` 用于 YAML 配置）。
 
 ## 快速开始
 
@@ -96,7 +101,13 @@ mini-deepseek-harness-python/
 │   │   ├── deepseek.py      # DeepSeek wire 序列化 + SSE 适配器
 │   │   ├── fake.py          # FakeLlmAdapter（无 API key）
 │   │   ├── retry_policy.py  # retry policy 解析（normal/always）
-│   │   └── retry.py         # agent/request-error 恢复 + 退避
+│   │   ├── retry.py         # agent/request-error 恢复 + 退避
+│   │   └── token_meter.py   # TokenMeter 增量 fold + usage 折入锚
+│   ├── compaction/          # 上游 packages/compaction
+│   │   ├── engine.py        # pre-step 压力 + request-error overflow 恢复
+│   │   ├── region.py        # selectCompactableRange + 检查点事务
+│   │   ├── summarizer.py    # 前缀重放摘要 + 检查点框架
+│   │   └── config.py        # 规格解析（threshold / retain / retries）
 │   ├── boot/                # 上游 packages/boot
 │   │   ├── boot.py          # 启动 + patch overlay
 │   │   ├── composition.py   # YAML 配置 / !!js 插值 / dump 渲染

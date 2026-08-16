@@ -25,6 +25,13 @@ KNOWN_TYPES = frozenset({
     "hook/invoked", "hook/result",
     # LLM 重试审计（上游 llm-retry/src/index.ts SessionEventMap，log-only 非 surface）
     "llm/retry", "llm/retry-started",
+    # 上下文压缩（上游 compaction/compaction/src/types.ts SessionEventMap，
+    # 三个事件 log-only 非 surface；surface 变更是随后带 replace surfaceOp 的
+    # user/message 检查点）
+    "compaction/start", "compaction/summary", "compaction/end",
+    # 计划模式（上游 plan/plan-mode/src/index.ts SessionEventMap，
+    # log-only 非 surface、整值替换：{active: boolean}，最后一条胜出）
+    "plan/mode",
 })
 
 # 只有这三种事件产生模型消息，可带 surfaceOp（上游 types.ts SurfaceEventType）

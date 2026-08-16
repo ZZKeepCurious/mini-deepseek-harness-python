@@ -30,6 +30,9 @@ from ..core.scope import Context
 from ..core.agent_loop.agent import AgentLoop
 from ..llm import FakeLlmAdapter
 from ..llm.retry import apply_retry_planner
+from ..compaction import install_compaction
+from ..jobs import install_jobs, register_job_tools
+from ..core.system_prompt import install_system_prompt
 from ..core.session import Session
 from ..core.tools import ToolRegistry
 
@@ -201,8 +204,12 @@ class SdkRuntime:
             if loop is None:
                 ctx = Context(name=f"sdk:{session_id}")
                 apply_retry_planner(ctx)
-                loop = AgentLoop(Session(session_id), self._adapter,
-                                 ToolRegistry(Context(name="sdk")), ctx)
+                install_compaction(ctx)
+                install_jobs(ctx)
+                install_system_prompt(ctx)
+                reg = ToolRegistry(Context(name="sdk"))
+                register_job_tools(reg, ctx.inject("jobs"))
+                loop = AgentLoop(Session(session_id), self._adapter, reg, ctx)
                 self._sessions[session_id] = loop
             blocks = params.get("contentBlocks")
             text = "".join(b.get("text", "") for b in blocks or []

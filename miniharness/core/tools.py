@@ -72,8 +72,13 @@ def _check(value: Any, schema: dict, path: str, errors: list[str]) -> None:
 
 @dataclass
 class ToolExec:
-    """执行上下文：signal 是唯一可替换的字段（用于超时/取消）。"""
+    """执行上下文：signal 是唯一可替换的字段（用于超时/取消）。
+
+    agent 由 AgentLoop/scheduler 在派发时填入（上游 ToolExecution.agent），
+    供作业等按调用者会话栅栏的工具使用；缺省 None = 无 agent 调用方。
+    """
     signal: threading.Event = field(default_factory=threading.Event)
+    agent: Any = None
 
 
 @dataclass
