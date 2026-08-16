@@ -139,7 +139,7 @@ miniharness/
 | `protocol/hooks.py` | `packages/hooks/hook-protocol` + `hooks-claude-code` | |
 | `seams/sandbox_local.py` | `packages/sandbox/sandbox-local` + `sandbox-windows-acl` | |
 | `seams/credentials_local.py` | `packages/credentials/credentials-local` | |
-| `seams/subagent/`（`__init__.py` + `providers.py` + `worker.py`） | `packages/subagent/subagent` + `subagent-fork-in-process` + `-acp` + `-dsh-sdk` | |
+| `seams/subagent/`（`__init__.py` + `providers.py` + `worker.py` + `continuation.py` + `descriptor.py`） | `packages/subagent/subagent` + `subagent-fork-in-process` + `-acp` + `-dsh-sdk` + `subagent-spawn-in-process` + `subagent-in-process-driver` + `tool-subagent-control` + `tool-subagent-report` | 续跑（A7）为同步阻塞子回合模型（上游为异步事件驱动，见 A8 规划） |
 | `demo.py` | `packages/examples/agent-spine-demo` | 教学入口，保留顶层（`python -m miniharness.demo`） |
 | `example_plugins.py` | `examples/` | 教学示例，保留顶层 |
 

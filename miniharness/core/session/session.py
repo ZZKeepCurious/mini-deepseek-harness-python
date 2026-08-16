@@ -18,11 +18,18 @@ __all__ = ["Session"]
 
 
 class Session:
-    """追加式事件日志：唯一事实来源。构造时可带 seed（恢复/回放历史）。"""
+    """追加式事件日志：唯一事实来源。构造时可带 seed（恢复/回放历史）与 meta。
 
-    def __init__(self, session_id: str, seed: list | None = None, created_at: int | None = None):
+    meta 是会话的持久化头部元数据（上游 Session.header 的 mini 子集：
+    parentSession / origin / delegationDepth / seedLength / cwd），冷恢复与
+    子代理继承用；普通会话缺省为空 dict。
+    """
+
+    def __init__(self, session_id: str, seed: list | None = None, created_at: int | None = None,
+                 meta: dict | None = None):
         self.session_id = session_id
         self.created_at = created_at or now_ms()
+        self.meta = dict(meta) if meta else {}
         self._events: list[dict[str, Any]] = []
         self._replace_count = 0
 

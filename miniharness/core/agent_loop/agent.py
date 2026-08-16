@@ -137,10 +137,12 @@ class AgentLoop:
         self.inbox.append(message)
         self._pump()
 
-    def inject(self, content: str, source: str = "plugin") -> None:
-        """非唤醒注入（上游 inject）：只入 inbox，不开 turn。
-        后续任一 followup/steer 触发 pump 时按 FIFO 一并消费。"""
-        message = create_message(
+    def inject(self, content: str | dict, source: str = "plugin") -> None:
+        """非唤醒注入（上游 inject(message)）：只入 inbox，不开 turn。
+        后续任一 followup/steer 触发 pump 时按 FIFO 一并消费。content 为
+        字符串时构造文本 user 消息；为 dict 时按预建消息逐字入队（子代理
+        结算通知经此送达 idle 父代理前的非唤醒路径）。"""
+        message = content if isinstance(content, dict) else create_message(
             "user", [text_block(content)],
             {"kind": "plugin", "plugin": source},
         )

@@ -109,3 +109,25 @@ class _InProcessSubAgent(SubAgent):
     def run(self, task):
         self._loop.followup(task)
         return self._loop.last_response()
+
+
+# ---------- 可继续子代理（A7：durable 子会话 + 冷恢复） ----------
+
+from .continuation import (  # noqa: E402
+    CONTEXT_SUMMARY_MAX_CHARS,
+    SubagentContinuationManager,
+    SubagentError,
+    bound_context_summary,
+    delegation_depth_of,
+    epoch_stop_reason,
+    final_assistant_output,
+    install_subagent_control_tools,
+    settlement_summary,
+)
+from .descriptor import (  # noqa: E402
+    SUBAGENT_DESCRIPTOR_VERSION,
+    fold_subagent_descriptor,
+    parse_subagent_descriptor,
+    seed_descriptor_turn,
+    snapshot_subagent_descriptor,
+)

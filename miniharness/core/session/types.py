@@ -39,6 +39,10 @@ KNOWN_TYPES = frozenset({
     # 目标域变更（上游 goal/goal/src/domain.ts SessionEventMap：
     # goal/change 全快照或 clear 墓碑，version 1，log-only 非 surface）
     "goal/change",
+    # 可继续子代理描述符（上游 subagent/subagent/src/descriptor.ts
+    # SessionEventMap：model-hidden、log-only 非 surface、首条权威，
+    # version 2；冷恢复据此重建子会话组合）
+    "subagent/descriptor",
 })
 
 # 只有这三种事件产生模型消息，可带 surfaceOp（上游 types.ts SurfaceEventType）

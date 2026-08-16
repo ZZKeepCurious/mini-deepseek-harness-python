@@ -31,7 +31,7 @@ from . import (
 
 
 class SessionPersistence:
-    """接缝接口：append / flush / load。"""
+    """接缝接口：append / flush / load，以及 A7 追加的 declare / inspect / list_headers。"""
 
     def append(self, session_id: str, event: dict) -> None:
         raise NotImplementedError
@@ -40,6 +40,18 @@ class SessionPersistence:
         raise NotImplementedError
 
     def load(self, session_id: str) -> list[dict]:
+        raise NotImplementedError
+
+    def declare(self, session_id: str, meta: dict | None = None, created_at: int | None = None) -> None:
+        """在首次 append 前写 header 元数据（子会话创建用）；幂等。"""
+        raise NotImplementedError
+
+    def inspect(self, session_id: str) -> dict:
+        """返回 {meta, events}：meta 为 header 元数据（无则 None）。"""
+        raise NotImplementedError
+
+    def list_headers(self) -> list[dict]:
+        """枚举全部会话 header：{id, meta, created_at}（meta 可能为 None）。"""
         raise NotImplementedError
 
 
@@ -59,6 +71,18 @@ class JsonlPersistence(SessionPersistence):
     def append(self, session_id, event):
         self._pending.setdefault(session_id, []).append(event)
 
+    def declare(self, session_id: str, meta: dict | None = None, created_at: int | None = None) -> None:
+        if session_id in self._created or self._path(session_id).exists():
+            return
+        header: dict[str, Any] = {"version": SESSION_FORMAT_VERSION, "id": session_id}
+        if meta:
+            header["meta"] = meta
+        if created_at is not None:
+            header["createdAt"] = created_at
+        with open(self._path(session_id), "w", encoding="utf-8") as f:
+            f.write(json.dumps(header, ensure_ascii=False) + "\n")
+        self._created.add(session_id)
+
     def _ensure_header(self, session_id: str) -> None:
         path = self._path(session_id)
         if session_id in self._created or path.exists():
@@ -76,15 +100,15 @@ class JsonlPersistence(SessionPersistence):
                     f.write(json.dumps(thaw(ev), ensure_ascii=False) + "\n")
         self._pending.clear()
 
-    def load(self, session_id):
+    def _read_file(self, session_id):
+        """读回 (header, events)；torn 尾部截断修复（与 load 共享）。"""
         path = self._path(session_id)
         if not path.exists():
-            return []
-        events = []
+            return None, []
         with open(path, encoding="utf-8") as f:
             lines = f.readlines()
         if not lines:
-            return []
+            return None, []
         header = json.loads(lines[0])
         if header.get("version") != SESSION_FORMAT_VERSION:
             raise RuntimeError(
@@ -98,11 +122,38 @@ class JsonlPersistence(SessionPersistence):
             except json.JSONDecodeError:
                 body = body[:-1]
                 self._truncate(path, lines[:1] + body)
+        events = []
         for line in body:
             line = line.strip()
             if line:
                 events.append(json.loads(line))
+        return header, events
+
+    def load(self, session_id):
+        _, events = self._read_file(session_id)
         return events
+
+    def inspect(self, session_id):
+        header, events = self._read_file(session_id)
+        return {"meta": header.get("meta") if header else None, "events": events}
+
+    def list_headers(self):
+        headers = []
+        for path in sorted(self.root.glob("*.jsonl")):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    first = f.readline()
+                header = json.loads(first) if first.strip() else {}
+            except (ValueError, OSError):
+                continue
+            if not isinstance(header, dict) or header.get("version") != SESSION_FORMAT_VERSION:
+                continue
+            headers.append({
+                "id": header.get("id"),
+                "meta": header.get("meta"),
+                "created_at": header.get("createdAt"),
+            })
+        return headers
 
     def _truncate(self, path: Path, kept: list[str]) -> None:
         with open(path, "w", encoding="utf-8") as f:
@@ -112,7 +163,7 @@ class JsonlPersistence(SessionPersistence):
 class SqlitePersistence(SessionPersistence):
     """SQLite 后端：多会话一库；单调 SCHEMA_VERSION，版本不符拒绝加载。"""
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     def __init__(self, root: Path):
         self.root = Path(root)
@@ -133,11 +184,23 @@ class SqlitePersistence(SessionPersistence):
             "session_id TEXT, seq INTEGER, type TEXT, data TEXT, "
             "PRIMARY KEY (session_id, seq))"
         )
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS sessions ("
+            "session_id TEXT PRIMARY KEY, meta TEXT, created_at INTEGER)"
+        )
         self._conn.commit()
         self._pending: dict[str, list[dict]] = {}
 
     def append(self, session_id, event):
         self._pending.setdefault(session_id, []).append(event)
+
+    def declare(self, session_id: str, meta: dict | None = None, created_at: int | None = None) -> None:
+        self._conn.execute(
+            "INSERT INTO sessions VALUES (?, ?, ?) "
+            "ON CONFLICT(session_id) DO NOTHING",
+            (session_id, json.dumps(meta, ensure_ascii=False) if meta else None, created_at),
+        )
+        self._conn.commit()
 
     def flush(self):
         for sid, events in self._pending.items():
@@ -157,6 +220,18 @@ class SqlitePersistence(SessionPersistence):
             "SELECT data FROM events WHERE session_id=? ORDER BY seq", (session_id,)
         ).fetchall()
         return [json.loads(r[0]) for r in rows]
+
+    def inspect(self, session_id):
+        row = self._conn.execute(
+            "SELECT meta FROM sessions WHERE session_id=?", (session_id,)
+        ).fetchone()
+        return {"meta": json.loads(row[0]) if row and row[0] else None, "events": self.load(session_id)}
+
+    def list_headers(self):
+        rows = self._conn.execute(
+            "SELECT session_id, meta, created_at FROM sessions ORDER BY session_id"
+        ).fetchall()
+        return [{"id": r[0], "meta": json.loads(r[1]) if r[1] else None, "created_at": r[2]} for r in rows]
 
     def close(self):
         self._conn.close()
