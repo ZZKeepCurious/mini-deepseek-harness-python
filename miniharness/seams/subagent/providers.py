@@ -274,7 +274,9 @@ class _SdkChild(SubAgent):
             if method == "session.event" and params.get("sessionId") == self._session_id:
                 event = params.get("event") or {}
                 if event.get("type") == "assistant/message":
-                    texts = [b.get("text", "") for b in (event.get("data") or {}).get("content", [])
+                    data = event.get("data") or {}
+                    message = data.get("message") or data
+                    texts = [b.get("text", "") for b in message.get("content", [])
                              if b.get("type") == "text"]
                     if texts:
                         return "".join(texts)

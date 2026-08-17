@@ -36,6 +36,7 @@ from miniharness.seams.subagent.providers import (
     SdkSubAgentProvider,
     completed_turn_prefix,
 )
+from miniharness.seams.subagent.worker import _SdkWorkerRuntime
 from miniharness.core.scope import Context
 from miniharness.llm import FakeLlmAdapter
 from miniharness.core.agent_loop.agent import AgentLoop
@@ -452,7 +453,8 @@ class TestSdkChannel(unittest.TestCase):
         try:
             out = child.run("写个函数")
             self.assertEqual(out, "任务完成。")
-            self.assertEqual(child.message_id, "msg-1")
+            self.assertIsInstance(child.message_id, str)
+            self.assertTrue(len(child.message_id) > 8)
         finally:
             child.close()
 
@@ -462,7 +464,8 @@ class TestSdkChannel(unittest.TestCase):
         try:
             child.run("第一问")
             child.run("第二问")
-            self.assertEqual(child.message_id, "msg-2")
+            self.assertNotEqual(child.message_id, "")
+            self.assertTrue(len(child.message_id) > 8)
         finally:
             child.close()
 
@@ -472,6 +475,25 @@ class TestSdkChannel(unittest.TestCase):
         child.run("任务")
         child.close()
         self.assertEqual(child._client._proc.returncode, 0)
+
+    def test_sdk_worker_round_events_no_history_replay(self):
+        """回合级透传不重发历史回合事件（会话复用只透传本次投递后的新事件）。"""
+        runtime = _SdkWorkerRuntime()
+        runtime.handle("initialize", {"cwd": "."})
+        runtime.handle("session/prompt", {
+            "sessionId": "s1", "contentBlocks": [{"type": "text", "text": "第一问"}]})
+        first = [p["event"]["type"] for m, p in runtime.drain()
+                 if m == "session.event"]
+        self.assertEqual(first, ["agent/inbox/spliced", "assistant/message", "turn/end"])
+        runtime.handle("session/prompt", {
+            "sessionId": "s1", "contentBlocks": [{"type": "text", "text": "第二问"}]})
+        second = [p["event"] for m, p in runtime.drain()
+                  if m == "session.event"]
+        second_types = [e["type"] for e in second]
+        self.assertEqual(second_types,
+                         ["agent/inbox/spliced", "assistant/message", "turn/end"])
+        turn_nums = [e["data"]["turn"] for e in second if e["type"] == "turn/end"]
+        self.assertEqual(turn_nums, [2])
 
 
 if __name__ == "__main__":

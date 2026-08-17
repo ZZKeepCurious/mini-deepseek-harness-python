@@ -19,6 +19,7 @@ from typing import Any
 
 from ...protocol.acp import AcpServer
 from ...protocol.sdk import JsonRpcLineTransport, SdkRuntime
+from ...core.session import thaw
 
 
 def _write_stdout(text: str) -> None:
@@ -102,29 +103,65 @@ def _notify_acp_updates(server: AcpServer, session_id: str) -> None:
 # ---------- SDK 协议端点 ----------
 
 class _SdkWorkerRuntime:
-    """SdkRuntime 包装：session/prompt 后发 session.event 通知（输出流）。
+    """SdkRuntime 包装：session/prompt 后发 session.event / session.status 通知。
 
-    对齐上游 wire 的 session.event 通知词汇；mini 以终态一条承载
-    （上游逐块流式，简化标注）。
+    对齐上游 wire 的 session.event / session.status 通知词汇。回合级透传：
+    prompt 同步跑完整个回合后，把回合期间新增的 agent/inbox/spliced（含本次
+    messageId 的 inserted 回执）、assistant/message 与 turn/end 事件逐条发
+    session.event，末尾补 session.status = idle 通知；上游逐块流式透传，mini
+    按事件逐条终态透传（简化标注）。
     """
 
     def __init__(self):
         self.runtime = SdkRuntime()
         self._notifications: list[tuple[str, dict]] = []
+        self._event_boundary = 0
 
     def handle(self, method: str, params: dict) -> Any:
         result = self.runtime.handle(method, params)
         if method == "session/prompt":
             session_id = params.get("sessionId")
             loop = self.runtime.sessions.get(session_id)
-            text = loop.last_response() if loop else ""
-            if text:
-                self._notifications.append(("session.event", {
+            if loop is not None:
+                self._emit_round_events(loop, session_id)
+                self._notifications.append(("session.status", {
                     "sessionId": session_id,
-                    "event": {"type": "assistant/message", "data": {
-                        "content": [{"type": "text", "text": text}]}},
+                    "status": "idle",
                 }))
         return result
+
+    def _emit_round_events(self, loop: AgentLoop, session_id: str) -> None:
+        """把本次 prompt 投递新增的 inbox 回执、assistant/message、turn/end 发成 session.event。
+
+        以 followup 投递的消息 id 为界，且只扫本次投递之后的事件（不重发
+        历史回合）：agent/inbox/spliced（inserted 含本次 messageId 的回执）、
+        assistant/message 与 turn/end 逐条透传（上游 SDK Session.run 消费这
+        三类事件以结算结果）。
+        """
+        wanted_seqs: list[int] = []
+        message_id = self.runtime.last_message_id
+        for event in loop.session.events[self._event_boundary:]:
+            if event["type"] == "agent/inbox/spliced":
+                inserted = event["data"].get("inserted")
+                if inserted and any(
+                    getattr(m, "get", lambda _k, _d=None: None)("id") == message_id
+                    for m in inserted
+                ):
+                    wanted_seqs.append(event["seq"])
+            elif event["type"] == "assistant/message":
+                wanted_seqs.append(event["seq"])
+            elif event["type"] == "turn/end":
+                wanted_seqs.append(event["seq"])
+        wanted = set(wanted_seqs)
+        for event in loop.session.events:
+            if event["seq"] not in wanted:
+                continue
+            plain = thaw(event)
+            self._notifications.append(("session.event", {
+                "sessionId": session_id,
+                "event": {"type": plain["type"], "data": plain["data"]},
+            }))
+        self._event_boundary = len(loop.session.events)
 
     def drain(self) -> list[tuple[str, dict]]:
         notifications = self._notifications

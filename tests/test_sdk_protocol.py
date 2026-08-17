@@ -137,13 +137,18 @@ class TestSdkRuntime(unittest.TestCase):
         result = rt.handle("session/prompt",
                            {"sessionId": "sdk-1",
                             "contentBlocks": [{"type": "text", "text": "你好"}]})
-        self.assertEqual(result["messageId"], "msg-1")
+        message_id = result["messageId"]
+        self.assertIsInstance(message_id, str)
+        self.assertTrue(len(message_id) > 8)
         self.assertIn("sdk-1", rt.sessions)
         events = rt.sessions["sdk-1"].session.events
         self.assertEqual(events[0]["type"], "agent/inbox/spliced")
         self.assertIn("turn/start", [e["type"] for e in events])
         # 回合真的跑完：turn/end 已落日志
         self.assertEqual(events[-1]["type"], "turn/end")
+        # messageId 是真实消息 id，与 inbox 回执 inserted 一致（官方 SDK 依赖此回执）
+        inserted = events[0]["data"]["inserted"]
+        self.assertEqual([m["id"] for m in inserted], [message_id])
 
     def test_session_prompt_unknown_session_lazy_creates_again(self):
         rt = SdkRuntime()

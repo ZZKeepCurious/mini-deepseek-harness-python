@@ -15,10 +15,15 @@
     （→ {}）；通知 session.event / session.status / subagent.started /
     subagent.finished（mini 以内存仿真承载）。
   * serverInfo.name 是 wire 稳定标识 deepseek-harness-sdk-runtime。
+  * messageId 是真实消息 id（create_message 的 uuid），与会话日志中
+    agent/inbox/spliced 的 inserted 消息 id 一致——官方 SDK 客户端
+    Session.run 依赖该回执确认投递（python/sdk api.py _is_inbox_receipt）。
 
 载体简化：上游基于 Node 字节流 + async；mini 用"行馈送 + 内存输出 + 回调式
 pending"的同步近似（request 返回 PendingRequest，feed 响应帧时 settle）——
-帧分类、错误码、id 配对语义完整保留。
+帧分类、错误码、id 配对语义完整保留。session/prompt 在 mini 中同步跑完整个
+回合才返回（上游投递即返回、回合异步流式），消息已真实入 inbox 且 id 与
+回执一致，语义对齐。
 """
 from __future__ import annotations
 
@@ -34,7 +39,7 @@ from ..compaction import install_compaction
 from ..jobs import install_jobs, register_job_tools
 from ..skills import install_skills, register_skill_tools
 from ..core.system_prompt import install_system_prompt
-from ..core.session import Session
+from ..core.session import Session, create_message, text_block
 from ..core.tools import ToolRegistry
 
 
@@ -179,6 +184,10 @@ class SdkRuntime:
 
     对应上游 HarnessSdkJsonRpcServer 的三个请求方法；通知（session.event 等）
     在 mini 中由 loop 事件钩子承载（简化标注，见文档）。
+
+    同步近似：上游 session/prompt 投递即返回 messageId、回合异步跑、通知流式
+    透传；mini 同步跑完整个回合后返回 messageId（消息已真实入 inbox，id 与
+    agent/inbox/spliced 的 inserted 一致），通知在回合后由 worker 逐条发。
     """
 
     WIRE_NAME = "deepseek-harness-sdk-runtime"
@@ -186,7 +195,7 @@ class SdkRuntime:
     def __init__(self, adapter: Any = None):
         self._sessions: dict[str, AgentLoop] = {}
         self._adapter = adapter or FakeLlmAdapter()
-        self._message_counter = 0
+        self.last_message_id: str | None = None
         self.cwd = "."
         self.provider = "fake"
         self.model = "fake-model"
@@ -217,10 +226,11 @@ class SdkRuntime:
             blocks = params.get("contentBlocks")
             text = "".join(b.get("text", "") for b in blocks or []
                            if b.get("type") == "text")
-            self._message_counter += 1
-            message_id = f"msg-{self._message_counter}"
-            loop.run(text)
-            return {"messageId": message_id}
+            message = create_message("user", [text_block(text)],
+                                     {"kind": "user"})
+            self.last_message_id = message["id"]
+            loop.followup(message)
+            return {"messageId": message["id"]}
         if method == "shutdown":
             return {}
         raise ValueError(f"method not found: {method}")
