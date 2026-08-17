@@ -37,6 +37,7 @@ from .protocol import (
     LlmAdapter,
     LlmFailure,
     StreamChunk,
+    _aiter_from_thread,
 )
 from .retry_policy import resolve_retry_policy
 
@@ -279,7 +280,21 @@ class DeepSeekAdapter(LlmAdapter):
             "input_modalities": ["text"],
         }
 
-    def stream(self, messages, tools):
+    async def stream(self, messages, tools, signal=None):
+        """async 迭代器（对齐上游 async stream）：SSE 读取搬进 executor 线程，
+        经 asyncio.Queue 桥接逐 chunk 产出；signal.aborted/.event 置位即中止
+        （协作式取消，对齐上游 signal 携带进 stream 的语义）。
+
+        简化标注：阻塞读取线程无法被强制中断（urlopen 120s 超时兜底），
+        取消后 producer 线程继续排空至自然结束；流桥在无数据窗口内为
+        事件驱动（abort_event 竞速），非轮询。
+        """
+        abort_event = getattr(signal, "event", None) if signal is not None else None
+        body = self._build_body(messages, tools)
+        async for chunk in _aiter_from_thread(lambda: self._iter_chunks(body), abort_event):
+            yield chunk
+
+    def _build_body(self, messages, tools) -> dict:
         body: dict[str, Any] = {
             "model": self._model,
             "messages": serialize_messages(messages),
@@ -296,6 +311,10 @@ class DeepSeekAdapter(LlmAdapter):
             ]
         if self._max_tokens is not None:
             body["max_tokens"] = self._max_tokens
+        return body
+
+    def _iter_chunks(self, body: dict):
+        """同步 SSE 请求 + 解析（阻塞；经 _aiter_from_thread 桥接给 async stream）。"""
         req = urllib.request.Request(
             self._base + "/chat/completions",
             data=json.dumps(body).encode("utf-8"),

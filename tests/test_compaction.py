@@ -3,6 +3,7 @@
 上游对照：packages/compaction/compaction-basic/src/{config,region,summarizer}.ts
 + packages/compaction/compaction/src/{index,tool-pairing}.ts。
 """
+import asyncio
 import unittest
 
 from miniharness.compaction import (
@@ -140,7 +141,7 @@ class _SummaryAdapter(LlmAdapter):
         self.fail_code = fail_code
         self.calls = 0
 
-    def stream(self, messages, tools):
+    async def stream(self, messages, tools, signal=None):
         self.calls += 1
         if self.fail_times > 0:
             self.fail_times -= 1
@@ -215,8 +216,8 @@ class CompactSurfaceRegionTest(unittest.TestCase):
         agent = _agent(session, adapter)
         nodes = session.surface_nodes()
         start, end = nodes[0]["seq"], nodes[-2]["seq"]  # 保留最后一段
-        result = compact_surface_region(session, TokenMeter(), agent,
-                                        resolve_config(), start, end)
+        result = asyncio.run(compact_surface_region(session, TokenMeter(), agent,
+                                                    resolve_config(), start, end))
 
         types = [e["type"] for e in session.events]
         self.assertIn("compaction/start", types)
@@ -247,8 +248,9 @@ class CompactSurfaceRegionTest(unittest.TestCase):
         adapter = _SummaryAdapter()
         agent = _agent(session, adapter)
         with self.assertRaises(RuntimeError):
-            compact_surface_region(session, TokenMeter(), agent, resolve_config(),
-                                   session.events[0]["seq"], session.events[1]["seq"])
+            asyncio.run(compact_surface_region(session, TokenMeter(), agent,
+                                               resolve_config(),
+                                               session.events[0]["seq"], session.events[1]["seq"]))
 
     def test_failure_appends_closing_end_with_error(self):
         session = Session("c3")
@@ -257,8 +259,8 @@ class CompactSurfaceRegionTest(unittest.TestCase):
         agent = _agent(session, adapter)
         nodes = session.surface_nodes()
         with self.assertRaises(LlmFailure):
-            compact_surface_region(session, TokenMeter(), agent, resolve_config(),
-                                   nodes[0]["seq"], nodes[0]["seq"])
+            asyncio.run(compact_surface_region(session, TokenMeter(), agent, resolve_config(),
+                                               nodes[0]["seq"], nodes[0]["seq"]))
         last = session.events[-1]
         self.assertEqual(last["type"], "compaction/end")
         self.assertIn("error", last["data"])
@@ -283,8 +285,8 @@ class CompactSurfaceRegionTest(unittest.TestCase):
         nodes = session.surface_nodes()
         # 切在 assistant（tool-call）与 tool/result 之间 → 切散配对 → 非法
         with self.assertRaises(ValueError):
-            compact_surface_region(session, TokenMeter(), _agent(session, _SummaryAdapter()),
-                                   resolve_config(), nodes[1]["seq"], nodes[1]["seq"])
+            asyncio.run(compact_surface_region(session, TokenMeter(), _agent(session, _SummaryAdapter()),
+                                               resolve_config(), nodes[1]["seq"], nodes[1]["seq"]))
 
 
 # ---------- 压缩引擎 ----------
@@ -299,7 +301,7 @@ class EnginePressureTest(unittest.TestCase):
 
     def test_below_threshold_no_compaction(self):
         _seed_history(self.session, n=2)
-        result = self.engine.compact_if_needed(self.agent, "pressure")
+        result = asyncio.run(self.engine.compact_if_needed(self.agent, "pressure"))
         self.assertIsNone(result)
         self.assertNotIn("compaction/start",
                          [e["type"] for e in self.session.events])
@@ -307,7 +309,7 @@ class EnginePressureTest(unittest.TestCase):
     def test_above_threshold_compacts(self):
         self.adapter.context_window = 250  # 阈值 200：日志底层开销约 144，压缩后应低于阈值
         _seed_history(self.session, n=20)
-        result = self.engine.compact_if_needed(self.agent, "pressure")
+        result = asyncio.run(self.engine.compact_if_needed(self.agent, "pressure"))
         self.assertIsNotNone(result)
         self.assertEqual(self.session.replace_generation, 1)
         msgs = derive_messages(self.session.events)
@@ -317,11 +319,11 @@ class EnginePressureTest(unittest.TestCase):
     def test_no_context_window_skips(self):
         self.adapter.context_window = None
         _seed_history(self.session, n=20)
-        self.assertIsNone(self.engine.compact_if_needed(self.agent, "pressure"))
+        self.assertIsNone(asyncio.run(self.engine.compact_if_needed(self.agent, "pressure")))
 
     def test_unknown_trigger(self):
         with self.assertRaises(ValueError):
-            self.engine.compact_if_needed(self.agent, "nope")
+            asyncio.run(self.engine.compact_if_needed(self.agent, "nope"))
 
 
 class EngineOverflowRecoveryTest(unittest.TestCase):

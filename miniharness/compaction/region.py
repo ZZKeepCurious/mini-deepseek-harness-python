@@ -54,11 +54,12 @@ def select_compactable_range(session, measurement: dict, retain_tokens: int):
     return {"start": surface_nodes[0]["seq"], "end": surface_nodes[keep_from - 1]["seq"]}
 
 
-def compact_surface_region(session, meter, agent, config: dict, start: int, end: int) -> dict:
+async def compact_surface_region(session, meter, agent, config: dict, start: int, end: int) -> dict:
     """在一个选定 surface 区间上跑完整压缩事务（start/end 为当前 surface 上的 seq）。
 
     返回压缩结果 {compactionId, startSeq, summarySeq, endSeq, summary,
-    shadowedRange, shadowedSeqs, shadowedTokenCount}。
+    shadowedRange, shadowedSeqs, shadowedTokenCount}。async：摘要经适配器
+    async 迭代器（asyncio 化重构后唯一形态）。
     """
     selection = _validate_surface_region(session, start, end)
     entry = inspect_compaction_entry_state(session.events)
@@ -82,7 +83,7 @@ def compact_surface_region(session, meter, agent, config: dict, start: int, end:
             raise ValueError("compaction: selected surface changed before summarization began")
         shadowed_tokens = sum(n["tokens"] for n in selected)
         input_ = _build_summarization_input(session, selection["shadowedSeqs"])
-        summary_result = summarize_with_adapter(agent, config, input_)
+        summary_result = await summarize_with_adapter(agent, config, input_)
 
         checkpoint = create_message(
             "user",

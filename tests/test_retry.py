@@ -3,6 +3,7 @@
 上游对照：packages/llm/llm/src/retry-policy.ts + packages/llm/llm-retry/src/index.ts
 + packages/core/agent/src/runtime-types.ts（agent/request-error）。
 """
+import asyncio
 import email.utils
 import random
 import unittest
@@ -172,6 +173,12 @@ def _session():
     return Session("retry-test")
 
 
+def _recover(*args, **kwargs):
+    """同步包装：recover_llm_failure 已 async 化（asyncio 化重构），
+    单测在普通线程直接经一次性事件循环驱动。"""
+    return asyncio.run(recover_llm_failure(*args, **kwargs))
+
+
 class RecoverDecisionTest(unittest.TestCase):
     def setUp(self):
         self.session = _session()
@@ -188,21 +195,21 @@ class RecoverDecisionTest(unittest.TestCase):
         return None
 
     def test_no_policy_delegates(self):
-        result = recover_llm_failure(self.session, 1, 1, "deepseek-official",
+        result = _recover(self.session, 1, 1, "deepseek-official",
                                      self.failure, None, next_fn=self.delegate)
         self.assertIsNone(result)
         self.assertEqual(self.calls, 1)
 
     def test_non_retryable_code_delegates(self):
         failure = LlmFailure(AUTH, "bad key")
-        result = recover_llm_failure(self.session, 1, 1, "p", failure, self.policy,
+        result = _recover(self.session, 1, 1, "p", failure, self.policy,
                                      next_fn=self.delegate)
         self.assertIsNone(result)
         self.assertEqual(self.calls, 1)
         self.assertEqual([e["type"] for e in self.session.events], [])
 
     def test_first_retry_appends_events_and_returns_action(self):
-        result = recover_llm_failure(self.session, 1, 1, "p", self.failure, self.policy)
+        result = _recover(self.session, 1, 1, "p", self.failure, self.policy)
         self.assertEqual(result, {"kind": "retry"})
         types = [e["type"] for e in self.session.events]
         self.assertEqual(types, ["llm/retry", "llm/retry-started"])
@@ -223,8 +230,8 @@ class RecoverDecisionTest(unittest.TestCase):
         self.assertEqual(started["retry"], 1)
 
     def test_second_retry_reuses_retry_id_and_increments(self):
-        recover_llm_failure(self.session, 1, 1, "p", self.failure, self.policy)
-        result = recover_llm_failure(self.session, 1, 1, "p", self.failure, self.policy)
+        _recover(self.session, 1, 1, "p", self.failure, self.policy)
+        result = _recover(self.session, 1, 1, "p", self.failure, self.policy)
         self.assertEqual(result, {"kind": "retry"})
         first = self.session.events[0]["data"]
         second = self.session.events[2]["data"]
@@ -236,16 +243,16 @@ class RecoverDecisionTest(unittest.TestCase):
             "mode": "normal", "maxRetries": 1,
             "backoff": {"initialDelayMs": 1, "maxDelayMs": 2, "jitterRatio": 0},
         })
-        self.assertEqual(recover_llm_failure(self.session, 1, 1, "p", self.failure, small),
+        self.assertEqual(_recover(self.session, 1, 1, "p", self.failure, small),
                          {"kind": "retry"})
-        result = recover_llm_failure(self.session, 1, 1, "p", self.failure, small,
+        result = _recover(self.session, 1, 1, "p", self.failure, small,
                                      next_fn=self.delegate)
         self.assertIsNone(result)
         self.assertEqual(self.calls, 1)
 
     def test_other_step_does_not_count(self):
-        recover_llm_failure(self.session, 1, 1, "p", self.failure, self.policy)
-        result = recover_llm_failure(self.session, 1, 2, "p", self.failure, self.policy)
+        _recover(self.session, 1, 1, "p", self.failure, self.policy)
+        result = _recover(self.session, 1, 2, "p", self.failure, self.policy)
         self.assertEqual(result, {"kind": "retry"})
         self.assertEqual(self.session.events[2]["data"]["retry"], 1)
 
@@ -255,13 +262,13 @@ class RecoverDecisionTest(unittest.TestCase):
             "backoff": {"initialDelayMs": 1, "maxDelayMs": 5000, "jitterRatio": 0},
         })
         failure = LlmFailure(RATE_LIMIT, "slow down", provider_retry_after_ms=3000)
-        result = recover_llm_failure(self.session, 1, 1, "p", failure, wide)
+        result = _recover(self.session, 1, 1, "p", failure, wide)
         self.assertEqual(result, {"kind": "retry"})
         self.assertEqual(self.session.events[0]["data"]["delayMs"], 3000)
 
     def test_provider_retry_after_over_max_normal_delegates(self):
         failure = LlmFailure(RATE_LIMIT, "slow down", provider_retry_after_ms=99999)
-        result = recover_llm_failure(self.session, 1, 1, "p", failure, self.policy,
+        result = _recover(self.session, 1, 1, "p", failure, self.policy,
                                      next_fn=self.delegate)
         self.assertIsNone(result)
         self.assertEqual(self.calls, 1)
@@ -270,7 +277,7 @@ class RecoverDecisionTest(unittest.TestCase):
     def test_provider_retry_after_over_max_always_uses_local(self):
         always = {"mode": "always", "initialDelayMs": 1, "maxDelayMs": 2, "jitterRatio": 0}
         failure = LlmFailure(RATE_LIMIT, "slow down", provider_retry_after_ms=99999)
-        result = recover_llm_failure(self.session, 1, 1, "p", failure, always)
+        result = _recover(self.session, 1, 1, "p", failure, always)
         self.assertEqual(result, {"kind": "retry"})
         self.assertEqual(self.session.events[0]["data"]["delayMs"], 1)
         self.assertEqual(self.session.events[0]["data"]["mode"], "always")
@@ -279,7 +286,7 @@ class RecoverDecisionTest(unittest.TestCase):
     def test_always_mode_prefers_downstream_decision(self):
         always = {"mode": "always", "initialDelayMs": 1, "maxDelayMs": 2, "jitterRatio": 0}
         failure = LlmFailure(AUTH, "not retryable but always")
-        result = recover_llm_failure(
+        result = _recover(
             self.session, 1, 1, "p", failure, always,
             next_fn=lambda: {"kind": "retry"})
         self.assertEqual(result, {"kind": "retry"})
@@ -288,14 +295,14 @@ class RecoverDecisionTest(unittest.TestCase):
     def test_always_mode_retries_after_downstream_error(self):
         always = {"mode": "always", "initialDelayMs": 1, "maxDelayMs": 2, "jitterRatio": 0}
         failure = LlmFailure(AUTH, "x")
-        result = recover_llm_failure(self.session, 1, 1, "p", failure, always,
+        result = _recover(self.session, 1, 1, "p", failure, always,
                                      next_fn=lambda: (_ for _ in ()).throw(RuntimeError("boom")))
         self.assertEqual(result, {"kind": "retry"})
         self.assertEqual([e["type"] for e in self.session.events], ["llm/retry", "llm/retry-started"])
 
     def test_aborted_signal_before_wait(self):
         signal = type("S", (), {"aborted": True})()
-        result = recover_llm_failure(self.session, 1, 1, "p", self.failure, self.policy,
+        result = _recover(self.session, 1, 1, "p", self.failure, self.policy,
                                      signal=signal)
         self.assertIsNone(result)
         # 对齐上游：normal 分支不在派发前检查 abort——llm/retry 仍落，
@@ -317,7 +324,7 @@ class RecoverDecisionTest(unittest.TestCase):
         t = threading.Timer(0.12, signal.set)
         t.start()
         try:
-            result = recover_llm_failure(self.session, 1, 1, "p", self.failure, policy,
+            result = _recover(self.session, 1, 1, "p", self.failure, policy,
                                          signal=signal)
         finally:
             t.cancel()
@@ -326,14 +333,14 @@ class RecoverDecisionTest(unittest.TestCase):
         self.assertEqual(types, ["llm/retry"])   # started 不落
 
     def test_cancellable_delay_zero(self):
-        self.assertTrue(cancellable_delay(0, None))
+        self.assertTrue(asyncio.run(cancellable_delay(0, None)))
 
     def test_dict_failure_facts(self):
         wide = resolve_retry_policy({
             "mode": "normal", "maxRetries": 2,
             "backoff": {"initialDelayMs": 1, "maxDelayMs": 5000, "jitterRatio": 0},
         })
-        result = recover_llm_failure(
+        result = _recover(
             self.session, 1, 1, "p",
             {"code": RATE_LIMIT, "message": "m", "providerRetryAfterMs": 2500},
             wide)
@@ -355,7 +362,7 @@ class FlakyAdapter(LlmAdapter):
             "backoff": {"initialDelayMs": 1, "maxDelayMs": 2, "jitterRatio": 0},
         })
 
-    def stream(self, messages, tools):
+    async def stream(self, messages, tools, signal=None):
         if self.fail_times > 0:
             self.fail_times -= 1
             raise LlmFailure(self.code, f"HTTP 429: {self.code}")
@@ -425,8 +432,10 @@ class LoopRetryTest(unittest.TestCase):
         class BareAdapter(LlmAdapter):
             provider = "bare"
             retry_policy = None
-            def stream(self, messages, tools):
+
+            async def stream(self, messages, tools, signal=None):
                 raise LlmFailure(RATE_LIMIT, "x")
+                yield  # pragma: no cover - 使函数成为 async 生成器（首个 __anext__ 即抛）
         ctx = Context(name="root")
         apply_retry_planner(ctx)
         loop = AgentLoop(Session("loop-retry"), BareAdapter(), ToolRegistry(ctx), ctx)

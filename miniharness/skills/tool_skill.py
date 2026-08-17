@@ -35,7 +35,7 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from ..core.scope import Context
+from ..core.scope import Context, _maybe_await
 from ..core.session import create_message, text_block
 from ..core.tools import Tool, ToolExec
 from .registry import (
@@ -259,8 +259,8 @@ class SkillTool:
 
     # ---------- 手势 listener ----------
 
-    def _on_gesture(self, payload: dict, next_fn) -> dict:
-        decision = next_fn()
+    async def _on_gesture(self, payload: dict, next_fn) -> dict:
+        decision = await _maybe_await(next_fn())
         if isinstance(decision, dict) and decision.get("kind") == "reject":
             return decision
         agent = payload.get("agent")
@@ -287,8 +287,8 @@ class SkillTool:
 
     # ---------- catalog listener ----------
 
-    def _on_catalog(self, payload: dict, next_fn) -> dict:
-        decision = next_fn()
+    async def _on_catalog(self, payload: dict, next_fn) -> dict:
+        decision = await _maybe_await(next_fn())
         if isinstance(decision, dict) and decision.get("kind") == "reject":
             return decision
         agent = payload.get("agent")

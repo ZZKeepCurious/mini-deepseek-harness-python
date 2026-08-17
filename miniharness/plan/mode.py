@@ -26,7 +26,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
-from ..core.scope import Context
+from ..core.scope import Context, _maybe_await
 from ..core.session import Session, create_message, text_block
 from .config import resolve_config
 
@@ -113,9 +113,9 @@ class PlanModeController:
         active = pending["active"] if pending is not None else fold_plan_mode(session.events)
         return self._section if active else ""
 
-    def _on_pre_step(self, payload: dict, next_fn: Callable) -> dict:
+    async def _on_pre_step(self, payload: dict, next_fn: Callable) -> dict:
         """被接受的 in-turn pre-step 提交 pending 选择；拒绝/中止不提交。"""
-        decision = next_fn()
+        decision = await _maybe_await(next_fn())
         agent = payload.get("agent")
         signal = payload.get("signal")
         if agent is None:

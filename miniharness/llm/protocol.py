@@ -21,7 +21,8 @@ StreamChunk 字段与上游协议对齐（packages/llm/llm/src/types.ts）：
 """
 from __future__ import annotations
 
-from typing import Any, Iterator
+import asyncio
+from typing import Any, AsyncIterator
 
 from ..core.session import create_message
 
@@ -40,6 +41,7 @@ __all__ = [
     "SERVER",
     "STREAM_CHUNK_KINDS",
     "STREAM_CLOSED",
+    "StreamAborted",
     "StreamChunk",
     "TIMEOUT",
     "TRANSPORT",
@@ -84,6 +86,65 @@ class StreamChunk(dict):
         if kind not in STREAM_CHUNK_KINDS:
             raise ValueError(f"未知 chunk kind: {kind}")
         super().__init__({"type": kind, **payload})
+
+
+class StreamAborted(Exception):
+    """协作式取消哨兵：适配器流在 abort 事件置位时抛出的中止标记。
+
+    对齐上游"stream 抛 AbortError 中止迭代"语义（agent-loop 逐 await 点
+    检查 signal）：agent 的 step 捕获后按回合中止处理（不落部分消息）。
+    不是 asyncio.CancelledError——它只是自定义标记，避免与真实任务取消混淆。
+    """
+
+
+async def _aiter_from_thread(producer, abort_event=None):
+    """把阻塞生成器搬进 executor 线程，经 asyncio.Queue 桥接为 async 迭代器。
+
+    producer 是同步生成器（阻塞 I/O，如 urllib SSE 读取）。abort_event 可选：
+    协作式取消——置位后桥接在下一次取块前抛 StreamAborted（调用方按回合
+    中止语义处理）。
+
+    简化标注：producer 线程无法被强制中断（阻塞 I/O），消费者中止后线程
+    继续排空至自然结束（网络超时兜底，如 urlopen 120s）；队列无界，
+    中止时不被背压卡死。
+    """
+    DONE = object()
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def run():
+        try:
+            for item in producer():
+                queue.put_nowait(item)
+        except Exception as exc:  # noqa: BLE001 - 跨线程透传
+            queue.put_nowait(exc)
+        finally:
+            queue.put_nowait(DONE)
+
+    task = asyncio.ensure_future(asyncio.to_thread(run))
+    try:
+        while True:
+            get_task = asyncio.ensure_future(queue.get())
+            if abort_event is None:
+                item = await get_task
+            else:
+                abort_task = asyncio.ensure_future(abort_event.wait())
+                done, _pending = await asyncio.wait(
+                    {get_task, abort_task}, return_when=asyncio.FIRST_COMPLETED)
+                # abort 粘滞优先：若 get 与 abort 同一批完成（put_nowait 与 abort.set
+                # 撞在同一轮询批次），也视为取消——上游 AbortSignal 一经置位即停。
+                if abort_event.is_set():
+                    get_task.cancel()
+                    raise StreamAborted("LLM 流被取消")
+                abort_task.cancel()
+                item = get_task.result()
+            if item is DONE:
+                return
+            if isinstance(item, Exception):
+                raise item
+            yield item
+    finally:
+        if not task.done():
+            task.cancel()
 
 
 class LlmFailure(Exception):
@@ -136,7 +197,13 @@ class LlmAdapter:
     retry_policy: dict | None = None
     model: str | None = None
 
-    def stream(self, messages: list[dict], tools: list[dict]) -> Iterator[StreamChunk]:
+    async def stream(self, messages: list[dict], tools: list[dict],
+                     signal: Any | None = None) -> AsyncIterator[StreamChunk]:
+        """async 迭代器：逐 chunk 产出（对齐上游 async stream 迭代器）。
+
+        signal 可选：协作式取消信号（_AbortProxy 形态，含 .aborted/.event）；
+        置位后流应在下一次取块前中止（抛 StreamAborted）。迷你适配器可忽略。
+        """
         raise NotImplementedError
 
     def resolve_model_info(self) -> dict:

@@ -1,12 +1,20 @@
 """第 4 章验收：Agent Loop 状态机 + LLM 流式。运行：python -m unittest discover -s tests -t ."""
 
+import asyncio
+import time
 import unittest
 
 from miniharness.core.scope import Context
 from miniharness.llm import FakeLlmAdapter, LlmFailure, StreamChunk
+from miniharness.llm.protocol import StreamAborted, _aiter_from_thread
 from miniharness.core.agent_loop.agent import AgentLoop
 from miniharness.core.session import Session, derive_messages, turn_balance
 from miniharness.core.tools import Tool, ToolRegistry
+
+
+async def _collect(stream):
+    """async 迭代器收集（适配器 stream 已 async 化）。"""
+    return [c async for c in stream]
 
 
 def _make_env(tool_call=None, final="搞定。", extra=None):
@@ -156,7 +164,7 @@ class TestLoop(unittest.TestCase):
 
     def test_stream_chunk_protocol_invariants(self):
         adapter = FakeLlmAdapter(tool_call={"name": "bash", "arguments": {}})
-        chunks = list(adapter.stream([], []))
+        chunks = asyncio.run(_collect(adapter.stream([], [])))
         kinds = [c["type"] for c in chunks]
         self.assertIn("finish", kinds)
         self.assertEqual(kinds[-1], "finish")
@@ -168,8 +176,9 @@ class TestLoop(unittest.TestCase):
 
     def test_adapter_error_closes_turn_in_finally(self):
         class BoomAdapter(FakeLlmAdapter):
-            def stream(self, messages, tools):
+            async def stream(self, messages, tools, signal=None):
                 raise LlmFailure("RATE_LIMIT", "429 Too Many Requests")
+                yield  # pragma: no cover - 使函数成为 async 生成器（首个 __anext__ 即抛）
 
         session = Session("s1")
         ctx = Context()
@@ -188,7 +197,7 @@ class TestLoop(unittest.TestCase):
     def test_max_steps_guard(self):
         # 模型永远调用工具 → 死循环守卫；回合以 error 闭合
         class AlwaysToolAdapter(FakeLlmAdapter):
-            def stream(self, messages, tools):
+            async def stream(self, messages, tools, signal=None):
                 yield StreamChunk("block-start", index=0, blockType="tool-call")
                 yield StreamChunk("tool-call-delta", index=0, id="call_0", name="loop", argumentsDelta="{}")
                 yield StreamChunk("block-end", index=0, block={
@@ -264,6 +273,51 @@ class TestRequestEnvelope(unittest.TestCase):
         loop.ctx.on("agent/request", lambda cur, nxt: {**cur, "provider": None})
         with self.assertRaisesRegex(RuntimeError, "no provider/model"):
             loop.followup("你好")
+
+
+class ThreadBridgeTest(unittest.TestCase):
+    """asyncio 化重构：_aiter_from_thread 线程桥契约（保序 / 异常透传 / abort 竞速）。"""
+
+    def test_preserves_order(self):
+        def producer():
+            yield "a"
+            yield "b"
+            yield "c"
+
+        async def scenario():
+            return [c async for c in _aiter_from_thread(producer)]
+
+        self.assertEqual(asyncio.run(scenario()), ["a", "b", "c"])
+
+    def test_propagates_producer_exception(self):
+        def producer():
+            yield "a"
+            raise ValueError("boom")
+
+        async def scenario():
+            return [c async for c in _aiter_from_thread(producer)]
+
+        with self.assertRaises(ValueError):
+            asyncio.run(scenario())
+
+    def test_abort_race_raises_stream_aborted(self):
+        # 生产节奏慢于消费者 → 取块间队列为空（对应真实 SSE chunk 间的网络间隙），
+        # abort 置位后下一次取块由竞速判负 → StreamAborted（而非 CancelledError）。
+        def producer():
+            for i in range(100):
+                time.sleep(0.05)
+                yield i
+
+        async def scenario():
+            abort = asyncio.Event()
+            collected = []
+            async for chunk in _aiter_from_thread(producer, abort):
+                collected.append(chunk)
+                abort.set()  # 首块即触发
+            return collected
+
+        with self.assertRaises(StreamAborted):
+            asyncio.run(scenario())
 
 
 if __name__ == "__main__":

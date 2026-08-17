@@ -38,7 +38,7 @@ class FakeLlmAdapter(LlmAdapter):
             "input_modalities": ["text", "image"],
         }
 
-    def stream(self, messages, tools):
+    async def stream(self, messages, tools, signal=None):
         self.calls += 1
         if self._tool and self.calls == 1:
             arguments = self._tool.get("arguments", {})

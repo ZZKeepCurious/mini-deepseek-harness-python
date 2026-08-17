@@ -74,12 +74,13 @@ def frame_summary(summary: list) -> list:
     ]
 
 
-def summarize_with_adapter(agent, config: dict, input_: dict) -> dict:
+async def summarize_with_adapter(agent, config: dict, input_: dict) -> dict:
     """跑一次摘要：重放 region 消息 + 压缩指令，经 agent 的适配器流式产出。
 
     input_: {messages: [...], system?: str, tools?: [...]}（mini 仅 messages
     有值——压缩请求不经 agent/request 信封；system 用 agent.system_prompt）。
-    返回 {summary, provider, model, maxTokens?, usage?}。
+    返回 {summary, provider, model, maxTokens?, usage?}。async：流式走
+    适配器 async 迭代器（asyncio 化重构后唯一形态）。
     """
     from ..llm import BlockAssembler, LlmFailure
 
@@ -91,7 +92,7 @@ def summarize_with_adapter(agent, config: dict, input_: dict) -> dict:
         {"kind": "plugin", "plugin": "dsh-compaction-basic"},
     ))
     assembler = BlockAssembler()
-    for chunk in adapter.stream(messages, input_.get("tools", [])):
+    async for chunk in adapter.stream(messages, input_.get("tools", [])):
         assembler.push(chunk)
     _raise_on_finish_error(assembler.finish)
     summary = _summary_text(assembler.blocks)

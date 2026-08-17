@@ -43,12 +43,12 @@ class CompactionEngine:
     def _register_automatic(self) -> None:
         ctx = self.ctx
 
-        def on_pre_step(payload: dict, next_fn):
+        async def on_pre_step(payload: dict, next_fn):
             agent = payload.get("agent")
             signal = payload.get("signal")
             if agent is not None and not (signal is not None and getattr(signal, "aborted", False)):
                 try:
-                    result = self.compact_if_needed(agent, "pressure")
+                    result = await self.compact_if_needed(agent, "pressure")
                     if result is not None:
                         self._log_result(result, "step pressure")
                 except TargetPressureConfigError as error:
@@ -59,7 +59,7 @@ class CompactionEngine:
                         if hasattr(ctx, "logger") else None
             return next_fn()
 
-        def on_request_error(payload: dict, next_fn):
+        async def on_request_error(payload: dict, next_fn):
             failure = payload.get("failure")
             agent = payload.get("agent")
             signal = payload.get("signal")
@@ -79,7 +79,7 @@ class CompactionEngine:
                 return next_fn()
             generation = agent.session.replace_generation
             try:
-                result = self.compact_if_needed(agent, "context-overflow")
+                result = await self.compact_if_needed(agent, "context-overflow")
             except Exception as error:  # noqa: BLE001
                 if not getattr(signal, "aborted", False) \
                         and agent.session.replace_generation > generation:
@@ -115,7 +115,7 @@ class CompactionEngine:
 
     # ---------- 触发入口 ----------
 
-    def compact_if_needed(self, agent, trigger: str):
+    async def compact_if_needed(self, agent, trigger: str):
         """按触发类型考虑自动压缩；不需要/无安全区间返回 None。
 
         trigger: 'pressure'（step 边界压力）| 'context-overflow'（provider 确认溢出）。
@@ -130,7 +130,7 @@ class CompactionEngine:
             range_ = select_compactable_range(agent.session, measurement, 0)
             if range_ is None:
                 return None
-            return self._compact_region(agent, range_["start"], range_["end"])
+            return await self._compact_region(agent, range_["start"], range_["end"])
         # 压力检查：如果未配置 context_window，则跳过（兼容未配置的适配器）
         context_window = getattr(agent.adapter, "context_window", None)
         if context_window is None:
@@ -145,7 +145,7 @@ class CompactionEngine:
             range_ = select_compactable_range(agent.session, measurement, spec["retainTokens"])
             if range_ is None:
                 return result
-            result = self._compact_region(agent, range_["start"], range_["end"])
+            result = await self._compact_region(agent, range_["start"], range_["end"])
             measurement = self.meter.measure(agent.session)
             if measurement["totalTokens"] < spec["thresholdTokens"]:
                 return result
@@ -155,14 +155,14 @@ class CompactionEngine:
             f"threshold {spec['thresholdTokens']})"
         )
 
-    def compact_region(self, agent, start: int, end: int) -> dict:
+    async def compact_region(self, agent, start: int, end: int) -> dict:
         """强制压缩一个 surface 区间（start/end 为 seq；边界必须配对平衡）。"""
-        return compact_surface_region(agent.session, self.meter, agent, self.config, start, end)
+        return await compact_surface_region(agent.session, self.meter, agent, self.config, start, end)
 
     # ---------- 内部 ----------
 
-    def _compact_region(self, agent, start: int, end: int) -> dict:
-        return compact_surface_region(agent.session, self.meter, agent, self.config, start, end)
+    async def _compact_region(self, agent, start: int, end: int) -> dict:
+        return await compact_surface_region(agent.session, self.meter, agent, self.config, start, end)
 
     def _routed_target(self, agent):
         """最新 durable 路由请求的 provider/model（request/header 信封

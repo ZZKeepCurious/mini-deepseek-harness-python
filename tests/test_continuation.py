@@ -69,7 +69,7 @@ class _ScriptedParent(FakeLlmAdapter):
         self.tool_args = tool_args or {}
         self.cid = None
 
-    def stream(self, messages, tools):
+    async def stream(self, messages, tools, signal=None):
         self.calls += 1
         if self.calls == 1:
             text = self._last_user_text(messages)
@@ -336,8 +336,9 @@ class TestContinuationManager(unittest.TestCase):
 
     def test_child_error_settles_without_raising(self):
         class BoomAdapter(FakeLlmAdapter):
-            def stream(self, messages, tools):
+            async def stream(self, messages, tools, signal=None):
                 raise LlmFailure("RATE_LIMIT", "429 Too Many Requests")
+                yield  # pragma: no cover - 使函数成为 async 生成器（首个 __anext__ 即抛）
 
         mgr = self._manager(adapter_factory=lambda p, m: BoomAdapter())
         cid = mgr.start_continuable(label="研")
@@ -568,10 +569,11 @@ class TestAsyncContinuation(unittest.TestCase):
         asyncio.run(scenario())
 
     def test_async_child_error_settles(self):
-        # 子回合 LlmFailure → error turn/end → 结算 "failed before it finished"。
+        # 子回合抛 LlmFailure → error turn/end 闭合并结算 "failed before it finished"。
         class BoomAdapter(FakeLlmAdapter):
-            def stream(self, messages, tools):
+            async def stream(self, messages, tools, signal=None):
                 raise LlmFailure("RATE_LIMIT", "429 Too Many Requests")
+                yield  # pragma: no cover - 使函数成为 async 生成器（首个 __anext__ 即抛）
 
         async def scenario():
             self.parent.start_driver()
@@ -603,10 +605,11 @@ class TestAsyncContinuation(unittest.TestCase):
         asyncio.run(scenario())
 
     def test_async_driver_swallows_turn_error(self):
-        # driver 模式回合错误被吞（error turn/end 在日志），when_idle_async 正常返回。
+        # driver 模式回合出错不外抛：error turn/end 仍落日志、when_idle_async 正常返回。
         class BoomAdapter(FakeLlmAdapter):
-            def stream(self, messages, tools):
+            async def stream(self, messages, tools, signal=None):
                 raise LlmFailure("SERVER", "500 boom")
+                yield  # pragma: no cover - 使函数成为 async 生成器（首个 __anext__ 即抛）
 
         async def scenario():
             parent, _, _ = _parent_loop(adapter=BoomAdapter())

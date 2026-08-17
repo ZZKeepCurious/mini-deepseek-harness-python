@@ -41,8 +41,9 @@ A8 起执行模型对齐上游异步事件驱动，由"父是否有 driver"自�
     调用方，无 UNAUTHORIZED。
   * **子事件仅在 settle 时整体 flush**（上游 flushFinalState best-effort +
     崩溃 torn 修复 commitRepair 仍不在 mini，A7 已注）。
-  * **LLM 流式同步阻塞**沿用：异步窗口只在工具 await 期间，不与流式交错。
-"""
+  * LLM 流式已 async 化（2026-08-18 asyncio 化重构），DeepSeek SSE 仍为阻塞读
+    线程桥接（不可中断，超时兜底）——异步窗口真异步，流式本身受载体限制。
+  """
 from __future__ import annotations
 
 import asyncio

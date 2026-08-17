@@ -27,6 +27,7 @@ __all__ = [
     "SERVER",
     "STREAM_CHUNK_KINDS",
     "STREAM_CLOSED",
+    "StreamAborted",
     "StreamChunk",
     "TIMEOUT",
     "TRANSPORT",

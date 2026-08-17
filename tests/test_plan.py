@@ -5,6 +5,7 @@ systemPrompt 分节服务、PlanModeController set 四态、in-turn pre-step 提
 reject/aborted 不提交、plan:policy 节注入、模式切换叙述、循环集成。
 """
 
+import asyncio
 import unittest
 from types import SimpleNamespace
 
@@ -48,10 +49,11 @@ def _capture_adapter(tool_call=None):
             super().__init__(tool_call=tool_call, final_text="搞定。")
             self.systems = []
 
-        def stream(self, messages, tools):
+        async def stream(self, messages, tools, signal=None):
             system = next(m["content"][0]["text"] for m in messages if m["role"] == "system")
             self.systems.append(system)
-            return super().stream(messages, tools)
+            async for chunk in super().stream(messages, tools, signal):
+                yield chunk
     return Capture(tool_call=tool_call)
 
 
@@ -368,8 +370,9 @@ class PlanModeControllerTest(unittest.TestCase):
         _seed_open_turn(loop.session)
         controller.set(loop, True)
         ctx.on("agent/pre-step", lambda p, nxt: {"kind": "reject"})
-        decision = ctx.waterfall("agent/pre-step", {"messages": [], "agent": loop,
-                                                    "signal": SimpleNamespace(aborted=False)})
+        decision = asyncio.run(ctx.awaterfall("agent/pre-step",
+                                              {"messages": [], "agent": loop,
+                                               "signal": SimpleNamespace(aborted=False)}))
         self.assertEqual(decision["kind"], "reject")
         self.assertNotIn("plan/mode", [e["type"] for e in loop.session.events])
 
@@ -377,8 +380,8 @@ class PlanModeControllerTest(unittest.TestCase):
         ctx, controller, loop, _ = self._make()
         _seed_open_turn(loop.session)
         controller.set(loop, True)
-        ctx.waterfall("agent/pre-step", {"messages": [], "agent": loop,
-                                         "signal": SimpleNamespace(aborted=True)})
+        asyncio.run(ctx.awaterfall("agent/pre-step", {"messages": [], "agent": loop,
+                                                      "signal": SimpleNamespace(aborted=True)}))
         self.assertNotIn("plan/mode", [e["type"] for e in loop.session.events])
 
     def test_policy_section_active_only(self):

@@ -4,6 +4,7 @@
 keep planning/dismiss 反馈、/plan 四态文案、命令可选性、投影 fold。
 """
 
+import asyncio
 import unittest
 from types import SimpleNamespace
 
@@ -110,8 +111,8 @@ class ExitPlanModeTest(unittest.TestCase):
         # 批准只排队 silent 选择，durable 状态仍未关闭
         self.assertTrue(fold_plan_mode(loop.session.events))
         # 下一次被接受的 in-turn pre-step 提交关闭
-        ctx.waterfall("agent/pre-step", {"messages": [], "agent": loop,
-                                         "signal": SimpleNamespace(aborted=False)})
+        asyncio.run(ctx.awaterfall("agent/pre-step", {"messages": [], "agent": loop,
+                                                      "signal": SimpleNamespace(aborted=False)}))
         self.assertFalse(fold_plan_mode(loop.session.events))
 
     def test_question_shapes(self):

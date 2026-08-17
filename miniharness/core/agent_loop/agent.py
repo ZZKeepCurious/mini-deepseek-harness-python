@@ -1,4 +1,4 @@
-"""第 4 章：Agent Loop —— turn/step 状态机（同步简化版 + A8 事件驱动 driver）。
+"""第 4 章：Agent Loop —— turn/step 状态机（单一 async 驱动模型 + 同步门面）。
 
 对应 dsh 真实源码：packages/core/agent-loop。
 
@@ -11,10 +11,17 @@
   * pre-step 拒绝 → turn 以 {kind:'blocked'} 结束；step/end 与 turn/end
     在 finally 中必定落日志（失败时 reason 为 {kind:'error'|'aborted'|...}）
 
-A8 事件驱动 driver（可继续子代理异步对齐的前置）：
-  * start_driver() 把本 loop 切换到 driver 模式：followup/steer 只入队 +
-    线程安全唤醒（_request_wake → call_soon_threadsafe），回合由 _drive
-    在事件循环上执行；非 driver 模式维持 A7 同步 pump。
+asyncio 化（2026-08-17 重构，对齐上游异步事件驱动；设计见
+status/mini-harness/asyncio-refactor-design.md）：
+  * 唯一 async 引擎 _pump_async（driver 模式下由 _drive 驱动；同步门面
+    经一次性 asyncio.run 驱动——headless/demo/REPL/测试的 run/followup/
+    steer 零改动）。
+  * LLM 流式 async 迭代器；取消为协作式（asyncio.Event，对齐上游
+    AbortSignal）——cancel 不杀 driver，流桥/重试等待事件驱动退出、
+    工具调度器排干 started + 未启动的按模型序补合成错误。
+  * start_driver() 切换到事件驱动模式：followup/steer 只入队 + 线程安全
+    唤醒（_request_wake → call_soon_threadsafe），回合由 _drive 在事件
+    循环上执行。
   * _drive 在"真静默"（无未消费 inbox / 无 _continue / work_event 未再置位）
     时才 _mark_quiescent 并结算 when_idle_async 等待者（关闭"steer 结算通知
     在 pump 退出后到达导致 idle waiters 早结算"的竞态）。
@@ -26,12 +33,11 @@ A8 事件驱动 driver（可继续子代理异步对齐的前置）：
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import Any, Callable
 
 from ..scope import Context
 from ..system_prompt import render_prompt
-from ...llm import BlockAssembler, LlmAdapter, LlmFailure
+from ...llm import BlockAssembler, LlmAdapter, LlmFailure, StreamAborted
 from .inbox import Inbox
 from .tool_calls import schedule_tool_calls
 from ..session import (
@@ -39,10 +45,8 @@ from ..session import (
     create_message,
     derive_messages,
     text_block,
-    tool_call_block,
-    tool_result_block,
 )
-from ..tools import FusedSignal, ToolExec, ToolRegistry, ToolResult, run_pipeline
+from ..tools import ToolExec, ToolRegistry
 
 
 def canonical_header(config: dict, *, system: str = "", tools: list | None = None,
@@ -63,10 +67,11 @@ def canonical_header(config: dict, *, system: str = "", tools: list | None = Non
 
 
 class _AbortProxy:
-    """AbortSignal 的同步替身：aborted 反映宿主 loop 的取消标记。
+    """AbortSignal 的 asyncio 替身：aborted/event 反映宿主 loop 的取消标记。
 
-    供 agent/request-error 的 signal 字段与 llm-retry 的可取消等待使用
-    （mini 同步模型下无真实 AbortSignal，语义对齐：取消后不再重试）。
+    供 agent/request-error 的 signal 字段与 llm-retry/流桥的可取消等待使用
+    （对齐上游 AbortSignal：aborted 布尔 + abort 事件；取消后不再重试）。
+    event 为每轮新建的 asyncio.Event（_open_turn），置位即取消。
     """
 
     def __init__(self, owner: "AgentLoop"):
@@ -75,6 +80,10 @@ class _AbortProxy:
     @property
     def aborted(self) -> bool:
         return self._owner._cancelled
+
+    @property
+    def event(self) -> asyncio.Event | None:
+        return self._owner._cancel_event
 
 
 class AgentLoop:
@@ -114,6 +123,10 @@ class AgentLoop:
         self._step = 0     # 当前已打开的 step 编号（1 起，每 turn 重置）
         self._turn_end: dict | None = None
         self._step_signal: ToolExec | None = None   # 阶段 7：当前 step 的共享取消信号
+        # 协作式取消事件（asyncio.Event，_open_turn 每轮新建）：cancel 置位，
+        # llm-retry 延迟等待与流桥据此事件驱动中止（对齐上游 AbortSignal 的
+        # abort 事件；不用 Task.cancel——取消是协作式的，见 asyncio 化重构设计）
+        self._cancel_event: asyncio.Event | None = None
         # 重试规划器（agent/request-error 监听器）由装配方显式挂载：
         # AgentLoop 构造无副作用（迁移步骤 3，对齐上游插件 apply 时挂载）
         self._abort_proxy = _AbortProxy(self)
@@ -198,10 +211,10 @@ class AgentLoop:
         )
         self.inbox.append("next-turn", message)
         self._parked = False
-        if self._driver is not None:
+        if self._driver is not None and not self._driver.done():
             self._request_wake()
         else:
-            self._pump()
+            self._pump_sync_facade()
 
     # ---------- 干预面（第 9 章：Agent 干预面） ----------
 
@@ -219,10 +232,10 @@ class AgentLoop:
         )
         self.inbox.append("next-step", message)
         self._parked = False
-        if self._driver is not None:
+        if self._driver is not None and not self._driver.done():
             self._request_wake()
         else:
-            self._pump()
+            self._pump_sync_facade()
 
     def inject(self, content: str | dict, source: str = "plugin") -> None:
         """非唤醒注入（上游 inject(message)）：只入 inbox，不开 turn。
@@ -238,13 +251,12 @@ class AgentLoop:
     def cancel(self, cause: str | None = None, keep_inbox: bool = False) -> None:
         """取消（上游 cancel）：清 inbox（除非 keep_inbox）+ 中止活跃回合。
 
-        同步路径中无法中断正在执行的 step，取消在 step 边界生效：
-        当前 step 跑完后不再继续（工具回调内调用也可），turn 以
-        {kind:'aborted', reason:{kind: cause}} 闭合；无活跃回合且 inbox
-        为空 → idle no-op。
-        阶段 7 async 路径：置位共享 signal，并行调度器检测后停止补池、
-        排干已启动调用、未启动的按模型序补 TOOL_ABORTED_BEFORE_DISPATCH
-        合成错误结果（与上游 appendSkippedToolCall 一致）。
+        协作式取消（对齐上游 AbortSignal）：不杀 driver 任务，置位取消标记
+        后由执行点自行中止——流桥/重试等待事件驱动退出、工具调度器排干
+        started + 未启动的按模型序补 TOOL_ABORTED_BEFORE_DISPATCH 合成错误
+        结果；turn 以 {kind:'aborted', reason:{kind: cause}} 闭合；无活跃
+        回合且 inbox 为空 → idle no-op。线程安全：从 executor 线程调用时
+        经 call_soon_threadsafe 置位事件。
         A8：keep_inbox 且 inbox 非空 → 置 _parked（驻留队列不自动续跑，
         仅下次唤醒 send 恢复）。
         """
@@ -262,6 +274,22 @@ class AgentLoop:
             self._turn_end = {"kind": "aborted", "reason": {"kind": cause or "user"}}
             if self._step_signal is not None:
                 self._step_signal.signal.set()
+            self._set_cancel_event()
+
+    def _set_cancel_event(self) -> None:
+        """线程安全地置位本轮的取消事件（跨线程经 call_soon_threadsafe）。"""
+        event = self._cancel_event
+        if event is None:
+            return
+        loop = self._loop
+        try:
+            current = asyncio.get_running_loop()
+        except RuntimeError:
+            current = None
+        if loop is not None and loop is not current and not loop.is_closed():
+            loop.call_soon_threadsafe(event.set)
+        else:
+            event.set()
 
     def when_idle(self) -> bool:
         """quiescence（上游 whenIdle）：无活跃回合即 idle。
@@ -276,11 +304,38 @@ class AgentLoop:
         必须在事件循环内调用；幂等。driver 模式下 followup/steer 只入队 +
         线程安全唤醒（不再同步 pump），回合由 _drive 在循环上执行。
         """
+        self._ensure_driver()
+
+    def _ensure_driver(self) -> None:
+        """确保 driver 在运行：当前 loop 上绑定 _loop/_work_event 并创建驱动任务。
+
+        driver 已存活（未 done）时 no-op；否则（未起 / 已结束）重建。
+        """
         self._loop = asyncio.get_running_loop()
-        self._work_event = asyncio.Event()
-        self._quiescent = True    # 启动即静默（无待处理工作）
+        if self._work_event is None:
+            self._work_event = asyncio.Event()
+            self._quiescent = True    # 启动即静默（无待处理工作）
         if self._driver is None or self._driver.done():
             self._driver = self._loop.create_task(self._drive())
+
+    def _pump_sync_facade(self) -> None:
+        """同步门面：无活跃 driver 时驱动完整回合（对齐旧同步 pump 语义）。
+
+        当前线程无运行 loop → 一次性 asyncio.run(_pump_async)（异常向上抛，
+        对齐 followup 冒泡 LlmFailure 的既有契约）；已处于 loop 内且无 driver
+        → 起 driver + 唤醒（fire-and-forget，无法阻塞当前 loop；现有调用方
+        无此路径，标注为兜底）。
+        """
+        try:
+            asyncio.get_running_loop()
+            in_loop = True
+        except RuntimeError:
+            in_loop = False
+        if in_loop:
+            self._ensure_driver()
+            self._request_wake()
+        else:
+            asyncio.run(self._pump_async())
 
     def when_idle_async(self) -> asyncio.Future:
         """驱动静默可等待版（上游 whenIdle）：驱动排空全部工作后 resolve。
@@ -406,6 +461,13 @@ class AgentLoop:
         self._step = 0
         self._turn_open = True
         self._turn_end = None
+        # 每轮新建取消事件（绑定本轮 loop；同步门面下每次 asyncio.run 是新
+        # loop，必须每轮重建以规避跨 loop 复用 Event 的绑定错误）
+        self._cancel_event = asyncio.Event()
+        if self._driver is None or self._driver.done():
+            # 同步门面：无 driver 时把 _loop 刷新到当前（瞬态）loop，
+            # 供 cancel() 从其它线程经 call_soon_threadsafe 置位事件
+            self._loop = asyncio.get_running_loop()
         self.session.append("turn/start", {"turn": self._turn})
 
     def _close_turn(self, reason: dict | None = None) -> None:
@@ -417,6 +479,7 @@ class AgentLoop:
         })
         self._turn_open = False
         self._cancelled = False
+        self._cancel_event = None
         self._continue = False  # 回合闭合后不再有"续步"：驱动静默判定依赖它
         self._set_status("idle")
 
@@ -430,56 +493,9 @@ class AgentLoop:
         for message in claimed:
             self._fire_inbox_claimed(message)
 
-    def _pump(self) -> None:
-        steps = 0
-        try:
-            first = True
-            while (self.inbox or self._continue) and not self._cancelled and not self._parked:
-                steps += 1
-                if steps > self.max_steps:
-                    raise RuntimeError(f"超过最大 step 数 {self.max_steps}，疑似死循环")
-                if not self._turn_open:
-                    self._open_turn()
-                    first = True
-                # 每轮 turn 首个认领目标 next-turn，其后 next-step（上游 agent.ts:261）
-                target = "next-turn" if first else "next-step"
-                first = False
-                claimed = self.inbox.claim(target, self._turn)
-                self._fire_claimed_batch(claimed)
-                step_end = self._run_step(claimed)
-                # 只补"尚未有结局"的 step：cancel/reject/max-tokens 已先行落
-                # _turn_end 的优先（max-tokens 粘滞：后续完成 step 不降级）
-                if step_end is not None and self._turn_end is None:
-                    self._turn_end = step_end
-                if self._cancelled or self._parked:
-                    break
-                if step_end is not None and step_end.get("kind") == "blocked":
-                    break   # pre-step 拒绝即终局：不留 pending，turn 直接关闭
-                if self._turn_end is not None and not self.inbox.next_step:
-                    self.ctx.serial("agent/turn-stopping", {
-                        "agent": self, "turn": self._turn, "signal": self._abort_proxy,
-                    })
-                if self._turn_end is not None and not self.inbox.next_step:
-                    break
-        except LlmFailure as e:
-            self._turn_end = {"kind": "error", "error": e.failure}
-            self.ctx.emit("agent/error", {"agent": self, "turn": self._turn,
-                                          "step": self._step, "error": e.failure})
-            raise
-        except Exception as e:
-            failure = {"code": "UNKNOWN", "message": str(e)}
-            self._turn_end = {"kind": "error", "error": failure}
-            self.ctx.emit("agent/error", {"agent": self, "turn": self._turn,
-                                          "step": self._step, "error": failure})
-            raise
-        finally:
-            # turn/end 必定落日志（与上游 agent.ts finally 一致）
-            if self._turn_open:
-                self._close_turn(self._turn_end)
-
     async def _pump_async(self) -> None:
-        """阶段 7：async 主循环（语义与 _pump 相同，step 走并行调度器；
-        A8 起为 driver 核心——由 _drive 在事件循环上驱动）。"""
+        """async 主循环（asyncio 化重构后唯一 pump；driver 核心——由 _drive
+        在事件循环上驱动，同步门面经一次性 asyncio.run 驱动）。"""
         steps = 0
         try:
             first = True
@@ -524,47 +540,8 @@ class AgentLoop:
             if self._turn_open:
                 self._close_turn(self._turn_end)
 
-    def _run_step(self, claimed: list[dict]) -> dict | None:
-        """一个 step：pre-step → 落日志 → LLM 流式 → 工具管线 → step/end（finally）。
-
-        pre-step 在每一步都派发（含工具续步），对齐上游 agent.ts:266；决策
-        messages 是 step 输入（上游 agent.ts:282-284 逐条落 user/message，
-        plan-mode 叙述经此注入）。reject → 终局 blocked，零 step。
-        @returns step-end 原因：{'kind':'completed'} / {'kind':'max-tokens'} /
-            {'kind':'blocked'}，或 None（工具调用未完结合回合）。
-        """
-        decision = self.ctx.waterfall("agent/pre-step", {
-            "messages": claimed,
-            "agent": self,
-            "signal": self._abort_proxy,
-        })
-        if isinstance(decision, dict) and decision.get("kind") == "reject":
-            self._continue = False  # 复位：拒绝即终局（上游 agent.ts:267-269），避免泵循环跑无输入 step
-            self._turn_end = {"kind": "blocked"}
-            return {"kind": "blocked"}  # 零 step 尝试：不留 step/start，turn 以 blocked 闭合
-        messages = []
-        if isinstance(decision, dict):
-            candidate = decision.get("messages")
-            if isinstance(candidate, list):
-                messages = candidate
-
-        self._step += 1
-        self._continue = False
-        try:
-            tool_calls = self._stream_step(messages)
-            concluded = self._execute_tools_sync(tool_calls)
-            self._continue = bool(tool_calls)
-        finally:
-            # step/end 必定落日志（与上游 agent.ts finally 一致）
-            self.session.append("step/end", {"turn": self._turn, "step": self._step})
-        if self._turn_end is not None and self._turn_end.get("kind") == "max-tokens":
-            return {"kind": "max-tokens"}
-        if not tool_calls:
-            return {"kind": "completed"}
-        return {"kind": "completed"} if concluded else None
-
     async def _run_step_async(self, claimed: list[dict]) -> dict | None:
-        """阶段 7：async 版 step。pre-step 走 awaterfall，工具走并行调度器。"""
+        """async step：pre-step 走 awaterfall，工具走并行调度器。"""
         decision = await self.ctx.awaterfall("agent/pre-step", {
             "messages": claimed,
             "agent": self,
@@ -583,7 +560,7 @@ class AgentLoop:
         self._step += 1
         self._continue = False
         try:
-            tool_calls = self._stream_step(messages)
+            tool_calls = await self._stream_step_async(messages)
             concluded = await self._execute_tools_async(tool_calls)
             self._continue = bool(tool_calls)
         finally:
@@ -594,9 +571,9 @@ class AgentLoop:
             return {"kind": "completed"}
         return {"kind": "completed"} if concluded else None
 
-    def _stream_step(self, messages: list) -> list[dict]:
-        """落日志 + LLM 流式（同步适配器阻塞事件循环，可接受：不与在飞任务交错）。
-        返回模型产出的 tool-call 块列表（模型序）。
+    async def _stream_step_async(self, messages: list) -> list[dict]:
+        """落日志 + LLM 流式（async 迭代器）。返回模型产出的 tool-call 块
+        列表（模型序）。
 
         失败恢复（阶段 4）：适配器抛 LlmFailure 时派发 agent/request-error
         waterfall（上游 agent-loop 同语义扩展点）；{kind:'retry'} → 同 step
@@ -633,7 +610,7 @@ class AgentLoop:
             self.session.append("request/context", context)
             self._context_baseline = context
 
-        return self._stream_attempt()
+        return await self._stream_attempt()
 
     def _derive_history(self) -> list[dict]:
         """Derive the full message list from the current session events.
@@ -698,11 +675,13 @@ class AgentLoop:
             return {"maxTokens": True}
         return None
 
-    def _stream_attempt(self) -> list[dict]:
+    async def _stream_attempt(self) -> list[dict]:
         """一次 step 内的模型请求 attempt 循环（上游 request → retry → 终局）。
 
         每次循环首次都会重新派生 messages，以便 compaction checkpoint
-        的 surface replace 生效。
+        的 surface replace 生效。流式 async 迭代 + 每 chunk 取消检查：
+        取消（cancel 置位 → 流桥抛 StreamAborted 或循环提前 break）时不落
+        部分消息，回合以 cancel 置的 aborted 闭合。
         """
         while True:
             messages = self._derive_history()
@@ -710,14 +689,20 @@ class AgentLoop:
             assembler = BlockAssembler()
             chunk_seqs: list[int] = []
             try:
-                for chunk in self.adapter.stream(messages, self._tool_definitions()):
+                stream = self.adapter.stream(
+                    messages, self._tool_definitions(), self._abort_proxy)
+                async for chunk in stream:
                     ev = self.session.append("assistant/chunk", {
                         "turn": self._turn, "step": self._step, "chunk": chunk,
                     })
                     chunk_seqs.append(ev["seq"])
                     assembler.push(chunk)
+                    if self._cancelled:
+                        break
+            except StreamAborted:
+                return []   # 协作式取消：不落消息，turn 以 aborted 闭合
             except LlmFailure as e:
-                action = self.ctx.waterfall("agent/request-error", {
+                action = await self.ctx.awaterfall("agent/request-error", {
                     "agent": self,
                     "turn": self._turn,
                     "step": self._step,
@@ -729,6 +714,8 @@ class AgentLoop:
                 if isinstance(action, dict) and action.get("kind") == "retry":
                     continue
                 raise
+            if self._cancelled:
+                return []   # 非桥接适配器提前 break 的取消出口
 
             if assembler.finish is None:
                 assembler.finish = {"kind": "stop"}
@@ -745,7 +732,7 @@ class AgentLoop:
                     provider_retry_after_ms=failure.get("providerRetryAfterMs"),
                     request_id=failure.get("requestId"),
                 )
-                action = self.ctx.waterfall("agent/request-error", {
+                action = await self.ctx.awaterfall("agent/request-error", {
                     "agent": self,
                     "turn": self._turn,
                     "step": self._step,
@@ -772,24 +759,8 @@ class AgentLoop:
                 b for b in assistant_message["content"] if b.get("type") == "tool-call"
             ]
 
-    def _execute_tools_sync(self, tool_calls: list[dict]) -> bool:
-        """同步路径：先记录 tool/call 再执行（durable before dispatch），逐个串行。
-        共享 step signal（含 agent 身份）供工具按会话栅栏与 kill 中断。
-        @returns 是否有工具结算即终结当前回合（concludes_turn）。"""
-        if not tool_calls:
-            return False
-        self._step_signal = ToolExec(agent=self)
-        concluded = False
-        try:
-            for block in tool_calls:
-                result = self._run_tool(block["id"], block["name"], block["arguments"])
-                concluded = concluded or result.concludes_turn
-        finally:
-            self._step_signal = None
-        return concluded
-
     async def _execute_tools_async(self, tool_calls: list[dict]) -> bool:
-        """阶段 7：并行调度器（exclusive 屏障 + 有界滚动池 + 模型序提交）。
+        """并行调度器（exclusive 屏障 + 有界滚动池 + 模型序提交）。
         @returns 是否有工具结算即终结当前回合（concludes_turn）。"""
         if not tool_calls:
             return False
@@ -816,48 +787,3 @@ class AgentLoop:
                     "parameters": tool.parameters,
                 })
         return defs
-
-    def _run_tool(self, call_id: str, name: str, arguments: str) -> ToolResult:
-        # arguments 以模型产出的原始 JSON 字符串落盘（与上游字段一致）；
-        # 未知工具同样先落 tool/call 再产出 error 结果（上游 appendToolCall 先于派发）
-        self.session.append("tool/call", {
-            "turn": self._turn, "step": self._step,
-            "callId": call_id, "name": name, "arguments": arguments,
-        })
-        tool = self.tools.resolve(name)
-        if tool is None:
-            # 上游 ToolNotFoundError：code 'UNKNOWN_TOOL'（tools/src/index.ts:494-510）
-            result = ToolResult(ok=False, is_error=True, error=f"未知工具: {name}",
-                                error_info={"name": "ToolNotFoundError", "code": "UNKNOWN_TOOL"})
-        else:
-            try:
-                parsed = json.loads(arguments) if arguments else {}
-            except json.JSONDecodeError:
-                parsed = {}
-            if self._step_signal is not None:
-                # fuseToolSignals 隔离：每工具独立信号熔合共享 step 取消信号，
-                # 超时只中断本工具，不传染并行组内其它工具
-                exec_ = ToolExec(agent=self, signal=FusedSignal(self._step_signal.signal))
-            else:
-                exec_ = ToolExec(agent=self)
-            result = run_pipeline(self.ctx, tool, parsed, exec_)
-
-        content = result.content
-        if result.is_error and result.error is not None:
-            content = result.error
-        message = create_message(
-            "user",
-            [tool_result_block(call_id, [text_block(str(content))], is_error=result.is_error)],
-            {"kind": "tool", "callId": call_id},
-        )
-        data: dict[str, Any] = {
-            "turn": self._turn, "step": self._step, "message": message,
-        }
-        if result.is_error:
-            # 对齐上游 tool/result error 字段（llm/src/types.ts:295）：
-            # 仅当 error.info 存在才携带 {name, code}；普通工具体错误不带
-            info = getattr(result, "error_info", None)
-            if info is not None:
-                data["error"] = info
-        self.session.append("tool/result", data, surfaceOp="append")
-        return result

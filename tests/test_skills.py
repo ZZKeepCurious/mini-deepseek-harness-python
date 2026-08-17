@@ -9,6 +9,7 @@ kebab-case 策略、渲染精确文本、digest 确定性、skill 工具三态�
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
 import unittest
@@ -530,7 +531,8 @@ class GestureListenerTest(unittest.TestCase):
 
     def _pre_step(self, messages):
         agent = _fake_agent(self.ctx, self.session, self.reg)
-        return self.ctx.waterfall("agent/pre-step", {"agent": agent, "signal": None, "messages": messages})
+        return asyncio.run(self.ctx.awaterfall(
+            "agent/pre-step", {"agent": agent, "signal": None, "messages": messages}))
 
     def test_gesture_injects_instructions(self):
         decision = self._pre_step([
@@ -555,23 +557,23 @@ class GestureListenerTest(unittest.TestCase):
         # 无 skill 工具可见：目录不注入，只剩原文 → 手势禁用边界保持普通散文
         agent = _fake_agent(self.ctx, self.session,
                             SimpleNamespace(resolve=lambda name: None))
-        decision = self.ctx.waterfall("agent/pre-step", {
+        decision = asyncio.run(self.ctx.awaterfall("agent/pre-step", {
             "agent": agent, "signal": None,
             "messages": [{"id": "m1", "source": {"kind": "user"},
                           "content": [{"type": "text", "text": "/model-only"}]}],
-        })
+        }))
         self.assertEqual(len(decision["messages"]), 1)
         self.assertEqual(decision["messages"][0]["id"], "m1")
 
     def test_reject_short_circuits(self):
         # 下游先返回 reject：gesture/catalog 都不注入任何消息
         self.ctx.on("agent/pre-step", lambda payload, next_fn: {"kind": "reject"})
-        decision = self.ctx.waterfall("agent/pre-step", {
+        decision = asyncio.run(self.ctx.awaterfall("agent/pre-step", {
             "agent": _fake_agent(self.ctx, self.session, self.reg),
             "signal": None,
             "messages": [{"id": "m1", "source": {"kind": "user"},
                           "content": [{"type": "text", "text": "/bun"}]}],
-        })
+        }))
         self.assertEqual(decision["kind"], "reject")
         self.assertNotIn("messages", decision)
 
@@ -587,7 +589,8 @@ class CatalogListenerTest(unittest.TestCase):
         self.agent = _fake_agent(self.ctx, self.session, self.reg)
 
     def _pre_step(self, messages):
-        return self.ctx.waterfall("agent/pre-step", {"agent": self.agent, "signal": None, "messages": messages})
+        return asyncio.run(self.ctx.awaterfall(
+            "agent/pre-step", {"agent": self.agent, "signal": None, "messages": messages}))
 
     def test_first_publish_catalog(self):
         decision = self._pre_step([])
@@ -628,7 +631,8 @@ class CatalogListenerTest(unittest.TestCase):
         register_skill_tools(reg, registry)
         session = Session("e")
         agent = _fake_agent(ctx, session, reg)
-        decision = ctx.waterfall("agent/pre-step", {"agent": agent, "signal": None, "messages": []})
+        decision = asyncio.run(ctx.awaterfall(
+            "agent/pre-step", {"agent": agent, "signal": None, "messages": []}))
         self.assertEqual(decision["messages"], [])
 
     def test_retirement_after_publish(self):
@@ -650,7 +654,8 @@ class CatalogListenerTest(unittest.TestCase):
         reg = ToolRegistry(ctx)  # 不注册 skill 工具
         session = Session("nt")
         agent = _fake_agent(ctx, session, reg)
-        decision = ctx.waterfall("agent/pre-step", {"agent": agent, "signal": None, "messages": []})
+        decision = asyncio.run(ctx.awaterfall(
+            "agent/pre-step", {"agent": agent, "signal": None, "messages": []}))
         self.assertEqual(decision["messages"], [])
 
     def test_model_disabled_skills_excluded(self):

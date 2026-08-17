@@ -20,16 +20,18 @@
     (1 - ratio + 2*ratio*random)，再封顶 maxDelayMs。
   * 策略为 undefined（provider 未配置策略）→ 直接委派。
 
-载体简化（须在文档标注）：上游 async + AbortSignal 融合；mini 同步——
-等待以分片 sleep 轮询 signal.aborted 实现可取消（无计时器泄漏语义），
-请求仍阻塞事件循环（与既有 LLM 同步阻塞一致）。
+async 载体（2026-08-17 asyncio 化重构）：recover_llm_failure 为 async，
+延迟等待以 asyncio.Event（signal.event）事件驱动取消（与上游 AbortSignal
+融合的 cancellableDelay 同构）；signal 无 event 事件源时回退分片轮询
+.aborted（对测试信号兼容）。
 """
 from __future__ import annotations
 
+import asyncio
+import inspect
 import random
-import time
 import uuid
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from .retry_policy import retry_policy_key
 
@@ -47,22 +49,43 @@ def local_delay(policy: dict, retry: int, random: Callable[[], float]) -> int:
     return int(min(exponential * jitter, policy["maxDelayMs"]))
 
 
-def cancellable_delay(delay_ms: int, signal: Any) -> bool:
-    """等待 delay_ms，期间轮询 signal.aborted；被取消返回 False。
+async def _maybe_await(value: Any) -> Any:
+    """next_fn 返回值统一化：coroutine/awaitable 循环解包（awaterfall 的
+    next() 会返回下一层 coroutine，须 await 到普通值）。"""
+    while inspect.iscoroutine(value) or isinstance(value, Awaitable):
+        value = await value
+    return value
 
-    对齐上游 cancellableDelay：signal 已中止 → 立即 False；正常等待 →
-    True。signal 为 None 时视为永不取消。
+
+async def cancellable_delay(delay_ms: int, signal: Any) -> bool:
+    """等待 delay_ms，期间可被取消；被取消返回 False。
+
+    对齐上游 cancellableDelay：signal 已中止 → 立即 False；正常等待 → True。
+    signal 为 None 时视为永不取消。
+
+    async 载体：优先用 signal.event（asyncio.Event，事件驱动，立即响应）；
+    signal 无 event 属性时回退分片轮询 signal.aborted（对无事件源的测试
+    信号兼容）。
     """
     if signal is not None and signal.aborted:
         return False
-    deadline = time.monotonic() + delay_ms / 1000
+    event = getattr(signal, "event", None)
+    if event is not None and delay_ms > 0:
+        sleep_task = asyncio.ensure_future(asyncio.sleep(delay_ms / 1000))
+        abort_task = asyncio.ensure_future(event.wait())
+        done, pending = await asyncio.wait(
+            {sleep_task, abort_task}, return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+        return sleep_task in done
+    deadline = asyncio.get_running_loop().time() + delay_ms / 1000
     while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return True
         if signal is not None and signal.aborted:
             return False
-        time.sleep(min(_POLL_MS / 1000, remaining))
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            return True
+        await asyncio.sleep(min(_POLL_MS / 1000, remaining))
 
 
 def _failure_snapshot(failure: Any) -> dict:
@@ -83,7 +106,7 @@ def _failure_proxy(failure: Any) -> Any:
     })()
 
 
-def recover_llm_failure(
+async def recover_llm_failure(
     session,
     turn: int,
     step: int,
@@ -100,13 +123,13 @@ def recover_llm_failure(
     """
     failure = _failure_proxy(failure)
     if policy is None:
-        return next_fn() if next_fn is not None else None
+        return await _maybe_await(next_fn()) if next_fn is not None else None
     if policy["mode"] == "always":
         if signal is not None and signal.aborted:
             return None
         if next_fn is not None:
             try:
-                downstream = next_fn()
+                downstream = await _maybe_await(next_fn())
             except Exception:
                 downstream = None
             if isinstance(downstream, dict) and downstream.get("kind") == "retry":
@@ -114,10 +137,10 @@ def recover_llm_failure(
         # 下游未接管或失败 → 自己无限重试（任何 code）
     else:
         if failure.code not in policy["retryableCodes"]:
-            return next_fn() if next_fn is not None else None
+            return await _maybe_await(next_fn()) if next_fn is not None else None
         previous = _previous_retry(session, turn, step, provider, policy)
         if previous >= policy["maxRetries"]:
-            return next_fn() if next_fn is not None else None
+            return await _maybe_await(next_fn()) if next_fn is not None else None
 
     policy_key = retry_policy_key(policy)
     prior = _previous_retry_event(session, turn, step, provider, policy_key)
@@ -127,7 +150,7 @@ def recover_llm_failure(
     delay_ms = _resolve_delay(policy, retry, failure, random)
     if delay_ms is None:
         # providerRetryAfterMs 超过 maxDelayMs 且 normal：放弃（委派下游）
-        return next_fn() if next_fn is not None else None
+        return await _maybe_await(next_fn()) if next_fn is not None else None
 
     event_data: dict[str, Any] = {
         "retryId": retry_id, "turn": turn, "step": step, "provider": provider,
@@ -137,7 +160,7 @@ def recover_llm_failure(
     if policy["mode"] == "normal":
         event_data["maxRetries"] = policy["maxRetries"]
     session.append("llm/retry", event_data)
-    if not cancellable_delay(delay_ms, signal):
+    if not await cancellable_delay(delay_ms, signal):
         return None
     session.append("llm/retry-started", {"retryId": retry_id, "turn": turn,
                                          "step": step, "retry": retry})
@@ -173,7 +196,7 @@ def _previous_retry(session, turn: int, step: int, provider: str, policy: dict) 
     return event["data"]["retry"] if event is not None else 0
 
 
-def _on_request_error(payload: dict, next: Callable[[], Any] | None = None) -> Any:
+async def _on_request_error(payload: dict, next: Callable[[], Any] | None = None) -> Any:
     """agent/request-error 监听器：复刻上游 llm-retry 的 recover 入口。
 
     payload.failure 是 LlmFailure 实例（loop 以异常传入，同上游携带
@@ -181,7 +204,7 @@ def _on_request_error(payload: dict, next: Callable[[], Any] | None = None) -> A
     注册表 providerRetryPolicy 决议，mini 在请求时直接读适配器字段）。
     """
     agent = payload["agent"]
-    return recover_llm_failure(
+    return await recover_llm_failure(
         session=agent.session,
         turn=payload["turn"],
         step=payload["step"],

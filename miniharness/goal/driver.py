@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 from typing import Callable
 
-from ..core.scope import Context
+from ..core.scope import Context, _maybe_await
 from ..core.session.message import create_message
 from .prompt import render_goal_round_prompt
 
@@ -64,18 +64,18 @@ class GoalDriver:
                 and reservation["round"] == view["roundsStarted"] + 1
                 and reservation["round"] <= view["maxGoalRounds"])
 
-    def _on_pre_step(self, payload: dict, next_fn: Callable) -> dict:
+    async def _on_pre_step(self, payload: dict, next_fn: Callable) -> dict:
         """验证被认领的 goal 轮次消息（fail-closed），再委派下游决策。"""
         claimed = [m for m in payload.get("messages", [])
                    if isinstance(m, dict) and (m.get("source") or {}).get("kind") == "goal"]
         if not claimed:
-            return next_fn()
+            return await _maybe_await(next_fn())
         agent = payload.get("agent")
         session_id = id(agent.session)
         if not self._valid_reservation(agent):
             self._reservations.pop(session_id, None)
             return {"kind": "reject"}
-        decision = next_fn()
+        decision = await _maybe_await(next_fn())
         if isinstance(decision, dict) and decision.get("kind") == "reject":
             self._reservations.pop(session_id, None)
             return decision
