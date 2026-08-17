@@ -162,10 +162,10 @@ mini 的同步近似：上游是字节流 + async，mini 是"行馈送 + 内存�
 | 方法 | 语义（上游） | mini |
 |---|---|---|
 | `initialize` | cwd/provider/model + 可选 maxTokens → `serverInfo` | 记录参数，返回 `{"serverInfo": {"name": "deepseek-harness-sdk-runtime", "version": "0.0.1"}}`（name 是 wire 稳定标识） |
-| `session/prompt` | 未知 sessionId **懒创建** agent+session；返回 durable enqueue 回执 `messageId` | 懒创建 `AgentLoop`，跑一个回合，返回 `msg-N` |
+| `session/prompt` | 未知 sessionId **懒创建** agent+session；返回 durable enqueue 回执 `messageId` | 懒创建 `AgentLoop`，同步跑完一个回合，返回真实消息 id |
 | `shutdown` | → `{}` | `{}` |
 
-`messageId` 只标识入队的 user 消息，不标识任何后续 assistant 消息或回合结束（上游 README 明确）。通知（`session.event` / `session.status` / `subagent.*`）在 mini 中由 loop 事件钩子承载，属简化标注。
+`messageId` 只标识入队的 user 消息，不标识任何后续 assistant 消息或回合结束（上游 README 明确）。mini 的 `messageId` 是 `create_message` 签发的真实 id，与会话日志中 `agent/inbox/spliced` 的 `inserted` 消息 id 一致——官方 SDK 客户端 `Session.run` 依赖这条回执确认投递（`python/sdk api.py _is_inbox_receipt`），已由互操作测试验证（见 7.6.4）。通知（`session.event` / `session.status` / `subagent.*`）在 mini 中经 worker 回合级透传（inbox 回执、assistant/message、turn/end 逐条 + 末尾 status idle），上游为逐块流式，属简化标注。
 
 ### 7.6.3 硬性规定（被 21 个测试钉住）
 
@@ -173,9 +173,22 @@ mini 的同步近似：上游是字节流 + async，mini 是"行馈送 + 内存�
 2. 无 handler → `-32601`；handler 抛错 → `-32603` 且 message 原样；错误响应带 `JsonRpcResponseError(code, data)`。
 3. 响应帧只 settle 匹配 id 的 pending；未知 id 忽略；close 后拒绝写入。
 4. `serverInfo.name` 恒为 `deepseek-harness-sdk-runtime`。
-5. `session/prompt` 未知 sessionId 懒创建会话，`messageId` 递增签发。
+5. `session/prompt` 未知 sessionId 懒创建会话，返回真实消息 id（与 inbox 回执一致，非递增计数器）。
 
 验证：`python -m unittest tests.test_sdk_protocol -v`（21 个用例，含端到端 stdio 行仿真）。
+
+### 7.6.4 官方 Python SDK 互操作（`tests/test_upstream_sdk_interop.py`）
+
+用上游官方 `python/sdk` 的 `DeepSeekHarness` 客户端通过 `launch_args_override` 驱动 mini worker 子进程（`python -m miniharness.seams.subagent.worker sdk`），验证 wire 契约双向互通：
+
+- `Session.run` 全流程：`session/prompt` 响应 → 等 inbox 回执（`agent/inbox/spliced` inserted 含 messageId）→ 收集 `assistant/message` / `turn/end` → 等 `session.status == idle` → 结算 `final_response` / `finish_reason`；
+- `final_response` 取最后一条 assistant/message 的文本（返回"任务完成。"），`finish_reason` 归一为 `completed`；
+- 会话复用：同一 session 第二次 run 的 turn 编号递增（第二个回合 turn/end 的 turn == 2）；mini 以 `_event_boundary` 记录上次透传边界，**只透传本次投递后的新事件**，会话复用不重发历史回合（与上游服务端行为一致，避免客户端 `received` 门控侥幸遮蔽）。
+- 通知序列（worker `_SdkWorkerRuntime`）：prompt 同步跑完整回合后，逐条发 `session.event`（本次回合新增的 agent/inbox/spliced 回执 → assistant/message → turn/end），末尾 `session.status == idle`，全部**先于响应帧**写出。
+
+两个可选前提（缺任一即 skip，不进默认 CI 门禁）：本机装 `pydantic>=2.12`；上游 SDK 源码可达（`MINIHARNESS_UPSTREAM_SDK` 环境变量指向 `python/sdk/src`，缺省探测 `../deepseek-harness/python/sdk/src`——不能假设测试环境与工作区布局一致，找不到就 skip）。
+
+验证：`python tests/test_upstream_sdk_interop.py`（4 个用例，需环境变量 + pydantic）。
 ## 7.7 复现：ACP 最小子集（`miniharness/protocol/acp.py`）
 
 > 对应 dsh 真实源码：`packages/acp/acp`（`apply()` + `codec.ts`）。自动化专用契约全对齐，跑在假模型上。

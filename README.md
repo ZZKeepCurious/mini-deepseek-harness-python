@@ -47,12 +47,13 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 | Continuable subagents (`start_continuable`/`send_message`, durable child session + cold resume, settlement delivery, async event-driven A8 (submit-and-return + watchSettlement + steer batch merge), `send_message`/`interrupt_agent`/`list_agents` control tools) | `packages/subagent` (subagent + subagent-in-process-driver + tool-subagent-control + tool-subagent-report) |
 | Presets / agent intervention / trajectory / dynamic plugins / approval | `packages/preset` + `core/agent` + `interaction` |
 | Protocol entries (ACP / JSON-RPC SDK / hooks bridge) | `acp` + `sdk` + `hooks` |
+| Official Python SDK interop (upstream `DeepSeekHarness` drives mini worker via `launch_args_override`; `tests/test_upstream_sdk_interop.py`, skips without pydantic/upstream sources) | `python/sdk` |
 | Async event bus, true parallel tools + barrier | `core/agent-loop` |
 | CI (GitHub Actions, Python 3.10~3.13, integration-tagged real-API tests) | — |
 
-Planned: SDK interop tests and web surface are deprioritized.
+Planned: web surface is deprioritized.
 
-Status: **779 unit tests passing** (stdlib only; optional `pyyaml` for YAML config).
+Status: **808 unit tests passing** (stdlib only; optional `pyyaml` for YAML config).
 
 ## Getting started
 
