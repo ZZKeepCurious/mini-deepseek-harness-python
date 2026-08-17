@@ -14,13 +14,14 @@
 
 mini 简化标注：
   * 上游 EpochHeader 含 system/tools（可估 header 开销）；mini 的 request/header
-    形状为 {header:{model,provider},reason}（见 AGENTS.md 差异清单），无
-    system/tools 字段，故 estimateHeader 恒为 0。
+    形状为 {header:{config, system?, tools?},reason}（见 AGENTS.md 差异清单），
+    estimate_header 定价 system + tools 启发式开销（config 不计价，同上游）。
   * 上游 usage 锚同时计入 cacheRead/cacheWrite；mini 的 TokenUsage 归一同样
     携带 inputTokens/outputTokens/cacheReadTokens/cacheWriteTokens，此处逐项相加。
 """
 from __future__ import annotations
 
+import json
 from types import MappingProxyType
 from typing import Any
 
@@ -28,7 +29,8 @@ from ..core.session import SURFACE_TYPES, derive_event_message
 from .protocol import BlockAssembler
 
 __all__ = ["BLOCK_OVERHEAD", "CHARS_PER_TOKEN", "ROLE_OVERHEAD", "TokenMeter",
-           "estimate_content", "estimate_header", "estimate_message"]
+           "estimate_content", "estimate_header", "estimate_message",
+           "estimate_system_tokens", "estimate_tools_tokens"]
 
 # ---------- 启发式定价（estimate.ts） ----------
 
@@ -58,12 +60,27 @@ def estimate_message(message) -> int:
     return estimate_content(message.get("content", [])) + ROLE_OVERHEAD
 
 
-def estimate_header(header) -> int:
-    """定价请求信封的非 surface 部分。
+def estimate_system_tokens(header) -> int:
+    """定价请求信封的 system 部分（上游 estimate.ts estimateSystemTokens）：
+    无 system 字段 → 0；否则 ceil(len/4) + ROLE_OVERHEAD。"""
+    if header is None or header.get("system") is None:
+        return 0
+    return _ceil_len(header["system"]) + ROLE_OVERHEAD
 
-    mini 简化：request/header 无 system/tools 字段（见模块 docstring），恒为 0。
-    """
-    return 0
+
+def estimate_tools_tokens(header) -> int:
+    """定价请求信封的 tools 部分（上游 estimate.ts estimateToolsTokens）：
+    无 tools 或空列表 → 0；否则 ceil(JSON长度/4) + BLOCK_OVERHEAD。"""
+    tools = (header or {}).get("tools") or []
+    if not tools:
+        return 0
+    return _ceil_len(json.dumps(tools, ensure_ascii=False, sort_keys=True)) + BLOCK_OVERHEAD
+
+
+def estimate_header(header) -> int:
+    """定价请求信封的非 surface 部分（上游 estimate.ts estimateHeader）：
+    system + tools 启发式开销，config 不计价。"""
+    return estimate_system_tokens(header) + estimate_tools_tokens(header)
 
 
 def _ceil_len(text: Any) -> int:
@@ -178,7 +195,7 @@ class TokenMeter:
 
         etype = ev["type"]
         if etype == "request/header":
-            next_header = dict(ev["data"])
+            next_header = dict(ev["data"].get("header", {}))
         elif etype == "step/start":
             if state["stepStart"] is not None:
                 raise ValueError(

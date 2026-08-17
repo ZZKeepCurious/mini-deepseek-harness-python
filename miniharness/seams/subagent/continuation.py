@@ -343,7 +343,7 @@ class SubagentContinuationManager:
             },
         )
         if quiet:
-            self.parent.inbox.append(message)
+            self.parent.inbox.append("next-step", message)
         else:
             self._deliver(message)
 
@@ -612,11 +612,12 @@ class SubagentContinuationManager:
             else:
                 self.parent.steer(message)
         else:
-            # A7 同步路径：父 idle → followup；父 running → 非唤醒 inbox。
+            # A7 同步路径：父 idle → followup；父 running → 非唤醒 inbox
+            # （next-step：下一步边界消费，对齐上游 inject 语义）。
             if self.parent.status == "idle":
                 self.parent.followup(message)
             else:
-                self.parent.inbox.append(message)
+                self.parent.inbox.append("next-step", message)
 
     # ---------- 子专属 report 工具 ----------
 

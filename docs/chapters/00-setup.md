@@ -71,7 +71,7 @@ MiniHarness 是教学实现，不是移植。下面是简化清单，每一条�
 | 请求/回合同步阻塞式流式（不与在飞任务交错） | 逐 chunk durable 事件 |
 | JSON/YAML 配置 + 补丁（pyyaml 可选，缺省退化 JSON；`!!js` 仅 `process.env.<NAME>` 子集） | YAML cordis.yml（同样的 id/insert/replace 语义） |
 | LLM 失败以异常抛出（finish 带内 `{kind:'error'|'aborted'}` 与异常同走 `agent/request-error` waterfall） | `LlmError` 编码 `CONTEXT_WINDOW_EXCEEDED` / `EMPTY_RESPONSE`（可重试）等 |
-| 无 `agent/turn-stopping`、`system-prompt/assemble` waterfall | 上游都有（turn-stopping 是串行终点检查点） |
+| `agent/turn-stopping`、`system-prompt/assemble` waterfall 已实现（turn-stopping 为串行终点检查点，见第 4/13 章） | 上游都有 |
 | JSONL 明文行；SQLite 列 `(session_id, seq, type, data)` | JSONL 默认 checksum+Zstandard 压缩；SQLite 列 `(session_id, seq, type, time, data, source_event_seqs, surface_op)` |
 | `assistant/message` source 带 `{kind, provider, model}`（消息无 `id` 语义差异待核） | 消息 `{id, role, content, source}` 全字段 |
 

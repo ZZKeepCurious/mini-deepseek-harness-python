@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Callable
@@ -81,6 +82,42 @@ class ToolExec:
     agent: Any = None
 
 
+class FusedSignal:
+    """上游 fuseToolSignals（tools/src/index.ts）的同步替身。
+
+    每工具独立的包装信号与原调用方信号（step 共享）熔合：is_set() =
+    own or shared；set() 只置 own。这样"单工具超时"只中断该工具，不传染
+    并行组内其它工具；cancel 置位 shared 时全部熔合信号随之报告 set。
+    """
+
+    def __init__(self, shared: threading.Event):
+        self._shared = shared
+        self._own = threading.Event()
+
+    def set(self) -> None:
+        self._own.set()
+
+    def is_set(self) -> bool:
+        return self._own.is_set() or self._shared.is_set()
+
+    def clear(self) -> None:
+        self._own.clear()
+
+    def wait(self, timeout: float | None = None) -> bool:
+        """轮询近似：等 own 或 shared 置位（无真实事件监听，语义等价）。"""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            if self.is_set():
+                return True
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                time.sleep(min(remaining, 0.01))
+            else:
+                time.sleep(0.01)
+
+
 @dataclass
 class Tool:
     name: str
@@ -100,6 +137,8 @@ class ToolResult:
 
     error_info：可选 {name, code}，仅当存在时写入 tool/result 的 error
     字段（对齐上游 llm/src/types.ts:295 —— error.info 存在才携带）。
+    concludes_turn：工具结算即终结当前回合（上游 ToolExecutionResult.
+    concludesTurn，工具结果回灌后不再进入下一步）。
     """
     ok: bool
     content: Any = None
@@ -108,6 +147,7 @@ class ToolResult:
     meta: dict = field(default_factory=dict)
     _aborted: bool = field(default=False, repr=False, compare=False)
     error_info: dict | None = field(default=None, repr=False, compare=False)
+    concludes_turn: bool = field(default=False, repr=False, compare=False)
 
 
 # ---------- 作用域化注册表 ----------

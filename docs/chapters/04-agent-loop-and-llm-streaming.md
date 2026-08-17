@@ -400,11 +400,11 @@ print([e["type"] for e in session.events])
 
 | 上游事件/扩展点 | 用途 | mini 对应 |
 |---|---|---|
-| `system-prompt/assemble` waterfall | 提示词按片段组装（hook 可注入上下文） | 直接拼接，无扩展点 |
-| `agent/request` waterfall → `llm/stream` | 请求构造拦截（steering） | 未实现 waterfall，直连 adapter |
+| `system-prompt/assemble` waterfall | 提示词按片段组装（hook 可注入上下文） | 已实现（`core/system_prompt.py` assemble + contexts/tools/variables 提供器，第 13 章） |
+| `agent/request` waterfall → `llm/stream` | 请求构造拦截（steering） | 已实现（`_request_config`：seed=路由 config，payload 附 turn/step/signal，provider 缺失 fail loud） |
 | `agent/request-error` waterfall | 规范错误（如上下文溢出）后的重试决策 | 已实现（§4.10 重试/退避） |
-| `agent/turn-stopping` serial | turn 结束前串行终点检查 | 未实现（mini 的压力检查在 `agent/pre-step`，即 §4.10 压缩接线；turn-stopping 扩展点本身未复现） |
-| `finish {kind:'error'\|'aborted'}` 带内失败 | 流中途失败也可经协议传递 | 只在 `stream()` 抛 `LlmFailure` |
+| `agent/turn-stopping` serial | turn 结束前串行终点检查 | 已实现（serial/aserial；step/end 后 next-step 空才派发；pre-step 拒绝→blocked 终局不派发；max-tokens 粘滞不降级） |
+| `finish {kind:'error'\|'aborted'}` 带内失败 | 流中途失败也可经协议传递 | 已实现（带内错误/中止与异常路径同走 `agent/request-error` waterfall，§4.10） |
 | `EMPTY_RESPONSE` 编码 | 空响应 = 规范错误，可重试 | 已实现且默认可重试（§4.10） |
 
 ## 4.10 重试/退避与上下文溢出降级

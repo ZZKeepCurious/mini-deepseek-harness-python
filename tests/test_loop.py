@@ -39,7 +39,8 @@ class TestLoop(unittest.TestCase):
         session, loop, _ = _make_env()
         loop.followup("你好")
         types = [e["type"] for e in session.events]
-        self.assertEqual(types[0], "turn/start")
+        # inbox 入队先落 durable agent/inbox/spliced，turn/start 随认领后开
+        self.assertEqual(types[0], "agent/inbox/spliced")
         self.assertEqual(types[-1], "turn/end")
         self.assertIn("step/start", types)
         self.assertIn("step/end", types)
@@ -204,6 +205,65 @@ class TestLoop(unittest.TestCase):
             loop.followup("开始")
         self.assertEqual(session.events[-1]["type"], "turn/end")
         self.assertEqual(turn_balance(session.events), 0)
+
+
+class TestRequestEnvelope(unittest.TestCase):
+    """请求信封（request/header + request/context + agent/request waterfall）。
+
+    上游对照：packages/core/agent-loop/src/agent.ts buildRequest +
+    packages/core/session/src/request-header.ts canonicalHeader。
+    """
+
+    def _header_event(self, session):
+        events = [e for e in session.events if e["type"] == "request/header"]
+        self.assertEqual(len(events), 1)
+        return events[0]["data"]
+
+    def test_header_canonical_shape(self):
+        session, loop, _ = _make_env()
+        loop.followup("你好")
+        data = self._header_event(session)
+        self.assertEqual(data["reason"], "initial")
+        header = data["header"]
+        # canonical 信封：config 必有（provider/model），system/tools 非空才带
+        self.assertEqual(header["config"], {"provider": "fake", "model": None})
+        self.assertIn("system", header)
+        self.assertIn("助手", header["system"])
+        self.assertTrue(header["tools"])
+        self.assertEqual(header["tools"][0]["name"], "bash")
+        # adapter 未显式设 max_tokens → 无 adapterDefaults 字段（canonicalHeader）
+        self.assertNotIn("adapterDefaults", header)
+        # request/context 在首个请求落一次（provider/model）
+        ctx = [e for e in session.events if e["type"] == "request/context"]
+        self.assertEqual(ctx[0]["data"], {"provider": "fake", "model": None})
+
+    def test_header_reuse_avoids_change_log(self):
+        session, loop, _ = _make_env()
+        loop.followup("第一句")
+        loop.followup("第二句")
+        # 两次请求的 config/system/tools 一致 → 不追加 change（上游 headerEquals）
+        self.assertEqual(
+            [e["type"] for e in session.events].count("request/header"), 1
+        )
+
+    def test_agent_request_waterfall_overrides_model(self):
+        session, loop, _ = _make_env()
+
+        def override(cur, nxt):
+            return {**cur, "model": "overridden"}
+
+        loop.ctx.on("agent/request", override)
+        loop.followup("你好")
+        data = self._header_event(session)
+        self.assertEqual(data["header"]["config"]["model"], "overridden")
+        ctx = [e for e in session.events if e["type"] == "request/context"]
+        self.assertEqual(ctx[0]["data"]["model"], "overridden")
+
+    def test_agent_request_without_provider_fails_loud(self):
+        session, loop, _ = _make_env()
+        loop.ctx.on("agent/request", lambda cur, nxt: {**cur, "provider": None})
+        with self.assertRaisesRegex(RuntimeError, "no provider/model"):
+            loop.followup("你好")
 
 
 if __name__ == "__main__":

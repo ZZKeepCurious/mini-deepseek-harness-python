@@ -145,6 +145,13 @@ class Context:
                 coros.append(_const())
         return await asyncio.gather(*coros)
 
+    async def aserial(self, event: str, payload: Any = None) -> list:
+        """串行异步版：语义与 serial 相同（按注册序执行，async 监听器 await）。"""
+        results = []
+        for fn in self._listeners_for(event):
+            results.append(await _maybe_await(fn(payload)))
+        return results
+
     # ---------- 副作用与生命周期 ----------
 
     def effect(self, fn: Callable) -> Callable:

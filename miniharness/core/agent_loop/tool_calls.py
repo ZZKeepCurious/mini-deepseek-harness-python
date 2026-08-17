@@ -22,6 +22,7 @@ from typing import Any, Callable
 from ..scope import Context
 from ..session import Session, create_message, deep_freeze, text_block, tool_result_block
 from ..tools import (
+    FusedSignal,
     ToolExec,
     ToolResult,
     execution_mode,
@@ -110,6 +111,7 @@ async def schedule_tool_calls(
     """
     planned = list(tool_calls)
     next_ = 0
+    concluded = False
     while next_ < len(planned):
         first = planned[next_]
         tool = tools.resolve(first["name"])
@@ -119,13 +121,14 @@ async def schedule_tool_calls(
             session, ctx, tools, turn, step, group, mode, signal, body_fn, max_parallel,
             agent=agent,
         )
+        concluded = concluded or outcome["concluded"]
         next_ += outcome["consumed"]
         if outcome["aborted"]:
             for call in planned[next_:]:
                 seq = append_tool_call(session, turn, step, call["id"], call["name"], call["arguments"])
                 emit_tool_result(session, turn, step, call["id"], _aborted_result(), seq)
-            return False, True
-    return False, False
+            return concluded, True
+    return concluded, False
 
 
 async def _run_group(
@@ -138,16 +141,18 @@ async def _run_group(
     next_to_start = 0
     committed = 0
     started = 0
+    concluded = False
     aborted = signal.signal.is_set()
     scheduler_failure: BaseException | None = None
     in_flight: dict[int, asyncio.Task] = {}
     body_fn = body_fn or pipeline_async_body
 
     async def commit_ready() -> None:
-        nonlocal committed
+        nonlocal committed, concluded
         while committed < len(group) and slots[committed] is not None:
             call = group[committed]
             emit_tool_result(session, turn, step, call["id"], slots[committed], call_seqs[committed])
+            concluded = concluded or slots[committed].concludes_turn
             committed += 1
 
     async def start_call(index: int) -> None:
@@ -175,7 +180,8 @@ async def _run_group(
         if rejected is not None:
             slots[index] = rejected
             return
-        exec_ = ToolExec(signal=signal.signal, agent=agent)
+        # fuseToolSignals 隔离：每工具独立熔合信号，超时只中断本工具
+        exec_ = ToolExec(signal=FusedSignal(signal.signal), agent=agent)
         task = asyncio.create_task(body_fn(ctx, tool, frozen, exec_))
         in_flight[index] = task
 
@@ -234,7 +240,7 @@ async def _run_group(
         for call in group[started:]:
             seq = append_tool_call(session, turn, step, call["id"], call["name"], call["arguments"])
             emit_tool_result(session, turn, step, call["id"], _aborted_result(), seq)
-        return {"consumed": len(group), "aborted": True}
+        return {"consumed": len(group), "aborted": True, "concluded": concluded}
     if committed != started:
         raise RuntimeError("tool-call scheduler: uncommitted settled calls")
-    return {"consumed": started, "aborted": False}
+    return {"consumed": started, "aborted": False, "concluded": concluded}

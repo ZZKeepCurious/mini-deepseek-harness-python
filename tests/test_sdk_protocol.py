@@ -140,7 +140,8 @@ class TestSdkRuntime(unittest.TestCase):
         self.assertEqual(result["messageId"], "msg-1")
         self.assertIn("sdk-1", rt.sessions)
         events = rt.sessions["sdk-1"].session.events
-        self.assertEqual(events[0]["type"], "turn/start")
+        self.assertEqual(events[0]["type"], "agent/inbox/spliced")
+        self.assertIn("turn/start", [e["type"] for e in events])
         # 回合真的跑完：turn/end 已落日志
         self.assertEqual(events[-1]["type"], "turn/end")
 

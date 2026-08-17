@@ -20,7 +20,7 @@
 
 关键语义细节：
 
-1. **inbox 是唯一队列**：所有输入统一进 inbox，消息成为普通 FIFO turn——这就是为什么 `inject` 的"背景信息"会在下一次 `followup` 时一并进入日志（顺序保持）；
+1. **inbox 是唯一队列**：所有输入统一进 inbox，消息成为普通 FIFO turn——这就是为什么 `inject` 的"背景信息"会在下一次 `followup` 时一并进入日志（顺序保持）；（mini 真实实现为双队列：followup→next-turn、steer/inject→next-step，见 `core/agent_loop/inbox.py` 与 `agent/inbox/spliced` 事件；本节教学模型简化为单队列以便推演。）
 2. **取消是边界生效的**：`cancel` 清空排队 + 标记中止，活跃 step 跑完后不再继续；未派发的 tool call 补 `ABORTED_BEFORE_DISPATCH` 错误结果对，turn 以 `{kind:'aborted'}` 闭合；
 3. **被拒绝的 claimed 消息"既不丢弃也不重发"**（pre-step reject 的语义，见第 04 章）；
 4. **生命周期三态**：对外只暴露 `idle | running`（内部另有 maintenance）；`running` 是"驱动级排干区间"而非 turn 是否开着；quiescence = 无活跃 driver 且无 maintenance；

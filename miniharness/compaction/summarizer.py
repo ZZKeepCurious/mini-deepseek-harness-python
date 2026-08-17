@@ -77,8 +77,8 @@ def frame_summary(summary: list) -> list:
 def summarize_with_adapter(agent, config: dict, input_: dict) -> dict:
     """跑一次摘要：重放 region 消息 + 压缩指令，经 agent 的适配器流式产出。
 
-    input_: {messages: [...], system?: str, tools?: [...]}（mini 无 system/tools
-    信封字段，仅 messages 有值，见 AGENTS.md request/header 简化）。
+    input_: {messages: [...], system?: str, tools?: [...]}（mini 仅 messages
+    有值——压缩请求不经 agent/request 信封；system 用 agent.system_prompt）。
     返回 {summary, provider, model, maxTokens?, usage?}。
     """
     from ..llm import BlockAssembler, LlmFailure

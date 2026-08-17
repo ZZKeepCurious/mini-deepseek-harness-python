@@ -105,7 +105,7 @@ def _append(session: Session, type_: str, data: dict, **kwargs) -> dict:
 def _seed_history(session: Session, n: int = 2) -> int:
     """写 n 个回合（最后一回合保持打开，模拟运行中的会话）。返回首个 user seq。"""
     session.append("request/header",
-                   {"header": {"provider": "fake", "model": "fake-model"},
+                   {"header": {"config": {"provider": "fake", "model": "fake-model"}},
                     "reason": "initial"})
     first_seq = None
     for i in range(n):

@@ -185,10 +185,10 @@ def fold_trajectory(events: list | tuple, first_seq: int = 0) -> TrajectorySnaps
                 turn_open.ended_at = time
                 turn_open = None
         elif t == "request/header":
-            header = d.get("header", {})
+            config = d.get("header", {}).get("config", {})
             snapshot.requests.append({
                 "seq": ev["seq"], "turn": d.get("turn", 0), "step": d.get("step", 0),
-                "model": header.get("model"), "provider": header.get("provider"),
+                "model": config.get("model"), "provider": config.get("provider"),
                 "reason": d.get("reason"),
             })
 

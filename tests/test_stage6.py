@@ -403,8 +403,10 @@ class TestForkChannel(unittest.TestCase):
         out = child.run("写个函数")
         self.assertIn("子任务完成", out)
         child_events = child._loop.session.events
-        # 无 seed 时 Session 不补 end-seed 标记，回合直接从 turn/start 起
-        self.assertEqual(child_events[0]["type"], "turn/start")
+        # 无 seed 时 Session 不补 end-seed 标记；输入先落 agent/inbox/spliced，
+        # 回合从随后的 turn/start 起
+        self.assertEqual(child_events[0]["type"], "agent/inbox/spliced")
+        self.assertIn("turn/start", [e["type"] for e in child_events])
         self.assertNotIn("session/end-seed", [e["type"] for e in child_events])
 
 

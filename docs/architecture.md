@@ -110,7 +110,8 @@ miniharness/
 | `core/tools.py` | `packages/core/tools` | |
 | `core/agent_loop/agent.py` | `packages/core/agent-loop/src/agent.ts` | |
 | `core/agent_loop/tool_calls.py` | `packages/core/agent-loop/src/tool-calls.ts` | |
-| `core/system_prompt.py` | `packages/core/system-prompt/src/` | 仅 section 注册/渲染；assemble waterfall、提供器、插值、scope 层叠未复现（简化标注见模块 docstring） |
+| `core/agent_loop/inbox.py` | `packages/core/agent-loop/src/inbox.ts` | 双队列（followup→next-turn / steer→next-step）+ `agent/inbox/spliced` 持久化 |
+| `core/system_prompt.py` | `packages/core/system-prompt/src/` | assemble waterfall + contexts/tools/variables 提供器 + `{{variable}}` 严格插值；scope 层叠、运行时上下文快照注入请求历史、assembly.tools→请求工具集成未复现（简化标注见模块 docstring） |
 | `llm/protocol.py` | `packages/llm/llm/src/` | |
 | `llm/deepseek.py` | `packages/llm/llm-deepseek/src/` | |
 | `llm/fake.py` | 无 | 教学扩展 |

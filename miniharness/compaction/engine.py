@@ -165,13 +165,15 @@ class CompactionEngine:
         return compact_surface_region(agent.session, self.meter, agent, self.config, start, end)
 
     def _routed_target(self, agent):
-        """最新 durable 路由请求的 provider/model（request/header 信封，无则 None）。"""
+        """最新 durable 路由请求的 provider/model（request/header 信封
+        config，无则 None；对齐上游 compaction-basic routedTarget 读
+        session.requestHeader().config）。"""
         for ev in reversed(agent.session.events):
             if ev["type"] != "request/header":
                 continue
-            header = ev["data"].get("header", {})
-            provider = header.get("provider")
-            model = header.get("model")
+            config = ev["data"].get("header", {}).get("config", {})
+            provider = config.get("provider")
+            model = config.get("model")
             if provider and model:
                 return {"provider": provider, "model": model}
             return None

@@ -18,7 +18,18 @@ SESSION_FORMAT_VERSION = 0
 KNOWN_TYPES = frozenset({
     "turn/start", "turn/end", "step/start", "step/end",
     "user/message", "assistant/message", "assistant/chunk",
-    "tool/call", "tool/result", "request/header", "session/end-seed",
+    "tool/call", "tool/result",
+    # 请求信封（上游 agent-loop/src/agent.ts SessionEventMap，log-only 非
+    # surface）：request/header 存 canonical 快照 {header:{config,
+    # adapterDefaults?, system?, tools?}, reason}，attempt/重试不重复落；
+    # request/context {provider, model, contextWindow?} 在 provider/model/
+    # contextWindow 变化时追加
+    "request/header", "request/context", "session/end-seed",
+    # Inbox 变更（上游 agent/src/inbox.ts SessionEventMap，log-only 非 surface：
+    # 每次入队/认领/清除的 splice 形状 {target, start, removedCount?, inserted,
+    # outcome?}，冷恢复重放重建 live 状态；认领不写 outcome，丢弃式删除写
+    # 'canceled'）
+    "agent/inbox/spliced",
     # 审批审计（上游 user-approval/src/index.ts SessionEventMap，log-only 非 surface）
     "approval/asked", "approval/decided", "approval/policy",
     # 钩子审计（上游 hook-protocol/src/types.ts SessionEventMap，log-only 非 surface）

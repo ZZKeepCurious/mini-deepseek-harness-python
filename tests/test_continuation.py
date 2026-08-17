@@ -489,8 +489,9 @@ class TestAsyncContinuation(unittest.TestCase):
             self.assertEqual(self.mgr.state_of(cid)["kind"], "idle")
             await self.parent.when_idle_async()
             events = self.persistence.inspect(cid)["events"]
-            # mini 泵模型：一次 residency epoch = 一条 pump 会话（多条消息为 step）
-            self.assertEqual([e["type"] for e in events].count("turn/start"), 1)
+            # 对齐上游：两次 send_message → 两条 next-turn → 各占一个 turn
+            # （claim 每回合只从 next-turn 取一条），每回合 1 step
+            self.assertEqual([e["type"] for e in events].count("turn/start"), 2)
             self.assertEqual([e["type"] for e in events].count("step/start"), 2)
             user_texts = [e["data"]["content"][0]["text"] for e in events
                           if e["type"] == "user/message"]

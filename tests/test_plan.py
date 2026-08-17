@@ -11,7 +11,15 @@ from types import SimpleNamespace
 from miniharness.core.agent_loop.agent import AgentLoop
 from miniharness.core.scope import Context
 from miniharness.core.session import KNOWN_TYPES, Session
-from miniharness.core.system_prompt import SYSTEM_PROMPT_SERVICE, SystemPromptService, install_system_prompt
+from miniharness.core.system_prompt import (
+    SYSTEM_PROMPT_SERVICE,
+    TOOL_ORDER_REST,
+    SystemPromptService,
+    install_system_prompt,
+    order_tools,
+    render_context_snapshot,
+    render_prompt,
+)
 from miniharness.core.tools import Tool, ToolRegistry
 from miniharness.llm import FakeLlmAdapter
 from miniharness.plan import (
@@ -165,6 +173,143 @@ class SystemPromptServiceTest(unittest.TestCase):
         self.assertEqual([s["name"] for s in service.render({})], ["x"])
 
 
+class SystemPromptAssemblyTest(unittest.TestCase):
+    """装配面：contexts / tools / variables / assemble waterfall / 渲染。
+
+    上游对照：packages/core/system-prompt/src/index.ts（assemble /
+    renderPrompt / renderContextSnapshot / orderTools / complete 节）。
+    """
+
+    def setUp(self):
+        self.ctx = Context(name="sp-assembly")
+
+    def test_assemble_builds_all_providers(self):
+        service = SystemPromptService(self.ctx)
+        service.section("a", 0, "你是助手。")
+        service.context("cwd", 10, "cwd: {{cwd}}")
+        service.tools(lambda ctx: {"schemas": [{"name": "bash", "description": "d",
+                                                "parameters": {"type": "object"}}]})
+        service.variable("cwd", lambda ctx: ctx.get("cwd", "未知"))
+        assembly = service.assemble({"cwd": "/tmp"})
+        self.assertEqual(render_context_snapshot(assembly),
+                         "Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\ncwd: /tmp")
+        self.assertNotEqual(render_context_snapshot(assembly), "")
+        self.assertEqual([s["name"] for s in assembly["sections"]], ["a"])
+        # assembly 保留未插值文本（上游 AssembledContext：interpolation 前）
+        self.assertEqual(assembly["contexts"], [{"name": "cwd", "text": "cwd: {{cwd}}"}])
+        self.assertEqual([t["name"] for t in assembly["tools"]], ["bash"])
+        self.assertEqual(assembly["variables"], {"cwd": "/tmp"})
+        self.assertIn("cwd: /tmp", render_context_snapshot(assembly))
+
+    def test_variables_rendering_rules(self):
+        service = SystemPromptService(self.ctx)
+        service.section("v", 0, "值={{value}}")
+        # 未知变量 → fail loud
+        service.variable("value", lambda ctx: "x")
+        assembly = service.assemble({})
+        self.assertEqual(render_prompt(assembly), "值=x")
+        # 畸形引用（{{}} 空名）→ 抛错
+        service.section("bad", 1, "值={{}}")
+        with self.assertRaises(ValueError):
+            render_prompt(service.assemble({}))
+        # 未注册变量 → 抛错
+        service2 = SystemPromptService(self.ctx)
+        service2.section("u", 0, "{{missing}}")
+        with self.assertRaisesRegex(ValueError, "未知 prompt 变量"):
+            render_prompt(service2.assemble({}))
+        # 值为 None → 抛错
+        service3 = SystemPromptService(self.ctx)
+        service3.section("n", 0, "{{none}}")
+        service3.variable("none", lambda ctx: None)
+        with self.assertRaisesRegex(ValueError, "无值"):
+            render_prompt(service3.assemble({}))
+        # 孤立 {{ 无闭合 → 字面散文（不抛错）
+        service4 = SystemPromptService(self.ctx)
+        service4.section("lit", 0, "这是 {{ 字面")
+        self.assertEqual(render_prompt(service4.assemble({})), "这是 {{ 字面")
+
+    def test_unknown_variable_reports_registered(self):
+        service = SystemPromptService(self.ctx)
+        service.variable("known", lambda ctx: "k")
+        service.section("s", 0, "{{known}} {{other}}")
+        with self.assertRaisesRegex(ValueError, "registered variables: known"):
+            render_prompt(service.assemble({}))
+
+    def test_complete_section_restored_after_waterfall(self):
+        service = SystemPromptService(self.ctx)
+        service.section("persona", 0, "常规节", complete=True)
+        service.section("extra", 1, "额外节")
+
+        def rewrite(cur, nxt):
+            return {**cur, "assembly": {
+                **cur["assembly"], "sections": [{"name": "hack", "text": "篡改"}]}}
+        service._ctx.on("system-prompt/assemble", rewrite)
+        assembly = service.assemble({})
+        # waterfall 结果权威，但 complete 节恢复为唯一节（上游同款）
+        self.assertEqual([s["name"] for s in assembly["sections"]], ["persona"])
+
+    def test_multiple_complete_sections_fail(self):
+        service = SystemPromptService(self.ctx)
+        service.section("a", 0, "a", complete=True)
+        service.section("b", 1, "b", complete=True)
+        with self.assertRaisesRegex(ValueError, "多个 complete"):
+            service.assemble({})
+
+    def test_suppress_runtime_context(self):
+        service = SystemPromptService(self.ctx)
+        service.context("cwd", 10, "cwd")
+        self.assertEqual(len(service.assemble({})["contexts"]), 1)
+        disposer = service.suppress_runtime_context()
+        self.assertEqual(service.assemble({})["contexts"], [])
+        disposer()
+        self.assertEqual(len(service.assemble({})["contexts"]), 1)
+
+    def test_waterfall_may_rewrite_assembly(self):
+        service = SystemPromptService(self.ctx)
+        service.section("a", 0, "原节")
+
+        def drop(cur, nxt):
+            return {**cur, "assembly": {**cur["assembly"], "sections": []}}
+        service._ctx.on("system-prompt/assemble", drop)
+        self.assertEqual(service.assemble({})["sections"], [])
+
+    def test_tool_order_and_rest(self):
+        tools = [{"name": "zsh"}, {"name": "bash"}, {"name": "grep"}]
+        known = {"zsh", "bash", "grep"}
+        # 无 toolOrder → 字典序
+        self.assertEqual([t["name"] for t in order_tools(tools, None, known)],
+                         ["bash", "grep", "zsh"])
+        # toolOrder：列出顺序 + rest 插入未列出项
+        ordered = order_tools(tools, ["bash", TOOL_ORDER_REST], known)
+        self.assertEqual([t["name"] for t in ordered], ["bash", "grep", "zsh"])
+        # 未注册名 fail loud
+        with self.assertRaisesRegex(ValueError, "未注册工具"):
+            order_tools(tools, ["nope", TOOL_ORDER_REST], known)
+        # 缺 rest 条目 → 安装期抛错
+        with self.assertRaisesRegex(ValueError, "rest 条目"):
+            install_system_prompt(Context(name="x"), {"toolOrder": ["bash"]})
+
+    def test_variable_name_validation(self):
+        service = SystemPromptService(self.ctx)
+        with self.assertRaises(ValueError):
+            service.variable("Uppercase", lambda ctx: "x")
+        with self.assertRaises(ValueError):
+            service.variable("1bad", lambda ctx: "x")
+
+    def test_loop_injects_assembly_into_system_prompt(self):
+        ctx = Context(name="loop")
+        install_system_prompt(ctx)
+        service = ctx.inject(SYSTEM_PROMPT_SERVICE)
+        service.section("tool:goal", 114, "目标指引：{{mode}}")
+        service.variable("mode", lambda ctx: "标准")
+        adapter = _capture_adapter()
+        loop = AgentLoop(Session("sp1"), adapter, ToolRegistry(ctx), ctx)
+        loop.followup("你好")
+        header = [e for e in loop.session.events if e["type"] == "request/header"][0]
+        self.assertIn("目标指引：标准", header["data"]["header"]["system"])
+        self.assertIn("目标指引：标准", adapter.systems[-1])
+
+
 # ---------- PlanModeController ----------
 
 class PlanModeControllerTest(unittest.TestCase):
@@ -312,7 +457,7 @@ class PlanLoopIntegrationTest(unittest.TestCase):
         loop = AgentLoop(Session("i3"), _capture_adapter(), ToolRegistry(ctx), ctx)
         # 先有 request/header（plan inactive）→ 切换会产生叙述
         loop.session.append("request/header",
-                            {"header": {"provider": "fake", "model": "fake-model"},
+                            {"header": {"config": {"provider": "fake", "model": "fake-model"}},
                              "reason": "initial"})
         controller.set(loop, True)
         self.assertEqual(len(loop.inbox), 1)  # 叙述已入 inbox，未开回合
@@ -329,7 +474,7 @@ class PlanLoopIntegrationTest(unittest.TestCase):
         loop = AgentLoop(Session("i4"), _capture_adapter(), ToolRegistry(ctx), ctx)
         # 上次 header 时已是 inactive → 切 inactive 无叙述
         loop.session.append("request/header",
-                            {"header": {"provider": "fake", "model": "fake-model"},
+                            {"header": {"config": {"provider": "fake", "model": "fake-model"}},
                              "reason": "initial"})
         controller.set(loop, True)
         loop.inbox.clear()

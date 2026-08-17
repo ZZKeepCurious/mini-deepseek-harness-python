@@ -64,7 +64,9 @@ class TestAcpPrompt(unittest.TestCase):
                                     [{"type": "text", "text": "你好"}])
         self.assertEqual(result["stopReason"], "end_turn")
         loop = self.server.sessions[self.session_id]["loop"]
-        self.assertEqual(loop.session.events[0]["type"], "turn/start")
+        # 输入先落 agent/inbox/spliced，随后真实回合 turn/start → turn/end
+        self.assertEqual(loop.session.events[0]["type"], "agent/inbox/spliced")
+        self.assertIn("turn/start", [e["type"] for e in loop.session.events])
         self.assertEqual(loop.session.events[-1]["type"], "turn/end")
 
     def test_prompt_unknown_session_rejected(self):

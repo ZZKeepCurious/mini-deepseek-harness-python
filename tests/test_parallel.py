@@ -248,7 +248,7 @@ class TestScheduleTools(unittest.TestCase):
         err = [e for e in session.events if e["type"] == "tool/result" and "error" in e["data"]][0]
         self.assertEqual(err["data"]["message"]["content"][0]["isError"], True)
 
-    def test_timeout_sets_signal_and_drains(self):
+    def test_timeout_isolated_does_not_set_shared_signal_and_drains(self):
         session, ctx, reg = _env([])
         t = Tool(name="hang", description="d",
                  execute=lambda a, e: time.sleep(0.3) or "late",
@@ -258,7 +258,9 @@ class TestScheduleTools(unittest.TestCase):
         asyncio.run(schedule_tool_calls(session, ctx, reg, 1, 1,
                                         [{"id": "a", "name": "hang", "arguments": "{}"}],
                                         signal))
-        self.assertTrue(signal.signal.is_set())
+        # fuseToolSignals 隔离：单工具超时只中断该工具（熔合信号），
+        # 不置位调用方共享 step 信号——并行组内其它工具不受传染
+        self.assertFalse(signal.signal.is_set())
         err = [e for e in session.events if e["type"] == "tool/result"][0]
         self.assertTrue(err["data"]["message"]["content"][0]["isError"])
         self.assertIn("timeout", err["data"]["message"]["content"][0]["content"][0]["text"])
@@ -341,7 +343,8 @@ class TestLoopAsync(unittest.TestCase):
         text = asyncio.run(loop.run_async("你好"))
         self.assertEqual(text, "好了")
         self.assertEqual(loop.status, "idle")
-        self.assertEqual([e["type"] for e in session.events][0], "turn/start")
+        # inbox 入队先落 durable agent/inbox/spliced，turn/start 随认领后开
+        self.assertEqual([e["type"] for e in session.events][0], "agent/inbox/spliced")
         self.assertEqual([e["type"] for e in session.events][-1], "turn/end")
 
     def test_run_async_parallel_tool_roundtrip(self):
