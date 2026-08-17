@@ -36,6 +36,11 @@ miniharness/
 │   ├── retry_policy.py    # retry policy 解析（normal/always）
 │   ├── retry.py           # agent/request-error 恢复 + 退避
 │   └── token_meter.py     # TokenMeter 增量 fold + usage 折入锚
+├── attachment/             # packages/attachment（attachment + attachment-local）
+│   ├── types.py            # ImageAttachmentRef / SaveImageAttachment / ImageAttachmentLimits
+│   ├── error.py            # AttachmentError + 13 错误码 + is_image_admission_error
+│   ├── image.py            # 光栅探测（纯 stdlib 头部解析，简化标注）
+│   └── store.py            # LocalAttachmentStore（sha256 内容寻址 + 完整性复验）
 ├── compaction/            # packages/compaction
 │   ├── config.py          # 压缩规格解析（threshold / retain / retries）
 │   ├── region.py          # selectCompactableRange + 压缩事务（surface replace 检查点）
@@ -117,6 +122,7 @@ miniharness/
 | `llm/protocol.py` | `packages/llm/llm/src/` | |
 | `llm/deepseek.py` | `packages/llm/llm-deepseek/src/` | |
 | `llm/fake.py` | 无 | 教学扩展 |
+| `attachment/`（types + error + image + store） | `packages/attachment/attachment`（seam + types + error）+ `packages/attachment/attachment-local`（store + image） | 纯 stdlib 头部解析（上游 sharp 全解码）、普通写 + os.replace（上游 fsync + link 原子发布）、显式 root（上游 DSH_HOME/attachments/v1）；简化标注见模块 docstring |
 | `llm/retry_policy.py` | `packages/llm/llm/src/retry-policy.ts` | |
 | `llm/retry.py` | `packages/llm/llm-retry/src/` | |
 | `llm/token_meter.py` | `packages/llm/token-meter/src/` | |
@@ -153,7 +159,7 @@ miniharness/
 | 层 | 内容 | 允许依赖 |
 |---|---|---|
 | L0 地基 | `core/session`、`core/scope` | 无（两者互不依赖） |
-| L1 领域 | `llm/*`、`core/tools`、`core/system_prompt`、`core/session_store`、`boot/*` | 仅 L0 |
+| L1 领域 | `llm/*`、`core/tools`、`core/system_prompt`、`core/session_store`、`attachment`、`boot/*` | 仅 L0 |
 | L2 编排 | `core/agent_loop`、`compaction`、`jobs`、`plan`、`commands`、`goal`、`skills` | L0 + L1 |
 | L3 应用与入口 | `cli/*`、`protocol/*`、`seams/*`、`preset`、`extensions`、`interaction`、`client` | L0 ~ L2 |
 | 教学层 | `demo.py`、`example_plugins.py` | 任意层，但不得被业务模块依赖 |
@@ -176,4 +182,4 @@ miniharness/
 
 顶层 `__all__` 收敛至 28 项（白名单 + `FakeLlmAdapter`），由 `tests/test_dependencies.py` 断言钉死；白名单每一项都能在 §2 映射表里找到上游对应。
 
-**深路径契约（不在顶层 `__all__`，仅经子包深路径暴露，由 `tests/test_token_meter.py`、`tests/test_compaction.py`、`tests/test_jobs.py`、`tests/test_plan.py`、`tests/test_skills.py`、`tests/test_session_store.py` 钉死行为）**：`TokenMeter`、`install_compaction`、`CompactionEngine`、`compact_surface_region`、`select_compactable_range`、`inspect_compaction_entry_state`、`frame_summary`、`install_jobs`、`register_job_tools`、`LocalJobRegistry`、`JobDoneBox`、`fit_with_suffix`、`fit_completion_notice`、`install_system_prompt`、`SystemPromptService`、`install_plan_mode`、`PlanModeController`、`fold_plan_mode`、`resolve_config`、`install_skills`、`register_skill_tools`、`SkillRegistry`、`FileSystemSkillProvider`、`SkillTool`、`SKILL_GESTURE`、`render_skill_content`、`parse_skill_file`、`digest_catalog_entries`、`install_sessions`、`SessionStore`、`SessionForkError`、`SESSION_NOT_FOUND`、`SESSION_NOT_LIVE`、`SESSION_ALREADY_EXISTS`、`INVALID_BOUNDARY`、`OPEN_TURN`。装配约定：`apply_retry_planner(ctx)` → `install_compaction(ctx)` → `install_jobs(ctx)` → `install_system_prompt(ctx)` →（可选）`install_plan_mode(ctx, config)` →（可选）`install_skills(ctx)` →（可选）`install_sessions(ctx)`（均幂等；`CONTEXT_WINDOW_EXCEEDED` 不在重试白名单，由压缩接管；作业工具注册经 `register_job_tools(reg, ctx.inject("jobs"))`，`default_tools` 在 `ctx.jobs` 存在时自动收编；skill 工具注册经 `register_skill_tools(reg, ctx.inject("skills"))`，`default_tools` 在 `ctx.skills` 存在时自动收编；plan 依赖 systemPrompt 服务，缺失 fail loud；会话经 `install_sessions(ctx)` 提供 `ctx.sessions`，headless / demo / resume 入口已接入）。
+**深路径契约（不在顶层 `__all__`，仅经子包深路径暴露，由 `tests/test_token_meter.py`、`tests/test_compaction.py`、`tests/test_jobs.py`、`tests/test_plan.py`、`tests/test_skills.py`、`tests/test_session_store.py` 钉死行为）**：`TokenMeter`、`install_compaction`、`CompactionEngine`、`compact_surface_region`、`select_compactable_range`、`inspect_compaction_entry_state`、`frame_summary`、`install_jobs`、`register_job_tools`、`LocalJobRegistry`、`JobDoneBox`、`fit_with_suffix`、`fit_completion_notice`、`install_system_prompt`、`SystemPromptService`、`install_plan_mode`、`PlanModeController`、`fold_plan_mode`、`resolve_config`、`install_skills`、`register_skill_tools`、`SkillRegistry`、`FileSystemSkillProvider`、`SkillTool`、`SKILL_GESTURE`、`render_skill_content`、`parse_skill_file`、`digest_catalog_entries`、`install_sessions`、`SessionStore`、`SessionForkError`、`SESSION_NOT_FOUND`、`SESSION_NOT_LIVE`、`SESSION_ALREADY_EXISTS`、`INVALID_BOUNDARY`、`OPEN_TURN`、`LocalAttachmentStore`、`AttachmentStore`、`ImageAttachmentRef`、`SaveImageAttachment`、`ImageAttachmentLimits`、`AttachmentError`、`is_image_admission_error`、`detect_image`、`probe_image`、`supports_acp_image_prompts`、`admit_acp_prompt`、`assistant_block_to_acp`。装配约定：`apply_retry_planner(ctx)` → `install_compaction(ctx)` → `install_jobs(ctx)` → `install_system_prompt(ctx)` →（可选）`install_plan_mode(ctx, config)` →（可选）`install_skills(ctx)` →（可选）`install_sessions(ctx)`（均幂等；`CONTEXT_WINDOW_EXCEEDED` 不在重试白名单，由压缩接管；作业工具注册经 `register_job_tools(reg, ctx.inject("jobs"))`，`default_tools` 在 `ctx.jobs` 存在时自动收编；skill 工具注册经 `register_skill_tools(reg, ctx.inject("skills"))`，`default_tools` 在 `ctx.skills` 存在时自动收编；plan 依赖 systemPrompt 服务，缺失 fail loud；会话经 `install_sessions(ctx)` 提供 `ctx.sessions`，headless / demo / resume 入口已接入）。

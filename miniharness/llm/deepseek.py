@@ -45,6 +45,14 @@ __all__ = ["DeepSeekAdapter", "provider_retry_after_ms", "request_id", "serializ
 
 # ---------- DeepSeek wire 序列化（llm-deepseek/src/serialize.ts） ----------
 
+UNSUPPORTED_CONTENT = "UNSUPPORTED_CONTENT"
+
+
+def content_has_image(blocks: list) -> bool:
+    """内容块是否含 image 块（上游 contentHasImage，message.ts 同语义）。"""
+    return any(b.get("type") == "image" for b in blocks or [])
+
+
 def serialize_messages(messages: list[dict]) -> list[dict]:
     """把 harness 消息序列化为 DeepSeek chat-completions wire 消息。
 
@@ -52,6 +60,9 @@ def serialize_messages(messages: list[dict]) -> list[dict]:
     reasoning 仅在带 tool_calls 时作为 reasoning_content 回传、tool-call 块
     转为 tool_calls；user role 消息的文本走 {role:'user'}，每个 tool-result 块
     展开为独立的 {role:'tool', tool_call_id} 消息（空输出用 '(no output)'）。
+
+    image 块显式拒绝（上游 serialize.ts assertTextOnly → UNSUPPORTED_CONTENT）：
+    此 wire 路由是纯文本，静默丢弃会丢失图片内容。
     """
     wire: list[dict] = []
 
@@ -60,6 +71,11 @@ def serialize_messages(messages: list[dict]) -> list[dict]:
 
     for message in messages:
         blocks = message.get("content", [])
+        if content_has_image(blocks):
+            raise LlmFailure(
+                UNSUPPORTED_CONTENT,
+                "The DeepSeek chat-completions adapter does not support image content.",
+            )
         if message.get("role") == "system":
             wire.append({"role": "system", "content": flatten_text(blocks)})
             continue
@@ -226,6 +242,12 @@ class DeepSeekAdapter(LlmAdapter):
       * 请求体 stream:true + stream_options.include_usage
       * SSE 必须出现字面 [DONE]，EOF 未到 [DONE] 抛 STREAM_CLOSED（截断响应不可信）
       * finish reason 与 usage 在 [DONE] 之后发射；空响应抛 EMPTY_RESPONSE
+
+    简化标注（2026-08-17 上游 rc.7 审核）：上游推理 effort 提供 off/low/high/max
+    四档（adapter.ts REASONING_EFFORTS，rc.7 新增 low）；mini 请求参数
+    不承载 reasoningEffort（无 connector 配置面，默认走 provider 侧行为），
+    仅接收响应侧 reasoning_content 与 usage.reasoningTokens。语义影响：无
+    请求侧契约（mini 不宣称配置面）。见 AGENTS.md 简化清单。
     """
 
     provider = "deepseek-official"
@@ -239,6 +261,23 @@ class DeepSeekAdapter(LlmAdapter):
         self._max_tokens = max_tokens
         # 上游 llm-deepseek：retryPolicy 省略即 normal 默认（resolveRetryPolicy(undefined)）
         self.retry_policy = resolve_retry_policy(retry_policy, "llm-deepseek: retryPolicy")
+
+    @property
+    def model(self) -> str | None:
+        return self._model
+
+    def resolve_model_info(self) -> dict:
+        """DeepSeek chat-completions 适配器只支持文本输入。
+
+        对齐上游 adapter.ts resolveModelInfo：inputModalities 恒为 ['text']
+        （serialize.ts assertTextOnly 拒绝 image 块的原因）。mini 无模型
+        catalog，仅承载能力声明（教学简化）。
+        """
+        return {
+            "provider": self.provider,
+            "model": self._model,
+            "input_modalities": ["text"],
+        }
 
     def stream(self, messages, tools):
         body: dict[str, Any] = {

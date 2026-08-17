@@ -30,6 +30,8 @@ __all__ = [
     "StreamChunk",
     "TIMEOUT",
     "TRANSPORT",
+    "UNSUPPORTED_CONTENT",
+    "content_has_image",
     "provider_retry_after_ms",
     "request_id",
     "serialize_messages",

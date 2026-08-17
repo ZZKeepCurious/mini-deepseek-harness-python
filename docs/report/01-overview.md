@@ -26,7 +26,7 @@
 </div>
 
 !!! info "当前状态"
-    **当前状态**：developer preview（`0.1.0-rc.5`），MIT 协议。演进策略是"地基优先，不做兼容垫片"：后端拒绝旧磁盘格式；SQLite 使用单调 `SCHEMA_VERSION`；会话格式版本保持 `SESSION_FORMAT_VERSION`。学习时不必顾虑历史包袱——你看到的就是当前唯一事实。
+    **当前状态**：developer preview（`0.1.0-rc.7`），MIT 协议。演进策略是"地基优先，不做兼容垫片"：后端拒绝旧磁盘格式；SQLite 使用单调 `SCHEMA_VERSION`；会话格式版本保持 `SESSION_FORMAT_VERSION`。学习时不必顾虑历史包袱——你看到的就是当前唯一事实。
 
 ## 2. 分层架构
 

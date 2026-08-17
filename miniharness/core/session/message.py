@@ -9,6 +9,7 @@ import uuid
 
 __all__ = [
     "create_message",
+    "image_block",
     "reasoning_block",
     "text_block",
     "tool_call_block",
@@ -36,6 +37,16 @@ def text_block(text: str) -> dict:
 
 def reasoning_block(text: str) -> dict:
     return {"type": "reasoning", "text": text}
+
+
+def image_block(attachment: dict) -> dict:
+    """image 块：引用不可变附件（ImageAttachmentRef 形状）。
+
+    对齐上游 ImageBlock：{type:'image', attachment: ImageAttachmentRef}
+    （llm/llm/src/types.ts）。attachment 是持久化引用（sha256 内容寻址），
+    由 attachment 服务的 save_images 产出；本构造不持有原始字节。
+    """
+    return {"type": "image", "attachment": attachment}
 
 
 def tool_call_block(call_id: str, name: str, arguments: str) -> dict:

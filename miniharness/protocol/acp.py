@@ -1,37 +1,50 @@
 """第 7 章：ACP 最小子集 —— 自动化专用 Agent Client Protocol 服务。
 
-对应 dsh 真实源码：packages/acp/acp（apply + codec.ts）。
+对应 dsh 真实源码：packages/acp/acp（apply + codec.ts + content.ts）。
 
-上游语义（已核实，index.ts + codec.ts）：
-  * 自动化专用：只承载 prompt 文本、已提交的 assistant 文本、取消、一次性
-    权限决策；呈现与人机交互留在 web 表面。
+上游语义（已核实，index.ts + codec.ts + content.ts）：
+  * 自动化专用：只承载 prompt 文本/图片、已提交的 assistant 文本/图片、
+    取消、一次性权限决策；呈现与人机交互留在 web 表面。
   * initialize → {protocolVersion, agentInfo:{name:'deepseek-harness-acp',
-    version}, agentCapabilities:{promptCapabilities:{image:false,audio:false,
-    embeddedContext:false}}, authMethods:[]}（本桥不宣称富媒体能力）。
+    version}, agentCapabilities:{promptCapabilities:{image: <动态>,
+    audio:false, embeddedContext:false}}, authMethods:[]}——image 能力由
+    supportsAcpImagePrompts 如实判定（attachment 服务可用且模型声明图片输入）。
   * newSession：cwd 必须绝对路径（否则 invalid params）、additionalDirectories
     非空拒绝、mcpServers 非空拒绝；mint sessionId。
   * prompt：session 必须存在；已有 inflight 拒绝（"a prompt is already in
-    flight for this session"）；只支持 text 与 resource_link 内容（其余
-    invalid params）；空 prompt 拒绝；等待 whole-agent idle 结算：
-    turnless → 'cancelled'，max-tokens → 'end_turn'（README：非终局不是
-    prompt 级 stop reason），其余 turn/end 映射 stopReason；turn/end
-    kind='error' → 立即以 "turn failed" 拒绝。
-  * 会话更新只发已提交的 assistant text（image 块渲染为
-    "[image attachment <id>]"），chunk/reasoning/tools/plan 不上线。
+    flight for this session"）；image 块经 admitAcpPrompt 受理（mime 白名单 +
+    canonical base64 + attachment 存储），audio/resource 拒绝；空 prompt 拒绝；
+    等待 whole-agent idle 结算：turnless → 'cancelled'，max-tokens → 'end_turn'
+    （README：非终局不是 prompt 级 stop reason），其余 turn/end 映射 stopReason；
+    turn/end kind='error' → 立即以 "turn failed" 拒绝。
+  * 会话更新只发已提交的 assistant text/image（image 块经 readImage 读回
+    base64 内联），chunk/reasoning/tools/plan 不上线。
   * cancel：未知 session no-op；否则取消 agent 并结算 'cancelled'。
   * 审批桥：仅当 callId 存在时提供二选一（allow-once → 'allowed-once'，
     reject-once → 'rejected'，cancelled → 'cancelled'）；callId 缺失 → next()。
   * 错误码：invalid params / internal error（JSON-RPC -32602 / -32603）。
 
 载体简化：上游 async（whenIdle 等待 + stream 通知）；mini 同步——prompt
-直接跑完整回合后返回 stopReason，stream 通知以记录列表承载。
+直接跑完整回合后返回 stopReason，stream 通知以记录列表承载；attachment
+存储为内存/本地实现（见 miniharness/attachment）；模型图片能力经
+LlmAdapter.resolve_model_info 承载（上游为 llm 服务 resolveModelInfo）。
 """
 from __future__ import annotations
 
+import base64
 import os
 import uuid
 from typing import Any, Callable
 
+from ..attachment import (
+    INVALID_IMAGE_BASE64,
+    AttachmentError,
+    AttachmentStore,
+    ImageAttachmentRef,
+    SaveImageAttachment,
+    image_media_type,
+    is_image_admission_error,
+)
 from ..core.scope import Context
 from ..llm import FakeLlmAdapter
 from ..llm.retry import apply_retry_planner
@@ -40,8 +53,16 @@ from ..jobs import install_jobs, register_job_tools
 from ..skills import install_skills, register_skill_tools
 from ..core.system_prompt import install_system_prompt
 from ..core.agent_loop.agent import AgentLoop
-from ..core.session import Session, text_block, create_message
+from ..core.session import Session, create_message, image_block, text_block
 from ..core.tools import ToolRegistry
+
+# ACP 与核心词汇共享的光栅格式（上游 content.ts IMAGE_MEDIA_TYPES）
+_IMAGE_MEDIA_TYPES = ("image/png", "image/jpeg", "image/webp", "image/gif")
+
+# 规范 RFC 4648 base64（无空白、无 URL-safe 别名；上游 CANONICAL_BASE64）
+_CANONICAL_BASE64 = __import__("re").compile(
+    r"^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+)
 
 STOP_REASON_MAP = {
     "completed": "end_turn",
@@ -75,6 +96,166 @@ def prompt_has_unsupported_content(prompt: list | tuple) -> bool:
     return any(b.get("type") not in ("text", "resource_link") for b in prompt or [])
 
 
+# ---------- 富媒体内容受理与投影（acp/src/content.ts） ----------
+
+class AcpContentError(Exception):
+    """内容受理失败：invalid（-32602 参数错误）或 internal（-32603 内部失败）。
+
+    对齐上游 AcpContentError {kind: 'invalid'|'internal'}（content.ts）。
+    """
+
+    def __init__(self, message: str, kind: str):
+        super().__init__(message)
+        self.message = message
+        self.kind = kind
+
+
+def supports_acp_image_prompts(attachment, adapter) -> bool:
+    """是否可在 initialize 如实宣称内联图片 prompt（上游 supportsAcpImagePrompts）。
+
+    三项缺一即 false：attachment 服务可用、其媒体类型含光栅白名单、
+    模型声明图片输入（resolve_model_info.input_modalities 含 'image'）。
+    """
+    if attachment is None or adapter is None:
+        return False
+    if not any(mt in _IMAGE_MEDIA_TYPES for mt in attachment.image_limits.mediaTypes):
+        return False
+    try:
+        info = adapter.resolve_model_info()
+        return "image" in info.get("input_modalities", [])
+    except Exception:
+        return False
+
+
+def _decode_image_block(block: dict) -> SaveImageAttachment:
+    """严格解码一个 ACP 内联图片（上游 decodeImage）：mime 白名单 + canonical base64。"""
+    media_type = block.get("mimeType")
+    if media_type not in _IMAGE_MEDIA_TYPES:
+        raise AcpContentError(
+            "image mimeType must be image/png, image/jpeg, image/webp, or image/gif",
+            "invalid",
+        )
+    data = block.get("data", "")
+    if not isinstance(data, str) or not _CANONICAL_BASE64.match(data):
+        raise AcpContentError("image data must be canonical base64", "invalid")
+    try:
+        raw = base64.b64decode(data, validate=True)
+    except Exception:
+        raise AcpContentError("image data must be canonical base64", "invalid")
+    if base64.b64encode(raw).decode("ascii") != data:
+        raise AcpContentError("image data must be canonical base64", "invalid")
+    return SaveImageAttachment(data=raw, mediaType=media_type)
+
+
+def admit_acp_prompt(attachment, prompt: list | tuple, image_enabled: bool) -> list[dict]:
+    """把 ACP prompt 受理为有序持久核心内容（上游 admitAcpPrompt）。
+
+    校验通过后才开始存储写入（上游：批次内图片全部验证通过才启动写入）；
+    返回 wire 顺序的核心 ContentBlock[]（text / resource_link 保持顺序、
+    image 转 {type:'image', attachment: ref}）。
+    """
+    images: list[SaveImageAttachment] = []
+    for block in prompt or []:
+        btype = block.get("type")
+        if btype == "image":
+            if not image_enabled:
+                raise AcpContentError(
+                    "inline image prompts were not advertised by this connection",
+                    "invalid",
+                )
+            images.append(_decode_image_block(block))
+        elif btype in ("text", "resource_link"):
+            continue
+        elif btype == "audio":
+            raise AcpContentError("audio prompt content is not supported", "invalid")
+        elif btype == "resource":
+            raise AcpContentError(
+                "embedded resource prompt content is not supported", "invalid"
+            )
+        else:
+            raise AcpContentError("unsupported ACP prompt content", "invalid")
+
+    refs: list[dict] = []
+    if images:
+        try:
+            refs = attachment.save_images(images)
+        except AttachmentError as e:
+            if is_image_admission_error(e):
+                raise AcpContentError(e.message, "invalid")
+            raise AcpContentError("unable to persist the prompt image batch", "internal")
+
+    content: list[dict] = []
+    pending_text = ""
+    image_index = 0
+
+    def flush_text() -> None:
+        nonlocal pending_text
+        if pending_text:
+            content.append(text_block(pending_text))
+            pending_text = ""
+
+    for block in prompt or []:
+        btype = block.get("type")
+        if btype == "text":
+            pending_text += block.get("text", "")
+        elif btype == "resource_link":
+            pending_text += acp_prompt_to_text([block])
+        elif btype == "image":
+            flush_text()
+            ref = refs[image_index]
+            image_index += 1
+            content.append(image_block(ref.to_dict() if hasattr(ref, "to_dict") else ref))
+    flush_text()
+    if not any(
+        b.get("type") == "image"
+        or (b.get("type") == "text" and b.get("text", "").strip())
+        for b in content
+    ):
+        raise AcpContentError("empty prompt", "invalid")
+    return content
+
+
+def assistant_block_to_acp(attachment, block: dict) -> dict | None:
+    """已提交 assistant 块 → ACP wire 内容（上游 assistantBlockToAcp）。
+
+    text 空块跳过；image 块从 attachment 读回 + 完整性校验后 base64 内联；
+    其余核心块不上自动化线。
+    """
+    if block.get("type") == "text":
+        text = block.get("text", "")
+        return {"type": "text", "text": text} if text else None
+    if block.get("type") != "image":
+        return None
+    try:
+        stored = attachment.read_image(
+            _ref_from_dict(block.get("attachment", {}))
+        )
+    except AttachmentError as e:
+        raise AcpContentError(
+            "cannot deliver assistant image: the attachment is unavailable or corrupt",
+            "internal",
+        )
+    return {
+        "type": "image",
+        "data": base64.b64encode(stored.data).decode("ascii"),
+        "mimeType": stored.ref.mediaType,
+    }
+
+
+def _ref_from_dict(d: dict) -> Any:
+    """把日志里的 image.attachment（ref.to_dict 形状）还原为 ImageAttachmentRef。"""
+    from ..attachment import AttachmentId, ImageAttachmentRef
+
+    return ImageAttachmentRef(
+        attachmentId=AttachmentId(d["attachmentId"]),
+        mediaType=d["mediaType"],
+        bytes=d["bytes"],
+        width=d["width"],
+        height=d["height"],
+        **({"name": d["name"]} if "name" in d else {}),
+    )
+
+
 class AcpRequestError(Exception):
     """ACP 请求错误：invalid params（-32602）或 internal error（-32603）。"""
 
@@ -102,10 +283,11 @@ class AcpServer:
     WIRE_NAME = "deepseek-harness-acp"
 
     def __init__(self, adapter: Any = None, provider: str = "fake",
-                 model: str = "fake-model"):
+                 model: str = "fake-model", attachment: Any = None):
         self._adapter = adapter or FakeLlmAdapter()
         self.provider = provider
         self.model = model
+        self._attachment = attachment   # AttachmentStore | None（无则宣称 image:false）
         self._sessions: dict[str, dict] = {}   # session_id -> {loop, cwd}
         self._closed = False
         self.updates: list[dict] = []          # 会话更新流（简化载体）
@@ -122,8 +304,11 @@ class AcpServer:
             "protocolVersion": 1,
             "agentInfo": {"name": self.WIRE_NAME, "version": "0.0.1"},
             "agentCapabilities": {
-                "promptCapabilities": {"image": False, "audio": False,
-                                       "embeddedContext": False},
+                "promptCapabilities": {
+                    "image": supports_acp_image_prompts(self._attachment, self._adapter),
+                    "audio": False,
+                    "embeddedContext": False,
+                },
             },
             "authMethods": [],
         }
@@ -171,14 +356,23 @@ class AcpServer:
             raise invalid_params(f"unknown session: {session_id}")
         if record.get("inflight"):
             raise invalid_params("a prompt is already in flight for this session")
-        if prompt_has_unsupported_content(prompt):
-            raise invalid_params("only text and resource_link prompt content is supported")
-        text = acp_prompt_to_text(prompt)
-        if text.strip() == "":
+        image_enabled = supports_acp_image_prompts(self._attachment, self._adapter)
+        try:
+            content = admit_acp_prompt(self._attachment, prompt, image_enabled)
+        except AcpContentError as e:
+            if e.kind == "invalid":
+                raise invalid_params(e.message)
+            raise internal_error(e.message)
+        if not any(b.get("type") == "image" for b in content) and (
+            not content or not content[-1].get("text", "").strip()
+        ):
+            # 纯文本且无文本内容 → 空 prompt（图片已含在 admit 内校验）
             raise invalid_params("empty prompt")
         record["inflight"] = True
         try:
-            record["loop"].run(text)
+            message = create_message("user", content, {"kind": "user"})
+            record["loop"].followup(message)
+            self._emit_assistant_output(record["loop"])
         finally:
             record["inflight"] = False
         reason = self._last_turn_end(record["loop"])
@@ -199,6 +393,32 @@ class AcpServer:
             if event["type"] == "turn/end":
                 return event["data"].get("reason")
         return None
+
+    def _emit_assistant_output(self, loop) -> None:
+        """把回合内已提交的 assistant/message 投影为 ACP 更新流（简化载体）。
+
+        对齐上游 sessionUpdate 'agent_message_chunk'：只上线已提交的
+        assistant text/image 块（chunk/reasoning/tools/plan 不上线）；
+        image 块经 readImage 读回 base64 内联（assistantBlockToAcp）。
+        """
+        session_id = loop.session.session_id
+        for event in loop.session.events:
+            if event["type"] != "assistant/message":
+                continue
+            blocks = (event["data"].get("message") or {}).get("content", [])
+            content = [
+                b for b in (assistant_block_to_acp(self._attachment, b) for b in blocks)
+                if b is not None
+            ]
+            if not content:
+                continue
+            self.updates.append({
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": content,
+                },
+            })
 
     # ---------- cancel ----------
 

@@ -18,10 +18,25 @@ class FakeLlmAdapter(LlmAdapter):
 
     provider = "fake"
 
-    def __init__(self, tool_call: dict | None = None, final_text: str = "任务完成。"):
+    def __init__(self, tool_call: dict | None = None, final_text: str = "任务完成。",
+                 image: dict | None = None):
         self._tool = tool_call
         self._text = final_text
+        # 教学扩展：附带的 image 块（{attachment: ImageAttachmentRef 形状}），
+        # 使 assistant 图片输出路径（ACP readImage → base64 内联）可测。
+        self._image = image
         self.calls = 0
+
+    def resolve_model_info(self) -> dict:
+        """假模型声明支持文本与图片输入（教学扩展）。
+
+        上游无对应适配器；mini 以声明能力使 ACP 富媒体在 fake 路径可测
+        （支持图片输入才宣称 promptCapabilities.image）。"""
+        return {
+            "provider": self.provider,
+            "model": self.model,
+            "input_modalities": ["text", "image"],
+        }
 
     def stream(self, messages, tools):
         self.calls += 1
@@ -42,4 +57,9 @@ class FakeLlmAdapter(LlmAdapter):
             yield StreamChunk("block-end", index=0, block={
                 "type": "text", "text": self._text,
             })
+            if self._image is not None:
+                yield StreamChunk("block-start", index=1, blockType="image")
+                yield StreamChunk("block-end", index=1, block={
+                    "type": "image", "attachment": self._image,
+                })
             yield StreamChunk("finish", reason={"kind": "stop"})

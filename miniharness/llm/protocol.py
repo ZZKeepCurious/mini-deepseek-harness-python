@@ -70,6 +70,14 @@ class StreamChunk(dict):
 
     dict 子类，天然可 JSON 序列化；构造函数参数名保留 kind 以匹配
     STREAM_CHUNK_KINDS 词汇，但落盘键与上游一致为 "type"。
+
+    简化标注（2026-08-17 上游 rc.7 审核）：上游 finish chunk 可携带
+    replayState（ReplayEnvelope：{response, blocks?}，响应级 + 按块适配器
+    私有元数据，assembler 在 max-tokens 裁剪 tool-call 时同步裁剪 blocks，
+    条目数与块数不符则整体丢弃）。mini 未复现 ReplayEnvelope——mini 流为
+    同步 stdlib 载体，无重放双半（replay fidelity 的适配器私有元数据无消费
+    方），故 finish chunk 不含 replayState 字段。语义影响：无（该字段对
+    mini 可见契约为空）。见 AGENTS.md 简化清单。
     """
 
     def __init__(self, kind: str, **payload: Any):
@@ -117,13 +125,32 @@ class LlmAdapter:
     retry_policy：provider 属地的重试策略（resolve_retry_policy 结果）；
     None 表示该适配器不配置策略（上游未注册 providerRetryPolicy 时重试
     服务直接委派、不重试）。llm-deepseek 默认解析为 normal 默认策略。
+
+    模型能力：resolve_model_info 返回 {provider, model, input_modalities}；
+    缺省 input_modalities 视为 ['text']（对齐上游 resolveModelInfo：未声明
+    时假设纯文本）。ACP 富媒体据此判定图片输入支持（supportsAcpImagePrompts
+    同语义，见 packages/acp/acp/src/content.ts）。
     """
 
     provider: str = "base"
     retry_policy: dict | None = None
+    model: str | None = None
 
     def stream(self, messages: list[dict], tools: list[dict]) -> Iterator[StreamChunk]:
         raise NotImplementedError
+
+    def resolve_model_info(self) -> dict:
+        """模型能力声明：{provider, model, input_modalities}。
+
+        教学扩展：上游 resolveModelInfo 是 llm 服务方法（按 provider/model
+        解析 catalog）；mini 以适配器实例方法承载（无 catalog，简化标注）。
+        input_modalities 含 'image' 才宣称支持图片输入。
+        """
+        return {
+            "provider": self.provider,
+            "model": self.model,
+            "input_modalities": ["text"],
+        }
 
 
 class BlockAssembler:

@@ -32,6 +32,7 @@ LAYER_UNITS = [
     ("core.system_prompt", 1),
     ("llm", 1),
     ("boot", 1),
+    ("attachment", 1),
     ("core.agent_loop", 2),
     ("compaction", 2),
     ("commands", 2),
