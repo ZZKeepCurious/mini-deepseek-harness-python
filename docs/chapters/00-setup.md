@@ -65,10 +65,11 @@ MiniHarness 是教学实现，不是移植。下面是简化清单，每一条�
 
 | MiniHarness 简化 | 真实 dsh |
 |---|---|
-| 同步事件总线（parallel 用 list 模拟） | 异步（`@deepseek-ai/cordis` 基于 fiber/async） |
+| 同步事件总线为教学主体 + `aemit`/`awaterfall`/`aparallel`/`aserial` async 变体（agent/pre-step、agent/request-error 已 async 化） | 异步（`@deepseek-ai/cordis` 基于 fiber/async） |
 | `provides` 声明式依赖 | apply 期间动态注册 |
-| 同步路径工具逐工具串行执行（async 路径为并行池 + 串行屏障，第 12 章） | `isConcurrencySafe` 并行池 + 串行屏障 |
-| 请求/回合同步阻塞式流式（不与在飞任务交错） | 逐 chunk durable 事件 |
+| 工具体以线程池承载并行（pre 有序/body 重叠/模型序提交/abort 排干语义对齐，第 12 章） | `isConcurrencySafe` 并行池 + 串行屏障 |
+| LLM 流式 async 契约，但 DeepSeek SSE 以同步阻塞读经 executor 线程桥接（阻塞读不可中断，线程滞留至超时兜底） | `fetch` + AbortSignal 原生异步流 |
+| 同步门面（`followup`/`steer` 无 driver 时经 `asyncio.run` 瞬态事件循环驱动） | 常驻单事件循环 |
 | JSON/YAML 配置 + 补丁（pyyaml 可选，缺省退化 JSON；`!!js` 仅 `process.env.<NAME>` 子集） | YAML cordis.yml（同样的 id/insert/replace 语义） |
 | LLM 失败以异常抛出（finish 带内 `{kind:'error'|'aborted'}` 与异常同走 `agent/request-error` waterfall） | `LlmError` 编码 `CONTEXT_WINDOW_EXCEEDED` / `EMPTY_RESPONSE`（可重试）等 |
 | `agent/turn-stopping`、`system-prompt/assemble` waterfall 已实现（turn-stopping 为串行终点检查点，见第 4/13 章） | 上游都有 |

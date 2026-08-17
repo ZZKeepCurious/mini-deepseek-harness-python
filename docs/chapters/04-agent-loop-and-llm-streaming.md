@@ -13,6 +13,7 @@
     - **loop 片段**：本章 `loop.py` 的 `_append` 方法、字符串 reason、扁平 `assistant/message` 形态均已过时；实现是 ContentBlock 消息对象 + 显式编号 + `request/header` 事件 + 每 chunk 落 `assistant/chunk`（`core/agent_loop/agent.py`）。
     - **重试接线**：真实调用入口必须挂载 `apply_retry_planner`（`llm/retry.py:196`），否则 `agent/request-error` 瀑布不生效（本章 §4.11 真实 API 示例未调用，已修正纪律见 AGENTS.md）。
     - **时序图**：完整时序含 `request/header` 事件与逐 chunk `assistant/chunk` 落盘（见 `core/agent_loop/agent.py` 的 requestHeaderLogged 语义）。
+    - **stream 契约已 async 化**（2026-08-18 asyncio 化重构）：实现签名为 `async def stream(self, messages, tools, signal=None)` 异步迭代（`llm/protocol.py`，DeepSeek 阻塞 SSE 经 executor 线程桥接、abort 竞速抛 `StreamAborted`）；agent 循环为单一 async 驱动 + `followup`/`steer` 同步门面（无 driver 时经 `asyncio.run` 瞬态事件循环）；本章的同步 `def stream` 与同步泵形态已过时。
 
 ## 4.1 这一章要做什么
 
@@ -437,9 +438,10 @@ loop 前调用 `apply_retry_planner(ctx)`（幂等，可重复调用）。
 5. 延迟决议：`providerRetryAfterMs`（429 的 `Retry-After`，纯数字秒 ×1000 或 HTTP-date）
    有效时优先——超过 `maxDelayMs` 则 normal 放弃 / always 改用本地延迟；否则本地退避
    `min(initial × 2^min(retry-1, 1024), max) × (1 - ratio + 2×ratio×rand)` 再封顶 `maxDelayMs`
-6. 可取消：等待以分片 sleep 轮询 `signal.aborted`（mini 同步简化，无真实 AbortSignal；
-   loop 的 `_AbortProxy` 反映取消标记）；normal 分支不在派发前检查 abort——
-   `llm/retry` 仍落、等待立即放弃、不落 started（与上游一致）
+6. 可取消：等待为事件驱动 `asyncio.wait`（`signal.event` 置位即醒；无 `.event` 的
+   信号回退分片轮询 `signal.aborted`——mini 无真实 AbortSignal，取消为协作式
+   `asyncio.Event`，loop 的 `_AbortProxy` 暴露 `.aborted`/`.event`）；normal 分支
+   不在派发前检查 abort——`llm/retry` 仍落、等待立即放弃、不落 started（与上游一致）
 
 **接线语义**：重试是同 step 内重新发起模型请求——`messages` 不变（失败 attempt
 不产生任何消息事件，`derive_messages` 不受 `llm/retry` 影响）、`request/header`

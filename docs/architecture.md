@@ -115,16 +115,16 @@ miniharness/
 | `core/session_store.py` | `packages/core/session/src/index.ts`（SessionStore 部分） | 内存会话服务：create/prepare/enter/announce 生命周期 + get/list/fork（五错误码）+ flush 检查点 + `session/created|disposed|event|flush` 四事件；无 typert lookup、无 scope 过滤、flush 为同步近似（简化标注见模块 docstring） |
 | `core/scope.py` | `vendor/cordis` + `packages/core/scope` | |
 | `core/tools.py` | `packages/core/tools` | |
-| `core/agent_loop/agent.py` | `packages/core/agent-loop/src/agent.ts` | |
+| `core/agent_loop/agent.py` | `packages/core/agent-loop/src/agent.ts` | 单一 async 驱动（`_pump_async`/`_run_step_async`）+ `followup`/`steer` 同步门面（无 driver 时经 `asyncio.run` 瞬态事件循环）+ 协作式取消（`_cancel_event` 每轮新建 + `call_soon_threadsafe` 跨线程置位）；agent/pre-step 决策经 `awaterfall` |
 | `core/agent_loop/tool_calls.py` | `packages/core/agent-loop/src/tool-calls.ts` | |
 | `core/agent_loop/inbox.py` | `packages/core/agent-loop/src/inbox.ts` | 双队列（followup→next-turn / steer→next-step）+ `agent/inbox/spliced` 持久化 |
 | `core/system_prompt.py` | `packages/core/system-prompt/src/` | assemble waterfall + contexts/tools/variables 提供器 + `{{variable}}` 严格插值；scope 层叠、运行时上下文快照注入请求历史、assembly.tools→请求工具集成未复现（简化标注见模块 docstring） |
-| `llm/protocol.py` | `packages/llm/llm/src/` | |
-| `llm/deepseek.py` | `packages/llm/llm-deepseek/src/` | |
+| `llm/protocol.py` | `packages/llm/llm/src/` | `stream(messages, tools, signal)` async 契约 + `StreamAborted` + `_aiter_from_thread` 线程桥（2026-08-18 asyncio 化重构） |
+| `llm/deepseek.py` | `packages/llm/llm-deepseek/src/` | 阻塞 SSE 读经 executor 线程桥接为异步迭代（阻塞读不可中断，urlopen 120s 超时兜底；上游 fetch + AbortSignal） |
 | `llm/fake.py` | 无 | 教学扩展 |
 | `attachment/`（types + error + image + store） | `packages/attachment/attachment`（seam + types + error）+ `packages/attachment/attachment-local`（store + image） | 纯 stdlib 头部解析（上游 sharp 全解码）、普通写 + os.replace（上游 fsync + link 原子发布）、显式 root（上游 DSH_HOME/attachments/v1）；简化标注见模块 docstring |
 | `llm/retry_policy.py` | `packages/llm/llm/src/retry-policy.ts` | |
-| `llm/retry.py` | `packages/llm/llm-retry/src/` | |
+| `llm/retry.py` | `packages/llm/llm-retry/src/` | async 恢复决策 + 事件驱动可取消等待（`asyncio.wait`；无 `.event` 信号回退轮询） |
 | `llm/token_meter.py` | `packages/llm/token-meter/src/` | |
 | `compaction/`（config + region + summarizer + engine） | `packages/compaction/compaction-basic/src/`（config / region / summarizer / index.ts） | 前缀重放无 KV cache 语义、无 toolResultPruner（简化标注见模块 docstring） |
 | `jobs/`（types + registry + tools） | `packages/jobs/`（seam + jobs-local + tool-jobs） | `run_in_background` 触发入口未复现；无 scope 链/agent registry；execute 直接返回渲染文本（简化标注见模块 docstring） |

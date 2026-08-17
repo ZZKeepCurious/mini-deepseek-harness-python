@@ -27,9 +27,9 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 | Durable storage (JSONL / SQLite, header + `SESSION_FORMAT_VERSION=0` fail-closed, flush barrier, crash recovery) | `packages/session/session-persistence` |
 | Plugin event bus (emit / waterfall / parallel / serial, scopes, dependency-driven activation) | `vendor/cordis` + `core/scope` |
 | Tool registry + execution pipeline (schema validation, pre/execute/post, timeout) | `packages/core/tools` |
-| Agent loop (turn/step state machine, pre-step rejection, tool-feedback continuation) | `core/agent-loop` |
-| LLM seam (StreamChunk protocol, fake adapter, official DeepSeek SSE adapter) | `llm/llm` + `llm/llm-deepseek` |
-| Model request retry / backoff (normal/always policy, `agent/request-error`, `llm/retry` audit pair) | `llm/llm-retry` + `llm/llm/src/retry-policy.ts` |
+| Agent loop (async-driven turn/step state machine with sync facade, pre-step rejection, tool-feedback continuation) | `core/agent-loop` |
+| LLM seam (async `stream(messages, tools, signal)` contract, fake adapter, official DeepSeek SSE adapter bridged from a blocking reader thread) | `llm/llm` + `llm/llm-deepseek` |
+| Model request retry / backoff (normal/always policy, `agent/request-error`, `llm/retry` audit pair, event-driven cancellable wait) | `llm/llm-retry` + `llm/llm/src/retry-policy.ts` |
 | Token metering (incremental fold, usage anchor, 4 chars/token heuristic) | `llm/token-meter` |
 | Context compaction (pre-step pressure + `CONTEXT_WINDOW_EXCEEDED` recovery, surface-replace checkpoint transaction) | `compaction/compaction-basic` |
 | Background jobs (`job_output`/`job_list`/`job_kill`, completion notices, per-owner cap; no `job/*` session events) | `packages/jobs` (jobs-local + tool-jobs) |

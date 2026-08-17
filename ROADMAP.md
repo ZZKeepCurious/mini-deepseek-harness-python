@@ -5,19 +5,17 @@
 
 ## 已完成
 
-核心约定已全部落地，能力清单见 README"已实现能力"表：事件溯源会话、持久化与崩溃恢复、插件事件总线、工具管线、Agent Loop、LLM 扩展口与重试、boot 组合、headless 入口与启动器选项、能力扩展口三件套（沙箱/凭据/子 agent）、外部协议入口（ACP/SDK/hooks）、异步并行、preset/干预/轨迹/动态插件/审批、token 计量与上下文压缩（pre-step 压力检查 0.8/0.16、overflow 强制减容重试、surface replace 检查点事务）、后台作业（job_output/job_list/job_kill 三工具 + 完成 notice，进程内注册表、无会话事件）、plan（状态机 + 审查 UI：`/plan` 命令、`exit_plan_mode` 审查工具、userQuestions 通道、plan 投影单元）、命令表面（`command/run|done` 配对）、goal（`goal/change` 事件溯源 fold + GoalService + pull 式轮次驱动 + `get_goal`/`create_goal`/`update_goal` 三工具 + `/goal` 命令）、skills（分层注册表 + filesystem provider + skill 工具 + catalog-form 持久目录，报告 04 议题 10）、**可继续子代理**（`start_continuable`/`send_message` + durable 子会话 + 冷恢复 + 结算投递 + `send_message`/`interrupt_agent`/`list_agents` 控制工具；A7 同步阻塞子回合 → A8 升级为**异步事件驱动**：父有 driver 时投递即返回 message id、Activation 跨回合驻留、watchSettlement（when_idle_async + poke 竞速）、steer 批内合并、结算先于所有权释放、interrupt 缺省 no-op、disposal 竞速冷恢复重投不丢消息，无 driver 场景回退同步 pump）、**Agent 层补齐**（inbox 双队列 followup→next-turn / steer→next-step + `agent/inbox/spliced`、`agent/status`、`agent/error`、`agent/turn-stopping` serial/aserial、`request/header` canonical 形状 + `request/context`、`agent/request` waterfall、concludesTurn、fuseToolSignals 每工具独立熔合、system-prompt assemble/contexts/tools/variables 提供器 + `{{variable}}` 严格插值）、**会话管理服务**（`ctx.sessions`：create/prepare/enter/announce 生命周期、get/list、fork 五错误码、flush 并行检查点、`session/created|disposed|event|flush` 四事件，对齐上游 `packages/core/session` 的 manager 层；headless/demo/resume 已接入）、**官方 Python SDK 互操作**（用上游 `python/sdk` 的 `DeepSeekHarness` 经 `launch_args_override` 驱动 mini worker 子进程，验证 `Session.run` 全流程：inbox 回执 → assistant/message → turn/end → status idle → final_response/finish_reason；`tests/test_upstream_sdk_interop.py` 4 项，pydantic + 上游 SDK 源码可达时运行，缺则 skip）。发展史记录在工作区 `status/mini-harness/`。
+核心约定已全部落地，能力清单见 README"已实现能力"表：事件溯源会话、持久化与崩溃恢复、插件事件总线、工具管线、Agent Loop、LLM 扩展口与重试、boot 组合、headless 入口与启动器选项、能力扩展口三件套（沙箱/凭据/子 agent）、外部协议入口（ACP/SDK/hooks）、异步并行、preset/干预/轨迹/动态插件/审批、token 计量与上下文压缩（pre-step 压力检查 0.8/0.16、overflow 强制减容重试、surface replace 检查点事务）、后台作业（job_output/job_list/job_kill 三工具 + 完成 notice，进程内注册表、无会话事件）、plan（状态机 + 审查 UI：`/plan` 命令、`exit_plan_mode` 审查工具、userQuestions 通道、plan 投影单元）、命令表面（`command/run|done` 配对）、goal（`goal/change` 事件溯源 fold + GoalService + pull 式轮次驱动 + `get_goal`/`create_goal`/`update_goal` 三工具 + `/goal` 命令）、skills（分层注册表 + filesystem provider + skill 工具 + catalog-form 持久目录，报告 04 议题 10）、**可继续子代理**（`start_continuable`/`send_message` + durable 子会话 + 冷恢复 + 结算投递 + `send_message`/`interrupt_agent`/`list_agents` 控制工具；A7 同步阻塞子回合 → A8 升级为**异步事件驱动**：父有 driver 时投递即返回 message id、Activation 跨回合驻留、watchSettlement（when_idle_async + poke 竞速）、steer 批内合并、结算先于所有权释放、interrupt 缺省 no-op、disposal 竞速冷恢复重投不丢消息，无 driver 场景回退同步门面）、**Agent 层补齐**（inbox 双队列 followup→next-turn / steer→next-step + `agent/inbox/spliced`、`agent/status`、`agent/error`、`agent/turn-stopping` serial/aserial、`request/header` canonical 形状 + `request/context`、`agent/request` waterfall、concludesTurn、fuseToolSignals 每工具独立熔合、system-prompt assemble/contexts/tools/variables 提供器 + `{{variable}}` 严格插值）、**会话管理服务**（`ctx.sessions`：create/prepare/enter/announce 生命周期、get/list、fork 五错误码、flush 并行检查点、`session/created|disposed|event|flush` 四事件，对齐上游 `packages/core/session` 的 manager 层；headless/demo/resume 已接入）、**官方 Python SDK 互操作**（用上游 `python/sdk` 的 `DeepSeekHarness` 经 `launch_args_override` 驱动 mini worker 子进程，验证 `Session.run` 全流程：inbox 回执 → assistant/message → turn/end → status idle → final_response/finish_reason；`tests/test_upstream_sdk_interop.py` 4 项，pydantic + 上游 SDK 源码可达时运行，缺则 skip）、**核心 asyncio 化**（LLM 流式 `stream(messages, tools, signal)` async 契约 + `_aiter_from_thread` 线程桥 + `StreamAborted`；AgentLoop 单一 async 驱动 + `followup`/`steer` 同步门面（`asyncio.run` 瞬态事件循环）；协作式 `asyncio.Event` 取消（`_AbortProxy.event`）；retry/压缩链/agent-pre-step 监听器（plan/goal/skills）async 化——对齐上游"纯异步事件驱动"形态，DeepSeek SSE 阻塞读经线程桥接为标注简化）。发展史记录在工作区 `status/mini-harness/`。
 
 ## 规划中
 
-当前主线：**web 表面**（上游 `packages/bundle/web-app` 的 `dsh web` 别名 + 浏览器半）。
-
-待续：web 表面（`dsh web` 别名 + 浏览器半）。
+下一主线：**web 表面**（`dsh web` 别名 + 浏览器半，上游 `packages/bundle/web-app`）——核心异步化已完成，web 层 FastAPI + React 产品化可与后端同一事件循环，无需线程桥接；启动前先完成 asyncio 化重构两批提交。
 
 后置：
 
-- **web 表面**：`dsh web` 别名 + 浏览器半（上游 `packages/bundle/web-app`）；前端工程量最大，观察清单。
+- **web 表面**：`dsh web` 别名 + 浏览器半（上游 `packages/bundle/web-app`）；FastAPI + React 产品化与后端同一事件循环。
 
-远期展望：插件示例集（教程用插件 + 真实工具演示）；多 agent 编排（子 agent 递归任务分解）；web 表面（`dsh web` 别名 + 浏览器半，上游 `packages/bundle/web-app`）；遥测（事件订阅、用量统计，`usage` chunk 已就绪）。
+远期展望：插件示例集（教程用插件 + 真实工具演示）；多 agent 编排（子 agent 递归任务分解）；遥测（事件订阅、用量统计，`usage` chunk 已就绪）。
 
 ## 上游包观察清单（暂不纳入复现范围）
 

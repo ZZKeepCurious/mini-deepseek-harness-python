@@ -25,9 +25,9 @@
 | 持久化（JSONL / SQLite、header + `SESSION_FORMAT_VERSION=0` fail-closed、flush 栅栏、崩溃恢复） | `packages/session/session-persistence` |
 | 插件事件总线（emit / waterfall / parallel / serial、作用域、依赖驱动激活） | `vendor/cordis` + `core/scope` |
 | 工具注册表 + 执行管线（schema 校验、pre/execute/post、timeout） | `packages/core/tools` |
-| Agent Loop（turn/step 状态机、pre-step 拒绝、工具回灌续跑） | `core/agent-loop` |
-| LLM 扩展口（StreamChunk 协议、假模型、DeepSeek 官方 SSE 适配器） | `llm/llm` + `llm/llm-deepseek` |
-| 模型请求重试/退避（normal/always 策略、`agent/request-error`、`llm/retry` 审计对） | `llm/llm-retry` + `llm/llm/src/retry-policy.ts` |
+| Agent Loop（async 驱动 turn/step 状态机 + 同步门面、pre-step 拒绝、工具回灌续跑） | `core/agent-loop` |
+| LLM 扩展口（async `stream(messages, tools, signal)` 契约、假模型、DeepSeek 官方 SSE 适配器（阻塞读经线程桥接）） | `llm/llm` + `llm/llm-deepseek` |
+| 模型请求重试/退避（normal/always 策略、`agent/request-error`、`llm/retry` 审计对、事件驱动可取消等待） | `llm/llm-retry` + `llm/llm/src/retry-policy.ts` |
 | token 计量（增量 fold、usage 折入锚、4 字符/token 启发式） | `llm/token-meter` |
 | 上下文压缩（pre-step 压力 + `CONTEXT_WINDOW_EXCEEDED` 恢复、surface-replace 检查点事务） | `compaction/compaction-basic` |
 | 后台作业（`job_output`/`job_list`/`job_kill`、完成 notice、per-owner 上限；无 `job/*` 会话事件） | `packages/jobs`（jobs-local + tool-jobs） |

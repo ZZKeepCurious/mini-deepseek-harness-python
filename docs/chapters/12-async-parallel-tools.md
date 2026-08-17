@@ -171,4 +171,4 @@ LLM 流式仍是同步适配器（`adapter.stream` 阻塞事件循环）——�
 - [ ] 解释"pre-execute 有序、body 重叠"与 `pipeline_policy_async` / `pipeline_async_body` 拆段的关系；
 - [ ] 用 `max_parallel=2` 跑 4 个并行工具，观察 `fill_pool` 的补池节奏；
 - [ ] 构造一次中途取消：哪些结果真实、哪些合成，顺序如何；
-- [ ] 说出 mini 相对上游的简化（LLM 流式同步阻塞、线程池 vs 事件循环、fiber/scope carrier 未复现）。
+- [ ] 说出 mini 相对上游的简化（DeepSeek SSE 经阻塞读线程桥接且不可中断、工具体以线程池承载而非事件循环、fiber/scope carrier 未复现、同步门面经瞬态事件循环）。
