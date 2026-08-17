@@ -27,6 +27,7 @@ PACKAGE_ROOT = pathlib.Path(miniharness.__file__).resolve().parent
 LAYER_UNITS = [
     ("core.session", 0),
     ("core.scope", 0),
+    ("core.session_store", 1),
     ("core.tools", 1),
     ("core.system_prompt", 1),
     ("llm", 1),

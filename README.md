@@ -42,6 +42,7 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 | Headless one-shot entry (`--profile headless "task"`: stdout final text, exit code by turn/end reason) | `packages/bundle/headless` + `apps/cli` |
 | Launcher options (`--patch`, `--dump-config` / `--dump-default-config`, read-only composition dump) | `apps/cli/src/args.ts` |
 | Session management CLI (`miniharness sessions` list/resume/delete; mini teaching extension) | web surface (upstream) |
+| Session store service (`ctx.sessions`: create/prepare/enter/announce lifecycle, fork with 5 error codes, flush checkpoint, `session/created|disposed|event|flush` events) | `packages/core/session` (SessionStore) |
 | Capability seams (sandbox backends / credential layers / subagent ACP+SDK+fork channels) | capability seams docs |
 | Continuable subagents (`start_continuable`/`send_message`, durable child session + cold resume, settlement delivery, async event-driven A8 (submit-and-return + watchSettlement + steer batch merge), `send_message`/`interrupt_agent`/`list_agents` control tools) | `packages/subagent` (subagent + subagent-in-process-driver + tool-subagent-control + tool-subagent-report) |
 | Presets / agent intervention / trajectory / dynamic plugins / approval | `packages/preset` + `core/agent` + `interaction` |
@@ -51,7 +52,7 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 
 Planned: SDK interop tests and web surface are deprioritized.
 
-Status: **723 unit tests passing** (stdlib only; optional `pyyaml` for YAML config).
+Status: **779 unit tests passing** (stdlib only; optional `pyyaml` for YAML config).
 
 ## Getting started
 

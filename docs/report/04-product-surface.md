@@ -347,12 +347,12 @@ mini 已实现 plan 全链路（状态机 + 审查 UI，`miniharness/plan/`，�
 
 对齐上游 `packages/plan/plan-mode/` 的 wire/契约核心：
 
-- **状态只写日志**：唯一事实来源是 `plan/mode {active:boolean}`（log-only、非 surface、整值替换），生效状态 = `fold_plan_mode` 沿日志前缀折叠、最后一条胜出；resume/fork 无需 live mirror。`plan/mode` 已入 KNOWN_TYPES（22/39），seed 回放 fail-closed。
+- **状态只写日志**：唯一事实来源是 `plan/mode {active:boolean}`（log-only、非 surface、整值替换），生效状态 = `fold_plan_mode` 沿日志前缀折叠、最后一条胜出；resume/fork 无需 live mirror。`plan/mode` 已入 KNOWN_TYPES（22/44），seed 回放 fail-closed。
 - **set() 四态**（index.ts:425-445）：`committed`（idle 立即 append）/ `queued`（turn 运行中记 pending，在下一个被接受的 in-turn pre-step 提交）/ `cancelled`（反向 pending 选择被清除、生效状态已匹配目标）/ `noop`（选择与生效或已 pending 状态一致）；被拒绝（reject）或中止的 step 不提交。上游同语义：先记 pending 再判 open turn，commit 一律 append。
 - **plan:policy 节**（order 50，index.ts:225-233）：plan mode 生效（含 pending 选择）期间向每次模型请求注入部署方指引；实现经 `core/system_prompt.py` 分节渲染（基底 + 有序非空节，`\n\n` 连接，对齐上游 renderPrompt）。
 - **叙述**：仅当最近一次 request/header 描述另一模式时注入一句 user 消息（idle 经 `agent.inject` 入 inbox，queued 经 pre-step 决策 messages）；模型可见 ⟺ 已记录。
 - **审查 UI**（review.py + projection.py）：`exit_plan_mode` 工具（跨模式保持注册、要求 `# ` 标题的非空 markdown、批准 → 排队 silent 退出在下一个被接受的 in-turn pre-step 提交、Keep planning 是带反馈的失败调用、取消则提示等待）；`/plan` 命令四态文案逐字对齐（index.ts:274-301）；userQuestions 审查通道（ctx 服务 `userQuestions`，`.ask(question, agent)` 回调）；plan 投影单元（session-projection 的 `plan` 键，纯双事件折叠：`command/run`(name='plan') 记录已落盘选择、`plan/mode` 清空 pending）。
-- **命令契约**（`miniharness/commands/`）：`command/run` + `command/done` 按 commandId 配对（log-only 非 surface），命令进入 handler 前先落 run（durable before dispatch）；未命中已注册命令的斜杠行是普通文本；handler 抛错结算为 `kind:'error'`。`command/run|done` 已入 KNOWN_TYPES（24/39）。
+- **命令契约**（`miniharness/commands/`）：`command/run` + `command/done` 按 commandId 配对（log-only 非 surface），命令进入 handler 前先落 run（durable before dispatch）；未命中已注册命令的斜杠行是普通文本；handler 抛错结算为 `kind:'error'`。`command/run|done` 已入 KNOWN_TYPES（24/44）。
 
 mini 简化（教学范围，须在文档中标注）：无 canonical value（review 工具直接返回模型可见文本，即上游 output.render 文案）；无 presentCall/presentResult（无 UI 渲染层）；审查为同步回调（上游 async interaction.ask + signal）；userQuestions 无完整 async 对象形状（mini 收敛为 `.ask` 回调契约）。`system-prompt` 已实现 assemble waterfall + contexts/tools/variables 提供器 + `{{variable}}` 严格插值；保留简化：scope 层叠未复现（单全局层）、运行时上下文快照不注入请求历史（render_context_snapshot 呈现面保留）、assembly.tools 提供器结果不直接成为请求工具列表（请求工具来自 ToolRegistry）。`install_plan_mode` 要求 ctx 已提供 systemPrompt 服务（缺失抛 KeyError，fail loud）；装配序：`install_system_prompt` → `install_plan_mode` →（可选）`install_plan_review`。
 
@@ -360,7 +360,7 @@ mini 简化（教学范围，须在文档中标注）：无 canonical value（re
 
 对齐上游 `packages/goal/{goal, goal-round-driver, tool-goal, command-goal}` 的 wire/契约核心：
 
-- **事件溯源**：唯一 durable 事实是 `goal/change`（全快照或 clear 墓碑，version 1）+ 进程内通知 `goal/changed`（`{change: notification}`）；`goal/change` 已入 KNOWN_TYPES（25/39），seed 回放 fail-closed。严格重放 fold：decode 校验 kind/version/操作/字段集，非 create 操作要求精确推进一个 revision 且保持计数器/时间戳（对齐 domain.ts / fold.ts）。
+- **事件溯源**：唯一 durable 事实是 `goal/change`（全快照或 clear 墓碑，version 1）+ 进程内通知 `goal/changed`（`{change: notification}`）；`goal/change` 已入 KNOWN_TYPES（25/44），seed 回放 fail-closed。严格重放 fold：decode 校验 kind/version/操作/字段集，非 create 操作要求精确推进一个 revision 且保持计数器/时间戳（对齐 domain.ts / fold.ts）。
 - **round 驱动**（pull 式 GoalDriver）：宿主在回合边界显式 `continue_rounds(loop)`；每条 round 是 goal 来源 user 消息（`source:{kind:'goal', goalId, revision, round}`）经 `agent.followup()` 入 inbox；pre-step 做 fail-closed reservation 校验（active/armed、revision、round==roundsStarted+1、预算），校验失败 reject → turn 以 `{kind:'blocked'}` 闭合；round 预算用尽自动 block（code `round-limit`）、被拒 block `prompt-rejected`、max-tokens → disarm、aborted → pause。
 - **服务**（GoalService，ctx.goals）：compare-and-set 变更全族（create/edit/pause/resume/complete/block/clear）；错误码与上游一致（GOAL_ALREADY_EXISTS / GOAL_STALE_REVISION / GOAL_INVALID_TRANSITION / GOAL_INVALID_OBJECTIVE / GOAL_INVALID_MAX_ROUNDS / GOAL_INVALID_BLOCK_REASON / GOAL_INVALID_EDIT / GOAL_INVALID_STATE / GOAL_NOT_FOUND）；create 仅当前无目标或 complete 时允许；resume 校验 round 预算余量。
 - **模型工具**（tool-goal）：`get_goal` / `create_goal` / `update_goal`（description、参数 schema、canonical 输出 JSON 逐字对齐）；update 是 compare-and-set（stale ref → GOAL_STALE_REVISION，非法引用 → GOAL_TOOL_INVALID_UPDATE）；blocked 需 `{code:'model-reported', message}` 且 goal 轮次内未达连续轮数阈值（默认 3）时拒绝（GOAL_TOOL_BLOCK_THRESHOLD）；`tool:goal` prompt section（order 114）。

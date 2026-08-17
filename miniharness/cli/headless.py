@@ -12,7 +12,8 @@
 5. **不开监听端口**；`ctx.appExit` 由启动器持有（mini 由 CLI 提供 exit 函数）。
 
 简化说明（有意保留）：上游 runner 经 Cordis 服务（agents / sessions / agentDefaultModel）
-创建 Agent；mini 直接构造 Session + AgentLoop（载体差异，契约不变）。
+创建 Agent；mini 经 ctx.sessions.create() 走同一服务面（prepare+enter+announce），
+但 Agent 本体仍是 Session + AgentLoop 直连（载体差异，契约不变）。
 """
 from __future__ import annotations
 
@@ -29,7 +30,7 @@ from ..jobs import install_jobs
 from ..skills import install_skills
 from ..core.agent_loop.agent import AgentLoop
 from ..core.session.persistence import JsonlPersistence
-from ..core.session import Session
+from ..core.session_store import install_sessions
 from ..core.system_prompt import install_system_prompt
 from ..core.tools import ToolRegistry
 from .default_tools import default_tools
@@ -96,7 +97,9 @@ def run_headless(
     install_skills(ctx)
     install_system_prompt(ctx)
     tools = tools or default_tools(ctx)
-    session = Session(session_id or f"session-{os.urandom(8).hex()[:12]}")
+    store = install_sessions(ctx)
+    session = store.create(session_id or f"session-{os.urandom(8).hex()[:12]}",
+                           {"meta": {"cwd": os.getcwd()}})
     loop = AgentLoop(session, adapter, tools, ctx)
     first_seq = session.seq
     try:

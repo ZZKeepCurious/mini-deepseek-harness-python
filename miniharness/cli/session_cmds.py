@@ -23,6 +23,7 @@ from ..llm import DeepSeekAdapter, LlmAdapter, LlmFailure
 from ..core.agent_loop.agent import AgentLoop
 from ..core.session.persistence import JsonlPersistence, load_events_checked, repair_and_replay
 from ..core.session import Session, repair_interrupted_turn, turn_balance
+from ..core.session_store import install_sessions
 
 
 def sessions_root() -> Path:
@@ -110,6 +111,9 @@ def resume_session(
     install_compaction(ctx)
     install_jobs(ctx)
     install_system_prompt(ctx)
+    store = install_sessions(ctx)
+    store.enter(session)
+    store.announce(session)
     loop = AgentLoop(session, adapter, default_tools(ctx), ctx)
     first_seq = session.seq
     try:

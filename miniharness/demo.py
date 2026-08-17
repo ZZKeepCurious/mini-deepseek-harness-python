@@ -15,6 +15,7 @@ from .compaction import install_compaction
 from .core.agent_loop.agent import AgentLoop
 from .core.session.persistence import JsonlPersistence, repair_and_replay
 from .core.session import Session, create_message, derive_messages, text_block, turn_balance
+from .core.session_store import install_sessions
 from .core.system_prompt import install_system_prompt
 from .core.tools import Tool, ToolRegistry
 from .jobs import install_jobs, register_job_tools
@@ -33,14 +34,15 @@ def main() -> None:
     tmp = tempfile.mkdtemp(prefix="miniharness-demo-")
     root = Path(tmp)
 
-    # ---- 组装：Session + Context + 工具 + 假模型 + Loop ----
-    session = Session("demo-001")
+    # ---- 组装：ctx.sessions 服务 + 工具 + 假模型 + Loop ----
     ctx = Context(name="root")
     apply_retry_planner(ctx)
     install_compaction(ctx)
     install_jobs(ctx)
     install_skills(ctx)
     install_system_prompt(ctx)
+    store = install_sessions(ctx)
+    session = store.create("demo-001", {"meta": {"cwd": str(root)}})
     reg = ToolRegistry(ctx)
     register_job_tools(reg, ctx.inject("jobs"))
     register_skill_tools(reg, ctx.inject("skills"))

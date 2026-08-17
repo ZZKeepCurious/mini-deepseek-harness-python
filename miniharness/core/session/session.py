@@ -7,7 +7,7 @@ invariant 校验，坏事件进不来。
 from __future__ import annotations
 
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Callable
 
 from .invariant import validate_event
 from .json import deep_freeze, is_json_safe, now_ms, thaw
@@ -23,15 +23,19 @@ class Session:
     meta 是会话的持久化头部元数据（上游 Session.header 的 mini 子集：
     parentSession / origin / delegationDepth / seedLength / cwd），冷恢复与
     子代理继承用；普通会话缺省为空 dict。
+
+    on_append 是 store 发布钩子（SessionStore.enter 注入）：正常 append 落盘后
+    回调（上游 index.ts 的 session/event 派发），构造 seed 回放不触发。
     """
 
     def __init__(self, session_id: str, seed: list | None = None, created_at: int | None = None,
-                 meta: dict | None = None):
+                 meta: dict | None = None, on_append: Callable[[dict[str, Any]], None] | None = None):
         self.session_id = session_id
         self.created_at = created_at or now_ms()
         self.meta = dict(meta) if meta else {}
         self._events: list[dict[str, Any]] = []
         self._replace_count = 0
+        self._on_append = on_append
 
         if seed:
             self._replay_seed(seed)
@@ -75,6 +79,8 @@ class Session:
         self._events.append(record)
         if surfaceOp is not None and surfaceOp != "append":
             self._replace_count += 1
+        if self._on_append is not None:
+            self._on_append(record)
         return record
 
     def _replay_seed(self, seed: list) -> None:
