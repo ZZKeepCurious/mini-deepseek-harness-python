@@ -5,6 +5,7 @@ session/created|disposed|event|flush 四事件、announce throw 回滚、缺省 
 """
 from __future__ import annotations
 
+import os
 import unittest
 
 from miniharness.core.scope import Context
@@ -288,10 +289,11 @@ class TestFork(unittest.TestCase):
 
     def test_fork_inherits_cwd(self):
         ctx, store = _fresh_store()
-        parent = store.create("p", {"meta": {"cwd": "C:\\proj"}})
+        cwd = os.path.abspath("proj")   # 双平台均为绝对路径
+        parent = store.create("p", {"meta": {"cwd": cwd}})
         _with_turn(parent)
         child = store.fork(parent)
-        self.assertEqual(child.meta["cwd"], "C:\\proj")
+        self.assertEqual(child.meta["cwd"], cwd)
 
 
 class TestInstall(unittest.TestCase):
