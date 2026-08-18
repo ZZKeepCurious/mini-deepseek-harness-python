@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch as mock_patch
 
 from miniharness import cli
+from miniharness.cli.main import _parse_launcher as _parse_launcher_flags
 
 
 def _run_cli(argv, env=None):
@@ -40,10 +41,16 @@ class _Stream:
 
 
 class TestLauncherFlags(unittest.TestCase):
-    def test_unknown_option_fails(self):
+    def test_unknown_token_passes_through_to_app(self):
+        # 对齐上游 passThroughOptions（args.ts:123-129）：launcher 的 flags 到
+        # 第一个它不认识的 token 截止，其后全部（含选项形态）归 booted app。
+        # bare 调用无 profile → demo 回退（教学扩展），不因未知 token 报 usage error。
         out, err, code = _run_cli(["--nope"])
-        self.assertEqual(code, 1)
-        self.assertIn("unknown option", err)
+        self.assertNotIn("unknown option", err)
+        # 首个 positional 后的选项也不再由 launcher 解析
+        parsed = _parse_launcher_flags(["--profile", "headless", "task", "--not-a-launcher-flag"])
+        self.assertEqual(parsed["profile"], "headless")
+        self.assertEqual(parsed["task"], ["task", "--not-a-launcher-flag"])
 
     def test_profile_missing_value_fails(self):
         out, err, code = _run_cli(["--profile"])
@@ -100,6 +107,7 @@ class TestDump(unittest.TestCase):
             )
             out, err, code = _run_cli(["--dump-config", "--patch", str(patch)], env={"MINI_DUMP_G": "hi"})
             self.assertEqual(code, None)
+            # 空 builtin base + insert 行 → origin 即层 label
             self.assertIn("# == p.yml", out)
             self.assertIn("greeter", out)
             self.assertIn("!!js", out)
@@ -126,8 +134,9 @@ class TestDump(unittest.TestCase):
             )
             out, err, code = _run_cli(["--dump-config", "--config", str(config), "--patch", str(patch)])
             self.assertEqual(code, None)
+            # 改写行 provenance：origin + patched by 层（上游 groupedDump 格式）
+            self.assertIn("# == c.yml, patched by p.yml", out)
             self.assertIn("# == c.yml", out)
-            self.assertIn("# == p.yml", out)
             self.assertIn("greeting: hi", out)
 
     def test_dump_skipped_patch_warns(self):
@@ -146,7 +155,8 @@ class TestDump(unittest.TestCase):
     def test_dump_bad_patch_file_fails(self):
         out, err, code = _run_cli(["--dump-config", "--patch", "no_such.yml"])
         self.assertEqual(code, 1)
-        self.assertIn("failed to read patches", err)
+        # --patch overlay 错误 label 为 'overlay'（上游 loadOverlayPatches，index.ts:301）
+        self.assertIn("failed to read overlay", err)
 
 
 class TestCompositionValidation(unittest.TestCase):

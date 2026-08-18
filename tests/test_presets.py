@@ -1,5 +1,8 @@
 """第 8 章测试：preset roster —— 组合选择与挂载。"""
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from miniharness.core.scope import Context
 from miniharness.preset.presets import Preset, PresetRoster, builtin_roster
@@ -37,6 +40,43 @@ class TestRosterDiscovery(unittest.TestCase):
         self.assertFalse(p.persona.complete)
         self.assertTrue(p.persona.include_runtime_context)
         self.assertGreater(len(p.tools), 2)
+
+    def test_missing_root_yields_empty_roster(self):
+        # 根缺失 → 空名单（上游 scanRoot ENOENT → []）
+        with tempfile.TemporaryDirectory() as tmp:
+            roster = PresetRoster(Path(tmp) / "nope")
+            self.assertEqual(roster.ids(), [])
+
+    def test_broken_preset_occupies_roster_row(self):
+        # 名字合法但缺 preset.json → 占位 broken 行；残渣目录名跳过（上游 discovery.ts:139-163）
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "ghost").mkdir()
+            (root / ".DS_Store").mkdir()
+            (root / "valid").mkdir()
+            (root / "valid" / "preset.json").write_text(json.dumps(
+                {"id": "valid", "name": "Valid", "description": "", "order": 2}), encoding="utf-8")
+            roster = PresetRoster(root)
+            ids = roster.ids()
+            self.assertIn("ghost", ids)
+            self.assertIn("valid", ids)
+            self.assertNotIn(".DS_Store", ids)
+            ghost = roster.resolve("ghost")
+            self.assertIsNotNone(ghost.broken)
+            # broken 可 resolve（展示/删除需要行），但挂载期拒绝
+            with self.assertRaisesRegex(RuntimeError, "is broken"):
+                ghost.mount(Context(name="host"), Context(name="agent"),
+                            ToolRegistry(Context(name="host2")))
+
+    def test_unloadable_manifest_occupies_broken_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "corrupt").mkdir()
+            (root / "corrupt" / "preset.json").write_text("{ not json", encoding="utf-8")
+            roster = PresetRoster(root)
+            corrupt = roster.resolve("corrupt")
+            self.assertIsNotNone(corrupt.broken)
+            self.assertIn("unloadable", corrupt.broken)
 
 
 class TestMount(unittest.TestCase):

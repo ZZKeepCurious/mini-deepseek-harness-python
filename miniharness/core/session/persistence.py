@@ -28,6 +28,30 @@ from . import (
     thaw,
     turn_balance,
 )
+from .json import now_ms
+
+# header 基础键（其余键扁平并入，对齐上游 SessionHeader 平面字段：
+# version/id/createdAt + cwd?/parentSession?/seedLength?/origin?/
+# delegationDepth?/agentPreset? + mini 扩展 label?）
+_HEADER_BASE_KEYS = frozenset({"version", "id", "createdAt"})
+
+
+def _flat_header(session_id: str, meta: dict | None, created_at: int | None) -> dict:
+    """构造扁平 header（上游 prepare index.ts:877-887：meta 字段散开进 header）。"""
+    header: dict[str, Any] = {
+        "version": SESSION_FORMAT_VERSION,
+        "id": session_id,
+        "createdAt": created_at if created_at is not None else now_ms(),
+    }
+    if meta:
+        header.update(meta)
+    return header
+
+
+def _header_meta(header: dict) -> dict | None:
+    """从扁平 header 恢复 meta（剔除基础键；空 → None）。"""
+    meta = {k: v for k, v in header.items() if k not in _HEADER_BASE_KEYS}
+    return meta or None
 
 
 class SessionPersistence:
@@ -74,11 +98,7 @@ class JsonlPersistence(SessionPersistence):
     def declare(self, session_id: str, meta: dict | None = None, created_at: int | None = None) -> None:
         if session_id in self._created or self._path(session_id).exists():
             return
-        header: dict[str, Any] = {"version": SESSION_FORMAT_VERSION, "id": session_id}
-        if meta:
-            header["meta"] = meta
-        if created_at is not None:
-            header["createdAt"] = created_at
+        header = _flat_header(session_id, meta, created_at)
         with open(self._path(session_id), "w", encoding="utf-8") as f:
             f.write(json.dumps(header, ensure_ascii=False) + "\n")
         self._created.add(session_id)
@@ -87,7 +107,7 @@ class JsonlPersistence(SessionPersistence):
         path = self._path(session_id)
         if session_id in self._created or path.exists():
             return
-        header = {"version": SESSION_FORMAT_VERSION, "id": session_id}
+        header = _flat_header(session_id, None, None)
         with open(path, "w", encoding="utf-8") as f:
             f.write(json.dumps(header, ensure_ascii=False) + "\n")
         self._created.add(session_id)
@@ -116,12 +136,11 @@ class JsonlPersistence(SessionPersistence):
             )
         body = lines[1:]
         if body and not body[-1].endswith("\n"):
-            # torn 尾部：写入中途崩溃留下的残行，截断修复（上游 torn-tail 恢复）
-            try:
-                json.loads(body[-1].strip())
-            except json.JSONDecodeError:
-                body = body[:-1]
-                self._truncate(path, lines[:1] + body)
+            # torn 尾部：无换行的尾记录一律是写入中途崩溃的残行，整体忽略并
+            # 截断落盘——内容合法与否不参与判定（上游 format.ts:338
+            # "ignoring a final record without a newline as a torn tail"）
+            body = body[:-1]
+            self._truncate(path, lines[:1] + body)
         events = []
         for line in body:
             line = line.strip()
@@ -135,7 +154,7 @@ class JsonlPersistence(SessionPersistence):
 
     def inspect(self, session_id):
         header, events = self._read_file(session_id)
-        return {"meta": header.get("meta") if header else None, "events": events}
+        return {"meta": _header_meta(header) if header else None, "events": events}
 
     def list_headers(self):
         headers = []
@@ -150,7 +169,7 @@ class JsonlPersistence(SessionPersistence):
                 continue
             headers.append({
                 "id": header.get("id"),
-                "meta": header.get("meta"),
+                "meta": _header_meta(header),
                 "created_at": header.get("createdAt"),
             })
         return headers

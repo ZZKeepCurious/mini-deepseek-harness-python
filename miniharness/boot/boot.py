@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import importlib
+import sys
 from typing import Any, Callable
 
 from ..core.scope import Context, PluginManager
@@ -43,8 +44,14 @@ def boot(
     env = env or {}
     entries = resolve_js_exprs(load_composition(config_path, bin_name))
     for pp in patch_paths:
-        patches = resolve_js_exprs(load_patch_list(pp, bin_name))
-        entries = apply_patch(entries, patches)
+        patches = resolve_js_exprs(load_patch_list(pp, bin_name, label="overlay"))
+        # 目标缺失的补丁条目 → warn + 跳过该条（上游 per-entry Loader
+        # warning，index.ts:309-311），boot 继续
+        entries = apply_patch(
+            entries, patches,
+            on_missing=lambda tid: print(
+                f"{bin_name}: [warn] patch 目标 id={tid} 不存在，已跳过", file=sys.stderr),
+        )
 
     root = Context(name="root")
     for key, value in env.items():

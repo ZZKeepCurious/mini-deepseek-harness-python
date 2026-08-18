@@ -17,7 +17,7 @@ import json
 import sys
 from typing import Any
 
-from ...protocol.acp import AcpServer
+from ...protocol.acp import AcpRequestError, AcpServer
 from ...protocol.sdk import JsonRpcLineTransport, SdkRuntime
 from ...core.session import thaw
 
@@ -37,7 +37,9 @@ def _error_frame(id_: str, code: int, message: str) -> str:
 def run_acp_worker(permission: str) -> int:
     server = AcpServer()
     if permission == "reject":
-        server.set_answerer(lambda request: "reject-once")
+        # 上游 reject 策略经 wire 应答 {outcome:'cancelled'}（subagent-acp
+        # run.ts:262），桥映射为审批 'cancelled'；对齐取 'cancelled' 而非 'rejected'
+        server.set_answerer(lambda request: "cancelled")
     else:
         server.set_answerer(lambda request: "allow-once")
     for line in sys.stdin:
@@ -78,14 +80,16 @@ def _dispatch_acp(server: AcpServer, method: Any, params: dict) -> Any:
     if method == "shutdown":
         server.close()
         return None
-    raise ValueError(f"method not found: {method}")
+    # 未知方法 → JSON-RPC -32601 method not found（已核实上游 @agentclientprotocol
+    # /sdk 0.25.1 RequestError.methodNotFound → -32601，acp.js:548,1270）
+    raise AcpRequestError(-32601, f"method not found: {method}")
 
 
 def _notify_acp_updates(server: AcpServer, session_id: str) -> None:
     """prompt 完成后发一次 session 更新通知（最后一次提交的 assistant 文本）。
 
-    对齐 ACP 规范 session 通知形态；mini 同步载体只发终态一条
-    （上游是流式多次，简化标注）。
+    mini 同步载体的单帧终态通知（上游是流式多次 session/update 通知，
+    简化标注，见 AGENTS.md）。
     """
     record = server.sessions.get(session_id)
     if record is None:

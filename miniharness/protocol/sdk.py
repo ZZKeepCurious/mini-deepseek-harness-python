@@ -28,6 +28,7 @@ pending"的同步近似（request 返回 PendingRequest，feed 响应帧时 sett
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from typing import Any, Callable
 
@@ -196,13 +197,14 @@ class SdkRuntime:
         self._sessions: dict[str, AgentLoop] = {}
         self._adapter = adapter or FakeLlmAdapter()
         self.last_message_id: str | None = None
-        self.cwd = "."
+        self.cwd = os.path.abspath(".")
         self.provider = "fake"
         self.model = "fake-model"
 
     def handle(self, method: str, params: dict) -> Any:
         if method == "initialize":
-            self.cwd = params.get("cwd", ".")
+            # cwd resolve 成绝对路径（上游 server.ts:116 resolve(params.cwd)）
+            self.cwd = os.path.abspath(params.get("cwd", "."))
             self.provider = params.get("provider", "fake")
             self.model = params.get("model", "fake-model")
             return {"serverInfo": {"name": self.WIRE_NAME, "version": "0.0.1"}}

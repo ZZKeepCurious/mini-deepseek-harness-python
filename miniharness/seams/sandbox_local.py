@@ -339,9 +339,10 @@ class LocalSandboxProvider:
             return ["bwrap", *bwrap_profile_args(policy)]
         if runner == "landlock":
             launcher = self.internals.get("landlockLauncher") or "landlock-run"
+            # 旗标拼写对齐上游 entry/index.ts:96-97：`--ro <path>` / `--rw <path>`
             grant_args = landlock_profile_args(policy)
-            return [launcher, "--read-only", *grant_args["readOnly"],
-                    "--read-write", *grant_args["readWrite"]]
+            return [launcher, *sum(([ "--ro", r] for r in grant_args["readOnly"]), []),
+                    *sum(([ "--rw", r] for r in grant_args["readWrite"]), [])]
         if runner == "seatbelt":
             seatbelt_exec = self.internals.get("seatbeltExec") or "sandbox-exec"
             return [seatbelt_exec, *seatbelt_profile_args(policy)]

@@ -106,6 +106,6 @@ class Session:
                 raise TypeError(f"seed 事件必须可无损 JSON 序列化: {ev!r}")
             self._events.append(deep_freeze(ev))
         if not seed or self._events[-1]["type"] != "session/end-seed":
-            last_time = self._events[-1]["time"] if self._events else self.created_at
-            marker = deep_freeze({"type": "session/end-seed", "seq": self.seq, "time": last_time, "data": {}})
+            # time 取当前时钟（上游 append 一律 Date.now()，end-seed 不复用 last_time）
+            marker = deep_freeze({"type": "session/end-seed", "seq": self.seq, "time": now_ms(), "data": {}})
             self._events.append(marker)

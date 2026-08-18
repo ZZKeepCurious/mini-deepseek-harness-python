@@ -344,35 +344,48 @@ class DeepSeekAdapter(LlmAdapter):
         usage: dict | None = None
         finish_reason: str | None = None
         saw_done = False
+        # SSE spec-strict（上游 sse.ts:7-9 + eventsource-parser）：事件只在空行
+        # 终结时派发，EOF 处的未终止尾部是截断而非可 flush 的载荷（丢弃）；
+        # 多个 data: 行以 \n 连接（multi-data join）。
+        data_lines: list[str] = []
         for raw in resp:
-            line = raw.decode("utf-8", "replace").strip()
-            if not line.startswith("data:"):
+            line = raw.decode("utf-8", "replace").rstrip("\r\n")
+            if line == "":
+                # 空行终结：派发当前事件
+                if data_lines:
+                    data = "\n".join(data_lines)
+                    data_lines = []
+                    if data == "[DONE]":
+                        saw_done = True
+                        break
+                    try:
+                        piece = json.loads(data)
+                    except json.JSONDecodeError:
+                        # 对齐上游：SSE 载荷非 JSON → MALFORMED_RESPONSE（截断/损坏不可信）
+                        raise LlmFailure(MALFORMED_RESPONSE, f"malformed SSE payload: {data[:120]}") from None
+                    if piece.get("usage"):
+                        usage = _map_usage(piece["usage"])
+                    for choice in piece.get("choices", []):
+                        delta = choice.get("delta", {})
+                        finish_reason = choice.get("finish_reason") or finish_reason
+                        if delta.get("reasoning_content"):
+                            reasonings[choice["index"]] = reasonings.get(choice["index"], "") + delta["reasoning_content"]
+                        if delta.get("content"):
+                            texts[choice["index"]] = texts.get(choice["index"], "") + delta["content"]
+                        for tc in delta.get("tool_calls") or []:
+                            slot = pending.setdefault(tc["index"], {"id": "", "name": "", "arguments": ""})
+                            fn = tc.get("function", {})
+                            slot["id"] = tc.get("id") or slot["id"]
+                            slot["name"] += fn.get("name", "")
+                            slot["arguments"] += fn.get("arguments", "")
                 continue
-            data = line[5:].strip()
-            if data == "[DONE]":
-                saw_done = True
-                break
-            try:
-                piece = json.loads(data)
-            except json.JSONDecodeError:
-                # 对齐上游：SSE 载荷非 JSON → MALFORMED_RESPONSE（截断/损坏不可信）
-                raise LlmFailure(MALFORMED_RESPONSE, f"malformed SSE payload: {data[:120]}") from None
-            if piece.get("usage"):
-                usage = _map_usage(piece["usage"])
-            for choice in piece.get("choices", []):
-                delta = choice.get("delta", {})
-                finish_reason = choice.get("finish_reason") or finish_reason
-                if delta.get("reasoning_content"):
-                    reasonings[choice["index"]] = reasonings.get(choice["index"], "") + delta["reasoning_content"]
-                if delta.get("content"):
-                    texts[choice["index"]] = texts.get(choice["index"], "") + delta["content"]
-                for tc in delta.get("tool_calls") or []:
-                    slot = pending.setdefault(tc["index"], {"id": "", "name": "", "arguments": ""})
-                    fn = tc.get("function", {})
-                    slot["id"] = tc.get("id") or slot["id"]
-                    slot["name"] += fn.get("name", "")
-                    slot["arguments"] += fn.get("arguments", "")
-
+            if line.startswith("data:"):
+                payload = line[5:]
+                if payload.startswith(" "):
+                    payload = payload[1:]
+                data_lines.append(payload)
+            # 非 data 字段（注释/event:/id:/retry:）跳过
+        # EOF：未终止的 data_lines 缓冲直接丢弃（截断）；缺 [DONE] → STREAM_CLOSED
         if not saw_done:
             raise LlmFailure(STREAM_CLOSED, "SSE 流在 [DONE] 之前结束，响应不完整")
 

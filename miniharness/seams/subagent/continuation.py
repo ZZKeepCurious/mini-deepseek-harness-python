@@ -60,7 +60,7 @@ from ...core.session.persistence import SessionPersistence
 from ...core.system_prompt import SYSTEM_PROMPT_SERVICE, SystemPromptService
 from ...core.tools import Tool, ToolExec, ToolRegistry
 from ...llm import FakeLlmAdapter, LlmAdapter
-from .descriptor import fold_subagent_descriptor, seed_descriptor_turn
+from .descriptor import CONTINUATION_PROVIDER, fold_subagent_descriptor, seed_descriptor_turn
 from .providers import completed_turn_prefix
 
 __all__ = [
@@ -248,18 +248,20 @@ class SubagentContinuationManager:
             meta["label"] = label
         if seed:
             meta["seedLength"] = len(seed)
+        # 描述符对齐上游 descriptor.ts schema：{version, mode, provider, label?,
+        # agentProvider?, agentModel?, persona?, toolFilter?}（无 kind 字段）
         descriptor: dict[str, Any] = {
-            "kind": "continuable",
             "mode": "continuable",
+            "provider": CONTINUATION_PROVIDER,
+            "label": label or "",
             "agentProvider": getattr(self.parent.adapter, "provider", None),
             "agentModel": getattr(self.parent.adapter, "model", None),
         }
-        if label:
-            descriptor["label"] = label
         if persona:
             descriptor["persona"] = persona
         if tool_filter:
-            descriptor["toolFilter"] = tool_filter
+            # 上游 toolFilter 形状：{allow?: string[], deny?: string[]}
+            descriptor["toolFilter"] = {"allow": list(tool_filter)}
 
         child_session = Session(child_id, seed=seed, meta=meta)
         seed_descriptor_turn(child_session, descriptor)
@@ -450,9 +452,14 @@ class SubagentContinuationManager:
         child_ctx = self.parent.ctx.create_scope(f"subagent:{child_id}")
 
         reg = ToolRegistry(child_ctx)
-        allow = set(descriptor.get("toolFilter") or [])
+        # toolFilter {allow?, deny?}（上游 ToolRestriction 形状）
+        tool_filter = descriptor.get("toolFilter") or {}
+        allow = set(tool_filter.get("allow") or [])
+        deny = set(tool_filter.get("deny") or [])
         for name in self.parent.tools.names():
             if allow and name not in allow:
+                continue
+            if name in deny:
                 continue
             tool = self.parent.tools.resolve(name)
             if tool is not None:

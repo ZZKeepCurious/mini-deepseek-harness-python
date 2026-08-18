@@ -51,7 +51,9 @@ class _UsageError(Exception):
 
 
 def _parse_launcher(args: list[str]) -> dict[str, Any]:
-    """launcher 选项解析；未知选项 / 缺值 → usage error（对齐 commander 行为）。"""
+    """launcher 选项解析（对齐上游 commander passThroughOptions/enablePositionalOptions，
+    args.ts:123-129）：launcher 的 flags 在前，到第一个它不认识的 token 截止，
+    其后全部（含选项形态）归 booted app（mini 即 headless 任务文本）。"""
     parsed: dict[str, Any] = {"profile": None, "configs": [], "patches": [], "dump": None, "task": []}
     i = 0
     while i < len(args):
@@ -80,11 +82,10 @@ def _parse_launcher(args: list[str]) -> dict[str, Any]:
         elif a in ("-h", "--help"):
             parsed["help"] = True
             i += 1
-        elif a.startswith("-") and a != "-":
-            raise _UsageError(f"unknown option: {a}")
         else:
-            parsed["task"].append(a)
-            i += 1
+            # 第一个非 launcher 选项 token（positional 或未知选项）：其后全部归 app
+            parsed["task"].extend(args[i:])
+            break
     return parsed
 
 
@@ -108,7 +109,7 @@ def _dump_configuration(parsed: dict[str, Any], warn: Any | None = None) -> None
     else:
         base_label = Path(configs[0]).name
         base = load_composition(configs[0])
-    layers = [(Path(p).name, load_patch_list(p)) for p in parsed["patches"]]
+    layers = [(Path(p).name, load_patch_list(p, label="overlay")) for p in parsed["patches"]]
     sys.stdout.write(render_composition_dump("miniharness", base_label, base, layers, warn=warn.write))
 
 
@@ -130,7 +131,7 @@ def _validate_composition(parsed: dict[str, Any]) -> None:
 
     entries: list[dict] = []
     for pp in patches:
-        entries = apply_patch(entries, resolve_js_exprs(load_patch_list(pp)))
+        entries = apply_patch(entries, resolve_js_exprs(load_patch_list(pp, label="overlay")))
     sys.stdout.write(f"composition ok: {len(entries)} entry(ies) (patches over built-in empty base)\n")
 
 

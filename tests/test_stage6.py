@@ -130,8 +130,10 @@ class TestSandboxProvider(unittest.TestCase):
             "landlockLauncher": "/fake/landlock-run",
         })
         out = provider.confine(["true"], {"mode": "read-only", "workspaceRoot": "/ws"})
-        self.assertEqual(out["argv"][:2], ["/fake/landlock-run", "--read-only"])
-        self.assertIn("--read-write", out["argv"])
+        # 上游 entry/index.ts:96-97：`--ro <path>` / `--rw <path>`
+        self.assertEqual(out["argv"][0], "/fake/landlock-run")
+        self.assertIn("--ro", out["argv"])
+        self.assertIn("--rw", out["argv"])
         self.assertEqual(out["enforcement"], "full")
 
     def test_landlock_partial_enforcement(self):
@@ -215,6 +217,9 @@ class TestCredentialsParsing(unittest.TestCase):
             parse_credentials_document('{"api_key": 42}', "f")
         with self.assertRaises(ValueError):
             parse_credentials_document('{"api_key": ""}', "f")
+        # 重复键是解析错误（上游 uniqueKeys:true，credentials-local index.ts:160）
+        with self.assertRaisesRegex(ValueError, "duplicate key"):
+            parse_credentials_document('{"api_key": "a", "api_key": "b"}', "f")
 
     def test_parse_dotenv(self):
         text = "# comment\n\nAPI_KEY=sk-123\nEMPTY=\nQUOTED='hello world'\n"

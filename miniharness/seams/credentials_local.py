@@ -54,18 +54,32 @@ def resolve_dsh_home() -> str:
     return os.environ.get("DSH_HOME") or os.path.join(os.path.expanduser("~"), ".dsh")
 
 
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict:
+    """object_pairs_hook：重复键是解析错误（上游 YAML uniqueKeys:true，index.ts:160）。"""
+    seen: dict = {}
+    for key, value in pairs:
+        if key in seen:
+            raise ValueError(f"duplicate key {key!r}")
+        seen[key] = value
+    return seen
+
+
 def parse_credentials_document(text: str, filename: str) -> dict[str, str]:
     """解析凭据文档：严格映射，任何坏条目整体拒绝（不是跳过）。
 
     与上游 parseCredentialsDocument 同语义；错误信息只带键名与位置，
-    绝不引用值（值就是秘密）。
+    绝不引用值（值就是秘密）。重复键 fail-closed（上游 uniqueKeys:true）。
     """
     try:
-        root = json.loads(text)
+        root = json.loads(text, object_pairs_hook=_reject_duplicate_keys)
     except json.JSONDecodeError as error:
         raise ValueError(
             f"credentials-local: invalid document at {filename}: "
             f"JSON parse error at line {error.lineno}, column {error.colno}"
+        ) from error
+    except ValueError as error:  # 重复键
+        raise ValueError(
+            f"credentials-local: invalid document at {filename}: {error}"
         ) from error
     if not isinstance(root, dict):
         raise TypeError(f"credentials-local: {filename} must be a mapping of credential reference to value")

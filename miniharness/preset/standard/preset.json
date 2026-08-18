@@ -1,7 +1,7 @@
 {
   "id": "standard",
   "name": "标准模式",
-  "description": "完整编码 agent：bash/pwsh、文件系统、skills、goals、plan、上下文压缩、子代理/工作流、web 搜索",
+  "description": "完整编码 agent：bash/pwsh、文件系统、skills、goals、plan、web 搜索（上下文压缩随装配挂载；子代理/工作流不在本 roster 的工具列表）",
   "order": 1,
   "persona": {
     "complete": false,

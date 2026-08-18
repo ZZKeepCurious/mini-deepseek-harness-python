@@ -50,7 +50,10 @@ class TestJsonl(unittest.TestCase):
             p.flush()
             lines = (Path(tmp) / "s1.jsonl").read_text(encoding="utf-8").splitlines()
             header = json.loads(lines[0])
-            self.assertEqual(header, {"version": SESSION_FORMAT_VERSION, "id": "s1"})
+            # 扁平 header（上游 SessionHeader）：恒带 createdAt（Date.now 语义）
+            self.assertEqual(header["version"], SESSION_FORMAT_VERSION)
+            self.assertEqual(header["id"], "s1")
+            self.assertIsInstance(header["createdAt"], int)
 
     def test_version_mismatch_fail_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -166,6 +169,22 @@ class TestBoot(unittest.TestCase):
     def test_patch_missing_target_fails(self):
         with self.assertRaises(KeyError):
             apply_patch([{"id": "a", "config": {}}], [{"replace": {"id": "zz", "config": {}}}])
+
+    def test_patch_missing_target_with_on_missing_skips_entry(self):
+        # 上游 per-entry Loader warning（index.ts:309-311）：
+        # 目标缺失 → on_missing 通知 + 跳过该条，其余补丁照常应用
+        warned = []
+        patched = apply_patch(
+            [{"id": "a", "config": {"x": 1}}],
+            [
+                {"replace": {"id": "zz", "config": {"y": 2}}},
+                {"insert": [{"id": "new", "config": {}}]},
+            ],
+            on_missing=warned.append,
+        )
+        self.assertEqual(warned, ["zz"])
+        self.assertEqual([e["id"] for e in patched], ["a", "new"])
+        self.assertEqual(patched[0]["config"], {"x": 1})  # 目标缺失的 replace 未生效
 
     def test_boot_end_to_end(self):
         with tempfile.TemporaryDirectory() as tmp:

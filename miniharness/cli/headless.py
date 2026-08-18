@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import sys
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
@@ -98,7 +99,9 @@ def run_headless(
     install_system_prompt(ctx)
     tools = tools or default_tools(ctx)
     store = install_sessions(ctx)
-    session = store.create(session_id or f"session-{os.urandom(8).hex()[:12]}",
+    # 缺省 id 随机 uuid（上游 headless index.ts:112 `session-${randomUUID()}`，
+    # 122 bit 熵；此前 12 hex = 48 bit 为分歧，已对齐）
+    session = store.create(session_id or f"session-{uuid.uuid4()}",
                            {"meta": {"cwd": os.getcwd()}})
     loop = AgentLoop(session, adapter, tools, ctx)
     first_seq = session.seq

@@ -167,33 +167,59 @@ class TestDotenv(unittest.TestCase):
             load_dotenv_file(path, environ=env)
             self.assertEqual(env["MINI_ENV_A"], "keep")
 
+    def test_bootstrap_only_name_rejected_before_materialization(self):
+        # 上游 readEnvLayer（index.ts:153-162）：bootstrap-only 名字在任何值
+        # 物化前整体拒绝；非 bootstrap 名不受影响
+        from miniharness.boot.dotenv import is_bootstrap_only
+        self.assertTrue(is_bootstrap_only("PATH"))
+        self.assertTrue(is_bootstrap_only("PYTHONPATH"))
+        self.assertTrue(is_bootstrap_only("DSH_HOME"))
+        self.assertTrue(is_bootstrap_only("XDG_CONFIG_HOME"))
+        self.assertFalse(is_bootstrap_only("DEEPSEEK_API_KEY"))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".env"
+            path.write_text("OK_KEY=1\nPATH=/evil\n", encoding="utf-8")
+            env = {}
+            with self.assertRaisesRegex(ValueError, 'sets "PATH"'):
+                load_dotenv_file(path, environ=env)
+            # 拒绝发生在物化前：OK_KEY 也未写入
+            self.assertEqual(env, {})
+
 
 class TestComposeAndDump(unittest.TestCase):
     def test_origins_track_replace_and_insert(self):
-        combined, origins = compose_with_origins(_base_entries(), [("p1.yml", [
+        combined, records = compose_with_origins(_base_entries(), [("p1.yml", [
             {"replace": {"id": "greeter", "config": {"greeting": "hi"}}},
             {"insert": [{"id": "new1", "module": "m"}]},
         ])])
-        self.assertEqual(origins, ["p1.yml", "base", "p1.yml"])
+        # provenance 累积（上游 index.ts:422-436）：replace 改写保留 origin + patchedBy，
+        # insert 新行 origin 为层 label
+        self.assertEqual(records, [
+            {"origin": "base", "patchedBy": ["p1.yml"]},
+            {"origin": "base", "patchedBy": []},
+            {"origin": "p1.yml", "patchedBy": []},
+        ])
         self.assertEqual([e["id"] for e in combined], ["greeter", "base2", "new1"])
 
     def test_skipped_patch_warns_and_continues(self):
         warns = []
-        combined, origins = compose_with_origins(_base_entries(), [
+        combined, records = compose_with_origins(_base_entries(), [
             ("bad.yml", [{"replace": {"id": "nope", "config": {}}}]),
             ("ok.yml", [{"insert": [{"id": "new1", "module": "m"}]}]),
         ], warn=warns.append)
         self.assertEqual(len(warns), 1)
         self.assertIn("被跳过", warns[0])
         self.assertEqual([e["id"] for e in combined], ["greeter", "base2", "new1"])
-        self.assertEqual(origins[-1], "ok.yml")
+        self.assertEqual(records[-1], {"origin": "ok.yml", "patchedBy": []})
 
     def test_dump_sections_and_reloadable(self):
         rendered = render_composition_dump("miniharness", "base.yml", _base_entries(), [
             ("patch.yml", [{"replace": {"id": "greeter", "config": {"greeting": "hi"}}}]),
         ])
+        # provenance 注释（上游 groupedDump index.ts:460-462）：
+        # 改写行显示 "origin, patched by <layer>"
+        self.assertIn("# == base.yml, patched by patch.yml", rendered)
         self.assertIn("# == base.yml", rendered)
-        self.assertIn("# == patch.yml", rendered)
         self.assertEqual(rendered.count("- id:"), 2)
 
     def test_dump_js_expr_verbatim(self):

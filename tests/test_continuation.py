@@ -101,8 +101,16 @@ class _ScriptedParent(FakeLlmAdapter):
 
 
 class TestDescriptor(unittest.TestCase):
+    # 描述符 schema 对齐上游 descriptor.ts（2026-08-18 对齐清零轮）：
+    # {version, mode, provider, label?, agentProvider?, agentModel?, persona?, toolFilter?}
+
+    def _payload(self, **overrides):
+        payload = {"mode": "continuable", "provider": "in-process", "label": "研"}
+        payload.update(overrides)
+        return payload
+
     def test_snapshot_and_parse_roundtrip(self):
-        descriptor = {"kind": "continuable", "mode": "continuable", "label": "研"}
+        descriptor = self._payload()
         snapshot = snapshot_subagent_descriptor(descriptor)
         self.assertEqual(snapshot["version"], SUBAGENT_DESCRIPTOR_VERSION)
         self.assertEqual(parse_subagent_descriptor(snapshot), snapshot)
@@ -110,26 +118,48 @@ class TestDescriptor(unittest.TestCase):
     def test_parse_fail_closed(self):
         self.assertIsNone(parse_subagent_descriptor({}))
         self.assertIsNone(parse_subagent_descriptor(
-            {"version": 1, "kind": "continuable", "mode": "continuable"}))
+            {"version": 1, "mode": "continuable", "provider": "p", "label": "x"}))
         self.assertIsNone(parse_subagent_descriptor(
-            {"version": 2, "kind": "fork", "mode": "continuable"}))
+            {"version": 2, "mode": "continuable", "provider": 42, "label": "x"}))
         self.assertIsNone(parse_subagent_descriptor(
-            {"version": 2, "kind": "continuable", "mode": "background"}))
+            {"version": 2, "mode": "background", "provider": "p", "label": "x"}))
         self.assertIsNone(parse_subagent_descriptor(
-            {"version": 2, "kind": "continuable", "mode": "continuable",
+            {"version": 2, "mode": "continuable", "provider": "p"}))  # continuable 缺 label
+        self.assertIsNone(parse_subagent_descriptor(
+            {"version": 2, "mode": "continuable", "provider": "p", "label": "x",
              "toolFilter": "not-a-list"}))
+        self.assertIsNone(parse_subagent_descriptor(
+            {"version": 2, "mode": "continuable", "provider": "p", "label": "x",
+             "toolFilter": {"allow": "not-a-list"}}))
+        self.assertIsNone(parse_subagent_descriptor(
+            {"version": 2, "mode": "continuable", "provider": "p", "label": "x",
+             "bogusField": 1}))  # 未知字段拒绝（上游 assertKnownKeys）
         self.assertIsNone(parse_subagent_descriptor("junk"))
         self.assertIsNone(parse_subagent_descriptor(None))
 
+    def test_one_shot_descriptor_parses_but_not_continuable(self):
+        payload = {"version": 2, "mode": "one-shot", "provider": "p", "label": "once"}
+        self.assertEqual(parse_subagent_descriptor(payload), payload)
+        self.assertIsNone(parse_subagent_descriptor(
+            {"version": 2, "mode": "one-shot", "provider": "p", "persona": "x"}))  # one-shot 无 persona
+
+    def test_tool_filter_shape(self):
+        payload = self._payload(toolFilter={"allow": ["bash"], "deny": ["fs_write"]})
+        self.assertEqual(parse_subagent_descriptor(
+            snapshot_subagent_descriptor(payload)).get("toolFilter"),
+            {"allow": ["bash"], "deny": ["fs_write"]})
+
     def test_fold_first_authoritative(self):
+        # 首条权威；之后重复的同型事件被无视（上游 find 首条，非损坏）
         session = Session("c1")
-        seed_descriptor_turn(session, {"kind": "continuable", "mode": "continuable", "label": "a"})
+        seed_descriptor_turn(session, self._payload(label="a"))
         folded = fold_subagent_descriptor(session.events)
         self.assertEqual(folded["label"], "a")
         self.assertEqual(folded["version"], SUBAGENT_DESCRIPTOR_VERSION)
         self.assertIsNone(fold_subagent_descriptor([]))
-        seed_descriptor_turn(session, {"kind": "continuable", "mode": "continuable", "label": "b"})
-        self.assertIsNone(fold_subagent_descriptor(session.events))
+        seed_descriptor_turn(session, self._payload(label="b"))
+        again = fold_subagent_descriptor(session.events)
+        self.assertEqual(again["label"], "a")  # 第二条不能改写首条声明的组合
 
 
 class TestSettlementHelpers(unittest.TestCase):
@@ -191,8 +221,8 @@ class TestPersistenceApi(unittest.TestCase):
                                    "delegationDepth": 1, "label": "研"})
         persistence.declare("c1", {"parentSession": "p1"})  # 幂等：第二次忽略
         session = Session("c1")
-        session.append("subagent/descriptor", {"version": 2, "kind": "continuable",
-                                               "mode": "continuable"})
+        session.append("subagent/descriptor", {"version": 2, "mode": "continuable",
+                                               "provider": "in-process", "label": "研"})
         for ev in session.events:
             persistence.append("c1", ev)
         persistence.flush()

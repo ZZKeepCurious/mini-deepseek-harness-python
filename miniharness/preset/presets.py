@@ -15,6 +15,7 @@ apps/cli/config/agent-presets/（roster = 目录列表即名单）。
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,10 @@ from ..core.scope import Context
 from ..core.tools import Tool, ToolRegistry
 
 BUILTIN_PRESETS = Path(__file__).parent
+
+# preset id 语法（上游 discovery.ts PRESET_ID）：不匹配的目录名直接跳过
+# （.DS_Store 级残渣不占位、不报 broken）
+PRESET_ID = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 
 @dataclass(frozen=True)
@@ -44,15 +49,21 @@ class Preset:
     tools: list[str] = field(default_factory=list)
     persona: PersonaConfig = field(default_factory=PersonaConfig)
     provides: list[str] = field(default_factory=list)   # 进程级服务声明（默认空）
+    # 发现期健康标记（上游 discovery 的 broken）：缺 preset.json / 清单损坏的
+    # 目录仍占位 roster 行（id 被磁盘占据），挂载期拒绝
+    broken: str | None = None
 
     def mount(self, ctx: Context, agent_scope: Context, host_tools: ToolRegistry) -> ToolRegistry:
         """挂载到 agent 作用域，返回 agent 专属工具视图。
 
         挂载不变量（与上游 preset 挂载语义一致）：
+          * broken preset 在挂载期被拒绝（上游 resolveMountable → PresetMountError）
           * 只从 host 注册表挑工具，不新造工具实现（注册表留在 host plane）
           * host 缺工具 → fail loud（preset 声明了 host 没有的东西）
           * provides 命中 host 已有服务 → 拒绝挂载（进程级冲突）
         """
+        if self.broken is not None:
+            raise RuntimeError(f"preset {self.id} is broken: {self.broken}")
         missing = [t for t in self.tools if host_tools.resolve(t) is None]
         if missing:
             raise RuntimeError(
@@ -95,7 +106,14 @@ def load_preset(directory: Path) -> Preset:
 
 
 class PresetRoster:
-    """roster：目录列表即名单。发现 = 扫描 preset 根目录下每个含 preset.json 的目录。"""
+    """roster：目录列表即名单。发现 = 扫描 preset 根目录（上游 scanRoot）。
+
+    健康语义（对齐 discovery.ts:139-163）：
+      * 根缺失（ENOENT）→ 空名单（用户根首次使用前不存在）
+      * 目录名不匹配 PRESET_ID → 跳过（残渣不占位）
+      * 名字合法但缺 preset.json / 清单损坏 → 占位 broken 行（id 仍被占据）
+      * broken preset 可 resolve（展示/删除需要行），挂载期拒绝
+    """
 
     def __init__(self, root: Path):
         self.root = Path(root)
@@ -103,14 +121,30 @@ class PresetRoster:
 
     def _scan(self) -> dict[str, Preset]:
         presets: dict[str, Preset] = {}
-        for child in sorted(self.root.iterdir()):
-            if not child.is_dir():
+        try:
+            children = sorted(self.root.iterdir())
+        except FileNotFoundError:
+            return presets  # 根缺失 → 空（上游 ENOENT → []）
+        for child in children:
+            if not child.is_dir() or not PRESET_ID.match(child.name):
                 continue
-            if not (child / "preset.json").is_file():
+            manifest = child / "preset.json"
+            if not manifest.is_file():
+                presets[child.name] = Preset(
+                    id=child.name, name=child.name, description="", order=0,
+                    broken=f"the composition file preset.json is missing — "
+                           f"the directory still occupies the id; delete it or restore the file",
+                )
                 continue
-            p = load_preset(child)
-            if p.id in presets:
-                raise RuntimeError(f"roster 发现重复 preset id: {p.id}")
+            try:
+                p = load_preset(child)
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                # 清单损坏 → 占位 broken 行（上游 compositionProblem → broken）
+                presets[child.name] = Preset(
+                    id=child.name, name=child.name, description="", order=0,
+                    broken=f"the composition is unloadable: {error}",
+                )
+                continue
             presets[p.id] = p
         return presets
 
