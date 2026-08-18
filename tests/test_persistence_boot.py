@@ -128,6 +128,47 @@ class TestRecovery(unittest.TestCase):
             self.assertEqual(ends[0]["data"]["reason"], {"kind": "interrupted"})
             self.assertTrue(balanced_after_replay(p, "s1"))
 
+    def test_repair_persists_closers_jsonl(self):
+        # 上游 commitRepair：修复合成的 closers 必须落盘（追加 + fsync），
+        # 二次加载幂等（不会重复追加 closers）。
+        with tempfile.TemporaryDirectory() as tmp:
+            p = JsonlPersistence(Path(tmp))
+            p.append("s1", {"type": "turn/start", "seq": 0, "time": 1, "data": {"turn": 1}})
+            p.append("s1", {"type": "user/message", "seq": 1, "time": 2,
+                            "data": _msg("hi"), "surfaceOp": "append"})
+            p.flush()
+            first = repair_and_replay(p, "s1", Session("s1"))
+            # 内存会话 = 2 真实 + 1 closer + session/end-seed 构造标记
+            self.assertEqual(len(first.events), 4)
+            # 磁盘上已持久化 closers：直接读文件也应看到 turn/end
+            persisted = p.load("s1")
+            self.assertEqual([e["type"] for e in persisted], ["turn/start", "user/message", "turn/end"])
+            # 二次加载：日志已平衡 → 不再合成新 closers（幂等）
+            second = repair_and_replay(p, "s1", Session("s1"))
+            self.assertEqual(len(second.events), 4)
+            self.assertEqual(len(persisted), len(p.load("s1")))
+
+    def test_repair_persists_closers_sqlite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            p = SqlitePersistence(root)
+            p.append("s1", {"type": "turn/start", "seq": 0, "time": 1, "data": {"turn": 1}})
+            p.append("s1", {"type": "user/message", "seq": 1, "time": 2,
+                            "data": _msg("hi"), "surfaceOp": "append"})
+            p.flush()
+            first = repair_and_replay(p, "s1", Session("s1"))
+            self.assertEqual(len(first.events), 4)  # 3 日志 + end-seed 标记
+            p.close()
+            # 重开后日志仍含持久化的 closers
+            p2 = SqlitePersistence(root)
+            self.assertEqual(
+                [e["type"] for e in p2.load("s1")],
+                ["turn/start", "user/message", "turn/end"],
+            )
+            second = repair_and_replay(p2, "s1", Session("s1"))
+            self.assertEqual(len(second.events), 4)
+            p2.close()
+
     def test_unknown_event_fail_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = JsonlPersistence(Path(tmp))

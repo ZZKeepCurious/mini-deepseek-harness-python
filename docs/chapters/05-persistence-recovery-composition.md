@@ -7,8 +7,8 @@
 !!! warning "早期简化形态"
     本章代码为**教学简化形态**，与当前实现存在以下差异（学习时以当前实现为准，见 00-setup §0.5 简化表与 AGENTS.md 已核实清单）：
 
-    - **JSONL 片段**：实现每文件 header 行 + 事件行，`SESSION_FORMAT_VERSION = 0` 不符即拒读（fail-closed，`ignorable` 豁免）；torn 尾部截断修复在 `commitRepair` 中截断 torn tail + 追加 closers + fsync（`core/session/persistence.py:62-100`）。
-    - **`repair_and_replay`**：本章为逐条 `append` 重放；实现为 seed 回放——从 `session/end-seed` 标记重放（`core/session/persistence.py:177-186`）。
+    - **JSONL 片段**：实现每文件 header 行 + 事件行，`SESSION_FORMAT_VERSION = 0` 不符即拒读（fail-closed，`ignorable` 豁免）；torn 尾部截断修复在 `commitRepair` 中截断 torn tail + 追加 closers + fsync（`core/session/persistence.py` `_read_file`/`commit_repair`）。
+    - **`repair_and_replay`**：本章为逐条 `append` 重放；实现为 seed 回放——从 `session/end-seed` 标记重放，且修复合成的 closers 经 `commit_repair` 持久化落盘（`core/session/persistence.py:305-318`）。
     - **`turn/end` reason**：本章差异表写 `reason = "interrupted"` 字符串；实现为对象 `{kind:'interrupted'}`（配合 `repair_interrupted_turn` 合成 closers，见第 1 章横幅）。
     - **崩溃演示**：本章 §5.2"kill 进程"实为手动构造未闭合回合来模拟崩溃尾部，非真实 kill（`tests/test_persistence_boot.py` 可复核）。
     - **简化载体**：配置为 YAML（pyyaml 可选，缺省退化 JSON）+ `!!js` 仅 `process.env.<NAME>` 子集；持久化平铺 `root/<id>.jsonl` 是教学扩展（上游显式拒绝 legacy flat layout，用 `root/<projectDir>/<encodeSegment(id)>/session.jsonl(.zstd)`）。

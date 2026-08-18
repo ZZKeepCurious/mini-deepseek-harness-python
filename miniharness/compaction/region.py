@@ -10,7 +10,9 @@ compaction/summary → user/message 检查点（surfaceOp replace，sourceEventS
 路径恰好补一次 compaction/end（带 error），闭合失败留下可检测的孤儿锁。
 
 mini 简化标注：同步模型下摘要期间无并发 surface 变更（工具不在 pre-step 执行），
-稳定性校验保留但实际不会失败；崩溃孤儿锁可被 inspect 检出但 repair 不自动恢复。
+稳定性校验保留但实际不会失败；崩溃孤儿锁与上游同语义——检出即 busy 拒绝
+（上游 assertCompactionInactive 抛 ManualCompactionError('busy')，并无自动恢复；
+仅 end-seed 之后的孤儿 start 视为上一会话生命周期的遗留而豁免）。
 """
 from __future__ import annotations
 

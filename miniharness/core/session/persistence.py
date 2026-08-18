@@ -8,14 +8,17 @@
      （fail-closed，上游 format.ts / assertVersion）
   3. torn 尾部（写入中途崩溃留下的残行）截断修复，绝不静默丢弃
   4. load 时未知事件类型（未带 ignorable）整体拒绝 —— fail-closed
-  5. 崩溃恢复只合成 closers（工具结果 / step/end / turn/end），不截断日志
+  5. 崩溃恢复只合成 closers（工具结果 / step/end / turn/end），不截断有效日志；
+     修复结果经 commit_repair 持久化（截断 torn 尾 + 追加 closers + fsync，
+     对齐上游 commitRepair 两个 fsync 步）
 
 简化说明（有意保留）：上游默认 zstd 帧压缩与 CRC 校验依赖第三方库，
-本实现为明文 JSONL；fsync 与目录级持久化语义以 flush 屏障近似。
+本实现为明文 JSONL（zstd 未实现时标注简化）；JSONL 写路径已做真实 fsync。
 """
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -78,6 +81,14 @@ class SessionPersistence:
         """枚举全部会话 header：{id, meta, created_at}（meta 可能为 None）。"""
         raise NotImplementedError
 
+    def commit_repair(self, session_id: str, closers: list[dict]) -> None:
+        """把崩溃修复的 closers 持久化落盘（对齐上游 PersistenceBackend.commitRepair）。
+
+        上游以 commitRepair(meta, tornMarker, closers) 截断 torn 尾并追加 closers；
+        mini 的 torn 尾在 load 读路径已即时截断（含 fsync），故此处只追加 closers。
+        """
+        raise NotImplementedError
+
 
 class JsonlPersistence(SessionPersistence):
     """JSONL 后端：每会话一个文件；header 行 + 事件行（上游 format.ts）。"""
@@ -87,6 +98,13 @@ class JsonlPersistence(SessionPersistence):
         self.root.mkdir(parents=True, exist_ok=True)
         self._pending: dict[str, list[dict]] = {}
         self._created: set[str] = set()
+
+    def _durable(self, path: Path, mode: str, lines: list[str]) -> None:
+        """写入 + fsync：对齐上游 JSONL 后端的 fsync 持久化语义。"""
+        with open(path, mode, encoding="utf-8") as f:
+            f.write("".join(lines))
+            f.flush()
+            os.fsync(f.fileno())
 
     def _path(self, session_id: str) -> Path:
         safe = session_id.replace("/", "_").replace("\\", "_")
@@ -99,8 +117,7 @@ class JsonlPersistence(SessionPersistence):
         if session_id in self._created or self._path(session_id).exists():
             return
         header = _flat_header(session_id, meta, created_at)
-        with open(self._path(session_id), "w", encoding="utf-8") as f:
-            f.write(json.dumps(header, ensure_ascii=False) + "\n")
+        self._durable(self._path(session_id), "w", [json.dumps(header, ensure_ascii=False) + "\n"])
         self._created.add(session_id)
 
     def _ensure_header(self, session_id: str) -> None:
@@ -108,16 +125,14 @@ class JsonlPersistence(SessionPersistence):
         if session_id in self._created or path.exists():
             return
         header = _flat_header(session_id, None, None)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(json.dumps(header, ensure_ascii=False) + "\n")
+        self._durable(path, "w", [json.dumps(header, ensure_ascii=False) + "\n"])
         self._created.add(session_id)
 
     def flush(self):
         for sid, events in self._pending.items():
             self._ensure_header(sid)
-            with open(self._path(sid), "a", encoding="utf-8") as f:
-                for ev in events:
-                    f.write(json.dumps(thaw(ev), ensure_ascii=False) + "\n")
+            lines = [json.dumps(thaw(ev), ensure_ascii=False) + "\n" for ev in events]
+            self._durable(self._path(sid), "a", lines)
         self._pending.clear()
 
     def _read_file(self, session_id):
@@ -175,8 +190,14 @@ class JsonlPersistence(SessionPersistence):
         return headers
 
     def _truncate(self, path: Path, kept: list[str]) -> None:
-        with open(path, "w", encoding="utf-8") as f:
-            f.write("".join(kept))
+        self._durable(path, "w", kept)
+
+    def commit_repair(self, session_id: str, closers: list[dict]) -> None:
+        if not closers:
+            return
+        self._ensure_header(session_id)
+        lines = [json.dumps(thaw(ev), ensure_ascii=False) + "\n" for ev in closers]
+        self._durable(self._path(session_id), "a", lines)
 
 
 class SqlitePersistence(SessionPersistence):
@@ -252,6 +273,19 @@ class SqlitePersistence(SessionPersistence):
         ).fetchall()
         return [{"id": r[0], "meta": json.loads(r[1]) if r[1] else None, "created_at": r[2]} for r in rows]
 
+    def commit_repair(self, session_id: str, closers: list[dict]) -> None:
+        if not closers:
+            return
+        rows = [
+            (session_id, ev["seq"], ev["type"], json.dumps(thaw(ev), ensure_ascii=False))
+            for ev in closers
+        ]
+        self._conn.executemany(
+            "INSERT INTO events (session_id, seq, type, data) VALUES (?, ?, ?, ?)",
+            rows,
+        )
+        self._conn.commit()
+
     def close(self):
         self._conn.close()
 
@@ -272,9 +306,15 @@ def repair_and_replay(persistence: SessionPersistence, session_id: str, session:
     """load → 校验 → 崩溃修复 → 以 seed 回放进内存 Session（重启后继续对话）。
 
     与上游 prepareCore 顺序一致：fail-closed 校验在前，repair 只合成缺失 closers。
+    修复结果持久化：closers 经 commit_repair 落盘（对齐上游 commitPrepared →
+    backend.commitRepair），torn 尾截断在 load 读路径已即时落盘（含 fsync）。
+    已平衡的日志返回空 closers，二次加载幂等。
     """
     raw = load_events_checked(persistence.load(session_id))
-    repaired = raw + repair_interrupted_turn(raw)
+    closers = repair_interrupted_turn(raw)
+    if closers:
+        persistence.commit_repair(session_id, closers)
+    repaired = raw + closers
     if repaired:
         session = Session(session_id, seed=repaired, created_at=session.created_at)
     return session
