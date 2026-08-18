@@ -112,7 +112,7 @@ miniharness/
 |---|---|---|
 | `core/session/`（session + types/invariant/json/message/repair/surface，共 7 文件） | `packages/core/session/src/`（types/invariant/json/repair/surface 等 10 文件，index.ts 聚合）+ `packages/llm/llm/src/message.ts` | message 构造保留在会话域（L0 不依赖 llm，简化标注） |
 | `core/session/persistence.py` | `packages/session/session-persistence-{jsonl,sqlite}` | 上游是独立包组，mini 并入会话域（简化标注） |
-| `core/session_store.py` | `packages/core/session/src/index.ts`（SessionStore 部分） | 内存会话服务：create/prepare/enter/announce 生命周期 + get/list/fork（五错误码）+ flush 检查点 + `session/created|disposed|event|flush` 四事件；无 typert lookup、无 scope 过滤、flush 为同步近似（简化标注见模块 docstring） |
+| `core/session_store.py` | `packages/core/session/src/index.ts`（SessionStore 部分） | 内存会话服务：create/prepare/enter/announce 生命周期 + get/list/fork（五错误码）+ flush 检查点 + `session/created|disposed|event|flush` 四事件；enter 记录 owner scope、事件按 owner 路由（对齐上游 scopeTarget）；无 typert lookup、flush 为同步近似、无 fiber/effect（简化标注见模块 docstring） |
 | `core/scope.py` | `vendor/cordis` + `packages/core/scope` | |
 | `core/tools.py` | `packages/core/tools` | |
 | `core/agent_loop/agent.py` | `packages/core/agent-loop/src/agent.ts` | 单一 async 驱动（`_pump_async`/`_run_step_async`）+ `followup`/`steer` 同步门面（无 driver 时经 `asyncio.run` 瞬态事件循环）+ 协作式取消（`_cancel_event` 每轮新建 + `call_soon_threadsafe` 跨线程置位）；agent/pre-step 决策经 `awaterfall` |

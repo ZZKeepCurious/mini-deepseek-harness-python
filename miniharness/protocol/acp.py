@@ -448,6 +448,11 @@ class AcpServer:
     # ---------- 生命周期 ----------
 
     def close(self) -> None:
+        for record in self._sessions.values():
+            try:
+                record["loop"].dispose()
+            except Exception:
+                pass
         self._closed = True
         self._sessions.clear()
 

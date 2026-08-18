@@ -15,10 +15,16 @@
 mini 简化（有意保留，须在文档标注）：
   * 无 Cordis fiber/effect：create = prepare + enter + announce 的顺序事务，announce
     抛错时手动调 enter 返回的 detach 回滚（上游 effect 自动 yield 回滚；语义等价）
-  * 无 typert lookup 注册（mini 无 typert）；无 Scoped<Session> scope 过滤，事件全局派发
+  * 无 typert lookup 注册（mini 无 typert）
   * flush 为同步并行近似（上游 Promise.allSettled 后抛第一个失败；mini 首个异常直接上抛）
   * session/event payload 为 {"session","event"} 单对象（上游 (session, event) 双参）；
     created / disposed / flush payload 为 {"session": s}
+
+scope 路由（2026-08-18 地基①，对齐上游 dsh-scope）：
+  * enter 记录 owner scope（owner_ctx = enter 时的调用上下文；缺省 store ctx）
+  * session/created|disposed|event|flush 在 owner scope 上派发：owner scope 自身 +
+    祖先链监听器收到（含 root/全局）；兄弟/后代作用域不收到。等价上游
+    `scopeTarget(session, scopeOf(ctx))` 的"祖先接收、旁支隔离"。
 """
 from __future__ import annotations
 
@@ -69,15 +75,17 @@ class SessionStore:
 
     # ---------- 生命周期 ----------
 
-    def create(self, id: str | None = None, options: dict | None = None) -> Session:
+    def create(self, id: str | None = None, options: dict | None = None,
+               owner_ctx: "Context | None" = None) -> Session:
         """构造 + 进店 + 公告一条龙（上游 create：prepare 后 effect 包 enter+announce）。
 
         options：{seed?, meta?}。meta 是持久化头部元数据（cwd/parentSession/
         seedLength/origin/delegationDepth/agentPreset/createdAt），校验后传入
         Session.meta。id 缺省按 session-<n> 顺延去重。
+        owner_ctx：会话的 owner scope（对齐上游 enter 处 scopeOf(ctx)）；缺省 store ctx。
         """
         session = self.prepare(id, options)
-        detach = self.enter(session)
+        detach = self.enter(session, owner_ctx=owner_ctx)
         try:
             self.announce(session)
         except Exception:
@@ -107,8 +115,12 @@ class SessionStore:
         created_at = meta.pop("createdAt", None)
         return Session(id, seed=options.get("seed"), created_at=created_at, meta=meta)
 
-    def enter(self, session: Session) -> Any:
+    def enter(self, session: Session, owner_ctx: "Context | None" = None) -> Any:
         """把 prepare 好的会话装进店内：安装 append 发布钩子 + 登记条目。返回 detach 幂等 disposer。
+
+        owner_ctx：会话的 owner scope（对齐上游 scopeTarget(session, scopeOf(ctx))）。
+        记录在条目上，session/created|disposed|event|flush 都在该上下文上派发——
+        监听器只收到所属作用域（及祖先）的事件。缺省 store 自身上下文。
 
         不触发 session/created（由 announce 负责，便于把 detach 先 yield 再公告）。
         重复 id 或已 attach 的会话一律拒绝（fail loud）。
@@ -119,6 +131,7 @@ class SessionStore:
         entry = {
             "id": id,
             "session": session,
+            "owner_ctx": owner_ctx or self.ctx,
             "announced": False,
             "announcing": False,
             "appending": False,
@@ -152,7 +165,7 @@ class SessionStore:
         entry["announced"] = True
         entry["announcing"] = True
         try:
-            self.ctx.emit("session/created", {"session": session})
+            entry["owner_ctx"].emit("session/created", {"session": session})
         finally:
             entry["announcing"] = False
             if entry["detachRequested"] and not entry["appending"]:
@@ -163,8 +176,8 @@ class SessionStore:
 
         同步近似：第一个抛出的监听器异常直接上抛（上游 allSettled 后抛第一个）。
         """
-        self._live_entry_for(session)
-        return len(self.ctx.parallel("session/flush", {"session": session})) > 0
+        entry = self._live_entry_for(session)
+        return len(entry["owner_ctx"].parallel("session/flush", {"session": session})) > 0
 
     # ---------- 查询 ----------
 
@@ -291,7 +304,7 @@ class SessionStore:
             return  # 派发中的 detach 已把条目摘走，就地短路
         entry["appending"] = True
         try:
-            self.ctx.emit("session/event", {"session": session, "event": event})
+            entry["owner_ctx"].emit("session/event", {"session": session, "event": event})
         except Exception as error:
             logger = getattr(self.ctx, "logger", None)
             if logger is not None and hasattr(logger, "warn"):
@@ -303,7 +316,7 @@ class SessionStore:
 
     def _emit_disposed(self, entry: dict) -> None:
         try:
-            self.ctx.emit("session/disposed", {"session": entry["session"]})
+            entry["owner_ctx"].emit("session/disposed", {"session": entry["session"]})
         except Exception as error:
             logger = getattr(self.ctx, "logger", None)
             if logger is not None and hasattr(logger, "warn"):

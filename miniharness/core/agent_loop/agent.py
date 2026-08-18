@@ -100,7 +100,11 @@ class AgentLoop:
         self.session = session
         self.adapter = adapter
         self.tools = tools
-        self.ctx = ctx
+        # 每 agent 一个作用域（对齐上游 ReactLoopAgent 构造里 createScope(loopCtx, this)）：
+        # self.ctx 是作用域子上下文，经父链继承依赖与服务；本 agent 的注册归属该作用域，
+        # dispose() 逆序回滚（会话管理按 owner scope 路由 session 事件）。
+        self.scope = ctx.create_scope(f"agent:{session.session_id}")
+        self.ctx = self.scope
         self.system_prompt = system_prompt
         self.max_steps = max_steps
         self.max_parallel_tool_calls = max_parallel_tool_calls   # 阶段 7：并行池上限（上游 DEFAULT_MAX_PARALLEL_TOOL_CALLS）
@@ -150,6 +154,14 @@ class AgentLoop:
         # 仅下次唤醒 send（followup/steer 清 _parked）恢复（上游"waking send
         # resumes the parked queue"）
         self._parked = False
+
+    def dispose(self) -> None:
+        """拆解本 agent 的作用域：逆序回滚作用域上的全部注册（服务/监听器/effect）。
+
+        对齐上游生命周期 owner 在 driver 退出后 unwind scope（machine.scope.dispose()）。
+        拆解后作用域拒绝进一步注册（fail loud）。会话本身（session.log）不受影响。
+        """
+        self.scope.dispose()
 
     @property
     def id(self) -> str:

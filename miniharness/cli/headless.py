@@ -101,9 +101,17 @@ def run_headless(
     store = install_sessions(ctx)
     # 缺省 id 随机 uuid（上游 headless index.ts:112 `session-${randomUUID()}`，
     # 122 bit 熵；此前 12 hex = 48 bit 为分歧，已对齐）
-    session = store.create(session_id or f"session-{uuid.uuid4()}",
-                           {"meta": {"cwd": os.getcwd()}})
+    # 三段式（对齐上游 agent-loop：prepare → 构造 agent scope → enter(owner=loop.ctx) → announce）：
+    # 会话 owner 是 agent 作用域，session/created|disposed|event|flush 按 owner 路由
+    session = store.prepare(session_id or f"session-{uuid.uuid4()}",
+                            {"meta": {"cwd": os.getcwd()}})
     loop = AgentLoop(session, adapter, tools, ctx)
+    detach = store.enter(session, owner_ctx=loop.ctx)
+    try:
+        store.announce(session)
+    except Exception:
+        detach()
+        raise
     first_seq = session.seq
     try:
         loop.followup(task)

@@ -234,6 +234,12 @@ class SdkRuntime:
             loop.followup(message)
             return {"messageId": message["id"]}
         if method == "shutdown":
+            for loop in self._sessions.values():
+                try:
+                    loop.dispose()
+                except Exception:
+                    pass
+            self._sessions.clear()
             return {}
         raise ValueError(f"method not found: {method}")
 

@@ -112,9 +112,15 @@ def resume_session(
     install_jobs(ctx)
     install_system_prompt(ctx)
     store = install_sessions(ctx)
-    store.enter(session)
-    store.announce(session)
+    # 三段式（对齐 headless）：先构造 agent scope，再把会话装进店内并公告，
+    # owner = loop.ctx（session/created|disposed|event|flush 按 owner 作用域路由）
     loop = AgentLoop(session, adapter, default_tools(ctx), ctx)
+    detach = store.enter(session, owner_ctx=loop.ctx)
+    try:
+        store.announce(session)
+    except Exception:
+        detach()
+        raise
     first_seq = session.seq
     try:
         loop.followup(task)

@@ -37,6 +37,15 @@ class Context:
         self._listeners: dict[str, list[Callable]] = {}
         self._disposers: list[Callable] = []
         self._disposed = False
+        self._scope_key: Any = None  # create_scope 打标的身份键（对齐上游 dsh-scope ScopeKey）
+
+    @property
+    def scope_key(self) -> Any:
+        """作用域身份键：None = 根/无标号上下文；create_scope 产物有独立对象键。"""
+        return self._scope_key
+
+    def is_scope(self) -> bool:
+        return self._scope_key is not None
 
     def _assert_alive(self) -> None:
         if self._disposed:
@@ -171,7 +180,15 @@ class Context:
 
     # 便利方法
     def create_scope(self, name: str) -> "Context":
-        return Context(parent=self, name=name)
+        """创建作用域子上下文（对齐上游 dsh-scope createScope）。
+
+        子上下文挂独立身份键（scope_key），经父链继承依赖与服务；在子上下文上的
+        注册（服务/监听器/effect）属于该作用域，dispose() 逆序回滚。会话管理用
+        owner scope 路由 session 事件：监听器只收到所属（及祖先）作用域的事件。
+        """
+        child = Context(parent=self, name=name)
+        child._scope_key = object()
+        return child
 
 
 class PluginManager:
