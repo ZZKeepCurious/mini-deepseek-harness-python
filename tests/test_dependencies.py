@@ -4,7 +4,7 @@
 L0 地基  = core/session、core/scope            （两者互不依赖）
 L1 领域  = llm/*、core/tools、core/system_prompt、boot/*   （仅 L0）
 L2 编排  = core/agent_loop、compaction、commands、goal、jobs、plan、skills   （L0 + L1）
-L3 应用  = cli/*、protocol/*、seams/*、preset、extensions、interaction、client
+L3 应用  = cli/*、protocol/*、seams/*、preset、extensions、interaction、client、web
   （L0 ~ L2）
   教学层   = demo.py、example_plugins.py（任意层，但不得被业务模块导入）
 
@@ -47,6 +47,7 @@ LAYER_UNITS = [
     ("extensions", 3),
     ("interaction", 3),
     ("client", 3),
+    ("web", 3),
 ]
 
 TEACHING_MODULES = {"miniharness.demo", "miniharness.example_plugins"}
