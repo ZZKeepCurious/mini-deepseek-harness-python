@@ -44,7 +44,7 @@ __all__ = [
 JS_ENV_EXPR = re.compile(r"^process\.env\.([A-Za-z_][A-Za-z0-9_]*)$")
 _JS_TAG = "tag:yaml.org,2002:js"
 
-try:  # pyyaml 为可选依赖（stdlib only 的例外，文档已标注）
+try:  # pyyaml 为可选依赖（stdlib 优先的例外之一，httpx 之外，文档已标注）
     import yaml
 except ImportError:  # pragma: no cover - 依赖缺失路径
     yaml = None

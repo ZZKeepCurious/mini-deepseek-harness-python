@@ -1,10 +1,10 @@
 ﻿# 第 00 章：环境准备
 
-> 目标：把 MiniHarness 跑起来，知道代码在哪里、测试怎么跑、每个文件对应什么。读完整本手册不装 Node.js、不装 TypeScript、不装任何 pip 包。
+> 目标：把 MiniHarness 跑起来，知道代码在哪里、测试怎么跑、每个文件对应什么。读完整本手册不装 Node.js、不装 TypeScript；唯一必需的 pip 包是 SSE 传输层用的 `httpx`（可选 `pyyaml`）。
 
 ## 0.1 前置知识
 
-- Python 3.10+。本教程只用标准库：`unittest`、`json`、`sqlite3`、`urllib`、`threading`、`dataclasses`。
+- Python 3.10+。核心实现只依赖标准库：`unittest`、`json`、`sqlite3`、`threading`、`dataclasses`、`asyncio`；DeepSeek SSE 传输层用 `httpx`（stdlib 优先，关键协议层精选第三方）。
 - 基本的事件 / 回调 / 上下文概念。
 - 了解一个 Agent 回合的 wire 形状：`user message → assistant（可能带 tool call）→ tool result → assistant`。
 
@@ -67,8 +67,8 @@ MiniHarness 是教学实现，不是移植。下面是简化清单，每一条�
 |---|---|
 | 同步事件总线为教学主体 + `aemit`/`awaterfall`/`aparallel`/`aserial` async 变体（agent/pre-step、agent/request-error 已 async 化） | 异步（`@deepseek-ai/cordis` 基于 fiber/async） |
 | `provides` 声明式依赖 | apply 期间动态注册 |
-| 工具体以线程池承载并行（pre 有序/body 重叠/模型序提交/abort 排干语义对齐，第 12 章） | `isConcurrencySafe` 并行池 + 串行屏障 |
-| LLM 流式 async 契约，但 DeepSeek SSE 以同步阻塞读经 executor 线程桥接（阻塞读不可中断，线程滞留至超时兜底） | `fetch` + AbortSignal 原生异步流 |
+| 工具体执行体直接 `await`（async 契约）；同步工具函数经 `_maybe_await` 解包；阻塞调用以 `asyncio.to_thread` 显式放行（第 12 章） | `isConcurrencySafe` 并行池 + 串行屏障 |
+| LLM 流式 async 契约 + httpx 异步 SSE 传输（abort 置位即关闭连接，真取消；per-read idle 300s 对齐上游） | `fetch` + AbortSignal 原生异步流 |
 | 同步门面（`followup`/`steer` 无 driver 时经 `asyncio.run` 瞬态事件循环驱动） | 常驻单事件循环 |
 | JSON/YAML 配置 + 补丁（pyyaml 可选，缺省退化 JSON；`!!js` 仅 `process.env.<NAME>` 子集） | YAML cordis.yml（同样的 id/insert/replace 语义） |
 | LLM 失败以异常抛出（finish 带内 `{kind:'error'|'aborted'}` 与异常同走 `agent/request-error` waterfall） | `LlmError` 编码 `CONTEXT_WINDOW_EXCEEDED` / `EMPTY_RESPONSE`（可重试）等 |

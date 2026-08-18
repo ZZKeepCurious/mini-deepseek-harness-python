@@ -232,7 +232,7 @@ python -m unittest tests.test_tools -v
 
 ## 3.5 检查点练习
 
-1. **并行屏障**：实现一个简化版 `is_concurrency_safe` 调度——安全工具并行（线程池），非安全工具串行。给注册表加一个 `concurrency_batches()`，并写测试。
+1. **并行屏障**：实现一个简化版 `is_concurrency_safe` 调度——安全工具并行（async 执行体并发 await），非安全工具串行。给注册表加一个 `concurrency_batches()`，并写测试。
 2. **重试 wrapper**：写一个挂在 `tools/execute` waterfall 上的监听器，对第一次失败自动重试一次（around-dispatch 语义：`nxt` 包住真实执行）。断言最终结果。
 3. **限制工具集**：用 `restrict` 给一个作用域做"只允许 bash + read_file"的白名单，写测试断言白名单外工具被过滤。
 

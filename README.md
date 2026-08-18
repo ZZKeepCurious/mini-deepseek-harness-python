@@ -53,11 +53,11 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 
 Planned: web surface is deprioritized.
 
-Status: **808 unit tests passing** (stdlib only; optional `pyyaml` for YAML config).
+Status: **834 unit tests passing** (stdlib-first; `httpx` for the DeepSeek SSE transport, optional `pyyaml` for YAML config).
 
 ## Getting started
 
-Requirements: Python 3.10+, standard library only (optional `pyyaml` for YAML config files).
+Requirements: Python 3.10+ (stdlib-first; `httpx` for the DeepSeek SSE transport, optional `pyyaml` for YAML config files).
 
 ```sh
 # run all tests
@@ -100,7 +100,7 @@ miniharness
 
 ```
 mini-deepseek-harness-python/
-├── miniharness/             # core package (stdlib only, family layout, see docs/architecture.md)
+├── miniharness/             # core package (stdlib-first, family layout, see docs/architecture.md)
 │   ├── core/                # upstream packages/core
 │   │   ├── session/         # types / json / message / invariant / repair / surface / session
 │   │   │   └── persistence.py

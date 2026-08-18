@@ -21,7 +21,7 @@ from miniharness import (
 from miniharness.llm.retry import apply_retry_planner
 
 
-def make_calc(args, env):
+async def make_calc(args, env):
     return f"结果: {eval(args['expr'])}"
 
 

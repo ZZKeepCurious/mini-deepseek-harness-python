@@ -4,6 +4,7 @@
 三工具（job_output/job_list/job_kill）、完成 notice 投递（wakeup/quiet 与
 预算）、字节封顶、装配幂等。461+ 基线之外的独立测试文件。
 """
+import asyncio
 import threading
 import time
 import unittest
@@ -595,15 +596,19 @@ class JobsToolsTest(unittest.TestCase):
         self.tools = ToolRegistry(self.ctx)
         register_job_tools(self.tools, self.registry)
 
+    def _call(self, name, args, exec_=None):
+        """执行 job 工具（async 契约 → asyncio.run 包装）。"""
+        return asyncio.run(self.tools.resolve(name).execute(args, exec_ or self.exec))
+
     def test_job_list_format(self):
         box = JobDoneBox()
         self.registry.start({"kind": "bash", "label": "sleep", "owner": self.owner,
                              "run": lambda: {"done": box, "cancel": lambda r: None}})
-        out = self.tools.resolve("job_list").execute({}, self.exec)
+        out = self._call("job_list", {})
         self.assertEqual(out, "bash-1 [bash] running — sleep")
 
     def test_job_list_empty(self):
-        out = self.tools.resolve("job_list").execute({}, self.exec)
+        out = self._call("job_list", {})
         self.assertEqual(out, "(no background jobs)")
 
     def test_job_output_nonblocking_and_suffix(self):
@@ -617,14 +622,13 @@ class JobsToolsTest(unittest.TestCase):
                                    "run": lambda: {"done": box, "cancel": lambda r: None,
                                                    "read_output": read_output}})
         chunks.append("progress")
-        out = self.tools.resolve("job_output").execute(
-            {"job_id": tid}, self.exec)
+        out = self._call("job_output", {"job_id": tid})
         self.assertTrue(out.startswith("progress"))
         self.assertTrue(out.endswith("[status: running]"))
 
     def test_job_output_unknown_job(self):
         with self.assertRaises(RuntimeError):
-            self.tools.resolve("job_output").execute({"job_id": "nope-1"}, self.exec)
+            self._call("job_output", {"job_id": "nope-1"})
 
     def test_job_output_other_session_fenced(self):
         box = JobDoneBox()
@@ -633,23 +637,23 @@ class JobsToolsTest(unittest.TestCase):
         other = type("Exec", (), {"agent": _fake_owner("bob", Context(name="b")),
                                   "signal": threading.Event()})()
         with self.assertRaises(RuntimeError):
-            self.tools.resolve("job_output").execute({"job_id": tid}, other)
+            self._call("job_output", {"job_id": tid}, other)
 
     def test_job_kill_flows(self):
         box = JobDoneBox()
         tid = self.registry.start({"kind": "bash", "label": "sleep", "owner": self.owner,
                                    "run": lambda: {"done": box, "cancel": lambda r: None}})
-        out = self.tools.resolve("job_kill").execute({"job_id": tid}, self.exec)
+        out = self._call("job_kill", {"job_id": tid})
         self.assertEqual(out, "requested cancellation of job " + tid)
         box.settle({"status": "killed"})
-        out2 = self.tools.resolve("job_kill").execute({"job_id": tid}, self.exec)
+        out2 = self._call("job_kill", {"job_id": tid})
         self.assertIn("already finished", out2)
 
     def test_job_kill_with_reason(self):
         box = JobDoneBox()
         tid = self.registry.start({"kind": "bash", "label": "sleep", "owner": self.owner,
                                    "run": lambda: {"done": box, "cancel": lambda r: None}})
-        self.tools.resolve("job_kill").execute({"job_id": tid, "reason": "enough"}, self.exec)
+        self._call("job_kill", {"job_id": tid, "reason": "enough"})
         self.assertEqual(self.registry.get(tid, self.owner)["status"], "stopping")
 
     def test_config_bounds_enforced(self):

@@ -24,6 +24,7 @@ mini 简化（须在文档中标注）：无 canonical value（execute 直接返
 """
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any, Callable
 
@@ -107,7 +108,7 @@ def install_plan_review(ctx: Context, controller: PlanModeController) -> None:
     """
     tools = ctx.inject("tools")
 
-    def execute(args: dict, exec: Any) -> str:
+    async def execute(args: dict, exec: Any) -> str:
         agent = exec.agent
         if agent is None:
             raise _exit_plan_mode_error(
@@ -135,7 +136,8 @@ def install_plan_review(ctx: Context, controller: PlanModeController) -> None:
             ],
             "intent": {"kind": "plan-review", "approve": APPROVE_LABEL},
         }
-        answer = channel.ask(question, agent)
+        # 同步审查通道（简化）：to_thread 防止阻塞事件循环
+        answer = await asyncio.to_thread(channel.ask, question, agent)
         if answer is None:
             raise _exit_plan_mode_error(
                 "The user dismissed the plan review to speak instead; stay in plan mode, "

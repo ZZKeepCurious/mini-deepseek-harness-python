@@ -8,7 +8,6 @@ watchSettlement 结算、steer 批内合并、interrupt 缺省 no-op）。
 import asyncio
 import json
 import tempfile
-import time
 import unittest
 
 from miniharness.core.agent_loop.agent import AgentLoop
@@ -535,9 +534,9 @@ class TestAsyncContinuation(unittest.TestCase):
             self.parent.start_driver()
             cid = self.mgr.start_continuable(label="研")
 
-            def blocking_send(_args, _exec):
+            async def blocking_send(_args, _exec):
                 self.mgr.send_message(cid, "慢着跑，我在忙")
-                time.sleep(0.4)   # 父阻塞窗口：子结算期间父 running
+                await asyncio.sleep(0.4)   # 父阻塞窗口：子结算期间父 running
                 return "已派发"
 
             self.reg.register(Tool(name="do_all", description="d",

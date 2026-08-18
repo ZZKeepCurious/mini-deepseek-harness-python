@@ -489,19 +489,23 @@ class SkillToolExecuteTest(unittest.TestCase):
     def _exec(self):
         return SimpleNamespace(agent=SimpleNamespace(ctx=self.ctx, cwd=None))
 
+    def _call(self, args):
+        """执行 skill 工具（async 契约 → asyncio.run 包装）。"""
+        return asyncio.run(self.tool.execute(args, self._exec()))
+
     def test_success_renders_content(self):
-        result = self.tool.execute({"name": "bun"}, self._exec())
+        result = self._call({"name": "bun"})
         self.assertIn('<skill_content name="bun">', result)
         self.assertIn(SIMPLE_SKILL["content"], result)
 
     def test_invalid_name_error(self):
         with self.assertRaises(ValueError) as cm:
-            self.tool.execute({"name": "Bun"}, self._exec())
+            self._call({"name": "Bun"})
         self.assertIn('invalid skill name "Bun"', str(cm.exception))
 
     def test_unknown_skill_error(self):
         with self.assertRaises(ValueError) as cm:
-            self.tool.execute({"name": "nope"}, self._exec())
+            self._call({"name": "nope"})
         self.assertEqual(str(cm.exception), 'skill "nope" is unknown or no longer available')
 
     def test_model_disabled_error(self):
@@ -509,7 +513,7 @@ class SkillToolExecuteTest(unittest.TestCase):
                                 "description": "locked", "provider": RUNTIME_PROVIDER,
                                 "invocation": {"modelInvocable": False, "userInvocable": True}})
         with self.assertRaises(ValueError) as cm:
-            self.tool.execute({"name": "locked"}, self._exec())
+            self._call({"name": "locked"})
         self.assertEqual(str(cm.exception), 'skill "locked" is not available for model invocation')
 
     def test_present_call(self):

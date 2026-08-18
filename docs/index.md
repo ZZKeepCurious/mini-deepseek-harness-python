@@ -1,11 +1,11 @@
 # Mini DeepSeek Harness（Python）— 文档入口
 
-> 用纯 Python 标准库从 0 到 1 复现 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 核心能力的教学项目。
+> 用 Python（stdlib 优先，关键协议层精选第三方如 httpx）从 0 到 1 复现 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 核心能力的教学项目。
 > 仓库：https://github.com/ZZKeepCurious/mini-deepseek-harness-python
 
 ## 这是什么
 
-本手册用**纯 Python（标准库 only，零第三方依赖）**从零实现一个 `MiniHarness`：一个最小可用的 Agent 运行时核心子集，逐条复现 DeepSeek Harness（`dsh`）的**约定与硬性规定**。
+本手册用**纯 Python（stdlib 优先；DeepSeek SSE 传输层用 `httpx`，YAML 可选 `pyyaml`）**从零实现一个 `MiniHarness`：一个最小可用的 Agent 运行时核心子集，逐条复现 DeepSeek Harness（`dsh`）的**约定与硬性规定**。
 
 复现目标不是逐行移植 TypeScript，而是**掌握约定**：
 
@@ -75,7 +75,7 @@ flowchart LR
 ```bash
 # 在仓库根目录执行（代码包 miniharness/ 与测试 tests/ 都在根下）
 
-# 1. 跑全部测试（Python 3.10+，只需标准库）
+# 1. 跑全部测试（Python 3.10+；httpx 为 SSE 传输依赖，可选 pyyaml）
 python -m unittest discover -s tests -t .
 
 # 2. 体验一个真实回合（无需 API key，用内置假模型）

@@ -209,7 +209,7 @@ class SubagentContinuationManager:
         self._activations: dict[str, dict] = {}
         self._persisted: dict[str, int] = {}
         # 每 child 一把锁：串行化跨线程的 resume 与 settle 临界区
-        # （executor 线程的 send_message 与事件循环线程的 watcher 结算并发）
+        # （同步调用方的 send_message / 内联泵 与事件循环线程的 watcher 结算并发）
         self._locks: dict[str, threading.Lock] = {}
 
     @property
@@ -273,11 +273,9 @@ class SubagentContinuationManager:
     def send_message(self, child_id: str, message: str | dict, source: str = "parent") -> str:
         """向子代理投递一条消息，返回 message id。
 
-        异步路径（父有 driver）：投递即返回，子回合由子 driver 在事件循环上
-        跑，watcher 异步结算后把通知投递回父（对齐上游 followup 立即返回 +
-        watchSettlement 事件驱动）。子回合失败不冒泡（失败已是子会话内的
-        error turn/end，结算通知全量报告；对齐上游 sendMessage 不因子进程
-        失败抛错）。
+        同步门面（无驱动模式）：子回合同步 pump 跑完再结算；父有 driver 时
+        走 A8 异步路径（投递即返回）。事件循环内调用且父无 driver 时请用
+        send_message_async（内联泵保证确定性结算）。
         """
         activation = self._get_or_resume(child_id)
         msg = message if isinstance(message, dict) else create_message(
@@ -289,11 +287,48 @@ class SubagentContinuationManager:
             self._submit_sync(child_id, activation, msg)
         return msg["id"]
 
+    async def send_message_async(self, child_id: str, message: str | dict,
+                                 source: str = "parent") -> str:
+        """async 工具契约入口：事件循环内且父无 driver 时内联泵子回合。
+
+        旧实现经 _pump_sync_facade 的 in-loop 兜底起 fire-and-forget 子
+        driver，与父瞬态 asyncio.run 的拆除竞速（子回合未完、结算丢失）。
+        此处直接内联 `await child._pump_async()`，子 turn/end 先于工具返回
+        落盘，结算确定性（对齐 A7 同步语义的循环内版本）。
+        """
+        activation = self._get_or_resume(child_id)
+        msg = message if isinstance(message, dict) else create_message(
+            "user", [text_block(message)], {"kind": "user"},
+        )
+        if self.parent._driver is not None:
+            self.parent._loop.call_soon_threadsafe(self._submit_on_loop, child_id, activation, msg)
+        else:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                self._submit_sync(child_id, activation, msg)
+            else:
+                await self._submit_async(child_id, activation, msg)
+        return msg["id"]
+
     def _submit_sync(self, child_id: str, activation: dict, msg: dict) -> None:
         """同步路径（A7）：子 followup 同步 pump 跑完整个回合，返回后结算。"""
         child = activation["loop"]
         try:
             child.followup(msg)
+        except Exception:
+            pass
+        finally:
+            self._settle(child_id, activation)
+
+    async def _submit_async(self, child_id: str, activation: dict, msg: dict) -> None:
+        """瞬态循环内联泵：async 工具在循环内调用且父无 driver 时，
+        直接内联跑完子回合再结算（确定性，子 turn/end 先于工具返回落盘）。"""
+        child = activation["loop"]
+        try:
+            child.inbox.append("next-turn", msg)
+            child._parked = False
+            await child._pump_async()
         except Exception:
             pass
         finally:
@@ -632,7 +667,7 @@ class SubagentContinuationManager:
     def _report_tool(self, child_id: str) -> Tool:
         manager = self
 
-        def execute(args: dict, exec_: ToolExec):
+        async def execute(args: dict, exec_: ToolExec):
             quiet = args.get("reportDelivery") == "background"
             manager.report_from(child_id, args["report"], quiet=quiet)
             return args["report"]
@@ -675,8 +710,8 @@ def install_subagent_control_tools(
 
 
 def _send_message_tool(manager: SubagentContinuationManager) -> Tool:
-    def execute(args: dict, exec_: ToolExec):
-        manager.send_message(args["subagentId"], args["message"])
+    async def execute(args: dict, exec_: ToolExec):
+        await manager.send_message_async(args["subagentId"], args["message"])
         return f"Message sent to subagent {args['subagentId']}."
 
     return Tool(
@@ -698,7 +733,7 @@ def _send_message_tool(manager: SubagentContinuationManager) -> Tool:
 
 
 def _interrupt_agent_tool(manager: SubagentContinuationManager) -> Tool:
-    def execute(args: dict, exec_: ToolExec):
+    async def execute(args: dict, exec_: ToolExec):
         manager.interrupt(args["subagentId"], cause="parent")
         return f"Interrupted subagent {args['subagentId']}."
 
@@ -717,7 +752,7 @@ def _interrupt_agent_tool(manager: SubagentContinuationManager) -> Tool:
 
 
 def _list_agents_tool(manager: SubagentContinuationManager) -> Tool:
-    def execute(args: dict, exec_: ToolExec):
+    async def execute(args: dict, exec_: ToolExec):
         return json.dumps(manager.list_descendants(), ensure_ascii=False, indent=2)
 
     return Tool(

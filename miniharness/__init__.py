@@ -1,4 +1,4 @@
-"""MiniHarness：用纯 Python（stdlib only）从 0 到 1 复现 DeepSeek Harness 的核心契约。
+"""MiniHarness：用 Python（stdlib 优先，SSE 传输层用 httpx）从 0 到 1 复现 DeepSeek Harness 的核心契约。
 
 随教程逐步构建：dsh-from-scratch/01~06 章。
 

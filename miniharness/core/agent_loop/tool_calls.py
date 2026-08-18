@@ -4,7 +4,7 @@
   * 按模型序消费 tool-call：exclusive 调用形成单元素屏障，parallel 调用
     进入有界滚动池（max_parallel 上限），池满则等排空再补充
   * pre-execute（政策段）按模型序有序 await（startCall 顺序执行）；
-    只有 execute 体在线程池真并行（"dispatch 重叠"）
+    只有 execute 体真并行（"dispatch 重叠"，async 契约下直接 await，无线程池）
   * 结果按模型序提交（commitReady 只推进连续槽位）
   * 并行组内后序调用被重新分类为 exclusive → 立即停止补池，
     等当前池排空，留作下一个屏障（注册表运行期变化可形成屏障）

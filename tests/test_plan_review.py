@@ -51,6 +51,11 @@ def _make(commands=True):
     return ctx, controller, reg, loop
 
 
+def _call(reg, args, exec_=None):
+    """执行 exit_plan_mode 工具（async 契约 → asyncio.run 包装）。"""
+    return asyncio.run(reg.resolve(EXIT_PLAN_MODE).execute(args, exec_ or ToolExec()))
+
+
 class ExitPlanModeTest(unittest.TestCase):
     def test_registered_even_inactive(self):
         _, _, reg, _ = _make()
@@ -59,25 +64,25 @@ class ExitPlanModeTest(unittest.TestCase):
     def test_requires_agent(self):
         _, _, reg, _ = _make()
         with self.assertRaises(ValueError):
-            reg.resolve(EXIT_PLAN_MODE).execute({"plan": "# P"}, ToolExec())
+            _call(reg, {"plan": "# P"})
 
     def test_requires_plan_mode(self):
         _, _, reg, loop = _make()
         with self.assertRaises(ValueError) as cm:
-            reg.resolve(EXIT_PLAN_MODE).execute({"plan": "# P"}, ToolExec(agent=loop))
+            _call(reg, {"plan": "# P"}, ToolExec(agent=loop))
         self.assertIn("only available in plan mode", str(cm.exception))
 
     def test_requires_heading(self):
         _, controller, reg, loop = _make()
         controller.set(loop, True)
         with self.assertRaises(ValueError):
-            reg.resolve(EXIT_PLAN_MODE).execute({"plan": "no heading"}, ToolExec(agent=loop))
+            _call(reg, {"plan": "no heading"}, ToolExec(agent=loop))
 
     def test_requires_channel(self):
         ctx, controller, reg, loop = _make()
         controller.set(loop, True)
         with self.assertRaises(ValueError) as cm:
-            reg.resolve(EXIT_PLAN_MODE).execute({"plan": "# Plan"}, ToolExec(agent=loop))
+            _call(reg, {"plan": "# Plan"}, ToolExec(agent=loop))
         self.assertIn("no user-questions channel", str(cm.exception))
 
     def test_dismissed_stays(self):
@@ -86,7 +91,7 @@ class ExitPlanModeTest(unittest.TestCase):
         ctx.provide("userQuestions", channel)
         controller.set(loop, True)
         with self.assertRaises(ValueError) as cm:
-            reg.resolve(EXIT_PLAN_MODE).execute({"plan": "# Plan"}, ToolExec(agent=loop))
+            _call(reg, {"plan": "# Plan"}, ToolExec(agent=loop))
         self.assertIn("dismissed the plan review", str(cm.exception))
         self.assertTrue(fold_plan_mode(loop.session.events))
 
@@ -97,7 +102,7 @@ class ExitPlanModeTest(unittest.TestCase):
         ctx.provide("userQuestions", channel)
         controller.set(loop, True)
         with self.assertRaises(ValueError) as cm:
-            reg.resolve(EXIT_PLAN_MODE).execute({"plan": "# Plan"}, ToolExec(agent=loop))
+            _call(reg, {"plan": "# Plan"}, ToolExec(agent=loop))
         self.assertIn("feedback: make it shorter", str(cm.exception))
 
     def test_approved_queues_exit(self):
@@ -106,7 +111,7 @@ class ExitPlanModeTest(unittest.TestCase):
         channel.answers.append(APPROVE_LABEL)
         ctx.provide("userQuestions", channel)
         controller.set(loop, True)
-        out = reg.resolve(EXIT_PLAN_MODE).execute({"plan": "# Plan"}, ToolExec(agent=loop))
+        out = _call(reg, {"plan": "# Plan"}, ToolExec(agent=loop))
         self.assertIn("Plan approved", out)
         # 批准只排队 silent 选择，durable 状态仍未关闭
         self.assertTrue(fold_plan_mode(loop.session.events))
@@ -121,7 +126,7 @@ class ExitPlanModeTest(unittest.TestCase):
         channel.answers.append(APPROVE_LABEL)
         ctx.provide("userQuestions", channel)
         controller.set(loop, True)
-        reg.resolve(EXIT_PLAN_MODE).execute({"plan": "# Plan"}, ToolExec(agent=loop))
+        _call(reg, {"plan": "# Plan"}, ToolExec(agent=loop))
         question = channel.asked[0]
         self.assertEqual(question["id"], "plan-review")
         self.assertEqual([o["label"] for o in question["options"]],

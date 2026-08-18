@@ -4,6 +4,7 @@
 compare-and-set 生命周期与激活、pull 式 continue_rounds、tool-goal 三工具。
 """
 
+import asyncio
 import json
 import unittest
 from types import SimpleNamespace
@@ -354,6 +355,10 @@ class GoalToolsTest(unittest.TestCase):
         loop = _loop(ctx, reg=reg)
         return ctx, goals, reg, loop
 
+    def _call(self, reg, name, args, exec_):
+        """执行 goal 工具（async 契约 → asyncio.run 包装）。"""
+        return asyncio.run(reg.resolve(name).execute(args, exec_))
+
     def test_policy_section_registered(self):
         ctx, _, _, _ = self._make()
         names = [s["name"] for s in ctx.inject("systemPrompt").render({})]
@@ -361,66 +366,66 @@ class GoalToolsTest(unittest.TestCase):
 
     def test_get_goal_empty(self):
         _, _, reg, loop = self._make()
-        out = reg.resolve("get_goal").execute({}, ToolExec(agent=loop))
+        out = self._call(reg, "get_goal", {}, ToolExec(agent=loop))
         self.assertEqual(json.loads(out), {"goal": None})
 
     def test_create_and_read(self):
         _, goals, reg, loop = self._make()
-        out = reg.resolve("create_goal").execute(
-            {"objective": "build it", "max_goal_rounds": 5}, ToolExec(agent=loop))
+        out = self._call(reg, "create_goal",
+                         {"objective": "build it", "max_goal_rounds": 5}, ToolExec(agent=loop))
         value = json.loads(out)
         self.assertEqual(value["goal"]["objective"], "build it")
         self.assertEqual(value["goal"]["phase"], "active")
         self.assertEqual(value["activation"], "armed")
-        out = reg.resolve("get_goal").execute({}, ToolExec(agent=loop))
+        out = self._call(reg, "get_goal", {}, ToolExec(agent=loop))
         self.assertEqual(json.loads(out)["goal"]["revision"], 1)
 
     def test_create_invalid_objective_code(self):
         _, _, reg, loop = self._make()
         with self.assertRaises(GoalError) as cm:
-            reg.resolve("create_goal").execute({"objective": ""}, ToolExec(agent=loop))
+            self._call(reg, "create_goal", {"objective": ""}, ToolExec(agent=loop))
         self.assertEqual(cm.exception.code, "GOAL_INVALID_OBJECTIVE")
 
     def test_update_complete(self):
         _, goals, reg, loop = self._make()
-        reg.resolve("create_goal").execute({"objective": "a"}, ToolExec(agent=loop))
-        out = reg.resolve("update_goal").execute(
-            {"goal_id": goals.get(loop)["id"], "revision": 1, "action": "complete"},
-            ToolExec(agent=loop))
+        self._call(reg, "create_goal", {"objective": "a"}, ToolExec(agent=loop))
+        out = self._call(reg, "update_goal",
+                         {"goal_id": goals.get(loop)["id"], "revision": 1, "action": "complete"},
+                         ToolExec(agent=loop))
         self.assertEqual(json.loads(out)["goal"]["phase"], "complete")
 
     def test_update_invalid_ref(self):
         _, goals, reg, loop = self._make()
-        reg.resolve("create_goal").execute({"objective": "a"}, ToolExec(agent=loop))
+        self._call(reg, "create_goal", {"objective": "a"}, ToolExec(agent=loop))
         with self.assertRaises(GoalError) as cm:
-            reg.resolve("update_goal").execute(
-                {"goal_id": "nope", "revision": 0, "action": "pause"},
-                ToolExec(agent=loop))
+            self._call(reg, "update_goal",
+                       {"goal_id": "nope", "revision": 0, "action": "pause"},
+                       ToolExec(agent=loop))
         self.assertEqual(cm.exception.code, "GOAL_TOOL_INVALID_UPDATE")
         # 格式合法但与当前目标不匹配 → 服务层 stale ref
         with self.assertRaises(GoalError) as cm:
-            reg.resolve("update_goal").execute(
-                {"goal_id": "nope", "revision": 1, "action": "pause"},
-                ToolExec(agent=loop))
+            self._call(reg, "update_goal",
+                       {"goal_id": "nope", "revision": 1, "action": "pause"},
+                       ToolExec(agent=loop))
         self.assertEqual(cm.exception.code, "GOAL_STALE_REVISION")
 
     def test_update_param_mismatch(self):
         _, goals, reg, loop = self._make()
-        reg.resolve("create_goal").execute({"objective": "a"}, ToolExec(agent=loop))
+        self._call(reg, "create_goal", {"objective": "a"}, ToolExec(agent=loop))
         with self.assertRaises(GoalError) as cm:
-            reg.resolve("update_goal").execute(
-                {"goal_id": goals.get(loop)["id"], "revision": 1, "action": "complete",
-                 "objective": "b"},
-                ToolExec(agent=loop))
+            self._call(reg, "update_goal",
+                       {"goal_id": goals.get(loop)["id"], "revision": 1, "action": "complete",
+                        "objective": "b"},
+                       ToolExec(agent=loop))
         self.assertEqual(cm.exception.code, "GOAL_TOOL_INVALID_UPDATE")
 
     def test_blocked_requires_reason(self):
         _, goals, reg, loop = self._make()
-        reg.resolve("create_goal").execute({"objective": "a"}, ToolExec(agent=loop))
+        self._call(reg, "create_goal", {"objective": "a"}, ToolExec(agent=loop))
         with self.assertRaises(GoalError) as cm:
-            reg.resolve("update_goal").execute(
-                {"goal_id": goals.get(loop)["id"], "revision": 1, "action": "blocked"},
-                ToolExec(agent=loop))
+            self._call(reg, "update_goal",
+                       {"goal_id": goals.get(loop)["id"], "revision": 1, "action": "blocked"},
+                       ToolExec(agent=loop))
         self.assertEqual(cm.exception.code, "GOAL_TOOL_INVALID_UPDATE")
 
     def test_blocked_threshold_in_goal_round(self):
@@ -432,10 +437,10 @@ class GoalToolsTest(unittest.TestCase):
             {"kind": "goal", "goalId": created["id"], "revision": 1, "round": 1})
         loop.session.append("user/message", message, surfaceOp="append")
         with self.assertRaises(GoalError) as cm:
-            reg.resolve("update_goal").execute(
-                {"goal_id": created["id"], "revision": 1, "action": "blocked",
-                 "blocked_reason": "stuck"},
-                ToolExec(agent=loop))
+            self._call(reg, "update_goal",
+                       {"goal_id": created["id"], "revision": 1, "action": "blocked",
+                        "blocked_reason": "stuck"},
+                       ToolExec(agent=loop))
         self.assertEqual(cm.exception.code, "GOAL_TOOL_BLOCK_THRESHOLD")
 
     def test_blocked_threshold_passed(self):
@@ -447,10 +452,10 @@ class GoalToolsTest(unittest.TestCase):
                 "user", [{"type": "text", "text": "round"}],
                 {"kind": "goal", "goalId": created["id"], "revision": 1, "round": round_no})
             loop.session.append("user/message", message, surfaceOp="append")
-        out = reg.resolve("update_goal").execute(
-            {"goal_id": created["id"], "revision": 1, "action": "blocked",
-             "blocked_reason": "still stuck"},
-            ToolExec(agent=loop))
+        out = self._call(reg, "update_goal",
+                         {"goal_id": created["id"], "revision": 1, "action": "blocked",
+                          "blocked_reason": "still stuck"},
+                         ToolExec(agent=loop))
         value = json.loads(out)
         self.assertEqual(value["goal"]["phase"], "blocked")
         self.assertEqual(value["goal"]["blockedReason"]["code"], "model-reported")
@@ -458,7 +463,7 @@ class GoalToolsTest(unittest.TestCase):
     def test_requires_agent(self):
         _, _, reg, loop = self._make()
         with self.assertRaises(GoalError):
-            reg.resolve("get_goal").execute({}, ToolExec())
+            self._call(reg, "get_goal", {}, ToolExec())
 
 
 if __name__ == "__main__":

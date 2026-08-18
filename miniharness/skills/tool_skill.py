@@ -236,7 +236,7 @@ class SkillTool:
 
     # ---------- skill 工具 ----------
 
-    def _execute(self, args: dict, exec_: ToolExec) -> Any:
+    async def _execute(self, args: dict, exec_: ToolExec) -> Any:
         name = args.get("name")
         if not is_skill_name(name):
             raise ValueError(f'invalid skill name "{name}"')

@@ -11,13 +11,14 @@ pre-execute / execute / post-execute 三段 waterfall 管线。
 from __future__ import annotations
 
 import asyncio
+import inspect
 import threading
 import time
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Callable
 
-from .scope import Context
+from .scope import Context, _maybe_await
 from .session import deep_freeze, is_json_safe
 
 
@@ -122,7 +123,7 @@ class FusedSignal:
 class Tool:
     name: str
     description: str
-    execute: Callable[[dict, ToolExec], Any]
+    execute: Callable[[dict, ToolExec], Any]   # 可返回普通值或 coroutine（async 契约）
     parameters: dict = field(default_factory=dict)      # JSON Schema
     output: dict = field(default_factory=dict)          # canonical schema
     is_concurrency_safe: Callable[[dict], bool] | bool = False  # True/恒真 → 可并行
@@ -282,6 +283,30 @@ async def pipeline_policy_async(
     return None
 
 
+def _sync_execute(tool: Tool, frozen_args: Any, exec_: ToolExec) -> tuple[Any, Exception | None]:
+    """同步路径执行体：execute 返回 coroutine 时在瞬态事件循环中运行。
+
+    仅当无运行中事件循环时可用（同步门面/测试场景）；若在循环内被调用
+    （async 契约工具），提示改用 run_pipeline_async。超时线程路径在
+    新线程内调用本函数，asyncio.run 安全。
+    """
+    try:
+        value = tool.execute(dict(frozen_args), exec_)
+    except Exception as e:
+        return None, e
+    if inspect.isawaitable(value):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            try:
+                return asyncio.run(value), None
+            except Exception as e:
+                return None, e
+        raise RuntimeError(
+            "Tool.execute 返回 coroutine 但当前已有运行中的事件循环；请改用 run_pipeline_async")
+    return value, None
+
+
 def pipeline_body(
     ctx: Context, tool: Tool, frozen_args: Any, exec_: ToolExec, *,
     async_: bool = False,
@@ -290,10 +315,7 @@ def pipeline_body(
     box: dict[str, Any] = {}
 
     def target() -> None:
-        try:
-            box["value"] = tool.execute(dict(frozen_args), exec_)
-        except Exception as e:
-            box["error"] = e
+        box["value"], box["error"] = _sync_execute(tool, frozen_args, exec_)
 
     if tool.timeout_ms:
         t = threading.Thread(target=target, daemon=True)
@@ -354,35 +376,44 @@ def run_pipeline(ctx: Context, tool: Tool, args: dict, exec_: ToolExec | None = 
     return ToolResult(ok=True, content=deep_freeze(raw))
 
 
+async def _execute_async(tool: Tool, frozen_args: Any, exec_: ToolExec) -> Any:
+    """execute 契约统一化：普通值原样返回，coroutine/awaitable 直接 await。"""
+    return await _maybe_await(tool.execute(dict(frozen_args), exec_))
+
+
 async def pipeline_async_body(
     ctx: Context, tool: Tool, frozen_args: Any, exec_: ToolExec | None = None,
 ) -> ToolResult:
-    """政策通过后的执行体段（async 版）：execute 在线程池，post-execute
-    回事件循环（awaterfall），超时 wait_for + 置位 signal + shield 排干。
-    供调度器复用——政策段已按模型序有序跑过，此处只做 body。"""
-    exec_ = exec_ or ToolExec()
-    loop = asyncio.get_running_loop()
+    """政策通过后的执行体段（async 版）：execute 直接 await（无线程池），
+    post-execute 回事件循环（awaterfall），超时 wait_for + 置位 signal +
+    排干到静止点。供调度器复用——政策段已按模型序有序跑过，此处只做 body。
 
-    def body() -> tuple[Any, Exception | None]:
-        try:
-            raw = tool.execute(dict(frozen_args), exec_)
-        except Exception as e:
-            return None, e
-        return raw, None
+    取消语义对齐上游"已启动的 promise 必须排干到静止"：超时先置位
+    exec_.signal（工具协作中止，如子进程工具 terminate），再 await 任务排干；
+    wait_for 经 shield 包裹保证超时不取消底层任务（coroutine 可继续排干）。
+    """
+    exec_ = exec_ or ToolExec()
 
     if tool.timeout_ms:
+        task = asyncio.create_task(_execute_async(tool, frozen_args, exec_))
         try:
-            raw, error = await asyncio.wait_for(
-                loop.run_in_executor(None, body), tool.timeout_ms / 1000,
-            )
+            raw = await asyncio.wait_for(asyncio.shield(task), tool.timeout_ms / 1000)
+            error = None
         except asyncio.TimeoutError:
             exec_.signal.set()
-            # 排干：线程无法取消，必须等它到达静止点（上游排干语义）
-            raw, error = await asyncio.shield(loop.run_in_executor(None, body))
+            try:
+                raw = await task   # 排干：工具观察到 signal 后自行中止
+                error = None
+            except Exception as e:
+                raw, error = None, e
             if error is None:
                 error = TimeoutError(f"timeout after {tool.timeout_ms}ms")
     else:
-        raw, error = await loop.run_in_executor(None, body)
+        try:
+            raw = await _execute_async(tool, frozen_args, exec_)
+            error = None
+        except Exception as e:
+            raw, error = None, e
 
     # post-execute 回事件循环（与上游 finalize 在事件循环跑一致）
     post = await ctx.awaterfall("tools/post-execute", {"tool": tool.name, "result": raw})
@@ -406,7 +437,7 @@ async def run_pipeline_async(
     ctx: Context, tool: Tool, args: dict, exec_: ToolExec | None = None,
 ) -> ToolResult:
     """管线异步版（阶段 7）：政策段在事件循环按序 await（awaterfall），
-    执行体在线程池真并行；超时用 wait_for + 置位 signal + 排干，
+    执行体直接 await（async 契约），超时置位 signal + 排干到静止点，
     与上游"已启动的 promise 必须排干到静止"一致。"""
     exec_ = exec_ or ToolExec()
 

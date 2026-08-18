@@ -167,18 +167,18 @@ def register_goal_tools(reg: ToolRegistry, goals, ctx: Context | None = None,
         system_prompt.section(GOAL_POLICY_SECTION, GOAL_POLICY_ORDER,
                               lambda _context: _guidance(blocked_after))
 
-    def get_goal(args: dict, exec_: Any) -> str:
+    async def get_goal(args: dict, exec_: Any) -> str:
         agent = _require_agent(exec_, "get_goal")
         return json.dumps(goal_value(goals.get(agent)))
 
-    def create_goal(args: dict, exec_: Any) -> str:
+    async def create_goal(args: dict, exec_: Any) -> str:
         agent = _require_agent(exec_, "create_goal")
         request = {"objective": args.get("objective", "")}
         if args.get("max_goal_rounds") is not None:
             request["maxGoalRounds"] = args["max_goal_rounds"]
         return json.dumps(goal_value(goals.create(agent, request)))
 
-    def update_goal(args: dict, exec_: Any) -> str:
+    async def update_goal(args: dict, exec_: Any) -> str:
         agent = _require_agent(exec_, "update_goal")
         ref = _goal_ref(args.get("goal_id"), args.get("revision"))
         replacements = {}

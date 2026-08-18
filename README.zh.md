@@ -2,9 +2,9 @@
 
 [English](README.md) | 中文
 
-**Mini DeepSeek Harness** 是用 **纯 Python 标准库** 从零复现 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`，由 [DeepSeek AI](https://deepseek.com) 开发的开源 Agent 运行时）的**教学实现**。
+**Mini DeepSeek Harness** 是用 **Python（stdlib 优先，关键协议层精选第三方）** 从零复现 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`，由 [DeepSeek AI](https://deepseek.com) 开发的开源 Agent 运行时）的**教学实现**。
 
-上游项目整个系统建立在一个设计哲学之上：**一切皆插件**（everything is a plugin），其底层是 [Cordis](https://github.com/cordiverse/cordis)，一个依赖注入 + 事件总线框架，设计思想见论文 [_A Programming Paradigm for Spatiotemporal Composability_](https://github.com/cordiverse/paper)。我们对这一设计深表敬意。本仓库是我们的致敬之作：不止于阅读，而是亲手用 Python 重建其核心约定——事件溯源会话日志、插件事件总线、turn/step Agent Loop、能力扩展口三角色（Service Definition / Service Provider / Consumer），**零第三方依赖**，任何有 `python3` 的人都可以阅读、运行和修改它们。
+上游项目整个系统建立在一个设计哲学之上：**一切皆插件**（everything is a plugin），其底层是 [Cordis](https://github.com/cordiverse/cordis)，一个依赖注入 + 事件总线框架，设计思想见论文 [_A Programming Paradigm for Spatiotemporal Composability_](https://github.com/cordiverse/paper)。我们对这一设计深表敬意。本仓库是我们的致敬之作：不止于阅读，而是亲手用 Python 重建其核心约定——事件溯源会话日志、插件事件总线、turn/step Agent Loop、能力扩展口三角色（Service Definition / Service Provider / Consumer），**stdlib 优先**（除 httpx 传输层与可选 pyyaml 外不依赖第三方），任何有 `python3` 的人都可以阅读、运行和修改它们。
 
 > **这是学习项目，不是移植。** 与 DeepSeek AI 官方无关联。我们不追求功能对齐或替代品；我们追求的是理解并讲清楚这些思想。
 
@@ -51,11 +51,11 @@
 
 规划中：web 表面降级后置。
 
-状态：**808 个单元测试全绿**（纯标准库；可选 `pyyaml` 用于 YAML 配置）。
+状态：**834 个单元测试全绿**（stdlib 优先；`httpx` 承载 DeepSeek SSE 传输，可选 `pyyaml` 用于 YAML 配置）。
 
 ## 快速开始
 
-要求：Python 3.10+，纯标准库（可选 `pyyaml` 用于 YAML 配置）。
+要求：Python 3.10+，stdlib 优先（`httpx` 承载 DeepSeek SSE 传输，可选 `pyyaml` 用于 YAML 配置）。
 
 ```sh
 # 跑全部测试
@@ -98,7 +98,7 @@ miniharness
 
 ```
 mini-deepseek-harness-python/
-├── miniharness/             # 核心包（纯标准库，家族布局，见 docs/architecture.md）
+├── miniharness/             # 核心包（stdlib 优先，家族布局，见 docs/architecture.md）
 │   ├── core/                # 上游 packages/core
 │   │   ├── session/         # types / json / message / invariant / repair / surface / session
 │   │   │   └── persistence.py

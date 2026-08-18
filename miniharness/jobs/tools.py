@@ -19,6 +19,7 @@ mini 简化（须在文档标注）：
 """
 from __future__ import annotations
 
+import asyncio
 import threading
 from typing import Any
 
@@ -220,13 +221,15 @@ def install_completion_delivery(jobs, config: dict | None = None) -> None:
 # ---------- 三工具 ----------
 
 def job_output_tool(jobs, wait_default: int, wait_cap: int) -> Tool:
-    def execute(args: dict, exec_: Any) -> str:
+    async def execute(args: dict, exec_: Any) -> str:
         task_id = validate_job_id(args.get("job_id"))
         caller = getattr(exec_, "agent", None)
         jobs.get(task_id, caller)  # 存在性 + 会话栅栏先验
         if args.get("wait") is True:
             timeout = min(args.get("timeout_ms") or wait_default, wait_cap)
-            jobs.wait(task_id, timeout, caller, getattr(exec_, "signal", None))
+            # jobs.wait 是阻塞轮询：to_thread 防止卡住事件循环（abort 信号透传）
+            await asyncio.to_thread(jobs.wait, task_id, timeout, caller,
+                                    getattr(exec_, "signal", None))
         read = jobs.read(task_id, caller)
         body = read["text"] if read["text"] else "(no new output)"
         if body.endswith("\n"):
@@ -275,7 +278,7 @@ def job_output_tool(jobs, wait_default: int, wait_cap: int) -> Tool:
 
 
 def job_list_tool(jobs) -> Tool:
-    def execute(_args: dict, exec_: Any) -> str:
+    async def execute(_args: dict, exec_: Any) -> str:
         visible = [public_job(s) for s in jobs.list(getattr(exec_, "agent", None))]
         if not visible:
             return "(no background jobs)"
@@ -291,7 +294,7 @@ def job_list_tool(jobs) -> Tool:
 
 
 def job_kill_tool(jobs) -> Tool:
-    def execute(args: dict, exec_: Any) -> str:
+    async def execute(args: dict, exec_: Any) -> str:
         task_id = validate_job_id(args.get("job_id"))
         caller = getattr(exec_, "agent", None)
         result = jobs.kill(task_id, caller, args.get("reason"))

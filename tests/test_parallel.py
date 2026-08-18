@@ -35,11 +35,11 @@ def _env(tools=()):
 
 def _sleeper(name="sleeper", dur=0.15, safe=True, log=None):
     """sleep 工具：记录 [start, end] 时间戳，可注入并发日志。"""
-    def execute(args, e):
+    async def execute(args, e):
         tag = f"{name}:{args.get('tag', '')}"
         if log is not None:
             log.append(("start", tag, time.monotonic()))
-        time.sleep(args.get("dur", dur))
+        await asyncio.sleep(args.get("dur", dur))
         if log is not None:
             log.append(("end", tag, time.monotonic()))
         return f"done:{tag}"
@@ -148,10 +148,10 @@ class TestScheduleTools(unittest.TestCase):
         for i in range(5):
             name = "t%d" % i
             def make(name=name):
-                def execute(args, e):
+                async def execute(args, e):
                     state["active"] += 1
                     state["peak"] = max(state["peak"], state["active"])
-                    time.sleep(0.12)
+                    await asyncio.sleep(0.12)
                     state["active"] -= 1
                     return "ok"
                 return Tool(name=name, description="d", execute=execute,
@@ -168,8 +168,11 @@ class TestScheduleTools(unittest.TestCase):
         def safe(args):
             state["calls"] += 1
             return state["calls"] == 1   # 组分类时 True，补池时 False → 重分类
+        async def flaky_execute(args, e):
+            await asyncio.sleep(0.1)
+            return "ok"
         t = Tool(name="flaky", description="d",
-                 execute=lambda a, e: time.sleep(0.1) or "ok",
+                 execute=flaky_execute,
                  is_concurrency_safe=safe)
         reg.register(t)
         log = []
@@ -250,8 +253,11 @@ class TestScheduleTools(unittest.TestCase):
 
     def test_timeout_isolated_does_not_set_shared_signal_and_drains(self):
         session, ctx, reg = _env([])
+        async def hang_execute(args, e):
+            await asyncio.sleep(0.3)
+            return "late"
         t = Tool(name="hang", description="d",
-                 execute=lambda a, e: time.sleep(0.3) or "late",
+                 execute=hang_execute,
                  is_concurrency_safe=True, timeout_ms=50)
         reg.register(t)
         signal = ToolExec()
@@ -290,8 +296,11 @@ class TestPipelineAsync(unittest.TestCase):
 
     def test_timeout_and_drain(self):
         session, ctx, reg = _env([])
+        async def hang_execute(args, e):
+            await asyncio.sleep(0.2)
+            return "done"
         t = Tool(name="hang", description="d",
-                 execute=lambda a, e: time.sleep(0.2) or "done", timeout_ms=40)
+                 execute=hang_execute, timeout_ms=40)
         reg.register(t)
         result = asyncio.run(run_pipeline_async(ctx, t, {}))
         self.assertTrue(result.is_error)

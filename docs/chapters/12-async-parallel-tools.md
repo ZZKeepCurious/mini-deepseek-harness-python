@@ -105,21 +105,22 @@ bool 兼容保留（旧写法 `is_concurrency_safe=True` 仍工作）；callable
 - `pipeline_body`（同步）/ `pipeline_async_body`（异步）：execute + post-execute + 规范化；
 - `run_pipeline` / `run_pipeline_async` = 物化 → policy → body。
 
-拆段的理由就是"pre 有序、body 重叠"：调度器按模型序 `await pipeline_policy_async`，通过后才把 body 放线程池。
+拆段的理由就是"pre 有序、body 重叠"：调度器按模型序 `await pipeline_policy_async`，通过后才并发 `await` body（`asyncio.create_task(pipeline_async_body(...))`）。
 
 `pipeline_async_body` 的超时语义与上游"已启动的 promise 必须排干到静止"一致：
 
 ```python
+task = asyncio.create_task(_execute_async(tool, frozen_args, exec_))
 try:
-    raw, error = await asyncio.wait_for(loop.run_in_executor(None, body), tool.timeout_ms / 1000)
+    raw, error = await asyncio.wait_for(asyncio.shield(task), tool.timeout_ms / 1000)
 except asyncio.TimeoutError:
     exec_.signal.set()
-    raw, error = await asyncio.shield(loop.run_in_executor(None, body))  # 排干
+    raw, error = await task   # 排干：工具观察到 signal 后自行中止
     if error is None:
-        error = TimeoutError(...)
+        error = TimeoutError(f"timeout after {tool.timeout_ms}ms")
 ```
 
-线程无法取消：置位 signal（工具自己检查）后必须 `shield` 等它到达静止点。
+wait_for 经 `shield` 包裹保证超时不取消底层任务——置位 signal（工具协作中止，如子进程工具 terminate）后必须 `await` 排干到静止点。execute 返回普通值时 `_maybe_await` 原样透传；返回 coroutine 时直接 `await`（async 契约）。
 
 ## 12.5 代码 step-by-step（`miniharness/core/agent_loop/tool_calls.py`）
 
@@ -150,7 +151,7 @@ except asyncio.TimeoutError:
 - `cancel()` 在 async 路径多一步：置位 `_step_signal.signal`——调度器检测后停止补池、排干已启动、未启动补合成错误。turn 仍以 `{kind:'aborted'}` 闭合（既有契约不变）；
 - `AgentLoop(max_parallel_tool_calls=10)` 对齐上游配置项。
 
-LLM 流式仍是同步适配器（`adapter.stream` 阻塞事件循环）——可接受：流式发生在工具并行之前，没有在飞任务需要让路。
+LLM 流式已原生异步（httpx 传输）：`adapter.stream` 是真 async 迭代器，与工具执行体共用同一事件循环；abort 置位即关闭连接（无遗留线程）。
 
 ## 12.7 硬性规定（被测试钉住）
 
@@ -171,4 +172,4 @@ LLM 流式仍是同步适配器（`adapter.stream` 阻塞事件循环）——�
 - [ ] 解释"pre-execute 有序、body 重叠"与 `pipeline_policy_async` / `pipeline_async_body` 拆段的关系；
 - [ ] 用 `max_parallel=2` 跑 4 个并行工具，观察 `fill_pool` 的补池节奏；
 - [ ] 构造一次中途取消：哪些结果真实、哪些合成，顺序如何；
-- [ ] 说出 mini 相对上游的简化（DeepSeek SSE 经阻塞读线程桥接且不可中断、工具体以线程池承载而非事件循环、fiber/scope carrier 未复现、同步门面经瞬态事件循环）。
+- [ ] 说出 mini 相对上游的简化（fiber/scope carrier 未复现、同步门面无 driver 时经 `asyncio.run` 瞬态事件循环驱动、重试等待以协作式 `asyncio.Event` 近似 AbortSignal、`asyncio.subprocess` 尚未接入工具执行）。

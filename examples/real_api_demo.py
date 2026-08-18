@@ -15,7 +15,7 @@ from miniharness import AgentLoop, Context, DeepSeekAdapter, Session, Tool, Tool
 from miniharness.llm.retry import apply_retry_planner
 
 
-def shell(args, env):
+async def shell(args, env):
     return f"stdout: {args['cmd']}"
 
 
