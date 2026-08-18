@@ -119,8 +119,8 @@ miniharness/
 | `core/agent_loop/tool_calls.py` | `packages/core/agent-loop/src/tool-calls.ts` | |
 | `core/agent_loop/inbox.py` | `packages/core/agent-loop/src/inbox.ts` | 双队列（followup→next-turn / steer→next-step）+ `agent/inbox/spliced` 持久化 |
 | `core/system_prompt.py` | `packages/core/system-prompt/src/` | assemble waterfall + contexts/tools/variables 提供器 + `{{variable}}` 严格插值；scope 层叠、运行时上下文快照注入请求历史、assembly.tools→请求工具集成未复现（简化标注见模块 docstring） |
-| `llm/protocol.py` | `packages/llm/llm/src/` | `stream(messages, tools, signal)` async 契约 + `StreamAborted` + `_aiter_from_thread` 线程桥（2026-08-18 asyncio 化重构） |
-| `llm/deepseek.py` | `packages/llm/llm-deepseek/src/` | 阻塞 SSE 读经 executor 线程桥接为异步迭代（阻塞读不可中断，urlopen 120s 超时兜底；上游 fetch + AbortSignal） |
+| `llm/protocol.py` | `packages/llm/llm/src/` | `stream(messages, tools, signal)` async 契约 + `StreamAborted` + `_aiter_raced`（异步迭代与 abort 事件竞速；2026-08-18 asyncio 化重构） |
+| `llm/deepseek.py` | `packages/llm/llm-deepseek/src/` | httpx 异步传输（原生 asyncio，abort 置位即关闭连接、真取消）+ per-read idle 300s watchdog（对齐上游 fetch）+ SSE spec-strict 解析 |
 | `llm/fake.py` | 无 | 教学扩展 |
 | `attachment/`（types + error + image + store） | `packages/attachment/attachment`（seam + types + error）+ `packages/attachment/attachment-local`（store + image） | 纯 stdlib 头部解析（上游 sharp 全解码）、普通写 + os.replace（上游 fsync + link 原子发布）、显式 root（上游 DSH_HOME/attachments/v1）；简化标注见模块 docstring |
 | `llm/retry_policy.py` | `packages/llm/llm/src/retry-policy.ts` | |

@@ -97,54 +97,32 @@ class StreamAborted(Exception):
     """
 
 
-async def _aiter_from_thread(producer, abort_event=None):
-    """把阻塞生成器搬进 executor 线程，经 asyncio.Queue 桥接为 async 迭代器。
+async def _aiter_raced(aiter_: AsyncIterator, abort_event=None):
+    """把异步迭代器与 abort 事件竞速，abort 置位即在下次取块前抛 StreamAborted。
 
-    producer 是同步生成器（阻塞 I/O，如 urllib SSE 读取）。abort_event 可选：
-    协作式取消——置位后桥接在下一次取块前抛 StreamAborted（调用方按回合
-    中止语义处理）。
-
-    简化标注：producer 线程无法被强制中断（阻塞 I/O），消费者中止后线程
-    继续排空至自然结束（网络超时兜底，如 urlopen 120s）；队列无界，
-    中止时不被背压卡死。
+    对齐上游 AbortSignal：一经置位即中止迭代（下一次取块判负即抛），
+    调用方按回合中止语义处理（不落部分消息）。适配器在自身 async-with
+    中消费本迭代器——抛错退出即关闭连接，无遗留线程/资源。
     """
-    DONE = object()
-    queue: asyncio.Queue = asyncio.Queue()
-
-    def run():
-        try:
-            for item in producer():
-                queue.put_nowait(item)
-        except Exception as exc:  # noqa: BLE001 - 跨线程透传
-            queue.put_nowait(exc)
-        finally:
-            queue.put_nowait(DONE)
-
-    task = asyncio.ensure_future(asyncio.to_thread(run))
-    try:
-        while True:
-            get_task = asyncio.ensure_future(queue.get())
-            if abort_event is None:
-                item = await get_task
-            else:
-                abort_task = asyncio.ensure_future(abort_event.wait())
-                done, _pending = await asyncio.wait(
-                    {get_task, abort_task}, return_when=asyncio.FIRST_COMPLETED)
-                # abort 粘滞优先：若 get 与 abort 同一批完成（put_nowait 与 abort.set
-                # 撞在同一轮询批次），也视为取消——上游 AbortSignal 一经置位即停。
-                if abort_event.is_set():
-                    get_task.cancel()
-                    raise StreamAborted("LLM 流被取消")
-                abort_task.cancel()
-                item = get_task.result()
-            if item is DONE:
-                return
-            if isinstance(item, Exception):
-                raise item
+    if abort_event is None:
+        async for item in aiter_:
             yield item
-    finally:
-        if not task.done():
-            task.cancel()
+        return
+    while True:
+        get_task = asyncio.ensure_future(aiter_.__anext__())
+        abort_task = asyncio.ensure_future(abort_event.wait())
+        done, _pending = await asyncio.wait(
+            {get_task, abort_task}, return_when=asyncio.FIRST_COMPLETED)
+        # abort 粘滞优先：若 get 与 abort 同一批完成（数据送达与 abort.set 撞在
+        # 同一轮询批次），也视为取消——上游 AbortSignal 一经置位即停。
+        if abort_event.is_set():
+            get_task.cancel()
+            raise StreamAborted("LLM 流被取消")
+        abort_task.cancel()
+        try:
+            yield get_task.result()
+        except StopAsyncIteration:
+            return
 
 
 class LlmFailure(Exception):

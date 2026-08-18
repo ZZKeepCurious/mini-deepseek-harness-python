@@ -13,13 +13,13 @@
     - **loop 片段**：本章 `loop.py` 的 `_append` 方法、字符串 reason、扁平 `assistant/message` 形态均已过时；实现是 ContentBlock 消息对象 + 显式编号 + `request/header` 事件 + 每 chunk 落 `assistant/chunk`（`core/agent_loop/agent.py`）。
     - **重试接线**：真实调用入口必须挂载 `apply_retry_planner`（`llm/retry.py:196`），否则 `agent/request-error` 瀑布不生效（本章 §4.11 真实 API 示例未调用，已修正纪律见 AGENTS.md）。
     - **时序图**：完整时序含 `request/header` 事件与逐 chunk `assistant/chunk` 落盘（见 `core/agent_loop/agent.py` 的 requestHeaderLogged 语义）。
-    - **stream 契约已 async 化**（2026-08-18 asyncio 化重构）：实现签名为 `async def stream(self, messages, tools, signal=None)` 异步迭代（`llm/protocol.py`，DeepSeek 阻塞 SSE 经 executor 线程桥接、abort 竞速抛 `StreamAborted`）；agent 循环为单一 async 驱动 + `followup`/`steer` 同步门面（无 driver 时经 `asyncio.run` 瞬态事件循环）；本章的同步 `def stream` 与同步泵形态已过时。
+    - **stream 契约已 async 化**（2026-08-18 asyncio 化重构 + httpx 传输）：实现签名为 `async def stream(self, messages, tools, signal=None)` 异步迭代（`llm/protocol.py`，httpx 原生 asyncio 传输，abort 置位即关闭连接、`_aiter_raced` 竞速抛 `StreamAborted`）；agent 循环为单一 async 驱动 + `followup`/`steer` 同步门面（无 driver 时经 `asyncio.run` 瞬态事件循环）；本章的同步 `def stream` 与同步泵形态已过时。
 
 ## 4.1 这一章要做什么
 
 前三章分别备好了日志、插件骨架和工具管线，这一章把它们接起来：模型在循环里转起来，一个回合完整跑完。两个部分：
 
-1. `llm.py`——统一流协议 `StreamChunk` + `LlmAdapter` 接口 + DeepSeek 官方 SSE 适配器（纯 stdlib，不装 SDK）
+1. `llm.py`——统一流协议 `StreamChunk` + `LlmAdapter` 接口 + DeepSeek 官方 SSE 适配器（httpx 异步传输，不装官方 SDK）
 2. `loop.py`——turn/step 状态机：inbox 排队、pre-step 拒绝、工具回灌继续、turn 括号闭合
 
 用 `FakeLlmAdapter` 不需要 API key 就能跑通"文本 + 工具调用"的完整回合——测试和演示都靠它。
@@ -140,54 +140,78 @@ class FakeLlmAdapter(LlmAdapter):
 
 行为规则：第一次调用返回一次工具调用，之后返回最终文本。这样就能驱动"模型调工具 → 拿到结果 → 再回答"的完整回合，全程不需要真实模型。注意 `tool-call` 块的 `arguments` 是 **JSON 字符串**，与上游 `ContentBlock` 一致——模型侧协议里参数就是字符串，不是对象。
 
-### 步骤 4：DeepSeekAdapter —— 官方 SSE（stdlib urllib）
+### 步骤 4：DeepSeekAdapter —— 官方 SSE（httpx 异步传输）
 
 ```python
+import httpx
+
 class DeepSeekAdapter(LlmAdapter):
     provider = "deepseek-official"
+    CONNECT_TIMEOUT_S = 30.0
+    READ_TIMEOUT_S = 300.0   # per-read idle watchdog（对齐上游 fetch 300s）
 
     def __init__(self, api_key=None, base_url=None, model="deepseek-chat"):
         self._key = api_key if api_key is not None else os.environ.get("DEEPSEEK_API_KEY", "")
         self._base = (base_url or os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")).rstrip("/")
         self._model = model
 
-    def stream(self, messages, tools):
-        body = {"model": self._model, "messages": messages, "stream": True}
+    async def stream(self, messages, tools, signal=None):
+        """async 迭代器：httpx 异步传输 + SSE 解析，逐 chunk 产出。
+        signal.aborted 置位 → _aiter_raced 在下次取块前抛 StreamAborted，
+        退出 async-with 即关闭连接（真取消，无遗留线程）。"""
+        abort_event = getattr(signal, "event", None) if signal is not None else None
+        body = {"model": self._model, "messages": serialize_messages(messages), "stream": True}
         if tools:
-            body["tools"] = [t["schema"] for t in tools]
-        req = urllib.request.Request(self._base + "/chat/completions",
-            data=json.dumps(body).encode(),
-            headers={"Content-Type": "application/json", "Authorization": "Bearer " + self._key})
-        try:
-            resp = urllib.request.urlopen(req, timeout=120)
-        except urllib.error.HTTPError as e:
-            detail = e.read(200).decode("utf-8", "replace")
-            code = "AUTH_ERROR" if e.code in (401, 403) else "REQUEST_ERROR"
-            raise LlmFailure(code, f"HTTP {e.code}: {detail}") from e
+            body["tools"] = [
+                {"type": "function", "function": {
+                    "name": t["name"], "description": t.get("description", ""),
+                    "parameters": t.get("parameters", {}),
+                }} for t in tools
+            ]
+        async with httpx.AsyncClient(timeout=httpx.Timeout(
+                self.CONNECT_TIMEOUT_S, read=self.READ_TIMEOUT_S)) as client:
+            async with client.stream("POST", self._base + "/chat/completions",
+                                     json=body,
+                                     headers={"Content-Type": "application/json",
+                                              "Authorization": "Bearer " + self._key}) as resp:
+                if resp.status_code >= 400:
+                    detail = (await resp.aread()).decode("utf-8", "replace")[:500]
+                    raise LlmFailure(_http_error_code(resp.status_code, detail),
+                                     f"HTTP {resp.status_code}: {detail}")
+                async for chunk in self._parse_sse(resp.aiter_lines(), abort_event):
+                    yield chunk
 
-        # tool-call 的 name / arguments 分片到达，需先收集；随后按 ContentBlock
-        # 重放为 block-start → delta* → block-end（Consumer 做流式 UI 可改为逐片转发）
+    async def _parse_sse(self, aiter_lines, abort_event=None):
+        """SSE spec-strict：事件只在空行终结时派发；EOF 处未终止尾部是截断，
+        丢弃；[DONE] 之前 EOF → STREAM_CLOSED；畸形载荷 → MALFORMED_RESPONSE。"""
         texts, reasonings, pending = {}, {}, {}
-        for raw in resp:
-            line = raw.decode("utf-8", "replace").strip()
-            if not line.startswith("data:"):
+        data_lines = []
+        async for line in aiter_lines:
+            if line == "":
+                if data_lines:
+                    data = "\n".join(data_lines)
+                    data_lines = []
+                    if data == "[DONE]":
+                        break
+                    piece = json.loads(data)
+                    for choice in piece.get("choices", []):
+                        delta = choice.get("delta", {})
+                        if delta.get("reasoning_content"):
+                            reasonings[choice["index"]] = reasonings.get(choice["index"], "") + delta["reasoning_content"]
+                        if delta.get("content"):
+                            texts[choice["index"]] = texts.get(choice["index"], "") + delta["content"]
+                        for tc in delta.get("tool_calls") or []:
+                            slot = pending.setdefault(tc["index"], {"id": "", "name": "", "arguments": ""})
+                            fn = tc.get("function", {})
+                            slot["id"] = tc.get("id") or slot["id"]
+                            slot["name"] += fn.get("name", "")
+                            slot["arguments"] += fn.get("arguments", "")
                 continue
-            data = line[5:].strip()
-            if data == "[DONE]":
-                break
-            piece = json.loads(data)
-            for choice in piece.get("choices", []):
-                delta = choice.get("delta", {})
-                if delta.get("reasoning_content"):
-                    reasonings[choice["index"]] = reasonings.get(choice["index"], "") + delta["reasoning_content"]
-                if delta.get("content"):
-                    texts[choice["index"]] = texts.get(choice["index"], "") + delta["content"]
-                for tc in delta.get("tool_calls") or []:
-                    slot = pending.setdefault(tc["index"], {"id": "", "name": "", "arguments": ""})
-                    fn = tc.get("function", {})
-                    slot["id"] = tc.get("id") or slot["id"]
-                    slot["name"] += fn.get("name", "")
-                    slot["arguments"] += fn.get("arguments", "")
+            if line.startswith("data:"):
+                payload = line[5:]
+                if payload.startswith(" "):
+                    payload = payload[1:]
+                data_lines.append(payload)
 
         for idx in sorted(texts):
             yield StreamChunk("block-start", index=idx, blockType="text")
@@ -214,7 +238,9 @@ class DeepSeekAdapter(LlmAdapter):
 两个细节：
 
 - `baseURL / apiKey` 从环境变量读取，代码里只存引用。凭据的完整处理在第 6 章（凭据扩展口）。
-- 401/403 映射为 `AUTH_ERROR`，其余 HTTP 错误映射为 `REQUEST_ERROR`——错误在源头就分类，调用方不用猜。
+- 错误在源头就分类（`_http_error_code`，对齐上游 adapter.ts）：401/403→`AUTH`、quota 措辞→`QUOTA`、429→`RATE_LIMIT`、400 上下文超限→`CONTEXT_WINDOW_EXCEEDED`、500+→`SERVER`、其余→`HTTP_<status>`，并携带 `status / providerRetryAfterMs / requestId` 事实——调用方不用猜。
+
+> 传输层为什么用 httpx 而不是 urllib？urllib 的阻塞读无法被真正取消，只能靠固定 120s 超时兜底（producer 线程滞留），与上游"per-read 300s watchdog + fetch 流中断可取消"的语义有差距。httpx 是原生 asyncio 传输：`abort` 置位即抛 `StreamAborted` 并关闭连接，`READ_TIMEOUT_S=300` 对齐上游每读间隙超时，且测试可用 `httpx.MockTransport` 注入、无需打真实网络。这是本手册"stdlib 优先、关键协议层精选第三方"的典型取舍。
 
 ## 4.4 代码 step-by-step（loop.py）
 

@@ -12,14 +12,15 @@ sse.ts + translate.ts）。
 """
 from __future__ import annotations
 
+import asyncio
 import email.utils
 import json
 import os
 import re
-import urllib.error
-import urllib.request
 from datetime import datetime, timezone
 from typing import Any
+
+import httpx
 
 from ..core.session import reasoning_block
 from .protocol import (
@@ -37,7 +38,7 @@ from .protocol import (
     LlmAdapter,
     LlmFailure,
     StreamChunk,
-    _aiter_from_thread,
+    _aiter_raced,
 )
 from .retry_policy import resolve_retry_policy
 
@@ -237,12 +238,14 @@ def _map_usage(usage: dict) -> dict:
 
 
 class DeepSeekAdapter(LlmAdapter):
-    """DeepSeek 官方 chat API 的 SSE 适配器（纯 stdlib urllib，零依赖）。
+    """DeepSeek 官方 chat API 的 SSE 适配器（httpx 异步传输）。
 
     与上游 llm-deepseek 一致：
       * 请求体 stream:true + stream_options.include_usage
       * SSE 必须出现字面 [DONE]，EOF 未到 [DONE] 抛 STREAM_CLOSED（截断响应不可信）
       * finish reason 与 usage 在 [DONE] 之后发射；空响应抛 EMPTY_RESPONSE
+      * per-read idle 超时 300s（对齐上游 fetch watchdog）+ 真取消：abort
+        置位即关闭连接（httpx 原生 asyncio 传输，无遗留线程）
 
     简化标注（2026-08-17 上游 rc.7 审核）：上游推理 effort 提供 off/low/high/max
     四档（adapter.ts REASONING_EFFORTS，rc.7 新增 low）；mini 请求参数
@@ -253,13 +256,18 @@ class DeepSeekAdapter(LlmAdapter):
 
     provider = "deepseek-official"
 
+    # 上游 per-read idle watchdog（fetch 流读间隙超时）；连接超时取常用值
+    CONNECT_TIMEOUT_S = 30.0
+    READ_TIMEOUT_S = 300.0
+
     def __init__(self, api_key: str | None = None, base_url: str | None = None,
                  model: str = "deepseek-chat", max_tokens: int | None = None,
-                 retry_policy: dict | None = None):
+                 retry_policy: dict | None = None, transport=None):
         self._key = api_key if api_key is not None else os.environ.get("DEEPSEEK_API_KEY", "")
         self._base = (base_url or os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")).rstrip("/")
         self._model = model
         self._max_tokens = max_tokens
+        self._transport = transport  # httpx transport（MockTransport 测试注入口）
         # 上游 llm-deepseek：retryPolicy 省略即 normal 默认（resolveRetryPolicy(undefined)）
         self.retry_policy = resolve_retry_policy(retry_policy, "llm-deepseek: retryPolicy")
 
@@ -281,17 +289,13 @@ class DeepSeekAdapter(LlmAdapter):
         }
 
     async def stream(self, messages, tools, signal=None):
-        """async 迭代器（对齐上游 async stream）：SSE 读取搬进 executor 线程，
-        经 asyncio.Queue 桥接逐 chunk 产出；signal.aborted/.event 置位即中止
-        （协作式取消，对齐上游 signal 携带进 stream 的语义）。
-
-        简化标注：阻塞读取线程无法被强制中断（urlopen 120s 超时兜底），
-        取消后 producer 线程继续排空至自然结束；流桥在无数据窗口内为
-        事件驱动（abort_event 竞速），非轮询。
+        """async 迭代器（对齐上游 async stream）：httpx 异步传输 + SSE 解析，
+        逐 chunk 产出。signal.aborted/.event 置位即中止——_aiter_raced 在下一次
+        取块前抛 StreamAborted，退出 async-with 关闭连接（真取消，无遗留线程）。
         """
         abort_event = getattr(signal, "event", None) if signal is not None else None
         body = self._build_body(messages, tools)
-        async for chunk in _aiter_from_thread(lambda: self._iter_chunks(body), abort_event):
+        async for chunk in self._iter_chunks(body, abort_event):
             yield chunk
 
     def _build_body(self, messages, tools) -> dict:
@@ -313,43 +317,59 @@ class DeepSeekAdapter(LlmAdapter):
             body["max_tokens"] = self._max_tokens
         return body
 
-    def _iter_chunks(self, body: dict):
-        """同步 SSE 请求 + 解析（阻塞；经 _aiter_from_thread 桥接给 async stream）。"""
-        req = urllib.request.Request(
-            self._base + "/chat/completions",
-            data=json.dumps(body).encode("utf-8"),
-            headers={"Content-Type": "application/json", "Authorization": "Bearer " + self._key},
-        )
-        try:
-            resp = urllib.request.urlopen(req, timeout=120)
-        except urllib.error.HTTPError as e:
-            detail = e.read(500).decode("utf-8", "replace")
-            code = _http_error_code(e.code, detail)
-            raise LlmFailure(code, f"HTTP {e.code}: {detail}",
-                             status=e.code,
-                             provider_retry_after_ms=provider_retry_after_ms(
-                                 e.headers.get("Retry-After")),
-                             request_id=request_id(e.headers)) from e
-        except urllib.error.URLError as e:
-            # socket 超时被 urlopen 包装进 URLError.reason；上游区分 TIMEOUT
-            if isinstance(e.reason, TimeoutError):
-                raise LlmFailure(TIMEOUT, "请求超时") from e
-            raise LlmFailure(TRANSPORT, f"网络错误: {e.reason}") from e
-        except TimeoutError as e:
-            raise LlmFailure(TIMEOUT, "请求超时") from e
+    async def _iter_chunks(self, body: dict, abort_event=None):
+        """httpx 异步传输：发起 POST + 错误映射，逐行喂给 SSE 解析器。
 
+        错误映射对齐上游 adapter.ts：401/403→AUTH、quota 措辞→QUOTA、
+        429→RATE_LIMIT、400 上下文超限→CONTEXT_WINDOW_EXCEEDED（否则
+        INVALID_REQUEST）、500+→SERVER、其余→HTTP_<status>；LlmError facts
+        （status / providerRetryAfterMs / requestId）逐项填写。超时→TIMEOUT、
+        其它传输错误→TRANSPORT。abort 置位经 _aiter_raced 抛 StreamAborted，
+        async-with 退出即关闭连接。
+        """
+        headers = {"Content-Type": "application/json", "Authorization": "Bearer " + self._key}
+        timeout = httpx.Timeout(self.CONNECT_TIMEOUT_S, read=self.READ_TIMEOUT_S)
+        kwargs: dict[str, Any] = {"timeout": timeout}
+        if self._transport is not None:
+            kwargs["transport"] = self._transport
+        try:
+            async with httpx.AsyncClient(**kwargs) as client:
+                async with client.stream(
+                    "POST", self._base + "/chat/completions", json=body, headers=headers,
+                ) as resp:
+                    if resp.status_code >= 400:
+                        detail = (await resp.aread()).decode("utf-8", "replace")[:500]
+                        raise LlmFailure(
+                            _http_error_code(resp.status_code, detail),
+                            f"HTTP {resp.status_code}: {detail}",
+                            status=resp.status_code,
+                            provider_retry_after_ms=provider_retry_after_ms(
+                                resp.headers.get("Retry-After")),
+                            request_id=request_id(resp.headers),
+                        ) from None
+                    async for chunk in self._parse_sse(resp.aiter_lines(), abort_event):
+                        yield chunk
+        except httpx.TimeoutException as e:
+            raise LlmFailure(TIMEOUT, "请求超时") from e
+        except httpx.HTTPError as e:
+            raise LlmFailure(TRANSPORT, f"网络错误: {e}") from e
+
+    async def _parse_sse(self, aiter_lines, abort_event=None):
+        """SSE spec-strict 解析（上游 sse.ts:7-9 + eventsource-parser）。
+
+        事件只在空行终结时派发，EOF 处的未终止尾部是截断而非可 flush 的
+        载荷（丢弃）；多个 data: 行以 \n 连接（multi-data join）；[DONE] 之前
+        EOF → STREAM_CLOSED（截断响应不可信）；畸形载荷 → MALFORMED_RESPONSE。
+        abort 置位覆盖截断判定（取消路径不落 STREAM_CLOSED）。
+        """
         texts: dict[int, str] = {}
         reasonings: dict[int, str] = {}
         pending: dict[int, dict[str, str]] = {}
         usage: dict | None = None
         finish_reason: str | None = None
         saw_done = False
-        # SSE spec-strict（上游 sse.ts:7-9 + eventsource-parser）：事件只在空行
-        # 终结时派发，EOF 处的未终止尾部是截断而非可 flush 的载荷（丢弃）；
-        # 多个 data: 行以 \n 连接（multi-data join）。
         data_lines: list[str] = []
-        for raw in resp:
-            line = raw.decode("utf-8", "replace").rstrip("\r\n")
+        async for line in _aiter_raced(aiter_lines, abort_event):
             if line == "":
                 # 空行终结：派发当前事件
                 if data_lines:
@@ -385,7 +405,9 @@ class DeepSeekAdapter(LlmAdapter):
                     payload = payload[1:]
                 data_lines.append(payload)
             # 非 data 字段（注释/event:/id:/retry:）跳过
-        # EOF：未终止的 data_lines 缓冲直接丢弃（截断）；缺 [DONE] → STREAM_CLOSED
+        # EOF：未终止的 data_lines 缓冲直接丢弃（截断）；取消覆盖截断判定
+        if abort_event is not None and abort_event.is_set():
+            raise StreamAborted("LLM 流被取消")
         if not saw_done:
             raise LlmFailure(STREAM_CLOSED, "SSE 流在 [DONE] 之前结束，响应不完整")
 

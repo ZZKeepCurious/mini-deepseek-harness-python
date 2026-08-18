@@ -1,12 +1,11 @@
 """第 4 章验收：Agent Loop 状态机 + LLM 流式。运行：python -m unittest discover -s tests -t ."""
 
 import asyncio
-import time
 import unittest
 
 from miniharness.core.scope import Context
 from miniharness.llm import FakeLlmAdapter, LlmFailure, StreamChunk
-from miniharness.llm.protocol import StreamAborted, _aiter_from_thread
+from miniharness.llm.protocol import StreamAborted, _aiter_raced
 from miniharness.core.agent_loop.agent import AgentLoop
 from miniharness.core.session import Session, derive_messages, turn_balance
 from miniharness.core.tools import Tool, ToolRegistry
@@ -275,43 +274,42 @@ class TestRequestEnvelope(unittest.TestCase):
             loop.followup("你好")
 
 
-class ThreadBridgeTest(unittest.TestCase):
-    """asyncio 化重构：_aiter_from_thread 线程桥契约（保序 / 异常透传 / abort 竞速）。"""
+class AbortRaceTest(unittest.TestCase):
+    """asyncio 化重构：_aiter_raced 异步竞速桥契约（保序 / 异常透传 / abort 竞速）。"""
+
+    async def _alines(self, items):
+        for item in items:
+            yield item
 
     def test_preserves_order(self):
-        def producer():
-            yield "a"
-            yield "b"
-            yield "c"
-
         async def scenario():
-            return [c async for c in _aiter_from_thread(producer)]
+            return [c async for c in _aiter_raced(self._alines(["a", "b", "c"]))]
 
         self.assertEqual(asyncio.run(scenario()), ["a", "b", "c"])
 
     def test_propagates_producer_exception(self):
-        def producer():
+        async def producer():
             yield "a"
             raise ValueError("boom")
 
         async def scenario():
-            return [c async for c in _aiter_from_thread(producer)]
+            return [c async for c in _aiter_raced(producer())]
 
         with self.assertRaises(ValueError):
             asyncio.run(scenario())
 
     def test_abort_race_raises_stream_aborted(self):
-        # 生产节奏慢于消费者 → 取块间队列为空（对应真实 SSE chunk 间的网络间隙），
+        # 生产节奏慢于消费者 → 取块间等待竞速（对应真实 SSE chunk 间的网络间隙），
         # abort 置位后下一次取块由竞速判负 → StreamAborted（而非 CancelledError）。
-        def producer():
+        async def producer():
             for i in range(100):
-                time.sleep(0.05)
+                await asyncio.sleep(0.05)
                 yield i
 
         async def scenario():
             abort = asyncio.Event()
             collected = []
-            async for chunk in _aiter_from_thread(producer, abort):
+            async for chunk in _aiter_raced(producer(), abort):
                 collected.append(chunk)
                 abort.set()  # 首块即触发
             return collected

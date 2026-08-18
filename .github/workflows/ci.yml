@@ -19,7 +19,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install dependencies
-        run: pip install pyyaml coverage
+        run: pip install httpx pyyaml coverage
       - name: Compile all sources
         run: python -m compileall -q miniharness tests examples
       - name: Run unit tests with coverage
