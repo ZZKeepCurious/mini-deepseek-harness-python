@@ -1,5 +1,5 @@
 site_name: Mini DeepSeek Harness 文档
-site_description: 用纯 Python 标准库从 0 到 1 复现 DeepSeek Harness 核心能力的教学项目
+site_description: 用 Python（stdlib 优先，SSE 传输层用 httpx）从 0 到 1 复现 DeepSeek Harness 核心能力的教学项目
 site_url: https://zzkeepcurious.github.io/mini-deepseek-harness-python/
 repo_url: https://github.com/ZZKeepCurious/mini-deepseek-harness-python
 edit_uri: blob/main/docs/
