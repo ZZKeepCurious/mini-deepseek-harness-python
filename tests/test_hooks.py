@@ -1,8 +1,12 @@
 """第 12 章测试：hooks 桥 —— CC 钩子翻译成拦截决策。"""
 import json
+import os
+import tempfile
 import unittest
+from unittest import mock
 
 from miniharness.protocol.hooks import (
+    DEFAULT_HOOK_TIMEOUT_MS,
     ClaudeCodeBridge,
     matches_matcher,
     matcher_diagnostic,
@@ -307,6 +311,91 @@ class TestRunHookSubprocess(unittest.TestCase):
         output, _ = run_hook("python -c \"import time; time.sleep(5)\"", timeout_sec=0.1)
         self.assertIsNone(output["exitCode"])
         self.assertIn("timed out", output["stderr"])
+
+    def test_default_timeout_matches_upstream(self):
+        self.assertEqual(DEFAULT_HOOK_TIMEOUT_MS, 600_000)
+
+    def test_stdin_payload_json_with_trailing_newline(self):
+        output, _ = run_hook(
+            "python -c \"import sys; d = sys.stdin.read(); "
+            "print('END' if d.endswith(chr(10)) else 'NO'); print(d.strip())\"",
+            payload={"toolName": "Bash"})
+        self.assertEqual(output["exitCode"], 0)
+        self.assertEqual(output["stdout"], "END\n{\"toolName\": \"Bash\"}")
+
+    def test_payload_without_trailing_newline(self):
+        output, _ = run_hook(
+            "python -c \"import sys; d = sys.stdin.read(); "
+            "print('END' if d.endswith(chr(10)) else 'NO')\"",
+            payload={"k": 1}, trailing_newline=False)
+        self.assertEqual(output["stdout"], "NO")
+
+    def test_env_override_visible_to_hook(self):
+        output, _ = run_hook(
+            "python -c \"import os; print(os.environ.get('CLAUDE_PROJECT_DIR', ''))\"",
+            env={"CLAUDE_PROJECT_DIR": "C:/proj"})
+        self.assertEqual(output["stdout"], "C:/proj")
+
+    def test_cwd_used(self):
+        with tempfile.TemporaryDirectory() as td:
+            output, _ = run_hook(
+                "python -c \"import os; print(os.path.basename(os.getcwd()))\"",
+                cwd=td)
+            self.assertEqual(output["stdout"], os.path.basename(td))
+
+    def test_oserror_infrastructure_failure_non_blocking(self):
+        with mock.patch("miniharness.protocol.hooks.subprocess.run",
+                        side_effect=FileNotFoundError("no shell")):
+            output, _ = run_hook("echo hi")
+        self.assertIsNone(output["exitCode"])
+        self.assertIn("no shell", output["stderr"])
+
+
+class TestDefaultRunnerWiring(unittest.TestCase):
+    def test_bridge_runner_wires_cwd_and_project_dir(self):
+        with tempfile.TemporaryDirectory() as td:
+            session = Session("hook-test", meta={"cwd": td})
+            bridge = ClaudeCodeBridge({
+                "PreToolUse": [{"hooks": [{"type": "command",
+                                           "command": "python -c \"import os; "
+                                                      "print(os.environ.get("
+                                                      "'CLAUDE_PROJECT_DIR','')); "
+                                                      "print(os.path.basename("
+                                                      "os.getcwd()))\""}]}],
+            })
+            runner = bridge._runner(session)
+            hook = bridge.parsed["config"]["PreToolUse"][0]["hooks"][0]
+            output, _ = runner(hook, {"toolName": "Bash"})
+            self.assertEqual(output["exitCode"], 0)
+            self.assertEqual(output["stdout"], f"{td}\n{os.path.basename(td)}")
+
+    def test_bridge_runner_explicit_project_dir_wins(self):
+        with tempfile.TemporaryDirectory() as td:
+            session = Session("hook-test", meta={"cwd": td})
+            bridge = ClaudeCodeBridge({
+                "PreToolUse": [{"hooks": [{"type": "command",
+                                           "command": "python -c \"import os; "
+                                                      "print(os.environ.get("
+                                                      "'CLAUDE_PROJECT_DIR','')); "
+                                                      "print(os.path.basename("
+                                                      "os.getcwd()))\""}]}],
+            }, vars={"projectDir": "C:/explicit/proj"})
+            runner = bridge._runner(session)
+            hook = bridge.parsed["config"]["PreToolUse"][0]["hooks"][0]
+            output, _ = runner(hook, {"toolName": "Bash"})
+            self.assertEqual(output["stdout"], f"C:/explicit/proj\n{os.path.basename(td)}")
+
+    def test_bridge_runner_without_session_no_env(self):
+        bridge = ClaudeCodeBridge({
+            "PreToolUse": [{"hooks": [{"type": "command",
+                                       "command": "python -c \"import os; "
+                                                  "print(os.environ.get("
+                                                  "'CLAUDE_PROJECT_DIR',''))\""}]}],
+        })
+        runner = bridge._runner(None)
+        hook = bridge.parsed["config"]["PreToolUse"][0]["hooks"][0]
+        output, _ = runner(hook, {"toolName": "Bash"})
+        self.assertEqual(output["stdout"], "")
 
 
 if __name__ == "__main__":

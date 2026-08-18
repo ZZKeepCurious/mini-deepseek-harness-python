@@ -145,7 +145,7 @@ miniharness/
 | `client/trajectory.py` | `packages/client/ui-trajectory` | |
 | `protocol/acp.py` | `packages/acp/acp` | |
 | `protocol/sdk.py` | `packages/sdk/protocol` + `sdk/server` | messageId 为真实消息 id（与 inbox 回执一致，官方 SDK 依赖）；互操作测试 `tests/test_upstream_sdk_interop.py`（需 pydantic + 上游 SDK 源码，缺则 skip） |
-| `protocol/hooks.py` | `packages/hooks/hook-protocol` + `hooks-claude-code` | |
+| `protocol/hooks.py` | `packages/hooks/hook-protocol` + `hooks-claude-code` | 默认 runner 对齐 runner.ts：stdin JSON payload + trailing newline、cwd、CLAUDE_PROJECT_DIR env、缺省 600000ms 超时；保留"异步 + signal"同步近似（subprocess） |
 | `seams/sandbox_local.py` | `packages/sandbox/sandbox-local` + `sandbox-windows-acl` | |
 | `seams/credentials_local.py` | `packages/credentials/credentials-local` | |
 | `seams/subagent/`（`__init__.py` + `providers.py` + `worker.py` + `continuation.py` + `descriptor.py`） | `packages/subagent/subagent` + `subagent-fork-in-process` + `-acp` + `-dsh-sdk` + `subagent-spawn-in-process` + `subagent-in-process-driver` + `tool-subagent-control` + `tool-subagent-report` | 续跑 A8 为异步事件驱动（双路径：父有 driver → 投递即返回 + watchSettlement 结算 + steer 批内合并；无 driver → 回退同步 pump）。简化见 AGENTS.md 差异清单 |

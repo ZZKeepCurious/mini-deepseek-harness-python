@@ -26,12 +26,15 @@
     ${CLAUDE_PROJECT_DIR} 替换；UserPromptSubmit/Stop 无匹配主题（matcher 丢弃）；
     无效 matcher 抛 SyntaxError（注册前整体拒绝）。
 
-载体简化：上游经 ctx.shell 异步执行 + signal；mini 用 subprocess 同步近似，
-run_fn 可注入（测试不依赖 shell）。
+载体简化：上游经 ctx.shell 异步执行 + signal 取消；mini 用 subprocess 同步近似。
+run_fn 可注入（测试不依赖 shell）。stdin payload（JSON + 尾换行）、cwd、env
+（CLAUDE_PROJECT_DIR 覆盖）与默认 600000ms 超时均已对齐 runner.ts；仅"异步 +
+signal"保留为同步近似。
 """
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import time
@@ -39,6 +42,7 @@ import uuid
 from typing import Any, Callable
 
 BLOCKING_EXIT_CODE = 2
+DEFAULT_HOOK_TIMEOUT_MS = 600_000
 CLAUDE_EVENTS = ["SessionStart", "UserPromptSubmit", "PreToolUse",
                  "PostToolUse", "Stop", "SubagentStart", "SubagentStop"]
 CLAUDE_LITERAL = re.compile(r"^[A-Za-z0-9_|]+$")
@@ -274,15 +278,41 @@ def parse_claude_code_config(raw: Any, vars: dict | None = None) -> dict:
 
 # ---------- runner ----------
 
-def run_hook(command: str, timeout_sec: float | None = None) -> tuple[dict, float]:
-    """执行一条钩子命令（同步近似 ctx.shell）。超时 → exitCode None。"""
+def run_hook(command: str, timeout_sec: float | None = None, *,
+             payload: Any | None = None, trailing_newline: bool = True,
+             cwd: str | None = None, env: dict | None = None,
+             default_timeout_ms: int = DEFAULT_HOOK_TIMEOUT_MS) -> tuple[dict, float]:
+    """执行一条钩子命令（同步近似 ctx.shell）。
+
+    对齐上游 hook-protocol/src/runner.ts runHook：
+      * stdin = JSON.stringify(payload) + (trailingNewline ? '\\n' : '')；
+      * 超时 = timeoutSec*1000 覆盖，缺省 default_timeout_ms（默认 600000ms）；
+      * env 为可信覆盖（如 CLAUDE_PROJECT_DIR），合并到进程环境之上；
+      * cwd 缺省为执行器当前目录。
+    超时 / 基础设施失败（OSError）→ 无退出码（exitCode None），回合不炸
+    （上游 catch → parseHookOutput(undefined, '', message)）。
+    """
     start = time.perf_counter()
+    stdin = None
+    if payload is not None:
+        stdin = json.dumps(payload, ensure_ascii=False)
+        if trailing_newline:
+            stdin += "\n"
+    timeout_ms = timeout_sec * 1000 if timeout_sec is not None else default_timeout_ms
+    merged_env = None
+    if env:
+        merged_env = dict(os.environ)
+        merged_env.update(env)
     try:
         proc = subprocess.run(command, shell=True, capture_output=True, text=True,
-                              timeout=timeout_sec)
+                              encoding="utf-8", errors="replace",
+                              input=stdin, cwd=cwd, env=merged_env,
+                              timeout=(timeout_ms / 1000) if timeout_ms is not None else None)
         output = parse_hook_output(proc.returncode, proc.stdout, proc.stderr)
     except subprocess.TimeoutExpired:
         output = parse_hook_output(None, "", "hook timed out")
+    except OSError as error:
+        output = parse_hook_output(None, "", str(error))
     return output, int((time.perf_counter() - start) * 1000)
 
 
@@ -306,6 +336,7 @@ class ClaudeCodeBridge:
     def __init__(self, raw_config: Any, vars: dict | None = None):
         self.parsed = parse_claude_code_config(raw_config, vars)
         self.skipped = self.parsed["skipped"]
+        self.vars = dict(vars) if vars else {}
 
     def pre_step(self, prompt_text: str, session=None, run_fn: Callable | None = None) -> dict | None:
         """UserPromptSubmit → pre-step 决策：deny → {'kind':'reject'}；否则 None（委派）。"""
@@ -369,7 +400,7 @@ class ClaudeCodeBridge:
                     "handlerId": handler_id,
                     **({"matcher": group["matcher"]} if group.get("matcher") else {}),
                 })
-                output, duration = (run_fn or _run_default)(hook, payload)
+                output, duration = (run_fn or self._runner(session))(hook, payload)
                 # 对齐上游 events.ts:99：decision 优先，未提供才按
                 # continue:false → 'stop' 推断（null 语义，非 falsy）
                 decision = output.get("decision") if output.get("decision") is not None else \
@@ -382,6 +413,20 @@ class ClaudeCodeBridge:
                 })
                 outputs.append(output)
         return merge_hook_outputs(outputs)
+
+    def _runner(self, session):
+        """默认 runner：注入 cwd / CLAUDE_PROJECT_DIR env（上游 index.ts runPoint）。
+
+        workdir = session.header.cwd（mini：meta['cwd']）；projectDir = 配置
+        projectDir ?? workdir；hookEnv = {CLAUDE_PROJECT_DIR: projectDir}。
+        run_fn 注入契约保持 (hook, payload)，cwd/env 经闭包带入。
+        """
+        workdir = None
+        if session is not None and isinstance(getattr(session, "meta", None), dict):
+            workdir = session.meta.get("cwd")
+        project_dir = self.vars.get("projectDir") or workdir
+        env = {"CLAUDE_PROJECT_DIR": project_dir} if project_dir is not None else None
+        return lambda hook, payload: _run_default(hook, payload, cwd=workdir, env=env)
 
     def _last_turn(self, session) -> int:
         if session is None:
@@ -397,5 +442,7 @@ def _stderr_summary(stderr: str) -> str:
     return stderr[:500] + ("…" if len(stderr) > 500 else "")
 
 
-def _run_default(hook: dict, payload: dict) -> tuple[dict, float]:
-    return run_hook(hook["command"], hook.get("timeoutSec"))
+def _run_default(hook: dict, payload: dict, cwd: str | None = None,
+                 env: dict | None = None) -> tuple[dict, float]:
+    return run_hook(hook["command"], hook.get("timeoutSec"), payload=payload,
+                    cwd=cwd, env=env)
