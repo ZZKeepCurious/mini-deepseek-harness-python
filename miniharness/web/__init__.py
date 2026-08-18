@@ -19,10 +19,13 @@ from .envelope import (
     server_response,
     transport_error,
 )
+from .api import WebApi, canonical_client_time_zone
 
 __all__ = [
     "RPC_ERROR_CODES",
     "EnvelopeError",
+    "WebApi",
+    "canonical_client_time_zone",
     "client_request",
     "client_response",
     "parse_message",

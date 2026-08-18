@@ -88,8 +88,7 @@ from .protocol.hooks import (
     substitute_command,
 )
 from .seams.subagent.providers import AcpSubAgentProvider, ForkSubAgentProvider, SdkSubAgentProvider
-
-__version__ = "0.2.0"
+from .core.version import __version__
 
 __all__ = [
     "AgentLoop",
