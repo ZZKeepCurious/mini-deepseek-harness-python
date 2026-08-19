@@ -20,10 +20,12 @@ from .envelope import (
     transport_error,
 )
 from .api import WebApi, canonical_client_time_zone
+from .streams import StreamHub
 
 __all__ = [
     "RPC_ERROR_CODES",
     "EnvelopeError",
+    "StreamHub",
     "WebApi",
     "canonical_client_time_zone",
     "client_request",
