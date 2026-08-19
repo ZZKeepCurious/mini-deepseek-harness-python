@@ -172,6 +172,22 @@ class TestSession(unittest.TestCase):
         with self.assertRaises(ValueError):
             Session("s2", seed=bad)
 
+    def test_thaw_descends_fresh_lists_holding_frozen_items(self):
+        # 冻结结构 list→tuple、dict→mappingproxy；但实时代码会在冻结值外层套
+        # 新建 list（web 流把 splice 的 inserted 重投影进新 items 数组），
+        # thaw 必须能下钻普通 list 解内层冻结项（回归：曾漏掉 list 分支）。
+        import json
+
+        from miniharness.core.session import deep_freeze, thaw
+
+        frozen = deep_freeze({"items": [{"message": {"content": [{"type": "text", "text": "hi"}],
+                                          "source": {"kind": "user"}}}]})
+        frame = {"type": "session/queue", "items": list(frozen["items"])}
+        plain = thaw(frame)
+        self.assertEqual(plain, {"type": "session/queue", "items": [
+            {"message": {"content": [{"type": "text", "text": "hi"}], "source": {"kind": "user"}}}]})
+        json.dumps(plain, ensure_ascii=False)
+
 
 if __name__ == "__main__":
     unittest.main()
