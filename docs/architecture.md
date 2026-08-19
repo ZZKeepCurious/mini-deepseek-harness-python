@@ -93,6 +93,12 @@ miniharness/
 │   └── subagent/          # 协议面 __init__ + providers.py（三通道）+ worker.py（子进程）
 ├── client/                # packages/client
 │   └── trajectory.py      # Trajectory 折叠引擎
+├── web/                   # packages/host/apiproxy + host/webserver + bundle/web-app（mini 子集）
+│   ├── envelope.py        # 四象限 RPC 信封 + 39 码错误集（rpc.ts）
+│   ├── api.py             # WebApi 会话服务（unary 方法 + 路由表）
+│   ├── streams.py         # StreamHub（mux/host 事件流 + session/queue 快照重投影）
+│   ├── server.py          # FastAPI 传输层（SSE + POST 载体状态码，handler.ts）
+│   └── launcher.py        # web profile 启动器（build_app / run_web）
 ├── demo.py                # 端到端演示（教学入口，python -m miniharness.demo）
 └── example_plugins.py     # boot 演示插件（教学示例）
 ```
@@ -143,6 +149,11 @@ miniharness/
 | `extensions/dynamic.py` | `packages/extensions/*` | |
 | `interaction/approval.py` | `packages/interaction/user-approval` | |
 | `client/trajectory.py` | `packages/client/ui-trajectory` | |
+| `web/envelope.py` | `packages/host/apiproxy/src/rpc.ts` | 四象限消息联合 + RPC_ERROR_CODES 39 码；server-request 全形 |
+| `web/api.py` | `packages/host/apiproxy/src/api-proxy.ts`（session 域）| WebApi unary 方法 + 路由表；`session/queue` placement 三态 |
+| `web/streams.py` | `packages/host/apiproxy/src/api-proxy.ts`（events.mux / events.host / queueItems）| mux 基线 + host 实时 + splice 重投影 queue 快照（api-proxy.ts:1300-1323） |
+| `web/server.py` | `packages/host/apiproxy/src/fetch/handler.ts` | SSE + POST 载体状态码；无 /api/respond、无 session.export、无 CORS、载荷校验在 WebApi 内（简化标注见模块 docstring） |
+| `web/launcher.py` | `packages/host/webserver`（Config：host 两值 + port 0）| host/port 读 MINIHARNESS_WEB_HOST/PORT（上游组合配置节，简化标注） |
 | `protocol/acp.py` | `packages/acp/acp` | |
 | `protocol/sdk.py` | `packages/sdk/protocol` + `sdk/server` | messageId 为真实消息 id（与 inbox 回执一致，官方 SDK 依赖）；互操作测试 `tests/test_upstream_sdk_interop.py`（需 pydantic + 上游 SDK 源码，缺则 skip） |
 | `protocol/hooks.py` | `packages/hooks/hook-protocol` + `hooks-claude-code` | 默认 runner 对齐 runner.ts：stdin JSON payload + trailing newline、cwd、CLAUDE_PROJECT_DIR env、缺省 600000ms 超时；保留"异步 + signal"同步近似（subprocess） |
@@ -161,13 +172,14 @@ miniharness/
 | L0 地基 | `core/session`、`core/scope` | 无（两者互不依赖） |
 | L1 领域 | `llm/*`、`core/tools`、`core/system_prompt`、`core/session_store`、`attachment`、`boot/*` | 仅 L0 |
 | L2 编排 | `core/agent_loop`、`compaction`、`jobs`、`plan`、`commands`、`goal`、`skills` | L0 + L1 |
-| L3 应用与入口 | `cli/*`、`protocol/*`、`seams/*`、`preset`、`extensions`、`interaction`、`client` | L0 ~ L2 |
+| L3 应用与入口 | `cli/*`、`protocol/*`、`seams/*`、`preset`、`extensions`、`interaction`、`client`、`web` | L0 ~ L2 |
 | 教学层 | `demo.py`、`example_plugins.py` | 任意层，但不得被业务模块依赖 |
 
 规则：
 
-1. L_n 只依赖 L_{&lt;n}，禁止依赖同层或上层。两条显式例外：
+1. L_n 只依赖 L_{&lt;n}，禁止依赖同层或上层。三条显式例外：
    - `seams/subagent/worker.py` 依赖 `protocol/*`（同层）：worker 是 ACP / SDK 线协议的服务端载体，复用协议层的帧与信封实现；
+   - `cli/main.py` 依赖 `web`（同层，单方向）：launcher 组装 web profile——cli 把 ctx/adapter/tools 交给 web 层运行时，web 层不得反向 import cli；
    - `cli/main.py` 依赖 `demo`（教学层）：无 profile 时以 `demo` 兜底（教学扩展入口）。
 2. `protocol/` 内三个模块互不依赖（acp、sdk、hooks 各自独立）。
 3. `seams/` 内 sandbox、credentials、subagent 三个子域互不依赖。

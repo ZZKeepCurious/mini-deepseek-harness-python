@@ -90,7 +90,9 @@ bin.ts → args 解析（--profile/--patch/--dump-config，task 为位置参数�
 
 headless 一次性任务入口（`miniharness/cli/headless.py` + `cli/main.py`）：stdout 最后一条非空 assistant 文本、退出码按 turn/end reason、空任务拒绝、未知 profile fail loud、不开端口、`ctx.appExit` 宿主钩子。9 个测试，手册 07 章。
 
-协议入口最小子集：JSON-RPC 信封（`miniharness/protocol/sdk.py`，21 测试，07 章 §7.6）、ACP（`miniharness/protocol/acp.py`，26 测试，07 章 §7.7）、hooks 桥（`miniharness/protocol/hooks.py`，40 测试，07 章 §7.8）；web 表面留在观察清单。
+协议入口最小子集：JSON-RPC 信封（`miniharness/protocol/sdk.py`，21 测试，07 章 §7.6）、ACP（`miniharness/protocol/acp.py`，26 测试，07 章 §7.7）、hooks 桥（`miniharness/protocol/hooks.py`，40 测试，07 章 §7.8）。
+
+web 传输层（`miniharness/web/`，07 章 §7.5，提交 A~E）：四象限 RPC 信封（`envelope.py`，39 码错误集）、WebApi unary 会话服务（`api.py`）、mux/host SSE 事件流 + session/queue splice 重投影（`streams.py`）、FastAPI 载体与 SSE 传输（`server.py`，对齐 handler.ts 状态码链）、`--profile web` 启动器（`launcher.py` + `cli/main.py`）。浏览器前端（`packages/client`）留在观察清单。
 
 异步化与并行工具执行（`miniharness/core/agent_loop/tool_calls.py` + core/scope async 变体 + `execution_mode` 分类器，36 测试，手册 12 章）——屏障/滚动池/模型序提交/取消排干与上游 `agent-loop/src/tool-calls.ts` 逐条对齐。
 

@@ -2,7 +2,7 @@
 
 English | [中文](README.zh.md)
 
-**Mini DeepSeek Harness** is an educational, from-scratch re-implementation of [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`) — the open-source agent harness developed by [DeepSeek AI](https://deepseek.com) — written in Python (**stdlib-first**, with `httpx` for the DeepSeek SSE transport and optional `pyyaml`).
+**Mini DeepSeek Harness** is an educational, from-scratch re-implementation of [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`) — the open-source agent harness developed by [DeepSeek AI](https://deepseek.com) — written in Python (**stdlib-first**, with `httpx` for the DeepSeek SSE transport, optional `pyyaml`, and an optional `[web]` extra: `fastapi` + `uvicorn` for the HTTP/SSE transport layer).
 
 The upstream project builds its entire system on a philosophy where **everything is a plugin**, powered by [Cordis](https://github.com/cordiverse/cordis), a dependency-injection and event-bus framework whose design is described in [_A Programming Paradigm for Spatiotemporal Composability_](https://github.com/cordiverse/paper). We deeply admire this design. This repository is our homage: instead of only reading about it, we re-implement its core contracts — the event-sourced session log, the plugin event bus, the turn/step agent loop, and the capability-seam triangle (Service Definition / Service Provider / Consumer) — **stdlib-first** (the only required third-party package is `httpx`, which carries the DeepSeek SSE transport; `pyyaml` is optional for YAML config), so anyone with `python3` can read, run, and modify them.
 
@@ -40,6 +40,7 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 | System prompt sections (ordered section registration + rendering into each request) | `core/system-prompt` |
 | Boot & composition (YAML/JSON overlays, `!!js` env interpolation, startup assertions) | `packages/boot` |
 | Headless one-shot entry (`--profile headless "task"`: stdout final text, exit code by turn/end reason) | `packages/bundle/headless` + `apps/cli` |
+| Web transport layer (`--profile web`: four-quadrant RPC envelope, WebApi unary session service, mux/host SSE event streams with splice-reprojected queue snapshots, FastAPI carrier mirroring `handler.ts` status-code chain; browser frontend not reproduced) | `packages/host/apiproxy` + `host/webserver` |
 | Launcher options (`--patch`, `--dump-config` / `--dump-default-config`, read-only composition dump) | `apps/cli/src/args.ts` |
 | Session management CLI (`miniharness sessions` list/resume/delete; mini teaching extension) | web surface (upstream) |
 | Session store service (`ctx.sessions`: create/prepare/enter/announce lifecycle, fork with 5 error codes, flush checkpoint, `session/created|disposed|event|flush` events) | `packages/core/session` (SessionStore) |
@@ -51,9 +52,9 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 | Async event bus, true parallel tools + barrier | `core/agent-loop` |
 | CI (GitHub Actions, Python 3.10~3.13, integration-tagged real-API tests) | — |
 
-Planned: web surface is deprioritized.
+Planned: the browser frontend (`packages/client`) is deprioritized; the web transport layer is implemented.
 
-Status: **834 unit tests passing** (stdlib-first; `httpx` for the DeepSeek SSE transport, optional `pyyaml` for YAML config).
+Status: **945 unit tests passing** (stdlib-first; `httpx` for the DeepSeek SSE transport, optional `pyyaml` for YAML config, optional `[web]` extra for the HTTP/SSE transport layer).
 
 ## Getting started
 
@@ -74,6 +75,9 @@ python examples/plan_goal_demo.py --approve
 
 # one-shot task, like `dsh --profile headless "task"` (needs DEEPSEEK_API_KEY)
 python -m miniharness.cli --profile headless "run the tests"
+
+# start the web transport server (requires: pip install ".[web]")
+python -m miniharness.cli --profile web
 
 # read-only composition dump, like `dsh --dump-config`
 python -m miniharness.cli --dump-config
@@ -130,6 +134,7 @@ mini-deepseek-harness-python/
 │   │   └── session_cmds.py  # session list / resume / delete
 │   ├── protocol/            # acp / sdk / hooks bridges
 │   ├── seams/               # sandbox / credentials / subagent seams
+│   ├── web/                 # apiproxy subset: envelope / api / streams / server / launcher
 │   ├── preset/  extensions/  interaction/  client/
 │   ├── demo.py              # end-to-end demo
 │   └── example_plugins.py   # boot demo plugins

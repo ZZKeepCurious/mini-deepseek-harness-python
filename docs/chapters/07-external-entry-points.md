@@ -2,7 +2,7 @@
 
 > 本章回答一个问题：使用者怎么把 dsh 跑起来？前六章讲的是内核（会话、总线、工具、loop、持久化、扩展口），这一章讲的是外壳——所有能"启动一个 dsh 进程"的路径，以及它们各自把什么约定暴露给外部。
 >
-> 对应 dsh 真实源码：`apps/cli` + `packages/boot/app-boot` + `packages/bundle/{headless,web-app}` + `packages/{acp,sdk,hooks}`。mini 复现了 headless 一条（`miniharness/cli/headless.py`），其余入口在本章做系统解读并标注复现规划。
+> 对应 dsh 真实源码：`apps/cli` + `packages/boot/app-boot` + `packages/bundle/{headless,web-app}` + `packages/{acp,sdk,hooks}`。mini 复现了 headless 一条（`miniharness/cli/headless.py`）与 web 的传输层（`miniharness/web/`，§7.5），其余入口在本章做系统解读并标注复现规划。
 
 ## 7.1 总览：一切入口都是 profile
 
@@ -30,7 +30,7 @@
 
 `miniharness/cli/main.py` 复现了启动器的选项语义（对齐 `apps/cli/src/args.ts`，已核实）：
 
-- `--profile headless "task"`：一次性任务（§7.2 全部语义）；未知 profile fail loud。
+- `--profile headless "task"`：一次性任务（§7.2 全部语义）；`--profile web`：启动 FastAPI 服务表层（§7.5，需 fastapi/uvicorn 的 `[web]` extra）；未知 profile fail loud。
 - 无任何参数（无 `--profile`/`--config`/`--patch`）时回退运行 `demo_main()`（无 key 端到端演示，main.py:180-184）。
 - `--patch <path>`（可重复）：YAML/JSON overlay 补丁，参与组合层叠与 dump。
 - `--dump-config`：只读打印最终组合（boot-free，不启动任何应用）；`--dump-default-config`：只打印内置默认组合。两者互斥（`program.error` 同语义）；dump 不接受任务参数；`--dump-default-config` 不接受 `--patch`/`--config`。输出带行级 `# == <label>` 来源注释、`!!js` 表达式原样未求值、skipped patch warn 不失败、单文档可再加载（对齐 `renderConfigDump`）。
@@ -107,7 +107,7 @@ python -m miniharness.cli --profile headless "task"     # 走启动器（对齐 
 miniharness --profile headless "run the tests"          # 安装后（pyproject scripts）
 ```
 
-CLI 解析与上游一致：`--profile headless` 之后的位置参数 join 空格、空任务 usage error 退出 1、未知 profile fail loud（mini 未复现 web，`--profile web` 明确报错而不是静默）。
+CLI 解析与上游一致：`--profile headless` 之后的位置参数 join 空格、空任务 usage error 退出 1、未知 profile fail loud。`--profile web` 不再报错，而是启动服务表层（不接受任务参数）。
 
 ## 7.3 web：同一个 base 上的浏览器表面
 
@@ -115,7 +115,14 @@ CLI 解析与上游一致：`--profile headless` 之后的位置参数 join 空�
 
 web 与 headless 是同一 base 的"同级表面"（README 原文 sibling surface）：内核、工具、会话全部共享，只有 Host 层不同。这个"表面 = 组合层差异"的视角正是第 5 章 boot/patch 机制的用武之地。
 
-mini 未复现 web（前端工程量与教学目标不匹配），观察清单中列为后续选项。
+web 的宿主侧可以拆成两半，mini 只复现其中**传输层**：
+
+| 半 | 上游 | 内容 | mini |
+|---|---|---|---|
+| HTTP 载体 + 事件流 | `packages/host/apiproxy` | 会话服务的 unary RPC 载体（`fetch/handler.ts`）+ mux/host SSE 事件流（`api-proxy.ts`） | `miniharness/web/`（§7.5，已复现） |
+| 浏览器前端 | `packages/client`（39 包）| React shell、对象层、Trajectory、审批面板等 | 未复现（前端工程量与教学目标不匹配），观察清单 |
+
+mini 未复现浏览器前端（`packages/client`），web 的 HTTP/SSE 传输层在 §7.5 落地，`--profile web` 启动它并监听 `MINIHARNESS_WEB_HOST`/`MINIHARNESS_WEB_PORT`（缺省 `127.0.0.1` / `0`=OS 分配）。
 
 ## 7.4 三个协议入口
 
@@ -138,6 +145,70 @@ mini 未复现 web（前端工程量与教学目标不匹配），观察清单�
 `packages/hooks/` 是两条桥：`hooks-claude-code` 和 `hooks-codex`。它们读取用户**既有**的 Claude Code 式 hook 配置（`hooks.json` 或 settings 的 `hooks` 键），把 `PreToolUse`、`UserPromptSubmit` 这类事件翻译成 harness 的类型化 Decision。公共的匹配器、退出码编解码、`ctx.shell` 执行、最严格合并都放在 `hook-protocol`，两条桥各只实现自己方言的 stdin 载荷与事件映射。
 
 hooks 的价值在于迁移成本：已经写好 Claude Code 钩子（安全策略、工作流检查）的用户，把这些钩子原样带进 dsh，而不是在 harness 里重写一遍。注意它只能挂在 harness 的**既有拦截点**上，不是新的独立入口。
+
+## 7.5 复现：web 传输层（`miniharness/web/`）
+
+> 对应 dsh 真实源码：`packages/host/apiproxy/src/fetch/handler.ts`（HTTP 载体）+ `api-proxy.ts`（events.mux / events.host / session.respond 域）+ `packages/host/webserver`（监听配置）。前端不在此列。
+>
+> 分层：`web/envelope.py`（§7.5.1，提交 A）→ `web/api.py`（§7.5.2，提交 B）→ `web/streams.py`（§7.5.3，提交 C）→ `web/server.py` + `web/launcher.py`（§7.5.4，提交 D/E）。四个提交 A~E 对应 ROADMAP 阶段 12 的 web 表层子项。
+
+### 7.5.1 信封：四象限 RPC（`web/envelope.py`）
+
+浏览器↔宿主的通信是**双向两个协议**，上游用一张四象限表收拢（`rpc.ts`）：
+
+| 方向 | 形状 | 语义 |
+|---|---|---|
+| client → host | `client-request`（type/rpcId/method/payload）| 浏览器发起的调用 |
+| client → host | `client-response`（type/rpcId/result/error）| respond 通道的回答（mini 未复现，无 `/api/respond`）|
+| host → client | `server-request`（type/rpcId/method/payload）| 主动推送（SSE 帧全走它）|
+| host → client | `server-response`（type/rpcId/result）| 调用的回执 |
+
+mini 的 `parse_message` 对四个 type 全部校验（未知 type、非字符串 rpcId、缺 method 等 → `EnvelopeError`）；`rpc_result_ok/error`、`rpc_receipt_accepted/rejected`、`rpc_error`、`transport_error` 对齐上游构造器；`RPC_ERROR_CODES` 是 39 码封闭错误集（`rpc.ts` 同款），未知码在 `rpc_error` 里以 `unknown` 兜底。互操作锚点：`tests/test_web_envelope.py` 逐项断言 `server_request` 全形与四象限 JSON 形状。
+
+### 7.5.2 会话服务：unary 方法（`web/api.py`）
+
+`WebApi(ctx, adapter, tools)` 是 mini 的 "api-proxy"：持有一个会话注册表（`_agents`：sessionId → AgentLoop），每个会话在 create 时挂一个常驻 AgentLoop（driver 模式）。路由表对齐上游 session 域方法：
+
+| 方法 | 语义 |
+|---|---|
+| `host.describe` | 版本 / cwd / provider / model / attachedSessions / canOpenPath |
+| `session.list` | 按 updatedAt 倒序 + blank / lastPromptAt 折叠投影 |
+| `session.create` | 会话 id 缺省 `session-<uuid4>`；`workspaceId` → workspace-not-found；重复 id + 同 cwd 幂等返回、异 cwd → session-conflict |
+| `session.prompt` | mode ∈ {queue, steer}；time zone 校验（非法 → invalid-time-zone）；`/` 开头单文本块 → 命令注册表；image 输入经模型模态校验后 ATTACHMENT_UNAVAILABLE 拒绝（无附件服务）|
+| `session.history` | 只读分页窗口（seq 偏移），不 resume |
+| `session.cancel` | 取消 + 清 inbox + turn 以 aborted 闭合 |
+| `session.models` | provider/model 快照 |
+
+### 7.5.3 事件流：mux / host（`web/streams.py`）
+
+`StreamHub(ctx, api)` 挂到 `ctx` 事件总线，把会话事件与宿主状态变成两类订阅流：
+
+- **mux**（`/api/events.mux`）：每流一队列，先放会话基线（已附着的每个会话逐条 `session/event`，rpcId 全流唯一、连接打开时签发，对齐 `api.events.mux({rpcId})`），之后实时追加；宿主事件（session-added/removed）也只进 mux。
+- **host**（`/api/events.host`）：纯实时，无基线。
+- **session/queue 快照**：`agent/inbox/spliced` 广播点观察到的是 **pre-splice** inbox（`Inbox._mutate` 先落日志后改内存、emit 同步），所以快照把 splice 的 `start/removedCount/inserted` **重投影**到 pre-splice 列表上（对齐 api-proxy.ts:1300-1323 `queueItems`）；placement 三态：next-turn→`queued`、next-step 且 `source.kind=='user'`→`steering`、其余→`context`；空快照不发。这是提交 C 里最难的契约点。
+- **session/jobs**：jobs 注册表变更时对 mux 发全量快照。
+
+### 7.5.4 HTTP 传输：载体与 SSE（`web/server.py` + `web/launcher.py`）
+
+`create_app(api, hub)` 是一个 FastAPI 应用，catch-all 路由 `/api/{path:path}` 镜像 `handler.ts` 的判定顺序：
+
+1. `GET /api/events.mux|host` → SSE：`text/event-stream` + `cache-control:no-cache`；打开先写一行 `: connected` 注释（host 无基线，否则空闲时零字节）；每帧 `data: <server-request 全形>\n\n`；流中途异常 → 单条 `stream/error` 帧（新 rpcId）后关闭。
+2. 非 POST / 不在 `/api/` 下 → 404；`content-type` 非 `application/json` → 415（跨站写围栏）；body 非 JSON → 400。
+3. 方法不在路由表 → 404；信封不合法 → 200 + bad-request（尽力 salvage rpcId，兜底哨兵 `invalid-request`；**上游对任何字符串 rpcId 都 salvage**）；`path` 与 `message.method` 不一致 → 200 + bad-request（`details.issues=[]`）。
+4. 派发崩溃 → 500 纯文本 `handler failure: ...`；业务错误恒 200 + `server-response`（`result.ok=false`）。
+
+`web/launcher.py` 把 `WebApi + StreamHub + create_app` 组装成可监听应用：`build_app(adapter, tools, ctx)` 纯装配（测试用），`run_web(...)` 阻塞监听。host/port 对齐 webserver 的 `Config`——host 只允许 `'127.0.0.1' | '0.0.0.0'`、port `0` 表示 OS 分配——但 mini 从 `MINIHARNESS_WEB_HOST/PORT` 环境变量读（上游是组合配置节，简化标注）。`cli/main.py` 的 `--profile web` 组装 ctx + `default_tools(ctx)` 后交给 launcher（cli→web 是 test_dependencies.py 的单方向显式例外）。
+
+**教学简化（须标注）**：无 `/api/respond`（无 approval/question 可应答交互）、无 `GET /api/session.export`、无 CORS 头；载荷 schema 校验在 `WebApi` 内做（上游先过 zod）；session 日志事件是 mappingproxy/tuple 冻结形态（`core/session/json.py` `deep_freeze`），序列化前经 `thaw` 还原——`thaw` 必须覆盖普通 list 分支，因为流层会把冻结 splice 的 `inserted` 重投影进新建的 items 数组（回归测试见 `tests/test_session.py`）。
+
+运行方式：
+
+```sh
+python -m miniharness.cli --profile web          # 走启动器（缺 key → adapter 构造不抛，启动后 describe 可用）
+MINIHARNESS_WEB_PORT=8000 python -m miniharness --profile web
+```
+
+依赖是可选 extra：`pip install "miniharness[web]"`（fastapi + uvicorn）；测试 `tests/test_web_server.py`（13 项，真实 uvicorn 线程 + httpx——SSE 增量读依赖真实 HTTP 传输，TestClient 会缓冲响应体）。
 
 ## 7.6 复现：JSON-RPC 信封最小子集（`miniharness/protocol/sdk.py`）
 

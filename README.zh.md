@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-**Mini DeepSeek Harness** 是用 **Python（stdlib 优先，关键协议层精选第三方）** 从零复现 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`，由 [DeepSeek AI](https://deepseek.com) 开发的开源 Agent 运行时）的**教学实现**。
+**Mini DeepSeek Harness** 是用 **Python（stdlib 优先，关键协议层精选第三方）** 从零复现 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`，由 [DeepSeek AI](https://deepseek.com) 开发的开源 Agent 运行时）的**教学实现**（`httpx` 承载 DeepSeek SSE 传输、可选 `pyyaml`、可选 `[web]` extra：`fastapi` + `uvicorn` 承载 HTTP/SSE 传输层）。
 
 上游项目整个系统建立在一个设计哲学之上：**一切皆插件**（everything is a plugin），其底层是 [Cordis](https://github.com/cordiverse/cordis)，一个依赖注入 + 事件总线框架，设计思想见论文 [_A Programming Paradigm for Spatiotemporal Composability_](https://github.com/cordiverse/paper)。我们对这一设计深表敬意。本仓库是我们的致敬之作：不止于阅读，而是亲手用 Python 重建其核心约定——事件溯源会话日志、插件事件总线、turn/step Agent Loop、能力扩展口三角色（Service Definition / Service Provider / Consumer），**stdlib 优先**（除 httpx 传输层与可选 pyyaml 外不依赖第三方），任何有 `python3` 的人都可以阅读、运行和修改它们。
 
@@ -38,6 +38,7 @@
 | system prompt 分节（有序节注册 + 渲染进每次请求） | `core/system-prompt` |
 | boot 与组合（YAML/JSON 补丁、`!!js` 环境变量插值、启动断言） | `packages/boot` |
 | headless 一次性任务入口（`--profile headless "task"`：stdout 最终文本、退出码按 turn/end reason） | `packages/bundle/headless` + `apps/cli` |
+| web 传输层（`--profile web`：四象限 RPC 信封、WebApi unary 会话服务、mux/host SSE 事件流（splice 重投影 queue 快照）、FastAPI 载体对齐 `handler.ts` 状态码链；浏览器前端未复现） | `packages/host/apiproxy` + `host/webserver` |
 | 启动器选项（`--patch`、`--dump-config` / `--dump-default-config`、只读组合导出） | `apps/cli/src/args.ts` |
 | 会话管理服务（`ctx.sessions`：create/prepare/enter/announce 生命周期、fork 五错误码、flush 检查点、`session/created|disposed|event|flush` 四事件） | `packages/core/session`（SessionStore） |
 | 会话管理 CLI（`miniharness sessions` 列表/恢复/删除；mini 教学扩展） | web 表面（上游） |
@@ -49,13 +50,13 @@
 | 异步事件总线、真并行工具 + 屏障 | `core/agent-loop` |
 | CI（GitHub Actions、Python 3.10~3.13、integration 标签真实 API 测试） | — |
 
-规划中：web 表面降级后置。
+规划中：浏览器前端（`packages/client`）降级后置；web 传输层已实现。
 
-状态：**834 个单元测试全绿**（stdlib 优先；`httpx` 承载 DeepSeek SSE 传输，可选 `pyyaml` 用于 YAML 配置）。
+状态：**945 个单元测试全绿**（stdlib 优先；`httpx` 承载 DeepSeek SSE 传输，可选 `pyyaml` 用于 YAML 配置，可选 `[web]` extra 承载 HTTP/SSE 传输层）。
 
 ## 快速开始
 
-要求：Python 3.10+，stdlib 优先（`httpx` 承载 DeepSeek SSE 传输，可选 `pyyaml` 用于 YAML 配置）。
+要求：Python 3.10+，stdlib 优先（`httpx` 承载 DeepSeek SSE 传输，可选 `pyyaml` 用于 YAML 配置；web 传输层需 `pip install ".[web]"`）。
 
 ```sh
 # 跑全部测试
@@ -71,6 +72,9 @@ python examples/chat_demo.py
 python examples/plan_goal_demo.py --approve
 # 一次性任务（对齐 `dsh --profile headless "task"`，需 DEEPSEEK_API_KEY）
 python -m miniharness.cli --profile headless "run the tests"
+
+# 启动 web 传输层服务器（需：pip install ".[web]"）
+python -m miniharness.cli --profile web
 
 # 只读组合导出（对齐 `dsh --dump-config`）
 python -m miniharness.cli --dump-config
@@ -128,6 +132,7 @@ mini-deepseek-harness-python/
 │   │   └── session_cmds.py  # 会话 list / resume / delete
 │   ├── protocol/            # acp / sdk / hooks 桥
 │   ├── seams/               # 沙箱 / 凭据 / 子 agent 扩展口
+│   ├── web/                 # apiproxy 子集：envelope / api / streams / server / launcher
 │   ├── preset/  extensions/  interaction/  client/
 │   ├── demo.py              # 端到端演示
 │   └── example_plugins.py   # boot 演示插件
