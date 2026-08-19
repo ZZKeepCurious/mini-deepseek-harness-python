@@ -131,6 +131,10 @@ class ImportDirectionTest(unittest.TestCase):
                     # §5 显式例外：seams.subagent 是 ACP/SDK 线协议的服务端载体，
                     # 复用 protocol 层的帧/信封实现（见 docs/architecture.md §3 规则 1）
                     continue
+                if src_unit == "cli" and dst_unit == "web":
+                    # §5 显式例外（单方向）：launcher 组装 web profile——cli 把
+                    # ctx/adapter/tools 交给 web 层运行时；web 层不得反向 import cli
+                    continue
                 if dst_layer >= src_layer:
                     violations.append(
                         f"{module_name}: L{src_layer} 导入 {dst}（L{dst_layer}，违反 §5 规则 1）"

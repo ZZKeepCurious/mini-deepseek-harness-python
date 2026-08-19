@@ -13,6 +13,7 @@ import json
 import os
 import threading
 import unittest
+from unittest.mock import patch as mock_patch
 
 import httpx
 
@@ -215,6 +216,68 @@ class TestSse(WebServerTest):
     def test_sse_post_method_404(self):
         response = self._post("events.mux")
         self.assertEqual(response.status_code, 404)
+
+
+class TestLauncher(unittest.TestCase):
+    """web/launcher：监听契约（host 两值 + port 0）与纯装配 build_app。"""
+
+    def test_resolve_bind_defaults(self):
+        from miniharness.web.launcher import _resolve_bind
+
+        with mock_patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MINIHARNESS_WEB_HOST", None)
+            os.environ.pop("MINIHARNESS_WEB_PORT", None)
+            self.assertEqual(_resolve_bind(None, None), ("127.0.0.1", 0))
+
+    def test_resolve_bind_env_and_override(self):
+        from miniharness.web.launcher import _resolve_bind
+
+        with mock_patch.dict(os.environ, {"MINIHARNESS_WEB_HOST": "0.0.0.0",
+                                          "MINIHARNESS_WEB_PORT": "8000"}, clear=False):
+            self.assertEqual(_resolve_bind(None, None), ("0.0.0.0", 8000))
+            # 显式参数优先于 env
+            self.assertEqual(_resolve_bind("127.0.0.1", 9000), ("127.0.0.1", 9000))
+
+    def test_resolve_bind_invalid_host(self):
+        from miniharness.web.launcher import _resolve_bind
+
+        with self.assertRaises(ValueError):
+            _resolve_bind("example.com", None)
+
+    def test_resolve_bind_invalid_port(self):
+        from miniharness.web.launcher import _resolve_bind
+
+        with self.assertRaises(ValueError):
+            _resolve_bind(None, 70000)
+
+    @unittest.skipUnless(HAS_WEB, "需要 fastapi/uvicorn")
+    def test_build_app_serves_api(self):
+        from miniharness.core.scope import Context
+        from miniharness.llm.fake import FakeLlmAdapter
+        from miniharness.web.launcher import build_app
+
+        ctx = Context(name="launcher-test")
+        adapter = FakeLlmAdapter()
+        adapter.model = "fake-model"
+        app = build_app(adapter, None, ctx)
+        self.assertIsNotNone(app)
+        server = _UvicornThread(app)
+        server.start()
+        server.wait_started()
+        client = httpx.Client(base_url=f"http://127.0.0.1:{server.port}", timeout=15)
+        try:
+            response = client.post("/api/host.describe", json={
+                "type": "client-request", "rpcId": "r-x", "method": "host.describe",
+                "payload": {},
+            })
+            self.assertEqual(response.status_code, 200)
+            body = response.json()
+            self.assertTrue(body["result"]["ok"])
+            self.assertEqual(body["rpcId"], "r-x")
+        finally:
+            client.close()
+            server.stop()
+            ctx.dispose()
 
 
 if __name__ == "__main__":

@@ -58,9 +58,29 @@ class TestLauncherFlags(unittest.TestCase):
         self.assertIn("requires a value", err)
 
     def test_unknown_profile_fails(self):
-        out, err, code = _run_cli(["--profile", "web", "task"])
+        out, err, code = _run_cli(["--profile", "bogus", "task"])
         self.assertEqual(code, 1)
         self.assertIn("unknown profile", err)
+
+    def test_web_profile_rejects_task_args(self):
+        out, err, code = _run_cli(["--profile", "web", "task"])
+        self.assertEqual(code, 1)
+        self.assertIn("takes no task", err)
+
+    def test_web_profile_dispatches_to_launcher(self):
+        # --profile web → cli 组装 ctx/adapter/tools 交给 web.launcher.run_web
+        # （拉真服务器会阻塞；mock run_web 只验调度与装配契约）
+        from miniharness.web import launcher as web_launcher
+
+        with mock_patch.object(web_launcher, "run_web") as run_web_mock:
+            out, err, code = _run_cli(["--profile", "web"])
+            self.assertEqual(code, None)
+            self.assertEqual(run_web_mock.call_count, 1)
+            adapter, tools, ctx = run_web_mock.call_args.args
+            self.assertIsNotNone(adapter)
+            self.assertIsNotNone(tools)
+            self.assertIsNotNone(ctx)
+            ctx.dispose()
 
     def test_help(self):
         out, err, code = _run_cli(["--help"])

@@ -2,11 +2,11 @@
 
 上游 launcher 只解析自己拥有的东西——启动哪个 profile、附带哪些 --patch、
 配置 dump——并把之后的所有参数原样交给被启动的应用（apps/cli/src/args.ts:5）。
-mini 只复现 headless 一个 profile（`--profile web` 对应 web 表层未复现，fail loud）；
-无参数时回退到 demo（教学演示入口，非上游语义）。
+mini 复现 headless 与 web 两个 profile（`--profile web` 启动 FastAPI 服务表层，
+对齐 host/webserver 监听契约）；无参数时回退到 demo（教学演示入口，非上游语义）。
 
 launcher 选项（对齐 args.ts，已核实）：
-  --profile <name>            启动 profile（mini 仅 headless）
+  --profile <name>            启动 profile（mini 提供 headless / web）
   --patch <path>              可重复 overlay 补丁（YAML/JSON）
   --dump-config               只读打印最终组合（boot-free）
   --dump-default-config       只打印内置默认组合；与 --patch 互斥
@@ -15,12 +15,15 @@ launcher 选项（对齐 args.ts，已核实）：
 mini 扩展/简化（须标注）：
   - --config 为 mini 教学扩展（上游无此标志）
   - mini 内置默认组合为空（headless 不走插件树，见 headless.py 简化标注）
-  - 组合层与 headless 运行时解耦：带 --config/--patch 跑任务时先 boot 验证，
+  - 组合层与 headless/web 运行时解耦：带 --config/--patch 跑任务时先 boot 验证，
     headless 运行时仍为内置 adapter
+  - web profile 的 host/port 读 MINIHARNESS_WEB_HOST / MINIHARNESS_WEB_PORT
+    （缺省 127.0.0.1 / 0，OS 分配），见 web/launcher.py
   - sessions 子命令为 mini 教学扩展（上游会话管理在 web 表层）
 
 用法：
   miniharness --profile headless "run the tests"        # 一次性任务，对齐上游
+  miniharness --profile web                             # 启动 web 服务（需 fastapi/uvicorn）
   miniharness --dump-config                             # 打印最终组合（只读）
   miniharness --patch patch.yml --profile headless "t"  # 组合验证 + 任务
   miniharness sessions / sessions resume <id> [task] / sessions delete <id>
@@ -35,9 +38,12 @@ from typing import Any
 from ..boot import apply_patch
 from ..boot.composition import load_composition, load_patch_list, render_composition_dump, resolve_js_exprs
 
+KNOWN_PROFILES = ("headless", "web")
+
 USAGE = (
     "Usage:\n"
     '  miniharness --profile headless "task"    answer one task, print the final assistant text, and exit\n'
+    "  miniharness --profile web                start the web service (FastAPI; requires fastapi/uvicorn)\n"
     "  miniharness --dump-config                print the final composed configuration (read-only)\n"
     "  miniharness --dump-default-config        print only the built-in default composition\n"
     "  miniharness --patch <path> --profile headless \"task\"\n"
@@ -158,8 +164,10 @@ def _main(args: list[str]) -> None:
         sys.stdout.write(USAGE)
         return
     if parsed["dump"] is not None:
-        if parsed["profile"] is not None and parsed["profile"] != "headless":
-            sys.stderr.write(f"error: unknown profile {parsed['profile']!r} (mini 仅提供 headless；web 未复现)\n")
+        if parsed["profile"] is not None and parsed["profile"] not in KNOWN_PROFILES:
+            sys.stderr.write(
+                f"error: unknown profile {parsed['profile']!r} (mini 提供 headless 与 web)\n"
+            )
             sys.exit(1)
         if parsed["dump"] == "default" and (parsed["patches"] or parsed["configs"]):
             sys.stderr.write(
@@ -173,8 +181,10 @@ def _main(args: list[str]) -> None:
         return
 
     profile = parsed["profile"]
-    if profile is not None and profile != "headless":
-        sys.stderr.write(f"error: unknown profile {profile!r} (mini 仅提供 headless；web 未复现)\n")
+    if profile is not None and profile not in KNOWN_PROFILES:
+        sys.stderr.write(
+            f"error: unknown profile {profile!r} (mini 提供 headless 与 web)\n"
+        )
         sys.exit(1)
     if profile is None and (parsed["configs"] or parsed["patches"]):
         profile = "headless"
@@ -185,6 +195,14 @@ def _main(args: list[str]) -> None:
         return
 
     _validate_composition(parsed)
+
+    if profile == "web":
+        if parsed["task"]:
+            sys.stderr.write("error: web profile takes no task arguments (starts a server instead)\n")
+            sys.exit(1)
+        _web_main()
+        return
+
     from .headless import headless_main
 
     task = " ".join(parsed["task"])
@@ -194,6 +212,26 @@ def _main(args: list[str]) -> None:
         )
         sys.exit(1)
     headless_main(task)
+
+
+def _web_main() -> None:
+    """web profile 组装：默认 DeepSeek 适配器 + default_tools，交给 web/launcher。
+
+    cli→web 是 launcher 语义的单方向依赖（组装面在 cli，运行面在 web，
+    test_dependencies.py §5 显式例外）。
+    """
+    from ..core.scope import Context
+    from ..llm import DeepSeekAdapter, LlmFailure
+    from ..web.launcher import run_web
+    from .default_tools import default_tools
+
+    ctx = Context(name="web")
+    try:
+        adapter = DeepSeekAdapter()
+    except LlmFailure as e:
+        sys.stderr.write(f"dsh: {e.failure['code']}: {e.failure['message']}\n")
+        sys.exit(1)
+    run_web(adapter, default_tools(ctx), ctx)
 
 
 if __name__ == "__main__":
