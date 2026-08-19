@@ -397,28 +397,36 @@ class AcpServer:
     def _emit_assistant_output(self, loop) -> None:
         """把回合内已提交的 assistant/message 投影为 ACP 更新流（简化载体）。
 
-        对齐上游 sessionUpdate 'agent_message_chunk'：只上线已提交的
-        assistant text/image 块（chunk/reasoning/tools/plan 不上线）；
-        image 块经 readImage 读回 base64 内联（assistantBlockToAcp）。
+        对齐上游 index.ts:222-252：只在 inflight turn 内、逐 block 发
+        `agent_message_chunk`（上游 session/event 监听按 `event.data.turn ===
+        inflight.turn` 过滤；每个 block 一条 update，content 为单块）。
+        chunk/reasoning/tools/plan 不上线；image 块经 readImage 读回 base64
+        内联（assistantBlockToAcp）。mini 仍以 updates 列表承载（无真实事件
+        总线，同步回合结束一次性投影，标注简化）。
         """
         session_id = loop.session.session_id
+        inflight_turn = None
+        for event in reversed(loop.session.events):
+            if event["type"] == "turn/end":
+                inflight_turn = event["data"].get("turn")
+                break
         for event in loop.session.events:
             if event["type"] != "assistant/message":
                 continue
-            blocks = (event["data"].get("message") or {}).get("content", [])
-            content = [
-                b for b in (assistant_block_to_acp(self._attachment, b) for b in blocks)
-                if b is not None
-            ]
-            if not content:
+            if event["data"].get("turn") != inflight_turn:
                 continue
-            self.updates.append({
-                "sessionId": session_id,
-                "update": {
-                    "sessionUpdate": "agent_message_chunk",
-                    "content": content,
-                },
-            })
+            blocks = (event["data"].get("message") or {}).get("content", [])
+            for block in blocks:
+                content = assistant_block_to_acp(self._attachment, block)
+                if content is None:
+                    continue
+                self.updates.append({
+                    "sessionId": session_id,
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": content,
+                    },
+                })
 
     # ---------- cancel ----------
 

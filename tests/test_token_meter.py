@@ -112,7 +112,7 @@ class TokenMeterFoldTest(unittest.TestCase):
         summary = _text_message("user", "压缩后的摘要。")
         self.session.append("user/message", summary, surfaceOp={
             "op": "replace", "start": first["seq"], "end": second["seq"],
-        })
+        }, sourceEventSeqs=[first["seq"], second["seq"]])
         m = self.meter.measure(self.session)
         expected = estimate_message(summary)
         self.assertEqual(m["surfaceTokens"], expected)
@@ -171,13 +171,13 @@ class TokenMeterFoldTest(unittest.TestCase):
         _append_text(self.session, "输入")
         self.session.append("step/start", {"turn": 1, "step": 1})
         assistant = create_message("assistant", [text_block("输出")], {"kind": "model"})
-        # usage 存在时才会走 provider 重装路径（锚定决策的替代面）
-        self.session.append("assistant/message", {
-            "turn": 1, "step": 1, "message": assistant,
-            "usage": {"inputTokens": 10, "outputTokens": 5},
-        }, surfaceOp="append", sourceEventSeqs=[999])  # 引用不存在的未来 seq
+        # 引用未来 seq 的 sourceEventSeqs 在 append 层即被拒绝（上游 assertProvenance
+        # 要求全部早于事件 seq，fail-closed 在日志边界，meter 无需再校验）
         with self.assertRaises(ValueError):
-            self.meter.measure(self.session)
+            self.session.append("assistant/message", {
+                "turn": 1, "step": 1, "message": assistant,
+                "usage": {"inputTokens": 10, "outputTokens": 5},
+            }, surfaceOp="append", sourceEventSeqs=[999])
 
 
 class TokenMeterReplayTest(unittest.TestCase):

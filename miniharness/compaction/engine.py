@@ -54,6 +54,11 @@ class CompactionEngine:
                 except TargetPressureConfigError as error:
                     if error.target_key not in self._warned_pressure_targets:
                         self._warned_pressure_targets.add(error.target_key)
+                        # 上游 index.ts:156-161：TargetPressureConfigError 首次也 warn，
+                        # 之后同一 target 静默（warnedPressureConfigTargets 去重）
+                        ctx.logger.warn(
+                            f"step compaction failed: {error}; continuing the turn"
+                        ) if hasattr(ctx, "logger") else None
                 except Exception as error:  # noqa: BLE001 - 压缩失败不中断回合（上游同语义）
                     ctx.logger.warn(f"step compaction failed: {error}; continuing the turn") \
                         if hasattr(ctx, "logger") else None
@@ -131,11 +136,16 @@ class CompactionEngine:
             if range_ is None:
                 return None
             return await self._compact_region(agent, range_["start"], range_["end"])
-        # 压力检查：如果未配置 context_window，则跳过（兼容未配置的适配器）
+        # 压力检查：缺 contextWindow 视为配置失败（上游 index.ts:296-302 抛
+        # TargetPressureConfigError，pre-step 捕获后 warn 一次并继续回合）
         context_window = getattr(agent.adapter, "context_window", None)
         if context_window is None:
-            # 未配置上下文上限时，压力检查直接返回 None（不触发 compaction）
-            return None
+            target_key = f"{target['provider']}/{target['model']}"
+            raise TargetPressureConfigError(
+                target_key,
+                f"compaction-basic: no context capacity for {target_key}; "
+                "configure contextWindow on that adapter model",
+            )
         spec = resolve_spec({**self.config, "target": f"{target['provider']}/{target['model']}"},
                             context_window)
         if measurement["totalTokens"] < spec["thresholdTokens"]:

@@ -297,10 +297,10 @@ class TestAcpRichMedia(unittest.TestCase):
         self.server.prompt(session_id, [{"type": "text", "text": "hi"}])
         update = self.server.updates[-1]
         self.assertEqual(update["update"]["sessionUpdate"], "agent_message_chunk")
-        image_content = next(
-            b for b in update["update"]["content"] if b.get("type") == "image")
-        self.assertEqual(image_content["mimeType"], "image/png")
-        self.assertEqual(base64.b64decode(image_content["data"]), _ONE_PNG)
+        # 逐 block 一条 update（content 为单块，对齐上游 index.ts:230-237）
+        self.assertEqual(update["update"]["content"]["type"], "image")
+        self.assertEqual(update["update"]["content"]["mimeType"], "image/png")
+        self.assertEqual(base64.b64decode(update["update"]["content"]["data"]), _ONE_PNG)
 
 
 class TestDeepSeekSerializeImageRejection(unittest.TestCase):

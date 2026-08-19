@@ -31,16 +31,11 @@ class ParseCommandTest(unittest.TestCase):
     def test_slash_then_blank(self):
         self.assertEqual(parse_command("/ "), None)
 
-    def test_name_lowercased(self):
-        self.assertEqual(parse_command("/Plan off"), ("plan", " off"))
-
-    def test_args_verbatim(self):
-        self.assertEqual(parse_command("/plan  hello   "), ("plan", "  hello   "))
-
-    def test_name_with_dash(self):
-        self.assertEqual(parse_command("/my-cmd x"), ("my-cmd", " x"))
-
-    def test_name_must_start_alnum(self):
+    def test_name_must_start_lowercase(self):
+        # 对齐上游 parseCommand：首字符必须小写字母（不做大小写转换）
+        self.assertEqual(parse_command("/Plan off"), None)
+        self.assertEqual(parse_command("/1x y"), None)
+        self.assertEqual(parse_command("/_x y"), None)
         self.assertEqual(parse_command("/-x"), None)
 
 
@@ -114,11 +109,12 @@ class CommandRegistryTest(unittest.TestCase):
         disposer()
         self.assertNotIn("x", registry.names())
 
-    def test_string_result_normalized(self):
+    def test_string_result_fails_loud(self):
+        # 对齐上游 normalizeResult：非 CommandResult 返回 fail loud（注册表边界）
         _, registry = self._make()
         registry.register("s", "s", lambda a, r: "ok")
-        result = registry.dispatch(_agent(), "/s")
-        self.assertEqual(result, {"kind": "success", "text": "ok"})
+        with self.assertRaises(TypeError):
+            registry.dispatch(_agent(), "/s")
 
     def test_route_command_without_service(self):
         ctx = Context(name="bare")
@@ -128,6 +124,77 @@ class CommandRegistryTest(unittest.TestCase):
         ctx, registry = self._make()
         registry.register("plan", "plan", lambda a, r: {"kind": "success", "text": "ok"})
         self.assertEqual(route_command("/plan off", _agent(), ctx), "ok")
+
+    def test_command_id_format_monotonic(self):
+        _, registry = self._make()
+        registry.register("a", "a", lambda a, r: {"kind": "success"})
+        agent = _agent()
+        registry.dispatch(agent, "/a")
+        registry.dispatch(agent, "/a")
+        ids = [e["data"]["commandId"] for e in agent.session.events
+               if e["type"] == "command/run"]
+        # 上游 mintCommandId：cmd-<8位实例前缀>-<单调序号>
+        self.assertEqual(len(ids), 2)
+        self.assertEqual(ids[0], f"cmd-{ids[0][4:12]}-1")
+        self.assertEqual(ids[1], f"cmd-{ids[1][4:12]}-2")
+        self.assertEqual(ids[0][4:12], ids[1][4:12])
+        self.assertRegex(ids[0], r"^cmd-[0-9a-f]{8}-\d+$")
+        # 同一 instance 前缀跨多次 dispatch 单调不重复
+        self.assertNotEqual(ids[0], ids[1])
+
+    def test_register_name_validation(self):
+        _, registry = self._make()
+        for bad in ("Plan", "1abc", "_x", "-x", "a b"):
+            with self.assertRaises(TypeError):
+                registry.register(bad, "d", lambda a, r: None)
+        registry.register("ok_name-1", "d", lambda a, r: None)
+
+    def test_register_description_validation(self):
+        _, registry = self._make()
+        with self.assertRaises(TypeError):
+            registry.register("x", "", lambda a, r: None)
+        with self.assertRaises(TypeError):
+            registry.register("x", "   ", lambda a, r: None)
+        with self.assertRaises(TypeError):
+            registry.register("x", "ok", None)
+
+    def test_record_input_false_omits_args(self):
+        _, registry = self._make()
+        registry.register("quiet", "q", lambda a, r: {"kind": "success"}, record_input=False)
+        agent = _agent()
+        registry.dispatch(agent, "/quiet secret")
+        run = [e for e in agent.session.events if e["type"] == "command/run"][0]
+        self.assertNotIn("args", run["data"])
+
+    def test_success_source_event_seq_recorded(self):
+        _, registry = self._make()
+        registry.register("src", "s", lambda a, r: {"kind": "success", "text": "ok",
+                                                    "sourceEventSeq": 7})
+        agent = _agent()
+        registry.dispatch(agent, "/src")
+        done = [e for e in agent.session.events if e["type"] == "command/done"][0]
+        self.assertEqual(done["data"]["sourceEventSeq"], 7)
+
+    def test_commands_change_notification(self):
+        ctx, registry = self._make()
+        events = []
+        ctx.on("commands/change", lambda payload: events.append(True))
+        disposer = registry.register("c", "c", lambda a, r: {"kind": "success"})
+        self.assertEqual(len(events), 1)
+        disposer()
+        self.assertEqual(len(events), 2)
+
+    def test_bad_result_kind_fails_loud(self):
+        _, registry = self._make()
+        registry.register("badk", "b", lambda a, r: {"kind": "nope"})
+        with self.assertRaises(TypeError):
+            registry.dispatch(_agent(), "/badk")
+
+    def test_error_result_requires_text(self):
+        _, registry = self._make()
+        registry.register("bade", "b", lambda a, r: {"kind": "error"})
+        with self.assertRaises(TypeError):
+            registry.dispatch(_agent(), "/bade")
 
 
 if __name__ == "__main__":

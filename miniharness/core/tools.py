@@ -362,9 +362,11 @@ def run_pipeline(ctx: Context, tool: Tool, args: dict, exec_: ToolExec | None = 
     raw, error = pipeline_body(ctx, tool, frozen_args, exec_)
 
     # 7. 外层规范化：异常 / 非法值 → isError
+    # 对齐上游 toolErrorResult（core/tools/src/index.ts:1870-1878）：
+    # 错误文本统一 `Error: ${message}`，不带 Python 类型名前缀
     if error is not None:
         e = error
-        return ToolResult(ok=False, is_error=True, error=f"{type(e).__name__}: {e}")
+        return ToolResult(ok=False, is_error=True, error=f"Error: {e}")
     if isinstance(raw, ToolResult):
         return raw
     if isinstance(raw, dict) and raw.get("isError"):
@@ -423,7 +425,7 @@ async def pipeline_async_body(
 
     if error is not None:
         e = error
-        return ToolResult(ok=False, is_error=True, error=f"{type(e).__name__}: {e}")
+        return ToolResult(ok=False, is_error=True, error=f"Error: {e}")
     if isinstance(raw, ToolResult):
         return raw
     if isinstance(raw, dict) and raw.get("isError"):

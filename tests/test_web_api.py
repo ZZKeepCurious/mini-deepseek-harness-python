@@ -355,7 +355,7 @@ class TestSessionHistory(WebApiTest):
         self._append("session-h", "assistant/message", message={"id": "m2"})
         self._append("session-h", "assistant/message", message={"id": "m2r"},
                      surface_op={"op": "replace", "start": 0, "end": 1},
-                     source_event_seqs=[1])
+                     source_event_seqs=[0, 1])
         value = self._value(self.api.dispatch("session.history", "rid", {
             "sessionId": "session-h", "maxMessages": 1}))
         # 替换副本不计消息配额，与其源消息同页

@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 from .invariant import validate_event
 from .json import deep_freeze, is_json_safe, now_ms, thaw
-from .surface import _surface_nodes
+from .surface import _surface_nodes, assert_provenance, assert_tool_result_rewrite
 from .types import KNOWN_TYPES, SURFACE_TYPES
 
 __all__ = ["Session"]
@@ -73,8 +73,25 @@ class Session:
         与上游 append(type, data, surfaceOp) 签名一致；surface 事件必须带
         surfaceOp（'append' 或 {op:'replace', start, end}），非 surface 事件
         禁止携带；sourceEventSeqs 仅 surface 事件可带（上游 SurfaceIntent）。
+
+        事件 seq 即 append 前的日志长度；replace 的 sourceEventSeqs 必须覆盖
+        当前 surface 上被遮蔽的全部节点（上游 surface.ts assertProvenance +
+        assertToolResultRewrite，fail-closed——不满足即拒绝 append）。
         """
         payload = validate_event(type_, data, surfaceOp, sourceEventSeqs)
+        if surfaceOp is not None and surfaceOp != "append":
+            # replace 必须命中当前 surface 上已存在的 start/end 区间
+            start, end = surfaceOp["start"], surfaceOp["end"]
+            surface = _surface_nodes(self._events)
+            shadowed = [node["seq"] for node in surface if start <= node["seq"] <= end]
+            if surfaceOp["op"] == "replace" and not shadowed:
+                raise ValueError(f"surface replace: seqs {start}-{end} not found in surface")
+            assert_provenance(type_, sourceEventSeqs, self.seq, shadowed)
+            event_probe = {"type": type_, "data": data or {}}
+            assert_tool_result_rewrite(event_probe, shadowed, list(self._events))
+        else:
+            # append 事件同样校验血统：sourceEventSeqs 必须早于当前 seq
+            assert_provenance(type_, sourceEventSeqs, self.seq, [])
         record = deep_freeze({"seq": self.seq, "time": now_ms(), **payload})
         self._events.append(record)
         if surfaceOp is not None and surfaceOp != "append":
@@ -88,6 +105,8 @@ class Session:
 
         与上游 restore 模式一致：冻结但不二次克隆；seed 末事件不是
         session/end-seed 时自动补记该标记（本进程首个 append 之前的边界）。
+        每个 seed 事件走与 append 相同的 surface 契约校验（surfaceOp /
+        sourceEventSeqs 血统 / tool-result 重写规则，fail-closed）。
         """
         for i, ev in enumerate(seed):
             if not isinstance(ev, (dict, MappingProxyType)) or ev.get("seq") != i:
@@ -96,12 +115,28 @@ class Session:
             if etype not in KNOWN_TYPES:
                 raise ValueError(f"未知事件类型: {etype!r}")
             data = ev.get("data", {})
+            surface_op = ev.get("surfaceOp")
+            source_seqs = ev.get("sourceEventSeqs")
             if etype in SURFACE_TYPES:
-                op = ev.get("surfaceOp")
-                if op not in ("append",) and not (isinstance(op, dict) and op.get("op") == "replace"):
+                if surface_op not in ("append",) and not (
+                    isinstance(surface_op, (dict, MappingProxyType))
+                    and surface_op.get("op") == "replace"
+                ):
                     raise ValueError(f"surface 事件 {etype} 必须带合法 surfaceOp")
-                if op != "append":
+                if surface_op != "append":
                     self._replace_count += 1
+                    start, end = surface_op["start"], surface_op["end"]
+                    surface = _surface_nodes(list(self._events))
+                    shadowed = [node["seq"] for node in surface if start <= node["seq"] <= end]
+                    if not shadowed:
+                        raise ValueError(f"surface replace: seqs {start}-{end} not found in surface")
+                    assert_provenance(etype, source_seqs, i, shadowed)
+                    assert_tool_result_rewrite(dict(ev), shadowed, list(self._events))
+                else:
+                    assert_provenance(etype, source_seqs, i, [])
+            else:
+                if surface_op is not None or source_seqs is not None:
+                    raise ValueError(f"非 surface 事件 {etype} 不允许携带 surfaceOp/sourceEventSeqs")
             if not is_json_safe(thaw(ev)):
                 raise TypeError(f"seed 事件必须可无损 JSON 序列化: {ev!r}")
             self._events.append(deep_freeze(ev))

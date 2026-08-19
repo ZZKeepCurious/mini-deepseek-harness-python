@@ -7,7 +7,7 @@ catalog 注入 listener + 目录渲染/digest）。
   * `skill` 工具：三态错误 `invalid skill name "<name>"` / `skill "<name>"
     is unknown or no longer available` / `skill "<name>" is not available
     for model invocation`；成功返回 {name, provider, resourceBase?, content}；
-    lookup 用调用方 agent（mini 传 agent.ctx 作 scope + agent.cwd）
+    lookup 用调用方 agent（mini 传 agent.ctx 作 scope + session.meta 的 cwd）
   * `/name` 手势：只扫 source.kind=='user' 的 text 块；SKILL_GESTURE
     (^|\\s)/kebab(?=\\s|$)；去重保序；未知名/非用户可调用名保持普通散文；
     注入消息 source {kind:'skill-invocation', name, form:'instructions'}
@@ -22,10 +22,8 @@ catalog 注入 listener + 目录渲染/digest）。
 mini 简化（有意保留，须在文档标注）：
   * execute 直接返回渲染文本 render_skill_content(skill)（上游 canonical
     value + output.render 分离未复现，与 jobs 同款简化）
-  * 工具错误经管线捕获后带 Python 类型名前缀 `ValueError: `（上游为
-    `Error: `）；三态错误消息体本身逐字一致
-  * lookup.cwd 取 getattr(agent, 'cwd', None)（mini Session 无 header，
-    AgentLoop 无 cwd 属性，缺省 None → 不扫描项目根）
+  * lookup.cwd 读 session.meta 的 cwd（对齐上游 agent.session.header.cwd，
+    经 `_lookup_for` 从 agent.session.meta 取，无则 None → 不扫描项目根）
   * signal 为 _AbortProxy / threading.Event：仅检查标记不中断执行
 """
 from __future__ import annotations
@@ -169,8 +167,14 @@ def _render_catalog_update(entries: list[dict]) -> dict:
 
 
 def _lookup_for(agent: Any) -> dict:
+    session = getattr(agent, "session", None)
+    cwd = None
+    if session is not None:
+        # 对齐上游 agent.session.header.cwd（core/tools/src/index.ts lookup 用
+        # 会话头部 cwd 决定项目根扫描）；mini Session.meta 承载同义头部子集
+        cwd = session.meta.get("cwd")
     return {
-        "cwd": getattr(agent, "cwd", None),
+        "cwd": cwd if cwd is not None else getattr(agent, "cwd", None),
         "scope": getattr(agent, "ctx", None),
     }
 

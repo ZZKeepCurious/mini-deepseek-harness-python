@@ -11,6 +11,7 @@ from miniharness.core.session import (
     repair_interrupted_turn,
     text_block,
     tool_call_block,
+    tool_result_block,
     turn_balance,
 )
 
@@ -73,7 +74,7 @@ class TestSession(unittest.TestCase):
         }, surfaceOp="append")
         s.append("assistant/message", {
             "message": create_message("assistant", [text_block("压缩后的摘要")]),
-        }, surfaceOp={"op": "replace", "start": 1, "end": 1})
+        }, surfaceOp={"op": "replace", "start": 1, "end": 1}, sourceEventSeqs=[1])
         msgs = derive_messages(s.events)
         self.assertEqual(len(msgs), 2)
         self.assertEqual(dict(msgs[-1]["content"][0]), {"type": "text", "text": "压缩后的摘要"})
@@ -187,6 +188,168 @@ class TestSession(unittest.TestCase):
         self.assertEqual(plain, {"type": "session/queue", "items": [
             {"message": {"content": [{"type": "text", "text": "hi"}], "source": {"kind": "user"}}}]})
         json.dumps(plain, ensure_ascii=False)
+
+
+class TestSurfaceValidation(unittest.TestCase):
+    """T1-1：surface 校验深度（上游 surface.ts surfaceOpOf / assertProvenance /
+    assertToolResultRewrite）。"""
+
+    def _session(self):
+        s = Session("sv")
+        s.append("user/message", create_message("user", [text_block("hi")]), surfaceOp="append")
+        return s
+
+    def test_replace_without_source_event_seqs_rejected(self):
+        s = self._session()
+        with self.assertRaises(ValueError):
+            s.append("assistant/message", {
+                "message": create_message("assistant", [text_block("sum")]),
+            }, surfaceOp={"op": "replace", "start": 0, "end": 0})
+
+    def test_replace_missing_shadowed_seq_rejected(self):
+        s = self._session()
+        s.append("assistant/message", {
+            "message": create_message("assistant", [text_block("a")]),
+        }, surfaceOp="append")
+        # sourceEventSeqs 未覆盖被遮蔽的 seq 0
+        with self.assertRaises(ValueError):
+            s.append("assistant/message", {
+                "message": create_message("assistant", [text_block("sum")]),
+            }, surfaceOp={"op": "replace", "start": 0, "end": 1}, sourceEventSeqs=[1])
+
+    def test_replace_source_event_seqs_earlier_required(self):
+        s = self._session()
+        with self.assertRaises(ValueError):
+            s.append("assistant/message", {
+                "message": create_message("assistant", [text_block("sum")]),
+            }, surfaceOp={"op": "replace", "start": 0, "end": 0},
+                sourceEventSeqs=[0, 3])  # seq 3 >= 当前 seq 2
+
+    def test_replace_source_event_seqs_duplicate_rejected(self):
+        s = self._session()
+        with self.assertRaises(ValueError):
+            s.append("assistant/message", {
+                "message": create_message("assistant", [text_block("sum")]),
+            }, surfaceOp={"op": "replace", "start": 0, "end": 0},
+                sourceEventSeqs=[0, 0])
+
+    def test_replace_op_must_be_exact_three_keys(self):
+        s = self._session()
+        with self.assertRaises(ValueError):
+            s.append("assistant/message", {
+                "message": create_message("assistant", [text_block("sum")]),
+            }, surfaceOp={"op": "replace", "start": 0, "end": 0, "extra": 1},
+                sourceEventSeqs=[0])
+
+    def test_replace_op_negative_seq_rejected(self):
+        s = self._session()
+        with self.assertRaises(ValueError):
+            s.append("assistant/message", {
+                "message": create_message("assistant", [text_block("sum")]),
+            }, surfaceOp={"op": "replace", "start": -1, "end": 0},
+                sourceEventSeqs=[0])
+
+    def test_nonsurface_with_source_event_seqs_rejected(self):
+        s = self._session()
+        with self.assertRaises(ValueError):
+            s.append("turn/start", {"turn": 1}, sourceEventSeqs=[0])
+
+    def test_append_source_event_seqs_empty_rejected(self):
+        s = self._session()
+        with self.assertRaises(ValueError):
+            s.append("tool/result", {
+                "turn": 1, "step": 1,
+                "message": create_message("user", [tool_result_block("c", [text_block("x")])]),
+            }, surfaceOp="append", sourceEventSeqs=[])
+
+    def test_append_source_event_seqs_must_be_earlier(self):
+        s = self._session()
+        with self.assertRaises(ValueError):
+            s.append("tool/result", {
+                "turn": 1, "step": 1,
+                "message": create_message("user", [tool_result_block("c", [text_block("x")])]),
+            }, surfaceOp="append", sourceEventSeqs=[2])  # 当前 seq == 1
+
+    def test_valid_append_source_event_seqs_accepted(self):
+        s = self._session()
+        msg = create_message("user", [tool_result_block("c", [text_block("x")])])
+        ev = s.append("tool/result", {"turn": 1, "step": 1, "message": msg},
+                      surfaceOp="append", sourceEventSeqs=[0])
+        self.assertEqual(ev["sourceEventSeqs"], (0,))
+
+    def test_tool_result_replace_must_target_tool_result(self):
+        s = self._session()
+        s.append("assistant/message", {
+            "message": create_message("assistant", [text_block("a")]),
+        }, surfaceOp="append")
+        # 被遮蔽节点 seq 0 是 user/message，不是 tool/result
+        with self.assertRaises(ValueError):
+            s.append("tool/result", {
+                "turn": 1, "step": 1,
+                "message": create_message("user", [tool_result_block("c", [text_block("x")])]),
+            }, surfaceOp={"op": "replace", "start": 0, "end": 0}, sourceEventSeqs=[0])
+
+    def test_tool_result_replace_multi_node_rejected(self):
+        s = Session("sv2")
+        msg = create_message("user", [tool_result_block("c1", [text_block("x")])])
+        s.append("user/message", create_message("user", [text_block("hi")]), surfaceOp="append")
+        s.append("tool/result", {"turn": 1, "step": 1, "message": msg}, surfaceOp="append")
+        s.append("assistant/message", {
+            "message": create_message("assistant", [text_block("a")]),
+        }, surfaceOp="append")
+        # 遮蔽 2 个节点 → 违反"恰好一个"
+        with self.assertRaises(ValueError):
+            s.append("tool/result", {
+                "turn": 1, "step": 1,
+                "message": create_message("user", [tool_result_block("c2", [text_block("y")])]),
+            }, surfaceOp={"op": "replace", "start": 1, "end": 2}, sourceEventSeqs=[1, 2])
+
+    def test_tool_result_replace_only_content_change_allowed(self):
+        s = Session("sv3")
+        orig = create_message("user", [tool_result_block("c1", [text_block("a.txt")])])
+        s.append("user/message", create_message("user", [text_block("hi")]), surfaceOp="append")
+        s.append("tool/result", {"turn": 1, "step": 1, "message": orig},
+                 surfaceOp="append")
+        # 只改 content（复用同一消息 id，其余字段不变）→ 合法
+        revised = create_message("user", [tool_result_block("c1", [text_block("b.txt")])])
+        revised["id"] = orig["id"]
+        s.append("tool/result", {"turn": 1, "step": 1, "message": revised},
+                 surfaceOp={"op": "replace", "start": 1, "end": 1},
+                 sourceEventSeqs=[1])
+        self.assertEqual(s.replace_generation, 1)
+        # 改 toolCallId → 非法
+        tampered = create_message("user", [tool_result_block("c9", [text_block("c.txt")])])
+        tampered["id"] = orig["id"]
+        with self.assertRaises(ValueError):
+            s.append("tool/result", {"turn": 1, "step": 1, "message": tampered},
+                     surfaceOp={"op": "replace", "start": 1, "end": 1},
+                     sourceEventSeqs=[1])
+
+    def test_seed_rejects_bad_provenance(self):
+        # seed 里的 replace 也必须覆盖被遮蔽节点（fail-closed 加载）
+        seed = [
+            {"type": "user/message", "seq": 0, "time": 1,
+             "data": create_message("user", [text_block("hi")]),
+             "surfaceOp": "append"},
+            {"type": "assistant/message", "seq": 1, "time": 1,
+             "data": {"message": create_message("assistant", [text_block("sum")])},
+             "surfaceOp": {"op": "replace", "start": 0, "end": 0}},
+        ]
+        with self.assertRaises(ValueError):
+            Session("sv4", seed=seed)
+
+    def test_seed_accepts_valid_provenance(self):
+        seed = [
+            {"type": "user/message", "seq": 0, "time": 1,
+             "data": create_message("user", [text_block("hi")]),
+             "surfaceOp": "append"},
+            {"type": "assistant/message", "seq": 1, "time": 1,
+             "data": {"message": create_message("assistant", [text_block("sum")])},
+             "surfaceOp": {"op": "replace", "start": 0, "end": 0},
+             "sourceEventSeqs": [0]},
+        ]
+        s = Session("sv4", seed=seed)
+        self.assertEqual(s.replace_generation, 1)
 
 
 if __name__ == "__main__":

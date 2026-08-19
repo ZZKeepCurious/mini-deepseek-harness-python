@@ -316,10 +316,11 @@ class EnginePressureTest(unittest.TestCase):
         self.assertIn("压缩摘要内容。",
                       "".join(b.get("text", "") for b in msgs[0]["content"]))
 
-    def test_no_context_window_skips(self):
+    def test_no_context_window_raises_config_error(self):
         self.adapter.context_window = None
         _seed_history(self.session, n=20)
-        self.assertIsNone(asyncio.run(self.engine.compact_if_needed(self.agent, "pressure")))
+        with self.assertRaises(TargetPressureConfigError):
+            asyncio.run(self.engine.compact_if_needed(self.agent, "pressure"))
 
     def test_unknown_trigger(self):
         with self.assertRaises(ValueError):
