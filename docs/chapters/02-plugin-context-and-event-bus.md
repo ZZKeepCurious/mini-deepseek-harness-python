@@ -52,13 +52,19 @@ flowchart LR
 
 ```python
 class Context:
-    def __init__(self, parent=None, name="root"):
+    def __init__(self, parent=None, name="root", *, _fiber=None):
         self.parent = parent                 # 作用域链：子找父
         self.name = name
         self._services = {}                  # 服务仓库
         self._listeners = {}                 # 事件 → 监听器列表
-        self._disposers = []                 # 可逆副作用栈（逆序回滚）
-        self._disposed = False
+        self._scope_key = None               # create_scope 打标的身份键
+        # fiber 承载副作用栈（2.2 的 effect/dispose 都在它上面）
+        if _fiber is not None:
+            self.fiber = _fiber
+        elif parent is None:
+            self.fiber = Fiber(0, self, name, is_root=True)
+        else:
+            self.fiber = parent.fiber
 
     def provide(self, key, value):
         """提供服务，返回 disposer。同 key 重复提供 = 冲突（fail loud）。"""
@@ -66,7 +72,10 @@ class Context:
         if key in self._services:
             raise RuntimeError(f"服务 {key} 已在 {self.name} 提供")
         self._services[key] = value
-        return self.effect(lambda: self._services.pop(key, None))
+        return self.effect(
+            lambda: (lambda: self._services.pop(key, None)),
+            f"ctx.provide({key})",
+        )
 
     def inject(self, key):
         """按 key 查找：沿父子链向上（作用域可见性）。"""
@@ -83,27 +92,55 @@ class Context:
 
 注意 `provide` 对重复提供直接抛错（fail loud）。常规的做法是"后注册的覆盖先注册的"，看起来方便，实际会让"谁覆盖了谁"变成谜。dsh 选择大声失败，冲突必须在启动时解决。
 
-### 步骤 2：可逆副作用 —— `effect` 与 `dispose`
+### 步骤 2：可逆副作用 —— `effect` 与 `dispose`（fiber 承载）
 
 ```python
-def effect(self, fn):
-    """登记一个可逆副作用；dispose 时按注册逆序回滚。"""
+# 上游语义：execute 立即执行，返回值按形态收集为 disposer
+def effect(self, execute, label="anonymous"):
     self._assert_alive()
-    self._disposers.append(fn)
-    return fn
-
-def dispose(self):
-    if self._disposed:
-        return
-    for fn in reversed(self._disposers):
-        fn()
-    self._disposers.clear()
-    self._disposed = True
+    return self.fiber.effect(execute, label)
 ```
 
-`provide`、`on` 返回的 disposer 都经 `effect` 登记。于是卸载插件 = 逆序回滚它装的一切：先撤销最后注册的，再撤销先前的。为什么必须逆序？因为后注册的副作用可能依赖先注册的存在，正序回滚会先拆掉地基。
+这里有个值得停下来看的约定：`effect` 的第一个参数是**执行体**（execute）而不是 disposer。注册的瞬间执行体就被调用，它的返回值决定收集什么：
 
-销毁后的 ctx 拒绝一切注册（`_disposed` 检查）——"销毁后拒绝注册"是一条被测试钉死的硬性规定。
+- 返回 `None` → 无 disposer（什么都不用清理）
+- 返回可调用对象 → 该对象就是 disposer，拆解时逆序调用
+- 返回 awaitable / 同步生成器 / 异步生成器 → 异步 setup，拆解时先等它完成再清理（setup barrier）
+- 返回其它 → `TypeError: Invalid effect`（fail loud）
+
+所以 `provide`、`on` 的写法是"外面包一层 lambda，里面返回真正的清理函数"：
+
+```python
+def provide(self, key, value):
+    self._services[key] = value
+    return self.effect(
+        lambda: (lambda: self._services.pop(key, None)),
+        f"ctx.provide({key})",
+    )
+```
+
+为什么 execute 立即执行？因为 setup 本身可能注册更多东西（嵌套 effect、监听器），它们必须在这一步就可见——拆解发生在很久以后，只有把"装了什么"完整记下，卸载时才能原样拆出来。而且**注册先于执行**：wrapper 先进入 fiber 的登记表，再跑执行体，所以执行体中途触发拆解时，拆解器能看到这个"尚未完成 setup"的 effect，先挂一个 setup barrier 等它 setup 结束再清理（对齐上游 `disposeAfter(waitForSetup())` 的重入保护，见测试 `test_registration_before_execute_reentrant_unload`）。
+
+`effect` 返回的 disposer 有两个性质：
+
+1. **单发**：调用一次即进入结算，二次调用 no-op，且返回同一个完成对象；
+2. **可 await**：`await disposer()` 会触发（若未触发）并等待结算结束——异步拆解完整落在调用方视线内。
+
+整个机制由一个 **fiber** 承载（上游 `vendor/cordis/src/fiber.ts`）。每个上下文对应一根 fiber，`fiber._disposables` 是它名下的 effect 列表，`fiber.dispose()` 逆序回滚全部：
+
+```python
+class FiberState:
+    PENDING / LOADING / ACTIVE / FAILED / UNLOADING / DISPOSED
+```
+
+- `create_scope` 铸新 fiber：`pending → loading → active`；
+- `fiber.dispose()`：`active → unloading → disposed`；
+- 每次状态转换派发 `internal/status`（payload `{"fiber", "old"}`）；
+- 处于 `unloading`/`disposed` 的 fiber 拒绝一切注册（`INACTIVE_EFFECT`）——"销毁后拒绝注册"是被测试钉死的硬性规定。
+
+`fiber.dispose()` 幂等：重复调用 join 在途的拆解（`inertia` = 在途转换，竞态共享同一完成）。拆解时全部同步 disposer 立即逆序执行（既有同步调用方零破坏）；含异步 disposer 则返回完成对象，需要时 `await`。异步拆解产生的错误被 contained——记入 fiber 的错误表并记日志，既不静默吞掉也不炸掉拆解本身。
+
+注意这个约定与早期 mini 版本相反（旧版 `effect(fn)` 把 `fn` 当 disposer、注册时不调用）。调用点已全部迁移到上游语义；迁移记录见 `status/mini-harness/migration-log.md`。
 
 ### 步骤 3：事件监听 + 四种派发
 
@@ -175,10 +212,21 @@ assert ctx.waterfall("w", {}) == "DENY"     # 第一位的 DENY 就是决策
 
 ```python
 def create_scope(self, name):
-    return Context(parent=self, name=name)
+    """fiber-backed 作用域子上下文：独立身份键 + 独立 fiber。"""
+    fiber = Fiber(next_uid, name=name)          # pending
+    child = Context(parent=self, name=name, _fiber=fiber)
+    child._scope_key = object()                 # 身份键
+    fiber.context = child
+    fiber._set_state(LOADING)                    # loading
+    fiber._set_state(ACTIVE)                     # active
+    self.fiber.effect(
+        lambda: (lambda: fiber.dispose()),       # 父拆解时收回该作用域
+        f"create_scope({name})",
+    )
+    return child
 ```
 
-作用域就是父子链，仅此而已。第 3 章的工具注册表会用它做 per-agent 工具隔离。
+作用域 = 父子链 + 独立 fiber。子 ctx 能看到祖先的服务，兄弟互不可见（第 3 章 per-agent 工具隔离、会话 owner scope 路由都用它）；拆解该作用域逆序回滚它自己名下的注册，父拆解时经注册的 effect 按序收回全部子作用域。
 
 ### 步骤 5：依赖驱动的插件激活（PluginManager）
 
@@ -196,7 +244,7 @@ class PluginManager:
             progressed = False
             for p in list(remaining):
                 if all(k in provided for k in p.get("inject", [])):
-                    snapshot = len(self.root._disposers)
+                    snapshot = len(self.root.fiber._disposables)
                     p["apply"](self.root)
                     disposer = self._collect_after(snapshot)
                     done.append((p["name"], disposer))
@@ -219,16 +267,20 @@ class PluginManager:
 
 ## 2.4 验收：硬性规定 + 测试
 
-这一章的硬性规定，`tests/test_bus.py` 每个都有对应测试：
+这一章的硬性规定，`tests/test_bus.py` 与 `tests/test_fiber.py` 每个都有对应测试：
 
 1. 服务重复提供 = 冲突（fail loud）；查找沿父子链向上
 2. `waterfall` 短路语义：不调 `next` 的监听器返回值就是最终决策
 3. 监听器按注册序执行；作用域内子先于父
-4. `dispose` 逆序回滚全部副作用；销毁后拒绝注册
-5. 插件激活顺序由依赖驱动；无法满足时明确报错
+4. `effect` 调用约定：execute 立即执行，返回值收集为 disposer；返回 `None` 无 disposer
+5. `dispose` 逆序回滚全部副作用；销毁后拒绝注册（fiber 置 `INACTIVE_EFFECT`）
+6. disposer 单发、可 await；异步拆解逆序 + 并发（fiber 级 `Promise.all` 等价物）
+7. fiber 状态机 `pending/loading/active/unloading/disposed` + `internal/status` 派发
+8. setup barrier：body 执行中途触发拆解不丢 disposer；body 抛错回滚已收集项后重抛
+9. 插件激活顺序由依赖驱动；无法满足时明确报错
 
 ```bash
-python -m unittest tests.test_bus -v
+python -m unittest tests.test_bus tests.test_fiber -v
 ```
 
 ## 2.5 检查点练习
@@ -241,7 +293,8 @@ python -m unittest tests.test_bus -v
 
 打开 `deepseek-harness/vendor/cordis/src`：
 
-- `context.ts`：`provide`/`inject`/`effect`/`dispose` 的完整实现，多了 fiber 生命周期管理（对应我们的 `_disposed` 检查，但更严格）
+- `context.ts`：`provide`/`inject`/`effect`/`dispose` 的完整实现——`effect` 的 execute 形态、注册先于执行、`disposeAfter(waitForSetup())` 重入保护，我们逐条对齐
+- `fiber.ts`：fiber 状态机、`internal/status`、`internal/plugin`、`inertia` 在途转换、`_unload` 的 `Promise.all` 并发拆解——2.2 的 fiber 语义都从这里来（mini 目前对齐 Phase 1：状态机 + effect 全语义 + 重入 barrier + 并发 unload；`ctx.plugin()` 注册表与 epoch 驱动的热重载尚未复现，见 `status/mini-harness/tasks.md`）
 - `events.ts`：四种派发模式的异步版本
 - `vendor/README.md`：18 项本地加固清单——挑 3 项读，体会"框架被 vendored 且可审计"意味着什么：不依赖 npm 供应链，代码就躺在仓库里，任何人都能审计每一行。
 

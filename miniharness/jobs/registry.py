@@ -66,7 +66,7 @@ class LocalJobRegistry:
         self._owner_cleanups: dict[int, Callable] = {}
         # 注册为 ctx.jobs 服务（同 context 二次提供 fail loud）；teardown 清场
         ctx.provide("jobs", self)
-        ctx.effect(self._dispose_all)
+        ctx.effect(lambda: self._dispose_all, "jobs registry teardown")
 
     # ---------- 生命周期与接入 ----------
 
@@ -315,7 +315,7 @@ class LocalJobRegistry:
             self._owner_cleanups.pop(key, None)
             self._dispose_owned(owner)
 
-        owner.ctx.effect(detach)
+        owner.ctx.effect(lambda: detach, f"jobs owner detach {key}")
         self._owner_cleanups[key] = detach
 
     def _dispose_owned(self, owner: Any) -> None:

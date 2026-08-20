@@ -119,7 +119,7 @@ miniharness/
 | `core/session/`（session + types/invariant/json/message/repair/surface，共 7 文件） | `packages/core/session/src/`（types/invariant/json/repair/surface 等 10 文件，index.ts 聚合）+ `packages/llm/llm/src/message.ts` | message 构造保留在会话域（L0 不依赖 llm，简化标注） |
 | `core/session/persistence.py` | `packages/session/session-persistence-{jsonl,sqlite}` | 上游是独立包组，mini 并入会话域（简化标注）；崩溃修复 closers 经 `commit_repair` 落盘（截断 torn 尾 + 追加 closers + fsync，对齐上游 commitRepair） |
 | `core/session_store.py` | `packages/core/session/src/index.ts`（SessionStore 部分） | 内存会话服务：create/prepare/enter/announce 生命周期 + get/list/fork（五错误码）+ flush 检查点 + `session/created|disposed|event|flush` 四事件；enter 记录 owner scope、事件按 owner 路由（对齐上游 scopeTarget）；无 typert lookup、flush 为同步近似、无 fiber/effect（简化标注见模块 docstring） |
-| `core/scope.py` | `vendor/cordis` + `packages/core/scope` | |
+| `core/scope.py` | `vendor/cordis` + `packages/core/scope` | Context（服务仓库 + 事件总线 + 四种派发 + asyncio 变体）+ fiber 生命周期（2026-08-20 对齐 fiber.ts Phase 1：状态机 PENDING/LOADING/ACTIVE/FAILED/UNLOADING/DISPOSED + `internal/status`；`effect(execute, label)` 上游形态——execute 立即执行、返回值按 None/callable/awaitable/生成器收集为 disposer；单发 + 可 await；注册先于执行 + setup barrier 重入保护；dispose 幂等 join 在途；同步立即逆序、异步并发 unload、错误 contained）+ `create_scope` fiber-backed 作用域（父拆解收回子 fiber）+ PluginManager；未复现 `ctx.plugin()` 注册表与 epoch 热重载（简化标注，见模块 docstring） |
 | `core/tools.py` | `packages/core/tools` | |
 | `core/agent_loop/agent.py` | `packages/core/agent-loop/src/agent.ts` | 单一 async 驱动（`_pump_async`/`_run_step_async`）+ `followup`/`steer` 同步门面（无 driver 时经 `asyncio.run` 瞬态事件循环）+ 协作式取消（`_cancel_event` 每轮新建 + `call_soon_threadsafe` 跨线程置位）；agent/pre-step 决策经 `awaterfall` |
 | `core/agent_loop/tool_calls.py` | `packages/core/agent-loop/src/tool-calls.ts` | |

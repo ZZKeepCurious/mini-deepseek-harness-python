@@ -205,7 +205,9 @@ class SystemPromptService:
                  "complete": complete, "seq": self._seq}
         self._seq += 1
         self._sections.append(entry)
-        return self._ctx.effect(lambda: self._sections.remove(entry))
+        return self._ctx.effect(
+            lambda: (lambda: self._sections.remove(entry)),
+            f"prompt section {name!r}")
 
     def context(self, name: str, order: int,
                 text: str | Callable[[dict], str]) -> Callable:
@@ -222,14 +224,18 @@ class SystemPromptService:
         entry = {"name": name, "order": order, "text": text, "seq": self._seq}
         self._seq += 1
         self._contexts.append(entry)
-        return self._ctx.effect(lambda: self._contexts.remove(entry))
+        return self._ctx.effect(
+            lambda: (lambda: self._contexts.remove(entry)),
+            f"prompt context {name!r}")
 
     def tools(self, provider: Callable[[dict], dict]) -> Callable:
         """注册一个工具 schema 提供器（上游 PromptLayer.toolProviders），
         返回 disposer。提供器返回 {schemas, knownNames?}；knownNames 缺省
         取 schemas 的名字集合，用于 toolOrder 校验。"""
         self._tool_providers.append(provider)
-        return self._ctx.effect(lambda: self._tool_providers.remove(provider))
+        return self._ctx.effect(
+            lambda: (lambda: self._tool_providers.remove(provider)),
+            "prompt tools provider")
 
     def variable(self, name: str,
                  provider: Callable[[dict], str | None]) -> Callable:
@@ -241,13 +247,17 @@ class SystemPromptService:
         if name in self._variables:
             raise ValueError(f"prompt 变量 {name!r} 已注册")
         self._variables[name] = provider
-        return self._ctx.effect(lambda: self._variables.pop(name, None))
+        return self._ctx.effect(
+            lambda: (lambda: self._variables.pop(name, None)),
+            f"prompt variable {name!r}")
 
     def suppress_runtime_context(self) -> Callable:
         """在当前作用域抑制全部动态上下文贡献（上游
         suppressRuntimeContext），返回 disposer。多个抑制器各自独立可撤销。"""
         self._runtime_context_suppressors.append(True)
-        return self._ctx.effect(lambda: self._runtime_context_suppressors.remove(True))
+        return self._ctx.effect(
+            lambda: (lambda: self._runtime_context_suppressors.remove(True)),
+            "prompt suppress runtime context")
 
     # ---------- 渲染面 ----------
 
