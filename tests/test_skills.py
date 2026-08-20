@@ -680,7 +680,7 @@ class CatalogLoopIntegrationTest(unittest.TestCase):
         from miniharness.llm import FakeLlmAdapter
         ctx = Context(name="loop")
         install_skills(ctx)
-        registry = ctx.inject("skills")
+        registry = ctx.get("skills")
         registry.register({**SIMPLE_SKILL, "provider": RUNTIME_PROVIDER})
         reg = ToolRegistry(ctx)
         register_skill_tools(reg, registry)
@@ -705,7 +705,7 @@ class GestureLoopIntegrationTest(unittest.TestCase):
         from miniharness.llm import FakeLlmAdapter
         ctx = Context(name="gl")
         install_skills(ctx)
-        registry = ctx.inject("skills")
+        registry = ctx.get("skills")
         registry.register({**SIMPLE_SKILL, "provider": RUNTIME_PROVIDER})
         reg = ToolRegistry(ctx)
         register_skill_tools(reg, registry)

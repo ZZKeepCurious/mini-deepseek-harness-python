@@ -343,8 +343,8 @@ class AcpServer:
         install_skills(ctx)
         install_system_prompt(ctx)
         reg = ToolRegistry(ctx)
-        register_job_tools(reg, ctx.inject("jobs"))
-        register_skill_tools(reg, ctx.inject("skills"))
+        register_job_tools(reg, ctx.get("jobs"))
+        register_skill_tools(reg, ctx.get("skills"))
         return AgentLoop(Session(session_id), self._adapter, reg, ctx)
 
     # ---------- prompt ----------

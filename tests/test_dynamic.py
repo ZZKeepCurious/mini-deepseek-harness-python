@@ -86,7 +86,7 @@ class TestDynamicPlugin(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.registry.run("pkg-1")
         # host 服务未被覆盖
-        self.assertIsNotNone(self.host.inject("session-persistence"))
+        self.assertIsNotNone(self.host.get("session-persistence"))
 
     def test_new_registry_does_not_restore(self):
         # "重启"：新 registry 即全新进程，一切不恢复

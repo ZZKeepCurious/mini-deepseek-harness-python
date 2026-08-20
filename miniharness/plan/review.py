@@ -106,7 +106,7 @@ def install_plan_review(ctx: Context, controller: PlanModeController) -> None:
     要求 ctx 已提供 tools 服务（先 install ToolRegistry；缺失抛 KeyError，fail
     loud）。commands 服务为可选（上游 ctx.get('commands') 语义，缺失则命令不可用）。
     """
-    tools = ctx.inject("tools")
+    tools = ctx.get("tools")
 
     async def execute(args: dict, exec: Any) -> str:
         agent = exec.agent
@@ -119,9 +119,8 @@ def install_plan_review(ctx: Context, controller: PlanModeController) -> None:
         if not _HEADING_PATTERN.match(plan.strip()):
             raise _exit_plan_mode_error(
                 f"{EXIT_PLAN_MODE} requires a non-empty markdown plan starting with a # heading")
-        try:
-            channel = ctx.inject("userQuestions")
-        except KeyError:
+        channel = ctx.get("userQuestions")
+        if channel is None:
             raise _exit_plan_mode_error(
                 "no user-questions channel is available to review the plan; "
                 "ask the user to switch the session mode instead")
@@ -168,9 +167,8 @@ def install_plan_review(ctx: Context, controller: PlanModeController) -> None:
         execute=execute,
     ))
 
-    try:
-        commands = ctx.inject("commands")
-    except KeyError:
+    commands = ctx.get("commands")
+    if commands is None:
         return
     commands.register(
         "plan",

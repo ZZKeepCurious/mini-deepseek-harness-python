@@ -66,7 +66,7 @@ MiniHarness 是教学实现，不是移植。下面是简化清单，每一条�
 | MiniHarness 简化 | 真实 dsh |
 |---|---|
 | 同步事件总线为教学主体 + `aemit`/`awaterfall`/`aparallel`/`aserial` async 变体（agent/pre-step、agent/request-error 已 async 化） | 异步（`@deepseek-ai/cordis` 基于 fiber/async） |
-| `provides` 声明式依赖 | apply 期间动态注册 |
+| 服务按隔离标签键控的全局 store（`ctx.get` 缺省返回 `None`；`ctx.isolate(name)` 换标签实现 per-agent 隔离；declarative `provides` 字段已废除，apply 期 `provide` 动态登记） | 反射 `reflect` 全量协议（`inject`/`provide`/`get`/`set`/`isolate`/`intercept` + `ctx.<name>` 属性代理） |
 | 工具体执行体直接 `await`（async 契约）；同步工具函数经 `_maybe_await` 解包；阻塞调用以 `asyncio.to_thread` 显式放行（第 12 章） | `isConcurrencySafe` 并行池 + 串行屏障 |
 | LLM 流式 async 契约 + httpx 异步 SSE 传输（abort 置位即关闭连接，真取消；per-read idle 300s 对齐上游） | `fetch` + AbortSignal 原生异步流 |
 | 同步门面（`followup`/`steer` 无 driver 时经 `asyncio.run` 瞬态事件循环驱动） | 常驻单事件循环 |

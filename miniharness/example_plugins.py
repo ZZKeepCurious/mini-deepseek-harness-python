@@ -4,8 +4,5 @@ from .core.scope import Context
 
 
 def apply(ctx: Context, greeting: str = "hello", service_name: str = "greeter") -> None:
-    """提供服务 greeter；inject 依赖通过模块级声明。"""
+    """提供服务 greeter；inject 依赖通过插件声明的 inject 字段（不在此模块声明）。"""
     ctx.provide(service_name, lambda name: f"{greeting}, {name}!")
-
-
-provides = ["greeter"]

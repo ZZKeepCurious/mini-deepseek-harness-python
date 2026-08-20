@@ -485,6 +485,10 @@ class SubagentContinuationManager:
     def _build_activation(self, child_session: Session, descriptor: dict, persisted: int) -> dict:
         child_id = child_session.session_id
         child_ctx = self.parent.ctx.create_scope(f"subagent:{child_id}")
+        # 子作用域独立的 tools/systemPrompt 服务标签（对齐上游 agent scope 层：
+        # per-agent 注册进 agent 自己的 realm，root realm 发布是进程级，冲突被拒）
+        child_ctx._isolate.setdefault("tools", object())
+        child_ctx._isolate.setdefault(SYSTEM_PROMPT_SERVICE, object())
 
         reg = ToolRegistry(child_ctx)
         # toolFilter {allow?, deny?}（上游 ToolRestriction 形状）

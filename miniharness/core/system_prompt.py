@@ -18,7 +18,7 @@ mini 范围说明：
     列表（实际请求工具来自 ToolRegistry，见 _tool_definitions）。
 
 装配：install_system_prompt(ctx) 提供 ctx "systemPrompt" 服务（幂等）。
-AgentLoop._derive_history 在渲染时经 ctx.inject("systemPrompt") 懒取；
+AgentLoop._derive_history 在渲染时经 ctx.get("systemPrompt") 懒取；
 无该服务时仅用 AgentLoop.system_prompt 字符串（既有行为不变）。
 """
 from __future__ import annotations
@@ -347,9 +347,8 @@ def install_system_prompt(ctx: Context, config: dict | None = None) -> SystemPro
     """提供 ctx "systemPrompt" 服务（幂等：已存在则复用现有实例）。
     @param config - 可选 {toolOrder: [...]}（须含 rest 条目，非法即抛）。
     """
-    try:
-        return ctx.inject(SYSTEM_PROMPT_SERVICE)
-    except KeyError:
+    service = ctx.get(SYSTEM_PROMPT_SERVICE)
+    if service is None:
         service = SystemPromptService(ctx, config or {})
         ctx.provide(SYSTEM_PROMPT_SERVICE, service)
-        return service
+    return service

@@ -47,7 +47,7 @@ class TestYamlLoading(unittest.TestCase):
             )
             ctx, activations = boot(config, patch)
             self.assertEqual([n for n, _ in activations], ["greeter"])
-            self.assertEqual(ctx.inject("greeter")("张三"), "你好呀, 张三!")
+            self.assertEqual(ctx.get("greeter")("张三"), "你好呀, 张三!")
 
     def test_yaml_bad_syntax_fails_with_prefix(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -130,7 +130,7 @@ class TestJsExpr(unittest.TestCase):
             os.environ["MINI_GREETING"] = "来自环境"
             try:
                 ctx, _ = boot(config)
-                self.assertEqual(ctx.inject("greeter")("王五"), "来自环境, 王五!")
+                self.assertEqual(ctx.get("greeter")("王五"), "来自环境, 王五!")
             finally:
                 if old is None:
                     os.environ.pop("MINI_GREETING", None)

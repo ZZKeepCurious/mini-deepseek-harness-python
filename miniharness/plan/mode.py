@@ -91,7 +91,9 @@ class PlanModeController:
         self._pending: dict[int, dict] = {}
         # plan:policy 节（order 50）；要求先 install_system_prompt（与上游
         # PlanModeController 声明 inject systemPrompt 一致，缺失 fail loud）。
-        system_prompt = ctx.inject("systemPrompt")
+        system_prompt = ctx.get("systemPrompt")
+        if system_prompt is None:
+            raise KeyError("systemPrompt")
         system_prompt.section(
             PLAN_POLICY_SECTION,
             PLAN_POLICY_ORDER,

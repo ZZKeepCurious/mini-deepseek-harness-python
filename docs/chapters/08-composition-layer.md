@@ -35,8 +35,8 @@ realm 规则的直接后果（`apps/cli/config/agent-presets/standard/agent.cord
 `vendor/cordis` 的 loader（`vendor/cordis/loader` 与 `vendor/include`）做的事可以压缩成三条：
 
 1. **include 展开**：组合里 `include: 'file.yml'` 的行先被替换成目标文件的内容（递归），这是"一个 preset 引用共享片段"的机制；
-2. **插件加载**：每条 entry 的 `plugin` 字段导入真实模块，取回 `inject`/`provides`/`apply` 元数据；
-3. **结算**：把整棵树交给插件管理器，按依赖激活——这正是 mini 第 2 章 `PluginManager` 做的事（`miniharness/core/scope.py`），只是上游还有 scope/fiber/carrier 的完整实现。
+2. **插件加载**：每条 entry 的 `plugin` 字段导入真实模块，取回 `inject`/`apply` 元数据（`provides` 已废除——服务在 apply 期动态登记）；
+3. **结算**：把整棵树交给插件管理器，按依赖激活——这正是 mini 第 2 章 `RegistryService` 做的事（`miniharness/core/scope.py`），只是上游还有 scope/fiber/carrier 的完整实现。
 
 ### 8.2.3 preset roster：目录列表即名单
 
@@ -107,12 +107,9 @@ def mount(self, ctx, agent_scope, host_tools) -> ToolRegistry:
     if missing:
         raise RuntimeError(f"preset {self.id} 声明了 host 未提供的工具: {', '.join(missing)}")
     for key in self.provides:
-        try:
-            ctx.inject(key)
-        except KeyError:
-            continue
-        raise RuntimeError(
-            f"preset {self.id} 声明进程级服务 {key}，但 host 已提供（拒绝挂载）")
+        if ctx.get(key) is not None:
+            raise RuntimeError(
+                f"preset {self.id} 声明进程级服务 {key}，但 host 已提供（拒绝挂载）")
     view = ToolRegistry(agent_scope)
     for name in self.tools:
         view.register(host_tools.resolve(name), scope=agent_scope)

@@ -326,10 +326,9 @@ class SessionStore:
 def install_sessions(ctx: Context) -> SessionStore:
     """幂等装配：创建 ctx.sessions 服务。首个调用生效；已存在时收养并直接返回。"""
     if getattr(ctx, "_miniharness_sessions_installed", False):
-        return ctx.inject("sessions")
-    try:
-        store = ctx.inject("sessions")
-    except KeyError:
+        return ctx.get("sessions")
+    store = ctx.get("sessions")
+    if store is None:
         store = SessionStore(ctx)
         ctx.provide("sessions", store)
     ctx._miniharness_sessions_installed = True

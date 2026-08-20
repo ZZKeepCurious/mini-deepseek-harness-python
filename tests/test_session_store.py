@@ -300,7 +300,7 @@ class TestInstall(unittest.TestCase):
     def test_install_provides_service(self):
         ctx = Context(name="store-test")
         store = install_sessions(ctx)
-        self.assertIs(ctx.inject("sessions"), store)
+        self.assertIs(ctx.get("sessions"), store)
 
     def test_install_idempotent(self):
         ctx = Context(name="store-test")

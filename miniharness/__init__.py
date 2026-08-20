@@ -22,7 +22,7 @@ from .core.session import (
     tool_result_block,
     turn_balance,
 )
-from .core.scope import Context, PluginManager
+from .core.scope import Context, RegistryService
 from .core.tools import (
     Tool,
     ToolExec,
@@ -98,7 +98,7 @@ __all__ = [
     "JsonlPersistence",
     "LlmAdapter",
     "LlmFailure",
-    "PluginManager",
+    "RegistryService",
     "SESSION_FORMAT_VERSION",
     "Session",
     "SessionPersistence",

@@ -68,11 +68,10 @@ def install_skills(ctx, config: dict | None = None) -> SkillRegistry:
     补挂 provider 与 listener 后直接返回。
     """
     if getattr(ctx, "_miniharness_skills_installed", False):
-        return ctx.inject("skills")
+        return ctx.get("skills")
     config = config or {}
-    try:
-        registry = ctx.inject("skills")
-    except KeyError:
+    registry = ctx.get("skills")
+    if registry is None:
         registry = SkillRegistry(ctx)
     ctx._miniharness_skills_installed = True
     filesystem_config = config.get("filesystem") or {}

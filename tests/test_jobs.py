@@ -74,7 +74,7 @@ class RegistryBasicsTest(unittest.TestCase):
         self.registry = LocalJobRegistry(self.ctx)
 
     def test_installs_ctx_jobs_service(self):
-        self.assertIs(self.ctx.inject("jobs"), self.registry)
+        self.assertIs(self.ctx.get("jobs"), self.registry)
 
     def test_duplicate_provide_fails(self):
         with self.assertRaises(RuntimeError):
@@ -676,7 +676,7 @@ class RealLoopIntegrationTest(unittest.TestCase):
         install_jobs(ctx)
         session = Session("jobs-real-1")
         loop = AgentLoop(session, _TextAdapter("done"), ToolRegistry(ctx), ctx)
-        registry = ctx.inject("jobs")
+        registry = ctx.get("jobs")
         real = JobDoneBox()
         tid = registry.start({"kind": "bash", "label": "long", "owner": loop,
                               "run": lambda: {"done": real, "cancel": lambda r: None}})

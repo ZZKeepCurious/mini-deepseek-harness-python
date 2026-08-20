@@ -361,7 +361,7 @@ class GoalToolsTest(unittest.TestCase):
 
     def test_policy_section_registered(self):
         ctx, _, _, _ = self._make()
-        names = [s["name"] for s in ctx.inject("systemPrompt").render({})]
+        names = [s["name"] for s in ctx.get("systemPrompt").render({})]
         self.assertIn("tool:goal", names)
 
     def test_get_goal_empty(self):

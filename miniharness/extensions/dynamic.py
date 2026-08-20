@@ -93,11 +93,8 @@ class DynamicPluginRegistry:
         p = self._defs[pkg_id]
         # 进程级冲突检查：声明的 provides 不得已存在于祖先链（apply 负责实际 provide）
         for key in p.provides:
-            try:
-                self.root.inject(key)
-            except KeyError:
-                continue
-            raise RuntimeError(f"包 {pkg_id} 提供进程级服务 {key}，host 已存在（拒绝）")
+            if self.root.get(key) is not None:
+                raise RuntimeError(f"包 {pkg_id} 提供进程级服务 {key}，host 已存在（拒绝）")
         scope = self.root.create_scope(f"dyn:{pkg_id}")
         if p.apply is not None:
             p.apply(scope)
@@ -111,7 +108,9 @@ class DynamicPluginRegistry:
         """调用运行中插件提供的服务（演示语义：ctx.provide 生效后可用）。"""
         if run_id not in self._runs:
             raise KeyError(f"未知 run: {run_id}")
-        fn = self._runs[run_id].inject(key)
+        fn = self._runs[run_id].get(key)
+        if fn is None:
+            raise KeyError(f"未知服务: {key}")
         return fn(*args, **kwargs)
 
     def stop(self, run_id: str) -> None:

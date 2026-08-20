@@ -88,10 +88,7 @@ class StreamHub:
             self.ctx.on("agent/status", self._on_agent_status),
             self.ctx.on("agent/error", self._on_agent_error),
         ]
-        try:
-            jobs = self.ctx.inject("jobs")
-        except KeyError:
-            jobs = None
+        jobs = self.ctx.get("jobs")
         if jobs is not None and hasattr(jobs, "on_jobs_changed"):
             self._disposers.append(jobs.on_jobs_changed(self._on_jobs_changed))
 
@@ -224,10 +221,7 @@ class StreamHub:
         queue.put_nowait(_mint({"type": "session/jobs", "sessionId": session_id, "jobs": snapshots}))
 
     def _jobs_registry(self):
-        try:
-            return self.ctx.inject("jobs")
-        except KeyError:
-            return None
+        return self.ctx.get("jobs")
 
     @staticmethod
     def _job_view(snapshot: dict) -> dict:

@@ -132,9 +132,8 @@ def install_goal_commands(ctx, goals) -> Callable | None:
     上游 command-goal inject ['commands', 'goals']；mini 经 ctx.inject 鸭子类型，
     无 commands 服务 = 命令不可用（不注册、不报错）。
     """
-    try:
-        commands = ctx.inject("commands")
-    except KeyError:
+    commands = ctx.get("commands")
+    if commands is None:
         return None
     return commands.register(
         "goal",

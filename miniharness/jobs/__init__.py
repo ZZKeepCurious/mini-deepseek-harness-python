@@ -67,11 +67,10 @@ def install_jobs(ctx, config: dict | None = None) -> LocalJobRegistry:
     补挂 controller 与 notice 投递后直接返回。
     """
     if getattr(ctx, "_miniharness_jobs_installed", False):
-        return ctx.inject("jobs")
+        return ctx.get("jobs")
     config = config or {}
-    try:
-        registry = ctx.inject("jobs")
-    except KeyError:
+    registry = ctx.get("jobs")
+    if registry is None:
         registry_config = {k: config[k] for k in _REGISTRY_KEYS if k in config}
         registry = LocalJobRegistry(ctx, registry_config)
     ctx._miniharness_jobs_installed = True

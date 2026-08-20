@@ -67,30 +67,33 @@ class Context:
             self.fiber = parent.fiber
 
     def provide(self, key, value):
-        """提供服务，返回 disposer。同 key 重复提供 = 冲突（fail loud）。"""
+        """提供服务，返回 disposer。同一隔离标签下重复提供 = 冲突（fail loud）。"""
         self._assert_alive()
-        if key in self._services:
-            raise RuntimeError(f"服务 {key} 已在 {self.name} 提供")
-        self._services[key] = value
+        label = self._label_of(key)          # 解析 name 的隔离标签
+        if label in self.root._reflect_store:
+            raise RuntimeError(f"服务 {key} 已在该标签提供")
+        self.root._reflect_store[label] = value
         return self.effect(
-            lambda: (lambda: self._services.pop(key, None)),
+            lambda: (lambda: self.root._reflect_store.pop(label, None)),
             f"ctx.provide({key})",
         )
 
-    def inject(self, key):
-        """按 key 查找：沿父子链向上（作用域可见性）。"""
-        if key in self._services:
-            return self._services[key]
-        if self.parent is not None:
-            return self.parent.inject(key)
-        raise KeyError(f"服务 {key} 未提供")
+    def get(self, key, strict=True):
+        """按 key 查找：按隔离标签读全局 store；strict 只返回提供者 ACTIVE 的实现，
+        未提供 → None（不再抛 KeyError）。"""
+        impl = self._find_impl(key)
+        if impl is None:
+            return None
+        if strict and not impl["fiber"].active:
+            return None
+        return impl["value"]
 ```
 
 为什么服务按 **key** 查找而不是直接 import 具体实现？因为插件要依赖的是"接口约定"（Service Definition），不是某个具体类。第 6 章的沙箱、凭据、子 agent 全部是这种模式：消费方只认识 key，具体实现可以替换。
 
-`parent` 链就是作用域：子 ctx 能看到祖先的服务，兄弟互不可见。这个可见性规则后面（第 3 章 per-agent 工具隔离）会直接用上。
+实现存一根**全局 store**，按"name 的隔离标签"键控（对齐上游 `reflect.ts` 的 `ctx[symbols.isolate][name]`）。`_label_of(key)` 沿祖先链找最近的 `isolate(name)` 遮蔽，否则用根默认标签——所以进程级服务（jobs/skills/tools）提供在根上，所有作用域都看得到；per-agent 的 tools/systemPrompt 在各自作用域 `isolate()` 换标签，互不冲撞（第 3 章工具隔离、continuation 子代理都用它）。
 
-注意 `provide` 对重复提供直接抛错（fail loud）。常规的做法是"后注册的覆盖先注册的"，看起来方便，实际会让"谁覆盖了谁"变成谜。dsh 选择大声失败，冲突必须在启动时解决。
+注意 `provide` 对同一标签下的重复提供直接抛错（fail loud）。常规的做法是"后注册的覆盖先注册的"，看起来方便，实际会让"谁覆盖了谁"变成谜。dsh 选择大声失败，冲突必须在启动时解决；真需要"每 agent 一套"就用 `isolate()` 换标签，而不是指望覆盖。
 
 ### 步骤 2：可逆副作用 —— `effect` 与 `dispose`（fiber 承载）
 
@@ -226,50 +229,34 @@ def create_scope(self, name):
     return child
 ```
 
-作用域 = 父子链 + 独立 fiber。子 ctx 能看到祖先的服务，兄弟互不可见（第 3 章 per-agent 工具隔离、会话 owner scope 路由都用它）；拆解该作用域逆序回滚它自己名下的注册，父拆解时经注册的 effect 按序收回全部子作用域。
+作用域 = 父子链 + 独立 fiber。服务可见性走隔离标签：根上提供的进程级服务所有作用域可见，`isolate(name)` 换标签后 per-agent 各自一套（第 3 章 per-agent 工具隔离、continuation 子代理、会话 owner scope 路由都用它）；拆解该作用域逆序回滚它自己名下的注册，父拆解时经注册的 effect 按序收回全部子作用域。
 
-### 步骤 5：依赖驱动的插件激活（PluginManager）
+### 步骤 5：依赖驱动的插件激活（RegistryService）
+
+mini 的真实实现是 `RegistryService`（`ctx.plugin(...)` 装载 fiber）：依赖在 `inject` 声明，apply 期间用 `provide` **动态**登记服务。声明 `inject` 的插件在依赖缺失时保持 `PENDING`（不激活、不报错），提供方一装载就触发 `_notify` → 依赖者 `_check_impl` + `_refresh`（epoch 重载：卸载→重装）。加载顺序由依赖关系本身表达，而不是 boot 脚本里的手写顺序：
 
 ```python
-class PluginManager:
-    def __init__(self, root):
-        self.root = root
-
-    def activate(self, plugins):
-        """inject 满足才 apply；全部激活或明确报错。"""
-        remaining = [dict(p) for p in plugins]
-        provided = set(self.root._services)
-        done = []
-        while remaining:
-            progressed = False
-            for p in list(remaining):
-                if all(k in provided for k in p.get("inject", [])):
-                    snapshot = len(self.root.fiber._disposables)
-                    p["apply"](self.root)
-                    disposer = self._collect_after(snapshot)
-                    done.append((p["name"], disposer))
-                    provided.update(p.get("provides", []))
-                    remaining.remove(p)
-                    progressed = True
-            if not progressed:
-                raise RuntimeError("插件依赖无法满足: " + ", ".join(p["name"] for p in remaining))
-        return done
+# 核心：注册是声明，激活靠依赖满足
+fiber = root.plugin({"name": "consumer", "inject": ["svc"],
+                     "apply": lambda ctx, cfg: ...})
+assert fiber.state == FiberState.PENDING      # 依赖缺失 → 静默等待
+provider = root.plugin({"name": "provider",
+                        "apply": lambda ctx, cfg: ctx.provide("svc", 42)})
+assert fiber.state == FiberState.ACTIVE       # 提供方装载 → 依赖者被唤醒
 ```
 
-常规插件系统靠手工排启动顺序，依赖关系复杂时极易出错。dsh 反过来：插件声明 `inject: [服务key]`，激活器循环扫描，**依赖满足才 apply**。加载顺序由依赖关系本身表达，而不是 boot 脚本里的手写顺序（测试 `test_plugin_manager_dependency_order` 钉住：provider 必须先于 consumer）。
+常规插件系统靠手工排启动顺序，依赖关系复杂时极易出错。dsh 反过来：依赖满足才 apply，依赖变化触发 epoch 重载（测试 `test_dependency_wakes_pending_fiber` 钉住：provider 必须先于 consumer）。
 
 两个细节：
 
-- 卸载 = 回滚该插件 apply 期间登记的全部副作用。`_collect_after(snapshot)` 从快照点收集"这个插件造成的新 disposer"，卸载时只回滚它自己的。
-- 循环依赖 / 缺失依赖 → 明确报错，绝不静默跳过。静默跳过会让"插件没生效"变成运行期谜题。
-
-> 简化声明：真实 Cordis 由 apply 期间的 `provide`/`effect` 动态登记；这里用声明式 `provides` 字段近似。语义（依赖驱动、可逆回滚）一致。
+- 卸载 = 回滚该插件 apply 期间登记的全部副作用（fiber disposer 栈逆序）；卸载时服务随之消失，strict `get` 回 `None`，依赖者据此重估。
+- 环依赖 / 缺失依赖 → 依赖者保持 `PENDING`（静默），不会半激活；boot 层负责在装配结束时检查所有 fiber 都到了终态并明确报错。
 
 ## 2.4 验收：硬性规定 + 测试
 
 这一章的硬性规定，`tests/test_bus.py` 与 `tests/test_fiber.py` 每个都有对应测试：
 
-1. 服务重复提供 = 冲突（fail loud）；查找沿父子链向上
+1. 服务按隔离标签提供/查找：同一标签重复提供 = 冲突（fail loud）；缺省返回 `None`；strict 过滤非 ACTIVE 提供者
 2. `waterfall` 短路语义：不调 `next` 的监听器返回值就是最终决策
 3. 监听器按注册序执行；作用域内子先于父
 4. `effect` 调用约定：execute 立即执行，返回值收集为 disposer；返回 `None` 无 disposer
@@ -286,15 +273,15 @@ python -m unittest tests.test_bus tests.test_fiber -v
 ## 2.5 检查点练习
 
 1. **写一个"权限策略"插件**：挂到 `tools/pre-execute`（waterfall），对 `name == "rm"` 的工具直接返回 `{"verdict": "deny"}`，其余调用 `next`。写测试断言拒绝路径。
-2. **作用域隔离**：创建 root → scopeA → scopeB，在 A 里 `provide` 一个服务，断言 B 看不到、A 能看到、root 的子子孙孙都能看到。
+2. **作用域与隔离**：创建 root → scopeA → scopeB，在 root 提供 `svc`，断言 A、B 都看得到；再对 A `isolate("local")` 提供 `local`，断言 B 仍看 root 的 `local`（同一标签共享）、A 的隔离标签互不影响。
 3. **热重载模拟**：activate 一个插件 → 记录服务存在 → dispose → 断言服务消失且再次 activate 同名插件不冲突。
 
 ## 2.6 回到 dsh：真实源码对照
 
 打开 `deepseek-harness/vendor/cordis/src`：
 
-- `context.ts`：`provide`/`inject`/`effect`/`dispose` 的完整实现——`effect` 的 execute 形态、注册先于执行、`disposeAfter(waitForSetup())` 重入保护，我们逐条对齐
-- `fiber.ts`：fiber 状态机、`internal/status`、`internal/plugin`、`inertia` 在途转换、`_unload` 的 `Promise.all` 并发拆解——2.2 的 fiber 语义都从这里来（mini 目前对齐 Phase 1：状态机 + effect 全语义 + 重入 barrier + 并发 unload；`ctx.plugin()` 注册表与 epoch 驱动的热重载尚未复现，见 `status/mini-harness/tasks.md`）
+- `context.ts` + `reflect.ts`：`provide`/`get`/`set`/`isolate`/`effect`/`dispose` 的完整实现——`effect` 的 execute 形态、注册先于执行、`disposeAfter(waitForSetup())` 重入保护、按隔离标签键控的全局 store、`notify` 的标签过滤，我们逐条对齐
+- `fiber.ts`：fiber 状态机、`internal/status`、`internal/plugin`、`_setEpoch` 依赖重载、`inertia` 在途转换、`_unload` 的 `Promise.all` 并发拆解——2.2 的 fiber 语义都从这里来（mini 已对齐装载半边 + 注册表；`epoch` 热重载与 `ctx.plugin()` 注册表的剩余语义、SessionStore fiber 化见 `status/mini-harness/tasks.md`）
 - `events.ts`：四种派发模式的异步版本
 - `vendor/README.md`：18 项本地加固清单——挑 3 项读，体会"框架被 vendored 且可审计"意味着什么：不依赖 npm 供应链，代码就躺在仓库里，任何人都能审计每一行。
 

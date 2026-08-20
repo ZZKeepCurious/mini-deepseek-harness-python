@@ -241,8 +241,8 @@ class TestBoot(unittest.TestCase):
             ]), encoding="utf-8")
             ctx, activations = boot(config, patch)
             self.assertEqual([n for n, _ in activations], ["greeter", "extra"])
-            self.assertEqual(ctx.inject("greeter")("张三"), "你好呀, 张三!")
-            self.assertEqual(ctx.inject("extra_greeter")("李四"), "hello, 李四!")
+            self.assertEqual(ctx.get("greeter")("张三"), "你好呀, 张三!")
+            self.assertEqual(ctx.get("extra_greeter")("李四"), "hello, 李四!")
 
     def test_boot_asserts_all_active(self):
         with tempfile.TemporaryDirectory() as tmp:

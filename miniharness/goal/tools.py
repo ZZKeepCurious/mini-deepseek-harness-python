@@ -158,12 +158,12 @@ def register_goal_tools(reg: ToolRegistry, goals, ctx: Context | None = None,
     """注册三个目标工具；ctx 提供 systemPrompt 时挂 'tool:goal' 策略节（order 114）。
 
     上游 tool-goal inject ['agents','goals','tools','systemPrompt']；mini 经
-    ctx.inject('systemPrompt') 可选（无 ctx 或缺失该服务则策略节不挂）。
+    ctx.get('systemPrompt') 可选（无 ctx 或缺失该服务则策略节不挂）。
     """
     if blocked_after < 1:
         raise TypeError("blockedAfterConsecutiveRounds must be a positive safe integer")
     if ctx is not None:
-        system_prompt = ctx.inject("systemPrompt")
+        system_prompt = ctx.get("systemPrompt")
         system_prompt.section(GOAL_POLICY_SECTION, GOAL_POLICY_ORDER,
                               lambda _context: _guidance(blocked_after))
 

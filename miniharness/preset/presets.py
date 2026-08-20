@@ -70,14 +70,14 @@ class Preset:
                 f"preset {self.id} 声明了 host 未提供的工具: {', '.join(missing)}"
             )
         for key in self.provides:
-            try:
-                ctx.inject(key)
-            except KeyError:
-                continue
-            raise RuntimeError(
-                f"preset {self.id} 声明进程级服务 {key}，但 host 已提供（拒绝挂载，避免与下个会话冲突）"
-            )
+            if ctx.get(key) is not None:
+                raise RuntimeError(
+                    f"preset {self.id} 声明进程级服务 {key}，但 host 已提供（拒绝挂载，避免与下个会话冲突）"
+                )
 
+        # agent 作用域独立的 tools 服务标签（对齐上游 agent scope realm：per-agent
+        # 工具注册进 agent 自己的层，不冲撞 host/根标签）；须先于视图创建
+        agent_scope._isolate.setdefault("tools", object())
         view = ToolRegistry(agent_scope)
         for name in self.tools:
             view.register(host_tools.resolve(name), scope=agent_scope)

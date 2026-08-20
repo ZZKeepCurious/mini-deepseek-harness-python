@@ -25,18 +25,12 @@ def default_tools(ctx: Context) -> ToolRegistry:
         execute=lambda args, e: f"stdout: {args['cmd']}",
     ))
     # ctx.jobs 服务存在时收编后台作业三工具（job_output/job_list/job_kill）
-    try:
-        jobs = ctx.inject("jobs")
-    except KeyError:
-        jobs = None
+    jobs = ctx.get("jobs")
     if jobs is not None:
         from ..jobs import register_job_tools
         register_job_tools(reg, jobs)
     # ctx.skills 服务存在时收编 `skill` 工具（catalog/手势注入已由 install_skills 接线）
-    try:
-        skills = ctx.inject("skills")
-    except KeyError:
-        skills = None
+    skills = ctx.get("skills")
     if skills is not None:
         from ..skills import register_skill_tools
         register_skill_tools(reg, skills)

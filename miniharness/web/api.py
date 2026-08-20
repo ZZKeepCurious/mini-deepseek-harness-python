@@ -110,9 +110,8 @@ class WebApi:
         self.adapter = adapter
         self.tools = tools if tools is not None else ToolRegistry(ctx)
         self.cwd = cwd or os.getcwd()
-        try:
-            self.store = ctx.inject("sessions")
-        except KeyError:
+        self.store = ctx.get("sessions")
+        if self.store is None:
             self.store = SessionStore(ctx)
             ctx.provide("sessions", self.store)
         self._agents: dict[str, AgentLoop] = {}
@@ -368,9 +367,8 @@ class WebApi:
         return self._ok(rpc_id, {"accepted": True})
 
     def _route_command(self, loop: AgentLoop, text: str, rpc_id: str) -> dict:
-        try:
-            commands = self.ctx.inject("commands")
-        except KeyError:
+        commands = self.ctx.get("commands")
+        if commands is None:
             return self._err(rpc_id, "unknown-command",
                              "no command registry is composed in this deployment", {})
         name, _ = parse_command(text)

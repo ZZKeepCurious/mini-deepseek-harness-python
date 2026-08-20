@@ -44,8 +44,8 @@ def main() -> None:
     store = install_sessions(ctx)
     session = store.create("demo-001", {"meta": {"cwd": str(root)}})
     reg = ToolRegistry(ctx)
-    register_job_tools(reg, ctx.inject("jobs"))
-    register_skill_tools(reg, ctx.inject("skills"))
+    register_job_tools(reg, ctx.get("jobs"))
+    register_skill_tools(reg, ctx.get("skills"))
     reg.register(Tool(
         name="bash",
         description="Run a shell command.",

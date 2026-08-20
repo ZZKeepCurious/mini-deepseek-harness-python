@@ -27,6 +27,7 @@ PACKAGE_ROOT = pathlib.Path(miniharness.__file__).resolve().parent
 LAYER_UNITS = [
     ("core.session", 0),
     ("core.scope", 0),
+    ("core.schema", 0),
     ("core.version", 0),
     ("core.session_store", 1),
     ("core.tools", 1),
@@ -135,6 +136,10 @@ class ImportDirectionTest(unittest.TestCase):
                     # §5 显式例外（单方向）：launcher 组装 web profile——cli 把
                     # ctx/adapter/tools 交给 web 层运行时；web 层不得反向 import cli
                     continue
+                if src_unit == "core.scope" and dst_unit == "core.schema":
+                    # §5 显式例外：L0 基座叶模块——core.scope 的 config 求值依赖
+                    # core.schema 的 resolve_config（两者同为 L0 叶，无更低层可落）
+                    continue
                 if dst_layer >= src_layer:
                     violations.append(
                         f"{module_name}: L{src_layer} 导入 {dst}（L{dst_layer}，违反 §5 规则 1）"
@@ -193,7 +198,7 @@ class ImportDirectionTest(unittest.TestCase):
 # §6 白名单 + FakeLlmAdapter（步骤 3 收敛结果，28 项）
 TOP_LEVEL_ALL = {
     "AgentLoop", "Context", "DeepSeekAdapter", "FakeLlmAdapter", "JsonlPersistence",
-    "LlmAdapter", "LlmFailure", "PluginManager", "SESSION_FORMAT_VERSION", "Session",
+    "LlmAdapter", "LlmFailure", "RegistryService", "SESSION_FORMAT_VERSION", "Session",
     "SessionPersistence", "SqlitePersistence", "StreamChunk", "TOOL_NOT_STARTED",
     "TOOL_OUTCOME_UNKNOWN", "Tool", "ToolRegistry", "apply_patch", "boot",
     "create_message", "derive_messages", "reasoning_block", "repair_interrupted_turn",

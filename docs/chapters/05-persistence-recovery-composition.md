@@ -201,13 +201,12 @@ def load_plugin(entry):
     module = importlib.import_module(entry["module"])
     return {
         "name": entry.get("id", module.__name__),
-        "inject": entry.get("inject") or getattr(module, "inject", []),
-        "provides": entry.get("provides") or getattr(module, "provides", []),
-        "apply": lambda ctx, m=module, c=entry.get("config", {}): m.apply(ctx, **c),
+        "inject": entry.get("inject") or getattr(module, "inject", None),
+        "apply": lambda ctx, config, m=module: m.apply(ctx, **config),
     }
 
 def boot(config_path, *patch_paths, env=None):
-    """boot()：加载配置 → 依序应用补丁 → 激活插件 → 断言全部就绪。"""
+    """boot()：加载配置 → 依序应用补丁 → 动态激活插件 → 断言全部就绪。"""
     env = env or {}
     with open(config_path, encoding="utf-8") as f:
         config = json.load(f)
@@ -221,15 +220,12 @@ def boot(config_path, *patch_paths, env=None):
     for key, value in env.items():
         root.provide(key, value)
 
-    manager = PluginManager(root)                    # 第 2 章的依赖驱动激活
-    activations = manager.activate([load_plugin(e) for e in entries])
-
-    activated_ids = {name for name, _ in activations}
-    missing = [e["id"] for e in entries if e["id"] not in activated_ids]
-    if missing:
-        raise RuntimeError(f"启动断言失败：以下条目未激活: {missing}")
-    return root, activations
+    fibers = [root.plugin(load_plugin(e), e.get("config", {})) for e in entries]
+    _drain(fibers)                                 # 异步 body 排空在途转换
+    _assert_entries_activated(fibers, entries)     # 终态断言（对齐上游）
 ```
+
+插件不再声明 `provides`：服务在 apply 期用 `ctx.provide()` 动态登记（与真实 Cordis 一致）。依赖 `inject` 缺失的插件保持 `PENDING`，boot 结束时 `_assert_entries_activated` 点名缺失的注入服务并明确报错——"插件没生效"绝不会是运行期谜题。
 
 `boot()` 的职责链条对应报告里的层叠顺序：`boot(config, *patches)` 的补丁按参数顺序应用——bundle 层 → profile 级 → home 级 → `--patch` overlay，越靠后越优先。
 

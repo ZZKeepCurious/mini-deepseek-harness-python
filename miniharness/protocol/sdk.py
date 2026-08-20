@@ -221,8 +221,8 @@ class SdkRuntime:
                 install_skills(ctx)
                 install_system_prompt(ctx)
                 reg = ToolRegistry(Context(name="sdk"))
-                register_job_tools(reg, ctx.inject("jobs"))
-                register_skill_tools(reg, ctx.inject("skills"))
+                register_job_tools(reg, ctx.get("jobs"))
+                register_skill_tools(reg, ctx.get("skills"))
                 loop = AgentLoop(Session(session_id), self._adapter, reg, ctx)
                 self._sessions[session_id] = loop
             blocks = params.get("contentBlocks")

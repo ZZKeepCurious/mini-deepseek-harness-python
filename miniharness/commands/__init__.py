@@ -208,9 +208,8 @@ def route_command(text: str, agent: Any, ctx: Context) -> str | None:
 
     无 commands 服务时返回 None（命令不可用即普通文本）。
     """
-    try:
-        commands = ctx.inject("commands")
-    except KeyError:
+    commands = ctx.get("commands")
+    if commands is None:
         return None
     result = commands.dispatch(agent, text)
     if result is None:

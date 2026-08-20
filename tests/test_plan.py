@@ -133,7 +133,7 @@ class SystemPromptServiceTest(unittest.TestCase):
         first = install_system_prompt(self.ctx)
         second = install_system_prompt(self.ctx)
         self.assertIs(first, second)
-        self.assertIs(self.ctx.inject(SYSTEM_PROMPT_SERVICE), first)
+        self.assertIs(self.ctx.get(SYSTEM_PROMPT_SERVICE), first)
 
     def test_render_sorted_by_order_skips_empty(self):
         service = SystemPromptService(self.ctx)
@@ -301,7 +301,7 @@ class SystemPromptAssemblyTest(unittest.TestCase):
     def test_loop_injects_assembly_into_system_prompt(self):
         ctx = Context(name="loop")
         install_system_prompt(ctx)
-        service = ctx.inject(SYSTEM_PROMPT_SERVICE)
+        service = ctx.get(SYSTEM_PROMPT_SERVICE)
         service.section("tool:goal", 114, "目标指引：{{mode}}")
         service.variable("mode", lambda ctx: "标准")
         adapter = _capture_adapter()

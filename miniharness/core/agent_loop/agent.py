@@ -647,10 +647,7 @@ class AgentLoop:
         request/header 的 system 字段与本方法同一来源，保证 header 与
         实际请求内容一致（上游 canonicalHeader 用 renderPrompt 结果）。"""
         parts = [self.system_prompt]
-        try:
-            system_prompt = self.ctx.inject("systemPrompt")
-        except KeyError:
-            system_prompt = None
+        system_prompt = self.ctx.get("systemPrompt")
         if system_prompt is not None:
             text = render_prompt(system_prompt.assemble(
                 {"agent": self, "session": self.session}))

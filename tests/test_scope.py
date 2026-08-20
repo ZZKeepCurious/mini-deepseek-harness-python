@@ -39,7 +39,7 @@ class TestCreateScope(unittest.TestCase):
         root = Context(name="root")
         root.provide("jobs", object())
         scope = root.create_scope("agent:1")
-        self.assertIsNotNone(scope.inject("jobs"))
+        self.assertIsNotNone(scope.get("jobs"))
 
         seen = []
         root.on("event", lambda p: seen.append(p))

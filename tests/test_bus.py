@@ -1,20 +1,28 @@
-"""第 2 章验收：插件上下文 + 事件总线 + 作用域。运行：python -m unittest discover -s tests -t ."""
+"""第 2 章验收：插件上下文 + 事件总线 + 作用域 + 注册表（Cordis 对齐）。
+运行：python -m unittest discover -s tests -t ."""
 
 import unittest
 
-from miniharness.core.scope import Context, PluginManager
+from miniharness.core.scope import Context, FiberState, RegistryService
 
 
 class TestBus(unittest.TestCase):
     def test_provide_inject(self):
         ctx = Context()
         ctx.provide("s", 42)
-        self.assertEqual(ctx.inject("s"), 42)
+        self.assertEqual(ctx.get("s"), 42)
 
-    def test_inject_missing_raises(self):
+    def test_get_missing_returns_none(self):
         ctx = Context()
-        with self.assertRaises(KeyError):
-            ctx.inject("nope")
+        self.assertIsNone(ctx.get("nope"))   # 对齐上游 get：未提供 → None（不抛 KeyError）
+
+    def test_get_strict_filters_inactive_provider(self):
+        ctx = Context()
+        fiber = ctx.plugin({"name": "p", "apply": lambda ctx, cfg: ctx.provide("s", 1)})
+        self.assertEqual(fiber.state, FiberState.ACTIVE)
+        self.assertEqual(ctx.get("s"), 1)
+        fiber.dispose()
+        self.assertIsNone(ctx.get("s"))      # 提供者非 ACTIVE → strict 返回 None
 
     def test_emit_order(self):
         ctx = Context()
@@ -63,54 +71,55 @@ class TestBus(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             ctx.provide("s2", 2)   # 已销毁，拒绝注册
 
-    def test_scope_visibility_up_chain(self):
+    def test_scope_visibility(self):
         root = Context()
         root.provide("svc", "global")
         a = root.create_scope("a")
-        self.assertEqual(a.inject("svc"), "global")
+        self.assertEqual(a.get("svc"), "global")   # 根服务全作用域可见
         a.provide("local", "A")
-        self.assertEqual(a.inject("local"), "A")
         b = root.create_scope("b")
-        with self.assertRaises(KeyError):
-            b.inject("local")   # 兄弟作用域不可见
+        # 兄弟作用域共享根标签（对齐上游全局 isolate store：scope 不提供服务，
+        # 进程级服务在根上对所有作用域可见）
+        self.assertEqual(b.get("local"), "A")
+        iso = a.isolate("local")   # 隔离作用域：name 换新标签解析
+        iso.provide("local", "B")
+        self.assertEqual(a.get("local"), "A")      # 原标签不受影响
+        self.assertEqual(iso.get("local"), "B")
+        self.assertEqual(b.get("local"), "A")
 
-    def test_plugin_manager_dependency_order(self):
+    def test_dependency_wakes_pending_fiber(self):
         root = Context()
-        manager = PluginManager(root)
-        activations = manager.activate([
-            {
-                "name": "consumer",
-                "inject": ["svc"],
-                "apply": lambda ctx: ctx.effect(lambda: None),  # 记录 svc 可用
-            },
-            {
-                "name": "provider",
-                "provides": ["svc"],
-                "apply": lambda ctx: ctx.provide("svc", 42),
-            },
-        ])
-        # provider 必须先于 consumer 激活（依赖驱动，而非手工排序）
-        self.assertEqual([n for n, _ in activations], ["provider", "consumer"])
-        self.assertEqual(root.inject("svc"), 42)
+        activations = []
+        consumer = root.plugin({
+            "name": "consumer",
+            "inject": ["svc"],
+            "apply": lambda ctx, cfg: activations.append(ctx.get("svc")),
+        })
+        # 依赖缺失 → 静默 PENDING，不激活
+        self.assertEqual(consumer.state, FiberState.PENDING)
+        provider = root.plugin({
+            "name": "provider",
+            "apply": lambda ctx, cfg: ctx.provide("svc", 42),
+        })
+        # 依赖满足 → provider 装载后唤醒 consumer（依赖驱动，而非手工排序）
+        self.assertEqual(provider.state, FiberState.ACTIVE)
+        self.assertEqual(consumer.state, FiberState.ACTIVE)
+        self.assertEqual(activations, [42])
+        self.assertEqual(root.get("svc"), 42)
 
-    def test_plugin_manager_cycle_raises(self):
+    def test_dependency_cycle_stays_pending(self):
         root = Context()
-        manager = PluginManager(root)
-        with self.assertRaises(RuntimeError):
-            manager.activate([
-                {"name": "p1", "inject": ["x"], "provides": ["y"], "apply": lambda ctx: None},
-                {"name": "p2", "inject": ["y"], "provides": ["x"], "apply": lambda ctx: None},
-            ])
+        p1 = root.plugin({"name": "p1", "inject": ["y"], "apply": lambda ctx, cfg: None})
+        p2 = root.plugin({"name": "p2", "inject": ["x"], "apply": lambda ctx, cfg: None})
+        self.assertEqual(p1.state, FiberState.PENDING)   # 环依赖 → 静默 PENDING（不抛错）
+        self.assertEqual(p2.state, FiberState.PENDING)
 
-    def test_plugin_manager_dispose_rolls_back(self):
+    def test_dispose_rolls_back_service(self):
         root = Context()
-        manager = PluginManager(root)
-        activations = manager.activate([
-            {"name": "p", "provides": ["svc"], "apply": lambda ctx: ctx.provide("svc", 1)},
-        ])
-        activations[0][1]()   # 卸载插件
-        with self.assertRaises(KeyError):
-            root.inject("svc")
+        fiber = root.plugin({"name": "p", "apply": lambda ctx, cfg: ctx.provide("svc", 1)})
+        self.assertEqual(root.get("svc"), 1)
+        fiber.dispose()
+        self.assertIsNone(root.get("svc"))   # 卸载 → 服务消失（strict get 回 None）
 
 
 if __name__ == "__main__":
