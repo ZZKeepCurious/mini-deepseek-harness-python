@@ -13,11 +13,15 @@ reflect）+ packages/core/scope（createScope）。
 监听器可以是普通同步函数，也可以是 async 函数；async 监听器会被 await，
 同步监听器直接调用。事件循环取自调用点的 running loop，不私建 loop。
 
-作用域（dsh-scope）：create_scope 铸一枚 fiber-backed 作用域子上下文，挂独立
-scope_key；dispose 逆序回滚，会话管理用 owner scope 路由事件。简化标注：上游
-作用域 fiber 都是 root 子节点，作用域父子关系走独立的 scopeParents 图 +
-scopeTarget 事件载波；mini 用上下文树近似（作用域 fiber 挂在调用方下，
-_listeners_for 祖先链即作用域链，事件上溯、旁支隔离）。
+作用域（dsh-scope，2026-08-20 Phase 4 全协议对齐）：create_scope 铸一枚 fiber-backed
+作用域子上下文（Scope 包装 {ctx, raw_dispose, dispose}，dispose 记忆化 quiesceFiber），
+挂独立 scope_key；scopeParents 图（bind_scope_parent/scope_parent_of/scope_chain_of）
+与 scope_target 事件载波（is_scope_carrier/carrier_key_of）替换上下文树近似——事件
+派发支持 this_arg 载波：未打标监听器全局接纳，打标监听器按"载波键或载波键祖先"
+接纳（事件只向上流、绝不向下）。scope 层存储（NamedEntries/AnonymousEntries/
+ScopedLayers）见 core/dsh_scope.py。保留载体差异（教学便捷，语义对齐）：scope_of
+沿 Context 的 parent 链近似原型继承；Context.create_scope 的 parent 缺省取最近
+enclosing scope（上游需显式传参）。
 
 fiber（2026-08-20 对齐 vendor/cordis/src/fiber.ts）：
   * Phase 1 —— 卸载半边：生命周期状态机 PENDING/LOADING/ACTIVE/FAILED/
@@ -73,6 +77,21 @@ import re
 import time
 from typing import Any, Awaitable, Callable
 
+from .dsh_scope import (
+    AnonymousEntries,
+    NamedEntries,
+    ScopedLayers,
+    Scope,
+    ScopeKey,
+    bind_scope_parent,
+    carrier_key_of,
+    create_scope as _dsh_create_scope,
+    is_scope_carrier,
+    scope_chain_of,
+    scope_of,
+    scope_parent_of,
+    scope_target,
+)
 from .schema import resolve_config
 
 _logger = logging.getLogger(__name__)
@@ -822,11 +841,6 @@ class Inject:
         return result
 
 
-def _scope_noop(ctx: "Context", config: Any = None) -> None:
-    """create_scope 的背衬 no-op 插件（对齐上游 createScope = ctx.plugin(scope)）。"""
-    return None
-
-
 class RegistryService:
     """插件注册表 + 动态依赖激活（对齐 vendor/cordis/src/registry.ts）。
 
@@ -1151,6 +1165,7 @@ class Context:
             self._registry = RegistryService(self)
             self._reflect_store: dict[object, dict] = {}   # 全局服务实现表（按 label 键控）
             self._reflect_labels: dict[str, object] = {}   # name → 默认 label（上游 root.isolate）
+            self._flat_hooks: dict[str, list[dict]] = {}   # 全局扁平 hook 表（dsh-scope 载波路由用）
             LoggerService(self)
         else:
             # 普通子上下文共享父 fiber（mini 实际只用 create_scope/plugin 建子上下文）
@@ -1169,11 +1184,13 @@ class Context:
 
     @property
     def scope_key(self) -> Any:
-        """作用域身份键：None = 根/无标号上下文；create_scope 产物有独立对象键。"""
-        return self._scope_key
+        """作用域身份键：None = 根/无标号上下文；create_scope 产物有独立对象键。
+        沿继承链（parent 链）取最近标号——上游 `ctx[kScope]` 原型继承等价，
+        作用域下挂载的插件上下文也归属该作用域。"""
+        return scope_of(self)
 
     def is_scope(self) -> bool:
-        return self._scope_key is not None
+        return self.scope_key is not None
 
     def _assert_alive(self) -> None:
         if self.fiber.uid is None or self.fiber.state in (
@@ -1239,7 +1256,7 @@ class Context:
             node = node.parent
         configs: list = []
         for node in reversed(nodes):
-            config = node.__dict__.get("_intercept")
+            config = getattr(node, "_intercept", {})
             if config and name in config:
                 configs.append(config[name])
         return configs
@@ -1334,15 +1351,28 @@ class Context:
 
     # ---------- 事件派发（四种模式） ----------
 
-    def on(self, event: str, fn: Callable) -> EffectDisposer:
-        """注册监听器，返回 disposer。"""
+    def on(self, event: str, fn: Callable, *, global_: bool = False) -> EffectDisposer:
+        """注册监听器，返回 disposer。
+
+        双写：祖先链路由（本上下文 _listeners）+ 根全局扁平 hook 表（dsh-scope
+        载波路由 _flat_hooks）。global_=True 的监听器无条件接收任何载波事件
+        （对齐上游 hook.global：绕过 filter）。
+        """
         self._assert_alive()
         self._listeners.setdefault(event, []).append(fn)
+        root = self.root
+        hook = {"ctx": self, "fn": fn, "global": global_}
+        root._flat_hooks.setdefault(event, []).append(hook)
 
         def disposer() -> None:
             lst = self._listeners.get(event)
             if lst and fn in lst:
                 lst.remove(fn)
+            hooks = root._flat_hooks.get(event)
+            if hooks:
+                for h in list(hooks):
+                    if h is hook:
+                        hooks.remove(h)
 
         return self.effect(lambda: disposer, f"ctx.on({event})")
 
@@ -1355,14 +1385,30 @@ class Context:
             node = node.parent
         return chain
 
-    def emit(self, event: str, payload: Any = None) -> None:
-        for fn in self._listeners_for(event):
+    def _hooks_for(self, event: str, this_arg: Any) -> list[Callable]:
+        """按派发目标解析监听器（对齐上游 events.dispatch 的 hook 收集）。
+
+        this_arg=None → 祖先链（mini 无载波普通事件的路由，文档标注）；载波 →
+        根扁平表 + 载波过滤（全局监听器无条件，打标监听器按载波键或键祖先）；
+        非载波对象（上游 thisArg 无 filter）→ 根扁平表全量。
+        """
+        if this_arg is None:
+            return self._listeners_for(event)
+        hooks = self.root._flat_hooks.get(event, [])
+        if not is_scope_carrier(this_arg):
+            return [h["fn"] for h in hooks]
+        admit = this_arg.admit
+        return [h["fn"] for h in hooks if h["global"] or admit(h["ctx"])]
+
+    def emit(self, event: str, payload: Any = None, *, this_arg: Any = None) -> None:
+        for fn in self._hooks_for(event, this_arg):
             fn(payload)
 
-    def waterfall(self, event: str, payload: Any = None) -> Any:
+    def waterfall(self, event: str, payload: Any = None, *,
+                  this_arg: Any = None) -> Any:
         """around-middleware：监听器签名 fn(payload, next)。
         调用 next(new) 继续下一位；不调用即短路，当前返回值就是最终决策。"""
-        listeners = self._listeners_for(event)
+        listeners = self._hooks_for(event, this_arg)
         idx = 0
 
         def step(cur: Any) -> Any:
@@ -1375,22 +1421,26 @@ class Context:
 
         return step(payload)
 
-    def parallel(self, event: str, payload: Any = None) -> list:
-        return [fn(payload) for fn in self._listeners_for(event)]
+    def parallel(self, event: str, payload: Any = None, *,
+                 this_arg: Any = None) -> list:
+        return [fn(payload) for fn in self._hooks_for(event, this_arg)]
 
-    def serial(self, event: str, payload: Any = None) -> list:
-        return [fn(payload) for fn in self._listeners_for(event)]
+    def serial(self, event: str, payload: Any = None, *,
+               this_arg: Any = None) -> list:
+        return [fn(payload) for fn in self._hooks_for(event, this_arg)]
 
     # ---------- 阶段 7：asyncio 变体 ----------
 
-    async def aemit(self, event: str, payload: Any = None) -> None:
+    async def aemit(self, event: str, payload: Any = None, *,
+                    this_arg: Any = None) -> None:
         """观察式异步派发：按注册序 await 每个监听器（async 监听器 await，同步直调）。"""
-        for fn in self._listeners_for(event):
+        for fn in self._hooks_for(event, this_arg):
             await _maybe_await(fn(payload))
 
-    async def awaterfall(self, event: str, payload: Any = None) -> Any:
+    async def awaterfall(self, event: str, payload: Any = None, *,
+                         this_arg: Any = None) -> Any:
         """流水线异步版：语义与 waterfall 相同（next() 委派、不调即短路）。"""
-        listeners = self._listeners_for(event)
+        listeners = self._hooks_for(event, this_arg)
         idx = 0
 
         async def step(cur: Any) -> Any:
@@ -1404,10 +1454,11 @@ class Context:
 
         return await step(payload)
 
-    async def aparallel(self, event: str, payload: Any = None) -> list:
+    async def aparallel(self, event: str, payload: Any = None, *,
+                        this_arg: Any = None) -> list:
         """并行异步版：全部监听器并发启动（asyncio.gather），结果按注册序返回。"""
         coros = []
-        for fn in self._listeners_for(event):
+        for fn in self._hooks_for(event, this_arg):
             result = fn(payload)
             if inspect.iscoroutine(result):
                 coros.append(result)
@@ -1417,10 +1468,11 @@ class Context:
                 coros.append(_const())
         return await asyncio.gather(*coros)
 
-    async def aserial(self, event: str, payload: Any = None) -> list:
+    async def aserial(self, event: str, payload: Any = None, *,
+                      this_arg: Any = None) -> list:
         """串行异步版：语义与 serial 相同（按注册序执行，async 监听器 await）。"""
         results = []
-        for fn in self._listeners_for(event):
+        for fn in self._hooks_for(event, this_arg):
             results.append(await _maybe_await(fn(payload)))
         return results
 
@@ -1441,18 +1493,21 @@ class Context:
             raise RuntimeError(f"上下文 {self.name} 不拥有其 fiber，无法拆解")
         return self.fiber.dispose()
 
-    def create_scope(self, name: str) -> "Context":
+    def create_scope(self, name: str = "scope",
+                     parent: object | None = None) -> Scope:
         """创建 fiber-backed 作用域子上下文（对齐上游 dsh-scope createScope）。
 
         底层经 ctx.plugin(noop) 铸造一枚独立 fiber：该 fiber 的拆解自动成为
         父 fiber 的一个 effect（'ctx.plugin()'）→ 父拆解时按序收回全部作用域。
-        dispose 幂等、可 await、竞态共享同一完成。
+        返回 Scope 包装 {ctx, raw_dispose, dispose}（dispose 记忆化 quiesceFiber：
+        拆解后等 fiber.inertia 排空；无运行 loop 时同步拆解）。包装 __getattr__
+        代理到 ctx——scope.scope_key/.on/.emit/.get 等直接可用。
 
-        简化标注：上游作用域 fiber 都是 root 子节点，作用域父子关系走独立的
-        scopeParents 图 + scopeTarget 事件载波；mini 用上下文树近似（作用域
-        fiber 挂在调用方下，_listeners_for 祖先链即作用域链，事件上溯）。
+        parent：显式传则经 bind_scope_parent 绑定（含环检测）；缺省取最近
+        enclosing scope（scope_of(self)，即嵌套 create_scope 自动成为上级 scope
+        的后裔，事件向父链上溯——上游需显式传参，为 mini 便捷，语义对齐）。
         """
-        fiber = self.registry.plugin({"name": name, "apply": _scope_noop}, parent=self)
-        child = fiber.context
-        child._scope_key = object()
-        return child
+        key = ScopeKey()
+        if parent is None:
+            parent = scope_of(self)
+        return _dsh_create_scope(self, key, parent=parent, name=name)

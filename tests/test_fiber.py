@@ -203,8 +203,8 @@ class TestFiberStateMachine(unittest.TestCase):
         s2 = root.create_scope("b")
         self.assertIsNot(s1.fiber, s2.fiber)
         self.assertNotEqual(s1.fiber.uid, s2.fiber.uid)
-        self.assertIs(s1.fiber.context, s1)
-        self.assertIs(s2.fiber.context, s2)
+        self.assertIs(s1.fiber.context, s1.ctx)
+        self.assertIs(s2.fiber.context, s2.ctx)
 
     def test_effect_rejected_after_dispose(self):
         ctx = Context()

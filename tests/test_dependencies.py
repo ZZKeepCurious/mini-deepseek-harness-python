@@ -1,7 +1,9 @@
 """步骤 4 验收：import 方向断言 + 顶层 API 收敛（对照 docs/architecture.md §3/§4）。
 
 用 stdlib AST 静态检查 miniharness/ 包内模块的导入边，钉死分层规则：
-L0 地基  = core/session、core/scope            （两者互不依赖）
+L0 地基  = core/session、core/scope、core/dsh_scope、core/schema、core/version
+          （同层叶模块互不依赖，core.scope↔core.schema / core.scope↔core.dsh_scope
+          有显式例外）
 L1 领域  = llm/*、core/tools、core/system_prompt、boot/*   （仅 L0）
 L2 编排  = core/agent_loop、compaction、commands、goal、jobs、plan、skills   （L0 + L1）
 L3 应用  = cli/*、protocol/*、seams/*、preset、extensions、interaction、client、web
@@ -27,6 +29,7 @@ PACKAGE_ROOT = pathlib.Path(miniharness.__file__).resolve().parent
 LAYER_UNITS = [
     ("core.session", 0),
     ("core.scope", 0),
+    ("core.dsh_scope", 0),
     ("core.schema", 0),
     ("core.version", 0),
     ("core.session_store", 1),
@@ -139,6 +142,10 @@ class ImportDirectionTest(unittest.TestCase):
                 if src_unit == "core.scope" and dst_unit == "core.schema":
                     # §5 显式例外：L0 基座叶模块——core.scope 的 config 求值依赖
                     # core.schema 的 resolve_config（两者同为 L0 叶，无更低层可落）
+                    continue
+                if src_unit == "core.scope" and dst_unit == "core.dsh_scope":
+                    # §5 显式例外：L0 基座叶模块——core.scope 是 dsh-scope 协议的
+                    # 门面（事件派发/服务层），协议本尊在 core.dsh_scope（同为 L0）
                     continue
                 if dst_layer >= src_layer:
                     violations.append(

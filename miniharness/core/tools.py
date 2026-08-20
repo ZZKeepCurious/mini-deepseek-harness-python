@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Callable
 
+from .dsh_scope import scope_chain_of, scope_of
 from .scope import Context, _maybe_await
 from .session import deep_freeze, is_json_safe
 
@@ -154,11 +155,16 @@ class ToolResult:
 # ---------- 作用域化注册表 ----------
 
 class ToolRegistry:
-    """可见性解析：自身注册 → 祖先作用域链 → 全局层。"""
+    """可见性解析：自身注册 → scope 键父链（scopeParents 图）→ 全局层。
+
+    作用域桶按 scope 键键控（对齐上游 dsh-scope scopeChainOf：注册挂在某
+    作用域键上，视图从任一 ctx 解析时沿 scope 键父链上溯，最近者胜）。
+    """
 
     def __init__(self, root: Context):
         self.root = root
         self._tools: dict[str, Tool] = {}
+        self._scoped: dict[object, dict[str, Tool]] = {}
         root.provide("tools", self)          # ctx.tools 服务
 
     def register(self, tool: Tool, scope: Context | None = None) -> Callable:
@@ -171,25 +177,27 @@ class ToolRegistry:
     def _bucket(self, scope: Context | None) -> dict:
         if scope is None:
             return self._tools
-        if not hasattr(scope, "_scoped_tools"):
-            scope._scoped_tools = {}
-        return scope._scoped_tools
+        key = scope_of(scope)
+        if key is None:
+            key = scope   # 无 scope 键的节点 → 对象级桶（保留旧 per-node 语义）
+        return self._scoped.setdefault(key, {})
+
+    def _chain(self, scope: Context | None) -> list:
+        if scope is None:
+            return []
+        return scope_chain_of(scope_of(scope))
 
     def resolve(self, name: str, scope: Context | None = None) -> Tool | None:
-        node = scope
-        while node is not None:
-            bucket = getattr(node, "_scoped_tools", {})
-            if name in bucket:
+        for key in self._chain(scope):
+            bucket = self._scoped.get(key)
+            if bucket and name in bucket:
                 return bucket[name]
-            node = node.parent
         return self._tools.get(name)
 
     def names(self, scope: Context | None = None) -> list[str]:
-        node = scope
         names: list[str] = []
-        while node is not None:
-            names.extend(getattr(node, "_scoped_tools", {}))
-            node = node.parent
+        for key in self._chain(scope):
+            names.extend(self._scoped.get(key, {}))
         names.extend(self._tools)
         return sorted(set(names))
 

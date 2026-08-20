@@ -19,11 +19,17 @@ mini 简化（有意保留，须在文档标注）：
   * session/event payload 为 {"session","event"} 单对象（上游 (session, event) 双参）；
     created / disposed / flush payload 为 {"session": s}
 
-scope 路由（2026-08-18 地基①，对齐上游 dsh-scope）：
-  * enter 记录 owner scope（owner_ctx = enter 时的调用上下文；缺省 store ctx）
-  * session/created|disposed|event|flush 在 owner scope 上派发：owner scope 自身 +
-    祖先链监听器收到（含 root/全局）；兄弟/后代作用域不收到。等价上游
-    `scopeTarget(session, scopeOf(ctx))` 的"祖先接收、旁支隔离"。
+scope 路由（2026-08-20 Phase 4 dsh-scope 全协议对齐，替换上下文树近似）：
+  * enter 铸造会话载波 carrier = scope_target(session, scope_of(owner_ctx or
+    store ctx))——键取 owner 作用域（上游 `scopeTarget(session, scopeOf(this.ctx))`
+    以 store 自身 ctx 的 scope 作键；mini 保留 owner_ctx 覆盖，正是上游文档承诺的
+    "agent-scoped listeners receive only sessions entered through that agent's
+    context"，见 session/index.ts:915）
+  * session/created|disposed|event|flush 经 store ctx 的全局扁平 hook 表 + 载波
+    过滤派发（this_arg=carrier）：未打标监听器（root/全局）全收；打标监听器按
+    "载波键或载波键祖先"接纳——事件只向上流、绝不向下，兄弟/后代作用域隔离
+  * payload 形状保持单对象（{"session":...} / {"session","event"}），已文档化
+    （上游 (session, event) 双参）
 """
 from __future__ import annotations
 
@@ -31,6 +37,7 @@ import os
 from typing import Any
 
 from .session.session import Session
+from .dsh_scope import scope_of, scope_target
 from .scope import Context
 
 __all__ = [
@@ -133,7 +140,7 @@ class SessionStore:
         entry = {
             "id": id,
             "session": session,
-            "owner_ctx": owner_ctx or self.ctx,
+            "carrier": scope_target(session, scope_of(owner_ctx or self.ctx)),
             "announced": False,
             "announcing": False,
             "appending": False,
@@ -167,7 +174,8 @@ class SessionStore:
         entry["announced"] = True
         entry["announcing"] = True
         try:
-            entry["owner_ctx"].emit("session/created", {"session": session})
+            self.ctx.emit("session/created", {"session": session},
+                          this_arg=entry["carrier"])
         finally:
             entry["announcing"] = False
             if entry["detachRequested"] and not entry["appending"]:
@@ -179,7 +187,8 @@ class SessionStore:
         同步近似：第一个抛出的监听器异常直接上抛（上游 allSettled 后抛第一个）。
         """
         entry = self._live_entry_for(session)
-        return len(entry["owner_ctx"].parallel("session/flush", {"session": session})) > 0
+        return len(self.ctx.parallel("session/flush", {"session": session},
+                                     this_arg=entry["carrier"])) > 0
 
     # ---------- 查询 ----------
 
@@ -306,7 +315,8 @@ class SessionStore:
             return  # 派发中的 detach 已把条目摘走，就地短路
         entry["appending"] = True
         try:
-            entry["owner_ctx"].emit("session/event", {"session": session, "event": event})
+            self.ctx.emit("session/event", {"session": session, "event": event},
+                          this_arg=entry["carrier"])
         except Exception as error:
             logger = getattr(self.ctx, "logger", None)
             if logger is not None and hasattr(logger, "warn"):
@@ -318,7 +328,8 @@ class SessionStore:
 
     def _emit_disposed(self, entry: dict) -> None:
         try:
-            entry["owner_ctx"].emit("session/disposed", {"session": entry["session"]})
+            self.ctx.emit("session/disposed", {"session": entry["session"]},
+                          this_arg=entry["carrier"])
         except Exception as error:
             logger = getattr(self.ctx, "logger", None)
             if logger is not None and hasattr(logger, "warn"):
