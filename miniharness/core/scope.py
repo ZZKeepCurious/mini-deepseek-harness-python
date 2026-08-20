@@ -46,6 +46,20 @@ store，按 (name 的隔离标签) 键控；_label_of 沿祖先链解析最近�
 依赖者）；服务可见性在 ACTIVE↔非 ACTIVE 转换时广播（对齐 fiber._updateState
 的 notify 段）。
 
+服务基类（2026-08-20 Phase 3 对齐 vendor/cordis/src/service.ts）：class Service
+子类构造时即经 ctx.provide 自动登记，随 fiber 自动注销；定义 _invoke 方法则该
+服务可调用（如 ctx.logger(name)）；_check 提供可用性谓词、_init 构造后运行
+（对齐 [init]）。intercept（对齐 context.ts）：ctx.intercept(name, config) 返回
+子上下文，携带该服务的一条 intercept 配置；Service._resolve_config 沿祖先链
+合并（近根者优先，base 前置、head 后置），供插件下方装载的子插件取用。
+
+日志（2026-08-20 Phase 3 对齐 vendor/cordis/src/logger.ts）：ctx.logger 内建
+服务（LoggerService extends Service，可调用）：ctx.logger(name) 铸具名 Logger
+门面（error/info/warn/debug，printf 风格 %s %d %f %o %c %%）；门面本身按
+exporter.levels[name]/default/自身 level 过滤；exporter 注册即 effect，默认
+缓冲导出器（bufferSize 1000）。LoggerService.error(...) 等直接以当前 fiber 名
+（hyphenate）记录。
+
 注意：effect() 调用约定是上游形态（execute = body，返回值收集为 disposer），
 与早期 mini 的"effect(fn) 中 fn 即 disposer"相反——调用点迁移与理由见
 status/mini-harness/migration-log.md 与 AGENTS.md 差异清单。
@@ -55,6 +69,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import re
+import time
 from typing import Any, Awaitable, Callable
 
 from .schema import resolve_config
@@ -920,6 +936,203 @@ class RegistryService:
         return Fiber(parent, config, inject, runtime, name=name)
 
 
+class Service:
+    """服务基类（对齐 vendor/cordis/src/service.ts）。
+
+    子类构造时调用 super().__init__(ctx, name)：立即经 ctx.provide(name, self)
+    登记，随拥有 fiber 自动注销。子类可定义：
+      _invoke   —— 实例可调用（如 ctx.logger(name) 铸子 Logger）
+      _check    —— 可用性谓词，透传给 provide（对齐 [check]）
+      _init     —— 构造后运行（类插件场景，对齐 [init]）
+    provide 类属性为缺省服务名（name 参数缺省时取用）。
+    """
+
+    provide: str | None = None
+
+    def __init__(self, ctx: "Context", name: str | None = None):
+        name = name or type(self).provide
+        if name is None:
+            raise TypeError("service must declare a name")
+        self.ctx = ctx
+        self.name = name
+        ctx.provide(name, self, getattr(self, "_check", None))
+        init = getattr(self, "_init", None)
+        if callable(init):
+            init()
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        invoke = getattr(self, "_invoke", None)
+        if invoke is None:
+            raise TypeError(f"service {self.name!r} is not callable")
+        return invoke(*args, **kwargs)
+
+    def _resolve_config(self, base: Any = None, head: Any = None,
+                        ctx: "Context | None" = None) -> dict:
+        """合并本服务祖先链的 intercept 配置（近根者优先；base 前置、head
+        后置），对齐 service.ts 的 [resolveConfig]（浅合并）。ctx 指定解析
+        上下文（日志 invoke 以访问方 ctx 解析），缺省用 self.ctx。"""
+        ctx = ctx or self.ctx
+        configs = list(ctx._resolve_intercept(self.name))
+        if base is not None:
+            configs.insert(0, base)
+        if head is not None:
+            configs.append(head)
+        merged: dict = {}
+        for config in configs:
+            if config:
+                merged.update(config)
+        return merged
+
+
+def _hyphenate(name: str) -> str:
+    """camelCase / snake_case / 空格 → kebab-case（对齐 cosmokit hyphenate）。"""
+    name = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1-\2", name)
+    name = re.sub(r"([a-z0-9])([A-Z])", r"\1-\2", name)
+    return name.replace("_", "-").replace(" ", "-").lower()
+
+
+class Logger:
+    """具名日志门面（对齐 vendor/cordis/src/logger.ts 的 Logger 类）。"""
+
+    def __init__(self, options: dict, service: "LoggerService"):
+        self.name: str = options["name"]
+        self.meta: dict | None = options.get("meta")
+        self.level: int | None = options.get("level")
+        self.service = service
+
+    def error(self, *args: Any) -> None:
+        self._log("error", 0, args)
+
+    def info(self, *args: Any) -> None:
+        self._log("info", 1, args)
+
+    def warn(self, *args: Any) -> None:
+        self._log("warn", 2, args)
+
+    def debug(self, *args: Any) -> None:
+        self._log("debug", 3, args)
+
+    def _log(self, type_: str, level: int, args: tuple) -> None:
+        if len(args) == 1 and isinstance(args[0], BaseException):
+            if args[0].__cause__ is not None:
+                getattr(self, type_)(args[0].__cause__)
+                return
+            errors = getattr(args[0], "errors", None)
+            if isinstance(errors, (list, tuple)):
+                for error in errors:
+                    getattr(self, type_)(error)
+                return
+        sn = self.service._sn_message
+        self.service._sn_message += 1
+        ts = int(time.time() * 1000)
+        message: dict = {
+            "sn": sn, "ts": ts, "type": type_, "level": level,
+            "name": self.name, "args": args,
+        }
+        if self.meta:
+            message.update(self.meta)
+        for exporter in list(self.service.exporters.values()):
+            target = (exporter.get("levels") or {}).get(
+                self.name, (exporter.get("levels") or {}).get("default",
+                                                              self.level if self.level is not None else 1))
+            if target < level:
+                continue
+            exporter["export"](message)
+
+
+class LoggerService(Service):
+    """内建日志服务（对齐 vendor/cordis/src/logger.ts LoggerService）。
+
+    可调用：ctx.get("logger")("name") 铸具名 Logger；ctx.get("logger").warn(...)
+    以当前 fiber 名（hyphenate）记录。默认缓冲导出器（bufferSize 1000）。
+    """
+
+    provide = "logger"
+    buffer_size = 1000
+
+    def __init__(self, ctx: "Context"):
+        self.buffer: list[dict] = []
+        self.exporters: dict[int, dict] = {}
+        self._sn_message = 0
+        self._sn_exporter = 0
+        super().__init__(ctx, "logger")
+        self.exporter({"colors": 3, "export": self._buffer_append})
+
+    def _buffer_append(self, message: dict) -> None:
+        self.buffer.append(message)
+        if len(self.buffer) > self.buffer_size:
+            self.buffer = self.buffer[-self.buffer_size:]
+
+    def exporter(self, exporter: dict) -> EffectDisposer:
+        """注册导出器，随当前 fiber 注销（对齐 ctx.logger.exporter()）。"""
+        def register() -> Callable:
+            self._sn_exporter += 1
+            self.exporters[self._sn_exporter] = exporter
+
+            def disposer() -> None:
+                self.exporters.pop(self._sn_exporter, None)
+
+            return disposer
+
+        return self.ctx.effect(register, "ctx.logger.exporter()")
+
+    def _invoke(self, name: str | None = None,
+                ctx: "Context | None" = None) -> Logger:
+        ctx = ctx or self.ctx
+        config = self._resolve_config(ctx=ctx)
+        fiber = ctx.fiber
+        name = name or config.get("name") or _hyphenate(fiber.name)
+        return Logger({
+            "name": name,
+            "level": config.get("level"),
+            "meta": {"fiber": fiber},
+        }, self)
+
+    def error(self, *args: Any) -> None:
+        self().error(*args)
+
+    def info(self, *args: Any) -> None:
+        self().info(*args)
+
+    def warn(self, *args: Any) -> None:
+        self().warn(*args)
+
+    def debug(self, *args: Any) -> None:
+        self().debug(*args)
+
+
+class _LoggerView:
+    """ctx.logger 属性视图：绑定访问上下文，intercept 从该上下文解析（对齐上游
+    traceable ctx.logger——invoke 以访问方 ctx 解析 [resolveConfig]，而非服务
+    构造时的根 ctx）。保持可调用 + error/info/warn/debug + exporter/buffer 面。"""
+
+    def __init__(self, service: LoggerService, ctx: "Context"):
+        self._service = service
+        self._ctx = ctx
+
+    def __call__(self, name: str | None = None) -> Logger:
+        return self._service._invoke(name, self._ctx)
+
+    def error(self, *args: Any) -> None:
+        self().error(*args)
+
+    def info(self, *args: Any) -> None:
+        self().info(*args)
+
+    def warn(self, *args: Any) -> None:
+        self().warn(*args)
+
+    def debug(self, *args: Any) -> None:
+        self().debug(*args)
+
+    def exporter(self, exporter: dict) -> EffectDisposer:
+        return self._service.exporter(exporter)
+
+    @property
+    def buffer(self) -> list[dict]:
+        return self._service.buffer
+
+
 class Context:
     """服务仓库 + 事件总线 + 可逆副作用容器（fiber 生命周期承载）。"""
 
@@ -929,6 +1142,7 @@ class Context:
         self.name = name
         self._listeners: dict[str, list[Callable]] = {}
         self._isolate: dict[str, object] = {}   # 隔离标签：name → label（仅本节点的遮蔽）
+        self._intercept: dict[str, Any] = {}    # intercept 配置：name → config（仅本节点的条目）
         self._scope_key: Any = None  # create_scope 打标的身份键（对齐上游 dsh-scope ScopeKey）
         if _fiber is not None:
             self.fiber = _fiber
@@ -937,6 +1151,7 @@ class Context:
             self._registry = RegistryService(self)
             self._reflect_store: dict[object, dict] = {}   # 全局服务实现表（按 label 键控）
             self._reflect_labels: dict[str, object] = {}   # name → 默认 label（上游 root.isolate）
+            LoggerService(self)
         else:
             # 普通子上下文共享父 fiber（mini 实际只用 create_scope/plugin 建子上下文）
             self.fiber = parent.fiber
@@ -994,9 +1209,55 @@ class Context:
         ctx.isolate()）。同一 label 传给两次 isolate 则共享同一作用域。
         返回共享父 fiber 的裸子上下文（mini 的 create_scope 另有 fiber 与事件层）。
         """
-        child = Context(parent=self, name=f"iso:{name}")
+        child = self.extend(name=f"iso:{name}")
         child._isolate[name] = label if label is not None else object()
         return child
+
+    def extend(self, meta: dict | None = None, *, name: str = "child") -> "Context":
+        """创建共享本 fiber 的裸子上下文，携带给定自有属性（对齐上游
+        ctx.extend(meta)：父上下文不被修改，子上下文原型继承——mini 以父链近似，
+        事件经 _listeners_for 上溯，隔离标签经 _label_of 上溯）。"""
+        child = Context(parent=self, name=name, _fiber=self.fiber)
+        for key, value in (meta or {}).items():
+            setattr(child, key, value)
+        return child
+
+    def intercept(self, name: str, config: Any) -> "Context":
+        """返回子上下文：在其下方装载的插件可见服务 name 的额外 intercept
+        配置（对齐上游 ctx.intercept(name, config)）。父上下文不被修改。"""
+        child = self.extend(name=f"intercept:{name}")
+        child._intercept = {name: config}
+        return child
+
+    def _resolve_intercept(self, name: str) -> list:
+        """收集 name 的祖先链 intercept 配置（近根者优先），对齐 service.ts
+        [resolveConfig] 的 prototype 链走查（own 条目 unshift 语义）。"""
+        nodes: list[Context] = []
+        node: Context | None = self
+        while node is not None:
+            nodes.append(node)
+            node = node.parent
+        configs: list = []
+        for node in reversed(nodes):
+            config = node.__dict__.get("_intercept")
+            if config and name in config:
+                configs.append(config[name])
+        return configs
+
+    @property
+    def logger(self) -> "_LoggerView | None":
+        """内建日志服务（对齐上游 ctx.logger 属性访问；返回绑定本上下文的视图）。
+        可写：显式赋值（含 None）遮蔽服务视图（测试替身 / 宿主覆写场景）。"""
+        if "logger" in self.__dict__:
+            return self.__dict__["logger"]
+        service = self.get("logger")
+        if service is None:
+            return None
+        return _LoggerView(service, self)
+
+    @logger.setter
+    def logger(self, value: Any) -> None:
+        self.__dict__["logger"] = value
 
     def provide(self, key: str, value: Any, check: Callable | None = None) -> EffectDisposer:
         """提供服务，返回 disposer。同一标签下重复提供 = 冲突（fail loud，对齐上游

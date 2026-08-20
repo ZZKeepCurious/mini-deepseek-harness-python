@@ -312,7 +312,10 @@ class TestErrorContainment(unittest.TestCase):
         ctx = Context()
         ctx.effect(lambda: None, "first")
         ctx.effect(lambda: None, "second")
-        self.assertEqual(ctx.fiber.get_effects(), ["first", "second"])
+        labels = [label for label in ctx.fiber.get_effects()
+                  if not label.startswith("ctx.provide(")
+                  and label != "ctx.logger.exporter()"]
+        self.assertEqual(labels, ["first", "second"])
 
 
 if __name__ == "__main__":

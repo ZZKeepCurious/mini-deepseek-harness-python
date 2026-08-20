@@ -3,7 +3,7 @@
 
 import unittest
 
-from miniharness.core.scope import Context, FiberState, RegistryService
+from miniharness.core.scope import Context, FiberState, RegistryService, Service
 
 
 class TestBus(unittest.TestCase):
@@ -120,6 +120,144 @@ class TestBus(unittest.TestCase):
         self.assertEqual(root.get("svc"), 1)
         fiber.dispose()
         self.assertIsNone(root.get("svc"))   # 卸载 → 服务消失（strict get 回 None）
+
+
+class TestServiceBase(unittest.TestCase):
+    def test_subclass_auto_provides(self):
+        class Counter(Service):
+            provide = "counter"
+
+            def __init__(self, ctx, name=None):
+                self.value = 0
+                super().__init__(ctx, name)
+
+            def _invoke(self, delta=1):
+                self.value += delta
+                return self.value
+
+        ctx = Context()
+        counter = Counter(ctx)
+        self.assertEqual(ctx.get("counter"), counter)   # 构造即登记
+        self.assertEqual(counter(2), 2)                  # _invoke → 可调用
+        self.assertEqual(ctx.get("counter")(3), 5)
+
+    def test_service_disposed_with_fiber(self):
+        class Greeter(Service):
+            provide = "greeter"
+
+        root = Context()
+        fiber = root.plugin({
+            "name": "g",
+            "apply": lambda ctx, cfg: Greeter(ctx, "greeter"),
+        })
+        self.assertEqual(fiber.state, FiberState.ACTIVE)
+        self.assertIsInstance(root.get("greeter"), Greeter)
+        fiber.dispose()
+        self.assertIsNone(root.get("greeter"))   # 随拥有 fiber 自动注销
+
+    def test_non_callable_service_raises(self):
+        class Silent(Service):
+            provide = "silent"
+
+        ctx = Context()
+        service = Silent(ctx)
+        with self.assertRaises(TypeError):
+            service()
+
+    def test_missing_name_raises(self):
+        class Anon(Service):
+            pass
+
+        with self.assertRaises(TypeError):
+            Anon(Context())
+
+    def test_intercept_merges_root_first(self):
+        class Conf(Service):
+            provide = "conf"
+
+            def current(self):
+                return self._resolve_config()
+
+        root = Context()
+        first = root.intercept("conf", {"a": 1, "b": "root"})
+        child = first.intercept("conf", {"b": "child", "c": 3})
+        ctx = child.extend(name="leaf")
+        service = Conf(ctx)
+        merged = service.current()
+        self.assertEqual(merged, {"a": 1, "b": "child", "c": 3})   # 近根者优先，深层覆盖
+
+    def test_intercept_does_not_mutate_parent(self):
+        root = Context()
+        root.intercept("svc", {"x": 1})
+        self.assertEqual(root._resolve_intercept("svc"), [])        # 父上下文未被修改
+
+
+class TestLoggerService(unittest.TestCase):
+    def test_named_logger_facade(self):
+        ctx = Context()
+        logger = ctx.logger("tester")
+        self.assertEqual(logger.name, "tester")
+        for method in ("error", "info", "warn", "debug"):
+            self.assertTrue(callable(getattr(logger, method)))
+
+    def test_exporter_receives_messages(self):
+        ctx = Context()
+        received = []
+        ctx.logger.exporter({"export": received.append})
+        ctx.logger("tester").info("hello %s", "world")
+        self.assertEqual(len(received), 1)
+        message = received[0]
+        self.assertEqual(message["name"], "tester")
+        self.assertEqual(message["type"], "info")
+        self.assertEqual(message["level"], 1)
+        self.assertEqual(message["args"], ("hello %s", "world"))
+        self.assertIn("sn", message)
+        self.assertIn("ts", message)
+
+    def test_level_filtering(self):
+        ctx = Context()
+        received = []
+        ctx.logger.exporter({"levels": {"default": 2}, "export": received.append})
+        ctx.logger("tester").debug("no")
+        self.assertEqual(received, [])           # debug(3) < default(2) → 丢弃
+        ctx.logger("tester").warn("yes")
+        self.assertEqual(len(received), 1)
+
+    def test_service_level_method_uses_fiber_name(self):
+        ctx = Context()
+        received = []
+        ctx.logger.exporter({"export": received.append})
+        ctx.logger.info("direct")   # 默认 INFO 阈值：warn/debug 会被过滤（对齐上游）
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0]["type"], "info")
+        self.assertTrue(received[0]["name"])     # 以 fiber 派生名记录
+
+    def test_default_buffering_exporter(self):
+        ctx = Context()
+        ctx.logger("buffered").info("one")
+        ctx.logger("buffered").info("two")
+        self.assertEqual(len(ctx.logger.buffer), 2)
+        self.assertEqual(ctx.logger.buffer[1]["name"], "buffered")
+
+    def test_exporter_disposed_with_fiber(self):
+        root = Context()
+        received = []
+        fiber = root.plugin({
+            "name": "lp",
+            "apply": lambda ctx, cfg: ctx.logger.exporter({"export": received.append}),
+        })
+        self.assertEqual(fiber.state, FiberState.ACTIVE)
+        root.logger("tester").info("x")
+        self.assertEqual(len(received), 1)
+        fiber.dispose()
+        root.logger("tester").info("y")
+        self.assertEqual(len(received), 1)       # 导出器随 fiber 注销
+
+    def test_intercept_config_feeds_logger(self):
+        ctx = Context()
+        ctx = ctx.intercept("logger", {"name": "wired"})
+        logger = ctx.logger("")     # 经 ctx.logger 视图：intercept 从访问方 ctx 解析
+        self.assertEqual(logger.name, "wired")   # name 经 intercept 配置注入
 
 
 if __name__ == "__main__":
