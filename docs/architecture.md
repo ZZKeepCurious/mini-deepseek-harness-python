@@ -151,8 +151,11 @@ miniharness/
 | `client/trajectory.py` | `packages/client/ui-trajectory` | |
 | `web/envelope.py` | `packages/host/apiproxy/src/rpc.ts` | 四象限消息联合 + RPC_ERROR_CODES 39 码；server-request 全形 |
 | `web/api.py` | `packages/host/apiproxy/src/api-proxy.ts`（session 域）| WebApi unary 方法 + 路由表；`session/queue` placement 三态 |
-| `web/streams.py` | `packages/host/apiproxy/src/api-proxy.ts`（events.mux / events.host / queueItems）| mux 基线 + host 实时 + splice 重投影 queue 快照（api-proxy.ts:1300-1323） |
-| `web/server.py` | `packages/host/apiproxy/src/fetch/handler.ts` | SSE + POST 载体状态码；无 /api/respond、无 session.export、无 CORS、载荷校验在 WebApi 内（简化标注见模块 docstring） |
+| `web/streams.py` | `packages/host/apiproxy/src/api-proxy.ts`（events.mux / events.host / queueItems）| mux 基线 + host 实时 + splice 重投影 queue 快照（api-proxy.ts:1300-1323）；每帧独立 rpcId（frame() 每帧 randomUUID），approval 帧复用 pending 稳定 id |
+| `web/approvals.py` | `packages/host/apiproxy`（approval 通道：api-proxy.ts + api/approvals.ts）| 审批桥：tools/ask 问询 → approval/requested|resolved mux 帧 + respond（RpcReceipt）+ 重连重放 + dispose 结算 cancelled；接线点在工具闸门（上游在 approval/request，教学简化） |
+| `web/server.py` | `packages/host/apiproxy/src/fetch/handler.ts` | SSE + POST 载体状态码 + `/api/respond`（RpcReceipt 回执）+ SPA 静态 fallback；无 session.export、无 CORS（上游同款：安全机制 = 415 跨站写围栏）、载荷校验在 WebApi 内（简化标注见模块 docstring） |
+| `web/frontend.py` | `packages/host/frontend-static` | 静态服务契约：遍历 403 / SPA 回退 200 / MIME 按扩展 / 未知扩展 octet-stream；index taps 恒 identity（无 boot-manifest） |
+| `web/static/`（index.html + app.js + style.css） | `packages/bundle/web-app` + `packages/client` | vanilla SPA（无构建步）：会话列表/创建、Trajectory 折叠、审批面板（/api/respond）、命令/配置、队列/作业面板；React monorepo 复现标注教学简化 |
 | `web/launcher.py` | `packages/host/webserver`（Config：host 两值 + port 0）| host/port 读 MINIHARNESS_WEB_HOST/PORT（上游组合配置节，简化标注） |
 | `protocol/acp.py` | `packages/acp/acp` | |
 | `protocol/sdk.py` | `packages/sdk/protocol` + `sdk/server` | messageId 为真实消息 id（与 inbox 回执一致，官方 SDK 依赖）；互操作测试 `tests/test_upstream_sdk_interop.py`（需 pydantic + 上游 SDK 源码，缺则 skip） |

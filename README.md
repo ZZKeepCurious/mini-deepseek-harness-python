@@ -40,7 +40,7 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 | System prompt sections (ordered section registration + rendering into each request) | `core/system-prompt` |
 | Boot & composition (YAML/JSON overlays, `!!js` env interpolation, startup assertions) | `packages/boot` |
 | Headless one-shot entry (`--profile headless "task"`: stdout final text, exit code by turn/end reason) | `packages/bundle/headless` + `apps/cli` |
-| Web transport layer (`--profile web`: four-quadrant RPC envelope, WebApi unary session service, mux/host SSE event streams with splice-reprojected queue snapshots, FastAPI carrier mirroring `handler.ts` status-code chain; browser frontend not reproduced) | `packages/host/apiproxy` + `host/webserver` |
+| Web transport layer + browser SPA (`--profile web`: four-quadrant RPC envelope, WebApi unary session service, mux/host SSE event streams with splice-reprojected queue snapshots and per-frame rpcId, approval bridge (`approval/requested\|resolved` mux frames + `POST /api/respond` RpcReceipt), FastAPI carrier mirroring `handler.ts` status-code chain + `/api/respond` + frontend-static contract, vanilla SPA (session list/create, Trajectory fold, approval panel, command/config, queue/jobs panel)) | `packages/host/apiproxy` + `host/frontend-static` + `host/webserver` |
 | Launcher options (`--patch`, `--dump-config` / `--dump-default-config`, read-only composition dump) | `apps/cli/src/args.ts` |
 | Session management CLI (`miniharness sessions` list/resume/delete; mini teaching extension) | web surface (upstream) |
 | Session store service (`ctx.sessions`: create/prepare/enter/announce lifecycle, fork with 5 error codes, flush checkpoint, `session/created|disposed|event|flush` events) | `packages/core/session` (SessionStore) |
@@ -52,9 +52,9 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 | Async event bus, true parallel tools + barrier | `core/agent-loop` |
 | CI (GitHub Actions, Python 3.10~3.13, integration-tagged real-API tests) | — |
 
-Planned: the browser frontend (`packages/client`) is deprioritized; the web transport layer is implemented.
+Planned: the upstream browser frontend (`packages/client`, React monorepo) is not reproduced verbatim; its wire surface is fully aligned (an upstream client pointed at the mini backend works) and a vanilla SPA (no build step) ships as the consumer.
 
-Status: **945 unit tests passing** (stdlib-first; `httpx` for the DeepSeek SSE transport, optional `pyyaml` for YAML config, optional `[web]` extra for the HTTP/SSE transport layer).
+Status: **988 unit tests passing** (stdlib-first; `httpx` for the DeepSeek SSE transport, optional `pyyaml` for YAML config, optional `[web]` extra for the HTTP/SSE transport layer).
 
 ## Getting started
 
@@ -134,7 +134,8 @@ mini-deepseek-harness-python/
 │   │   └── session_cmds.py  # session list / resume / delete
 │   ├── protocol/            # acp / sdk / hooks bridges
 │   ├── seams/               # sandbox / credentials / subagent seams
-│   ├── web/                 # apiproxy subset: envelope / api / streams / server / launcher
+│   ├── web/                 # apiproxy subset: envelope / api / streams / approvals / server / frontend / launcher
+│   ├── web/static/          # vanilla SPA browser frontend (index.html / app.js / style.css)
 │   ├── preset/  extensions/  interaction/  client/
 │   ├── demo.py              # end-to-end demo
 │   └── example_plugins.py   # boot demo plugins

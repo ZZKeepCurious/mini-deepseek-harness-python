@@ -92,7 +92,7 @@ headless 一次性任务入口（`miniharness/cli/headless.py` + `cli/main.py`�
 
 协议入口最小子集：JSON-RPC 信封（`miniharness/protocol/sdk.py`，21 测试，07 章 §7.6）、ACP（`miniharness/protocol/acp.py`，26 测试，07 章 §7.7）、hooks 桥（`miniharness/protocol/hooks.py`，40 测试，07 章 §7.8）。
 
-web 传输层（`miniharness/web/`，07 章 §7.5，提交 A~E）：四象限 RPC 信封（`envelope.py`，39 码错误集）、WebApi unary 会话服务（`api.py`）、mux/host SSE 事件流 + session/queue splice 重投影（`streams.py`）、FastAPI 载体与 SSE 传输（`server.py`，对齐 handler.ts 状态码链）、`--profile web` 启动器（`launcher.py` + `cli/main.py`）。浏览器前端（`packages/client`）留在观察清单。
+web 传输层（`miniharness/web/`，07 章 §7.5，提交 A~F）：四象限 RPC 信封（`envelope.py`，39 码错误集）、WebApi unary 会话服务（`api.py`）、mux/host SSE 事件流 + session/queue splice 重投影（`streams.py`，每帧独立 rpcId）、审批桥（`approvals.py`：tools/ask 问询 → approval/requested|resolved mux 帧 + `POST /api/respond` RpcReceipt + 重连重放 + dispose 结算）、静态服务契约（`frontend.py`，对齐 frontend-static）、FastAPI 载体与 SSE 传输（`server.py`，对齐 handler.ts 状态码链 + /api/respond + SPA fallback）、vanilla SPA 浏览器前端（`web/static/`：会话列表/创建、Trajectory 折叠、审批面板、命令/配置、队列/作业面板）、`--profile web` 启动器（`launcher.py` + `cli/main.py`）。后端 wire 已全对齐（上游客户端指向 mini 后端可工作）；React monorepo 复现标注教学简化。
 
 异步化与并行工具执行（`miniharness/core/agent_loop/tool_calls.py` + core/scope async 变体 + `execution_mode` 分类器，36 测试，手册 12 章）——屏障/滚动池/模型序提交/取消排干与上游 `agent-loop/src/tool-calls.ts` 逐条对齐。
 
@@ -232,7 +232,7 @@ tools/pre-execute 瀑布（core/tools）→ 返回 {kind:'ask'}（PreToolDecisio
 
 ### 5.4 mini 对照
 
-mini 已复现审批层：`ask/never` 两档、'never' 在派发前由服务自身确定性拒绝、审计事件 `approval/asked|decided` turn-enclosed 且 log-only 非 surface、`approval/policy` 最后一条胜出纯 fold、无 answerer/抛错/非词汇表返回值归一化 'unavailable' fail closed、'allowed-once' 无跨调用豁免（手册 09 章）。
+mini 已复现审批层：`ask/never` 两档、'never' 在派发前由服务自身确定性拒绝、审计事件 `approval/asked|decided` turn-enclosed 且 log-only 非 surface、`approval/policy` 最后一条胜出纯 fold、无 answerer/抛错/非词汇表返回值归一化 'unavailable' fail closed、'allowed-once' 无跨调用豁免（手册 09 章）。**web 人工通道已复现**（`web/approvals.py`）：接在工具管线闸门 `tools/ask` 而非上游的 `approval/request`（教学简化），wire 契约一致——pending 稳定 rpcId、`approval/requested` mux 帧、浏览器 `POST /api/respond` 回显 rpcId 得 RpcReceipt、结算广播 `approval/resolved`、重连重放复用 rpcId、网关 dispose 全 pending 'cancelled'（手册 07 章 §7.5.5）。
 
 ## 议题 6：运行时自我修改
 

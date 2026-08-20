@@ -108,9 +108,10 @@ class TestUnaryCarrier(WebServerTest):
         response = self.client.put("/api/host.describe")
         self.assertEqual(response.status_code, 404)
 
-    def test_non_api_path_404(self):
+    def test_non_api_path_non_get_405(self):
+        # /api2/ 不在 /api/ 下 → 静态服务 fallback（frontend-static）：非 GET/HEAD → 405
         response = self.client.post("/api2/host.describe")
-        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.status_code, 405)
 
     def test_non_json_media_type_415(self):
         response = self.client.post("/api/host.describe", content="{}",
@@ -191,12 +192,14 @@ class TestSse(WebServerTest):
                 if (frame["method"] == "session/event"
                         and frame["payload"]["event"]["type"] == "turn/end"):
                     break
-        # 流级单一 rpcId；server-request 全形；method = 帧 type
+        # 每帧独立 rpcId（对齐上游 frame() 每帧 randomUUID）；rpcId 只活在外层
+        # envelope 上，payload 不含它；method = 帧 type
         rpc_ids = {frame["rpcId"] for frame in frames}
-        self.assertEqual(len(rpc_ids), 1)
+        self.assertGreater(len(rpc_ids), 1)
         for frame in frames:
             self.assertEqual(frame["type"], "server-request")
             self.assertEqual(frame["method"], frame["payload"]["type"])
+            self.assertNotIn("rpcId", frame["payload"])
         types = [frame["method"] for frame in frames]
         self.assertIn("session/event", types)
         self.assertTrue(any(frame["method"] == "session/event"
@@ -216,6 +219,165 @@ class TestSse(WebServerTest):
     def test_sse_post_method_404(self):
         response = self._post("events.mux")
         self.assertEqual(response.status_code, 404)
+
+
+class TestRespondCarrier(WebServerTest):
+    """POST /api/respond 的载体契约（approval 的 client-response 入口）。"""
+
+    def _respond(self, body: dict):
+        return self.client.post("/api/respond", json=body)
+
+    def test_respond_not_pending(self):
+        response = self._respond({"type": "client-response", "rpcId": "ghost",
+                                  "result": {"ok": True, "value": {
+                                      "sessionId": "s", "approvalId": "a",
+                                      "outcome": "allowed-once"}}})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"accepted": False, "reason": "not-pending"})
+
+    def test_respond_invalid_envelope_bad_response(self):
+        # 信封不合法 / 非 client-response → 200 bad-response 回执（handler.ts 同款）
+        response = self._respond({"type": "client-request", "method": "x", "payload": {}})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"accepted": False, "reason": "bad-response"})
+        response = self._respond({"rpcId": "r"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"accepted": False, "reason": "bad-response"})
+
+    def test_respond_non_json_415(self):
+        response = self.client.post("/api/respond", content="{}",
+                                    headers={"content-type": "text/plain"})
+        self.assertEqual(response.status_code, 415)
+
+    def test_respond_bad_json_400(self):
+        response = self.client.post("/api/respond", content="not json",
+                                    headers={"content-type": "application/json"})
+        self.assertEqual(response.status_code, 400)
+
+    def test_respond_subpath_404(self):
+        response = self._respond({"type": "client-response", "rpcId": "x",
+                                  "result": {"ok": True, "value": {}}})
+        self.assertEqual(response.status_code, 200)
+        response = self.client.post("/api/respond/extra", json={})
+        self.assertEqual(response.status_code, 404)
+
+
+class TestStaticHttp(WebServerTest):
+    """非 /api/ 路径的静态服务载体（frontend-static 契约）。"""
+
+    def test_get_root_serves_spa(self):
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"].split(";")[0], "text/html")
+        self.assertIn("MiniHarness", response.text)
+
+    def test_get_asset_mime(self):
+        response = self.client.get("/app.js")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"].split(";")[0], "text/javascript")
+
+    def test_get_spa_route_fallback(self):
+        response = self.client.get("/some/client/route")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"].split(";")[0], "text/html")
+
+    def test_non_get_methods_405(self):
+        for method in ("POST", "PUT", "DELETE"):
+            response = self.client.request(method, "/not-an-api-path")
+            self.assertEqual(response.status_code, 405)
+
+
+@unittest.skipUnless(HAS_WEB, "需要 fastapi/uvicorn（pip install fastapi uvicorn，[web] extra）")
+class TestApprovalHttp(unittest.TestCase):
+    """端到端：工具 ask → mux approval/requested → POST /api/respond → 结算帧。"""
+
+    def setUp(self):
+        from miniharness.core.scope import Context
+        from miniharness.core.tools import Tool, ToolRegistry
+        from miniharness.llm.fake import FakeLlmAdapter
+        from miniharness.web.api import WebApi
+        from miniharness.web.server import create_app
+        from miniharness.web.streams import StreamHub
+
+        self.ctx = Context(name="approval-test")
+        self.tools = ToolRegistry(self.ctx)
+        self.tools.register(Tool(
+            name="echo", description="echo text",
+            execute=lambda args, exec_: {"echo": args.get("text", "")},
+            parameters={"type": "object", "properties": {"text": {"type": "string"}}},
+        ))
+        adapter = FakeLlmAdapter(tool_call={"name": "echo", "arguments": {"text": "hi"}})
+        adapter.model = "fake-model"
+        self.api = WebApi(self.ctx, adapter, self.tools)
+        self.hub = StreamHub(self.ctx, self.api)
+        self._server = _UvicornThread(create_app(self.api, self.hub))
+        self._server.start()
+        self._server.wait_started()
+        self.client = httpx.Client(base_url=f"http://127.0.0.1:{self._server.port}", timeout=15)
+
+    def tearDown(self):
+        self.client.close()
+        self._server.stop()
+        self.hub.dispose()
+        self.ctx.dispose()
+
+    def _create(self):
+        response = self.api.dispatch("session.create", "r-c", {"cwd": os.getcwd()})
+        self.assertTrue(response["result"]["ok"])
+        return response["result"]["value"]["sessionId"]
+
+    def test_respond_roundtrip(self):
+        sid = self._create()
+        loop = self.api._agents[sid]
+        loop.ctx.on("tools/pre-execute", lambda payload, nxt: {"kind": "ask"})
+        with self.client.stream("GET", "/api/events.mux") as response:
+            self.assertEqual(response.status_code, 200)
+            it = response.iter_lines()
+            self.assertEqual(next(it), ": connected")
+
+            prompt = self.client.post("/api/session.prompt", json={
+                "type": "client-request", "rpcId": "r-p", "method": "session.prompt",
+                "payload": {"sessionId": sid, "mode": "queue",
+                            "content": [{"type": "text", "text": "hi"}]},
+            })
+            self.assertEqual(prompt.status_code, 200)
+
+            requested = None
+            for _ in range(200):
+                line = next(it)
+                if not line.startswith("data: "):
+                    continue
+                frame = json.loads(line[6:])
+                if frame["method"] == "approval/requested":
+                    requested = frame
+                    break
+            self.assertIsNotNone(requested)
+            payload = requested["payload"]
+            self.assertEqual(payload["toolName"], "echo")
+
+            receipt = self.client.post("/api/respond", json={
+                "type": "client-response",
+                "rpcId": requested["rpcId"],
+                "result": {"ok": True, "value": {
+                    "sessionId": sid, "approvalId": payload["approvalId"],
+                    "outcome": "allowed-once",
+                }},
+            })
+            self.assertEqual(receipt.status_code, 200)
+            self.assertEqual(receipt.json(), {"accepted": True})
+
+            resolved = False
+            for _ in range(200):
+                line = next(it)
+                if not line.startswith("data: "):
+                    continue
+                frame = json.loads(line[6:])
+                if frame["method"] == "approval/resolved":
+                    self.assertEqual(frame["payload"]["outcome"], "allowed-once")
+                    self.assertEqual(frame["rpcId"], requested["rpcId"])
+                    resolved = True
+                    break
+            self.assertTrue(resolved)
 
 
 class TestLauncher(unittest.TestCase):

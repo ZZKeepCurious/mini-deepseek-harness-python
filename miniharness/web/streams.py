@@ -1,15 +1,17 @@
 """web 事件流：mux + host 两路下游帧（对齐 `packages/host/apiproxy/src/api/events.ts`）。
 
-两路流都是 `server-request` 窄形帧（rpcId 是发起方签发、应答回显的那个 id；
-纯推送帧里它标识这一帧本身）。mini 的 mux/host 帧不含 rpcId（教学简化：无
-approval/question 等可应答交互，纯推送帧的 rpcId 对消费方无意义）。
+两路流都是 `server-request` 窄形帧，且**每帧携带独立 rpcId**（对齐上游
+`frame(payload)`：`{rpcId: RpcId(randomUUID()), payload}`，纯推送帧每帧铸新）。
+可应答交互帧（approval/requested）例外：rpcId = pending 稳定 id，重连重放复用
+（对齐 api-proxy.ts 注释）。
 
-迭代 1 帧集（events.ts 子集）：
+帧集（events.ts 子集）：
   mux  = session/subscribed + session/event + session/queue + session/jobs
+         + approval/requested + approval/resolved
   host = host/session-added + host/session-removed + host/session-status
          + host/agent-error
-未实现：approval/*、question/*、session/projection、workspace/*、
-archived-sessions、host/remote-event、stream/error（无对应注册表/需应答交互）。
+未实现：question/*、session/projection、workspace/*、archived-sessions、
+host/remote-event（无对应注册表/需应答交互）。
 
 订阅语义（对齐上游）：
   * mux 打开时：为每个已挂 agent 的会话发 `session/subscribed` {sessionId,
@@ -33,18 +35,27 @@ archived-sessions、host/remote-event、stream/error（无对应注册表/需应
 AgentLoop 在自身 scope 上派发 agent/status|error；两者都沿父链到根 ctx，故
 hub 只需在根 ctx 注册监听。帧按目标集合（mux/host）分发到每个连接的队列。
 
-迭代 1 简化（须在 AGENTS.md 标注）：无 rpcId 字段；session/jobs
-来自 ctx.jobs 的 on_jobs_changed 回调（owner 恒为 AgentLoop，unowned 作业
-不落到任何会话）；无 since 恢复游标（重连 = 重开流 + 重拉 history）。
+迭代 1 简化（须在 AGENTS.md 标注）：无 since 恢复游标（重连 = 重开流 +
+重拉 history）；session/jobs 来自 ctx.jobs 的 on_jobs_changed 回调（owner 恒为
+AgentLoop，unowned 作业不落到任何会话）；approval 帧来自 web 审批桥（见
+`web/approvals.py`），纯推送帧的 rpcId 由 hub 每次铸新。
 """
 from __future__ import annotations
 
 import asyncio
 from typing import Any
 
+from .envelope import rpc_id
+
 __all__ = ["StreamHub"]
 
 QUEUE_CAPACITY = 1024
+
+
+def _mint(frame: dict) -> dict:
+    """给一帧补上独立 rpcId（上游 frame() 每帧 randomUUID()）。"""
+    frame["rpcId"] = rpc_id()
+    return frame
 
 
 class StreamHub:
@@ -57,6 +68,8 @@ class StreamHub:
     def __init__(self, ctx, api: Any):
         self.ctx = ctx
         self.api = api
+        self.approvals = api.approvals
+        self.approvals.hub = self
         self._mux: dict[asyncio.Queue, None] = {}
         self._host: dict[asyncio.Queue, None] = {}
         self._attached = False
@@ -87,6 +100,7 @@ class StreamHub:
             fn()
         self._disposers.clear()
         self._attached = False
+        self.approvals.dispose()
 
     def _broadcast(self, target: dict, frame: dict) -> None:
         for queue in list(target):
@@ -95,6 +109,13 @@ class StreamHub:
             except asyncio.QueueFull:
                 # 慢消费者丢帧：帧流是幂等收敛的，重连重拉 history 即恢复
                 pass
+
+    def emit_mux(self, frame: dict) -> None:
+        """向所有 mux 连接广播一帧（rpcId 由调用方给出：可应答帧用稳定 id）。
+
+        供审批桥在 tools/ask 问询周期广播 approval/requested|resolved。
+        """
+        self._broadcast(self._mux, frame)
 
     # ---------- 两路生成器 ----------
 
@@ -108,13 +129,15 @@ class StreamHub:
                 session = self.api.store.get(session_id)
                 if session is None:
                     continue
-                queue.put_nowait({
+                queue.put_nowait(_mint({
                     "type": "session/subscribed",
                     "sessionId": session_id,
                     "lastSeq": session.seq,
-                })
+                }))
                 self._queue_snapshot(queue, session_id)
                 self._jobs_snapshot(queue, session_id)
+            # 可应答交互重放：仍挂起的审批补发（复用原 rpcId，对齐上游 mux-open）
+            self.approvals.replay_mux(queue)
             while True:
                 frame = await queue.get()
                 yield frame
@@ -140,9 +163,9 @@ class StreamHub:
         if session.session_id not in self.api._agents:
             return
         event = payload["event"]
-        self._broadcast(self._mux, {
+        self._broadcast(self._mux, _mint({
             "type": "session/event", "sessionId": session.session_id, "event": event,
-        })
+        }))
         if event.get("type") == "agent/inbox/spliced":
             self._queue_snapshot_into(session.session_id, event["data"])
 
@@ -176,7 +199,7 @@ class StreamHub:
             items.append({"id": message["id"], "placement": placement, "message": message})
         if not items:
             return
-        queue.put_nowait({"type": "session/queue", "sessionId": session_id, "items": items})
+        queue.put_nowait(_mint({"type": "session/queue", "sessionId": session_id, "items": items}))
 
     def _on_jobs_changed(self, owner: Any) -> None:
         session_id = getattr(owner, "id", None)
@@ -186,7 +209,7 @@ class StreamHub:
         if jobs is None:
             return
         snapshots = [self._job_view(job) for job in jobs.list(owner)]
-        frame = {"type": "session/jobs", "sessionId": session_id, "jobs": snapshots}
+        frame = _mint({"type": "session/jobs", "sessionId": session_id, "jobs": snapshots})
         for queue in list(self._mux):
             queue.put_nowait(frame)
 
@@ -198,7 +221,7 @@ class StreamHub:
         snapshots = [self._job_view(job) for job in jobs.list(loop)]
         if not snapshots:
             return
-        queue.put_nowait({"type": "session/jobs", "sessionId": session_id, "jobs": snapshots})
+        queue.put_nowait(_mint({"type": "session/jobs", "sessionId": session_id, "jobs": snapshots}))
 
     def _jobs_registry(self):
         try:
@@ -226,26 +249,26 @@ class StreamHub:
             frame["cwd"] = meta["cwd"]
         if meta.get("agentPreset") is not None:
             frame["agentPreset"] = meta["agentPreset"]
-        self._broadcast(self._host, frame)
+        self._broadcast(self._host, _mint(frame))
 
     def _on_session_disposed(self, payload: dict) -> None:
         session = payload["session"]
-        self._broadcast(self._host, {
+        self._broadcast(self._host, _mint({
             "type": "host/session-removed", "sessionId": session.session_id,
-        })
+        }))
 
     def _on_agent_status(self, payload: dict) -> None:
         agent = payload["agent"]
         status = payload.get("status")
-        self._broadcast(self._host, {
+        self._broadcast(self._host, _mint({
             "type": "host/session-status", "sessionId": agent.id, "running": status == "running",
-        })
+        }))
 
     def _on_agent_error(self, payload: dict) -> None:
         agent = payload["agent"]
         error = payload.get("error") or {}
         message = error.get("message") if isinstance(error, dict) else str(error)
-        self._broadcast(self._host, {
+        self._broadcast(self._host, _mint({
             "type": "host/agent-error", "sessionId": agent.id,
             "message": message if message else str(error),
-        })
+        }))

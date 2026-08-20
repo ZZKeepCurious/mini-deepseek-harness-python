@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MiniHarness web</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">MiniHarness</div>
+    <div id="describe" class="describe">…</div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="panel-head">
+        <h2>会话</h2>
+        <button id="btn-create" type="button">+ 新建</button>
+      </div>
+      <ul id="session-list" class="session-list"></ul>
+      <h2 class="panel-sub">队列 / 作业</h2>
+      <div id="queue-panel" class="queue-panel"><p class="muted">未选择会话</p></div>
+      <div id="jobs-panel" class="queue-panel"></div>
+    </aside>
+
+    <main class="main">
+      <div id="approval-panel" class="approval-panel"></div>
+      <div id="trajectory" class="trajectory"><p class="muted">选择或新建一个会话开始。</p></div>
+      <form id="prompt-form" class="prompt-form" autocomplete="off">
+        <input id="prompt-input" type="text" placeholder="输入消息或 /命令（回车发送）" autofocus>
+        <button type="submit">发送</button>
+      </form>
+    </main>
+  </div>
+
+  <div id="create-dialog" class="dialog-backdrop hidden">
+    <form id="create-form" class="dialog">
+      <h3>新建会话</h3>
+      <label>cwd（绝对路径）
+        <input id="create-cwd" type="text" required>
+      </label>
+      <label>sessionId（可选，留空自动生成）
+        <input id="create-id" type="text" placeholder="session-…">
+      </label>
+      <div class="dialog-actions">
+        <button type="button" id="create-cancel">取消</button>
+        <button type="submit">创建</button>
+      </div>
+    </form>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

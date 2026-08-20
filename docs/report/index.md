@@ -76,8 +76,8 @@ flowchart LR
 | `packages/boot/app-boot（loadOverlayPatches / loadEnv / config-dump）+ apps/cli/src/args.ts` | `boot/composition.py + cli/main.py` | 05 + 07 | 03 §5.5 |
 | `web 表面会话管理（上游无 CLI）` | `cli/session_cmds.py` | 07 | 04 议题 2 |
 | （工程化） | `.github/workflows/ci.yml + tests/test_real_api.py` | 00 | — |
-| `packages/host/apiproxy（rpc.ts + api-proxy.ts + fetch/handler.ts）+ host/webserver` | `web/`（envelope + api + streams + server + launcher） | 07 §7.5 | 04 议题 2 |
-| `packages/bundle/web-app` | （前端观察清单，见 ROADMAP；mini 复现其传输层） | 07 §7.5 | 04 议题 2 |
+| `packages/host/apiproxy（rpc.ts + api-proxy.ts + fetch/handler.ts + api/approvals.ts）+ host/frontend-static + host/webserver` | `web/`（envelope + api + streams + approvals + server + frontend + launcher） | 07 §7.5 | 04 议题 2 |
+| `packages/bundle/web-app` + `packages/client` | `web/static/`（vanilla SPA：会话/Trajectory/审批/命令/队列作业面板；React monorepo 复现标注教学简化） | 07 §7.5.5 | 04 议题 2 |
 | `packages/skill/（skill + skill-filesystem + tool-skill + skill-badge）` | `skills/`（registry + filesystem + tool_skill） | 13 | 04 议题 10 |
 
 ## 与教程手册的关系

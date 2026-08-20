@@ -116,6 +116,9 @@ class WebApi:
             self.store = SessionStore(ctx)
             ctx.provide("sessions", self.store)
         self._agents: dict[str, AgentLoop] = {}
+        # 审批桥：tools/ask 问询 → mux 帧 → POST /api/respond（hub 构造时挂入）
+        from .approvals import ApprovalBridge
+        self.approvals = ApprovalBridge(self)
 
     # ---------- 路由 ----------
 
@@ -155,6 +158,7 @@ class WebApi:
             detach()
             raise
         self._agents[session.session_id] = loop
+        self.approvals.install(loop)
         try:
             loop.start_driver()
         except RuntimeError:

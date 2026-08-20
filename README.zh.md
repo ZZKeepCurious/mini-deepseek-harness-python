@@ -38,7 +38,7 @@
 | system prompt 分节（有序节注册 + 渲染进每次请求） | `core/system-prompt` |
 | boot 与组合（YAML/JSON 补丁、`!!js` 环境变量插值、启动断言） | `packages/boot` |
 | headless 一次性任务入口（`--profile headless "task"`：stdout 最终文本、退出码按 turn/end reason） | `packages/bundle/headless` + `apps/cli` |
-| web 传输层（`--profile web`：四象限 RPC 信封、WebApi unary 会话服务、mux/host SSE 事件流（splice 重投影 queue 快照）、FastAPI 载体对齐 `handler.ts` 状态码链；浏览器前端未复现） | `packages/host/apiproxy` + `host/webserver` |
+| web 传输层 + 浏览器 SPA（`--profile web`：四象限 RPC 信封、WebApi unary 会话服务、mux/host SSE 事件流（splice 重投影 queue 快照 + 每帧独立 rpcId）、审批桥（`approval/requested\|resolved` mux 帧 + `POST /api/respond` RpcReceipt）、FastAPI 载体对齐 `handler.ts` 状态码链 + `/api/respond` + frontend-static 契约、vanilla SPA（会话列表/创建、Trajectory 折叠、审批面板、命令/配置、队列/作业面板）） | `packages/host/apiproxy` + `host/frontend-static` + `host/webserver` |
 | 启动器选项（`--patch`、`--dump-config` / `--dump-default-config`、只读组合导出） | `apps/cli/src/args.ts` |
 | 会话管理服务（`ctx.sessions`：create/prepare/enter/announce 生命周期、fork 五错误码、flush 检查点、`session/created|disposed|event|flush` 四事件） | `packages/core/session`（SessionStore） |
 | 会话管理 CLI（`miniharness sessions` 列表/恢复/删除；mini 教学扩展） | web 表面（上游） |
@@ -50,9 +50,9 @@
 | 异步事件总线、真并行工具 + 屏障 | `core/agent-loop` |
 | CI（GitHub Actions、Python 3.10~3.13、integration 标签真实 API 测试） | — |
 
-规划中：浏览器前端（`packages/client`）降级后置；web 传输层已实现。
+规划中：上游浏览器前端（`packages/client`，React monorepo）不复现原样——wire 面已全对齐（上游客户端指向 mini 后端可工作），以 vanilla SPA（无构建步）作为消费者落地。
 
-状态：**945 个单元测试全绿**（stdlib 优先；`httpx` 承载 DeepSeek SSE 传输，可选 `pyyaml` 用于 YAML 配置，可选 `[web]` extra 承载 HTTP/SSE 传输层）。
+状态：**988 个单元测试全绿**（stdlib 优先；`httpx` 承载 DeepSeek SSE 传输，可选 `pyyaml` 用于 YAML 配置，可选 `[web]` extra 承载 HTTP/SSE 传输层）。
 
 ## 快速开始
 
@@ -132,7 +132,8 @@ mini-deepseek-harness-python/
 │   │   └── session_cmds.py  # 会话 list / resume / delete
 │   ├── protocol/            # acp / sdk / hooks 桥
 │   ├── seams/               # 沙箱 / 凭据 / 子 agent 扩展口
-│   ├── web/                 # apiproxy 子集：envelope / api / streams / server / launcher
+│   ├── web/                 # apiproxy 子集：envelope / api / streams / approvals / server / frontend / launcher
+│   ├── web/static/          # vanilla SPA 浏览器前端（index.html / app.js / style.css）
 │   ├── preset/  extensions/  interaction/  client/
 │   ├── demo.py              # 端到端演示
 │   └── example_plugins.py   # boot 演示插件
