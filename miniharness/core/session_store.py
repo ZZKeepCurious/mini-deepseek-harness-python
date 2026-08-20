@@ -13,9 +13,8 @@
     INVALID_BOUNDARY / OPEN_TURN；boundary 缺省 = 源最后事件 seq（空会话 → 空 seed）
 
 mini 简化（有意保留，须在文档标注）：
-  * 无 Cordis fiber/effect：create = prepare + enter + announce 的顺序事务，announce
-    抛错时手动调 enter 返回的 detach 回滚（上游 effect 自动 yield 回滚；语义等价）
-  * 无 typert lookup 注册（mini 无 typert）
+  * create 已对齐上游 generator effect（enter 先 yield、announce 抛错自动回滚，
+    2026-08-20）；仍无 typert lookup 注册（mini 无 typert）
   * flush 为同步并行近似（上游 Promise.allSettled 后抛第一个失败；mini 首个异常直接上抛）
   * session/event payload 为 {"session","event"} 单对象（上游 (session, event) 双参）；
     created / disposed / flush payload 为 {"session": s}
@@ -83,15 +82,18 @@ class SessionStore:
         seedLength/origin/delegationDepth/agentPreset/createdAt），校验后传入
         Session.meta。id 缺省按 session-<n> 顺延去重。
         owner_ctx：会话的 owner scope（对齐上游 enter 处 scopeOf(ctx)）；缺省 store ctx。
+
+        对齐上游 index.ts:830-841：单一 generator effect（label `sessions.create()`）
+        归 store ctx 的 fiber——先 yield enter 的 detach 再 announce，`session/created`
+        监听器抛错时 effect 机制自动逆序回滚已 yield 的 detach（不再手动 try/except）。
         """
         session = self.prepare(id, options)
-        detach = self.enter(session, owner_ctx=owner_ctx)
-        try:
+
+        def body():
+            yield self.enter(session, owner_ctx=owner_ctx)
             self.announce(session)
-        except Exception:
-            # 发布公告失败即回滚：detach 附带配对的 session/disposed
-            detach()
-            raise
+
+        self.ctx.effect(body, "sessions.create()")
         return session
 
     def prepare(self, id: str | None = None, options: dict | None = None) -> Session:
