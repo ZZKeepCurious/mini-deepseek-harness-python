@@ -112,32 +112,28 @@ def resume_session(
     install_jobs(ctx)
     install_system_prompt(ctx)
     store = install_sessions(ctx)
-    # 三段式（对齐 headless）：先构造 agent scope，再把会话装进店内并公告，
-    # owner = loop.ctx（session/created|disposed|event|flush 按 owner 作用域路由）
+    # 三段式（对齐 headless / 上游 agent-loop 工厂）：prepare → 构造 loop →
+    # publish（enter + announce + agent/session-start；店成员资格归 loop）
     loop = AgentLoop(session, adapter, default_tools(ctx), ctx)
-    detach = store.enter(session, owner_ctx=loop.ctx)
-    try:
-        store.announce(session)
-    except Exception:
-        detach()
-        raise
+    loop.publish()
     first_seq = session.seq
     try:
         loop.followup(task)
+        for ev in session.events[base_count:]:
+            pers.append(session_id, dict(ev))
+        pers.flush()
+
+        text, reason = summarize(session.events, first_seq)
+        stdout.write(text + "\n")
+        if reason is not None and reason.get("kind") == "error":
+            error = reason.get("error") or {}
+            stderr.write(f"dsh: {error.get('code', 'UNKNOWN')}: {error.get('message', '')}\n")
+        exit_fn(0 if (reason is not None and reason.get("kind") == "completed") else 1)
     except Exception as error:  # 对齐 headless：意外失败 stderr 一行 + exit(1)
         stderr.write(f"dsh: {error}\n")
         exit_fn(1)
-        return
-    for ev in session.events[base_count:]:
-        pers.append(session_id, dict(ev))
-    pers.flush()
-
-    text, reason = summarize(session.events, first_seq)
-    stdout.write(text + "\n")
-    if reason is not None and reason.get("kind") == "error":
-        error = reason.get("error") or {}
-        stderr.write(f"dsh: {error.get('code', 'UNKNOWN')}: {error.get('message', '')}\n")
-    exit_fn(0 if (reason is not None and reason.get("kind") == "completed") else 1)
+    finally:
+        loop.dispose()
 
 
 def delete_session(session_id: str, root: Path, stdout: Any, stderr: Any) -> None:

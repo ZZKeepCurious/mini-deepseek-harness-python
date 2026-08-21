@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Callable
 
-from .dsh_scope import scope_chain_of, scope_of
+from .dsh_scope import NamedEntries, ScopedLayers, scope_of
 from .scope import Context, _maybe_await
 from .session import deep_freeze, is_json_safe
 
@@ -157,49 +157,61 @@ class ToolResult:
 class ToolRegistry:
     """可见性解析：自身注册 → scope 键父链（scopeParents 图）→ 全局层。
 
-    作用域桶按 scope 键键控（对齐上游 dsh-scope scopeChainOf：注册挂在某
-    作用域键上，视图从任一 ctx 解析时沿 scope 键父链上溯，最近者胜）。
+    存储用 dsh_scope.ScopedLayers + NamedEntries（对齐上游 tools/src/index.ts
+    的 `private readonly layers = new ScopedLayers(...)`）：全局层 + 精确 scope
+    层，读不创建层；resolve 沿 scope 键父链上溯、最近 scope 同名者胜。
+    注册即 effect（上游 "Registrations are effects"）：register 经
+    ScopedLayers.effect 挂到目标 ctx 的 fiber——返回值是精确 disposer，
+    且目标 fiber 拆解时自动注销（HMR 安全契约）。无 scope 键的节点并入
+    全局层（上游 scopeOf(ctx) 语义，无 per-node 桶）。
     """
 
     def __init__(self, root: Context):
         self.root = root
-        self._tools: dict[str, Tool] = {}
-        self._scoped: dict[object, dict[str, Tool]] = {}
+        self._layers = ScopedLayers(
+            lambda _scope: NamedEntries(
+                lambda name: RuntimeError(f"工具 {name} 已注册")),
+            on_change=lambda: None,
+        )
         root.provide("tools", self)          # ctx.tools 服务
 
     def register(self, tool: Tool, scope: Context | None = None) -> Callable:
-        bucket = self._bucket(scope)
-        if tool.name in bucket:
-            raise RuntimeError(f"工具 {tool.name} 已注册")
-        bucket[tool.name] = tool
-        return lambda: bucket.pop(tool.name, None)
+        """注册工具（scope=None → 全局层；否则挂到该 ctx 的 scope 层）。
 
-    def _bucket(self, scope: Context | None) -> dict:
-        if scope is None:
-            return self._tools
-        key = scope_of(scope)
-        if key is None:
-            key = scope   # 无 scope 键的节点 → 对象级桶（保留旧 per-node 语义）
-        return self._scoped.setdefault(key, {})
+        返回幂等撤销 disposer；同时归目标 ctx 的 fiber 所有——fiber 拆解
+        自动注销（对齐上游 registry register 返回 disposer + effect 归属）。
+        """
+        target = scope if scope is not None else self.root
 
-    def _chain(self, scope: Context | None) -> list:
-        if scope is None:
-            return []
-        return scope_chain_of(scope_of(scope))
+        def action(layer: NamedEntries) -> Callable[[], None]:
+            return layer.insert(tool.name, tool)
+
+        return self._layers.effect(target, action, f"tools.register({tool.name})")
+
+    def _lookup_key(self, scope: Context | None) -> Any:
+        """查找视角：显式 scope → 其键；缺省 → 注册表自身 root 的键。
+
+        对齐上游 dispatch 的 `resolveExecution(exec.name, exec.agent, …)`
+        （tools/src/index.ts:1277）：执行期可见性永远从调用方 agent 的 scope
+        解析（全局层 + 祖先链 + 自身层）。上游单注册表按 agent 出视图；mini
+        每实例注册表等价物即"缺省视角 = 本注册表 root 的 scope"。root 无键
+        （组合根）→ None → 仅全局层。
+        """
+        if scope is not None:
+            return scope_of(scope)
+        return scope_of(self.root)
 
     def resolve(self, name: str, scope: Context | None = None) -> Tool | None:
-        for key in self._chain(scope):
-            bucket = self._scoped.get(key)
-            if bucket and name in bucket:
-                return bucket[name]
-        return self._tools.get(name)
+        key = self._lookup_key(scope)
+        for layer in reversed(self._layers.chain_layers(key)):
+            tool = layer.get(name)
+            if tool is not None:
+                return tool
+        return self._layers.global_layer.get(name)
 
     def names(self, scope: Context | None = None) -> list[str]:
-        names: list[str] = []
-        for key in self._chain(scope):
-            names.extend(self._scoped.get(key, {}))
-        names.extend(self._tools)
-        return sorted(set(names))
+        merged = self._layers.merge(self._lookup_key(scope), lambda layer: layer)
+        return sorted(merged)
 
     def restrict(self, allow: set[str] | None = None, deny: set[str] | None = None) -> Callable[[str], bool]:
         """ToolRestriction：deny 优先，其次 allow 白名单（继承过滤）。"""

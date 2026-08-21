@@ -511,6 +511,9 @@ class SubagentContinuationManager:
             max_steps=self.parent.max_steps,
             max_parallel_tool_calls=self.parent.max_parallel_tool_calls,
         )
+        # publish（上游 agent-loop 工厂同款）：子会话进店 + 公告 +
+        # agent/session-start；店成员资格归子 loop，结算 dispose 即 detach
+        child.publish()
 
         # 子作用域自己的 system prompt 服务（mini 的 SystemPromptService 是
         # 全局单例非 scope-aware → 子作用域提供独立实例）
@@ -616,6 +619,10 @@ class SubagentContinuationManager:
             summary = settlement_summary(stop, child_id)
             self._persist_delta(child.session, start=activation["persisted"])
             self._persisted[child_id] = len(child.session.events)
+            # 先 loop.dispose（cancel + 拆 loop scope + detach 会话：离店 +
+            # session/disposed，对齐上游 agent-loop dispose 生命周期），再拆
+            # 子作用域 ctx（级联回已拆的 loop.scope，幂等）
+            child.dispose()
             activation["ctx"].dispose()
             self._activations.pop(child_id, None)
         # 锁外投递：先摘激活再投递，父 pump 可对同一子代理再次 send_message

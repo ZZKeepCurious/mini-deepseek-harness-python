@@ -41,6 +41,7 @@ from ..jobs import install_jobs, register_job_tools
 from ..skills import install_skills, register_skill_tools
 from ..core.system_prompt import install_system_prompt
 from ..core.session import Session, create_message, text_block
+from ..core.session_store import install_sessions
 from ..core.tools import ToolRegistry
 
 
@@ -220,10 +221,12 @@ class SdkRuntime:
                 install_jobs(ctx)
                 install_skills(ctx)
                 install_system_prompt(ctx)
+                install_sessions(ctx)
                 reg = ToolRegistry(Context(name="sdk"))
                 register_job_tools(reg, ctx.get("jobs"))
                 register_skill_tools(reg, ctx.get("skills"))
                 loop = AgentLoop(Session(session_id), self._adapter, reg, ctx)
+                loop.publish()
                 self._sessions[session_id] = loop
             blocks = params.get("contentBlocks")
             text = "".join(b.get("text", "") for b in blocks or []

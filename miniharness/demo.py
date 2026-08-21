@@ -42,7 +42,7 @@ def main() -> None:
     install_skills(ctx)
     install_system_prompt(ctx)
     store = install_sessions(ctx)
-    session = store.create("demo-001", {"meta": {"cwd": str(root)}})
+    session = store.prepare("demo-001", {"meta": {"cwd": str(root)}})
     reg = ToolRegistry(ctx)
     register_job_tools(reg, ctx.get("jobs"))
     register_skill_tools(reg, ctx.get("skills"))
@@ -61,6 +61,7 @@ def main() -> None:
         final_text="我执行了 ls -la，任务完成。",
     )
     loop = AgentLoop(session, adapter, reg, ctx, system_prompt="你是一个可靠的小助手。")
+    loop.publish()
 
     # ---- 跑一个回合 ----
     loop.followup("帮我看看目录里有什么")
@@ -80,6 +81,7 @@ def main() -> None:
     print("\n-- 模拟进程崩溃（未写 turn/end 就退出）--")
     crash_session = Session("demo-002")
     crash_loop = AgentLoop(crash_session, FakeLlmAdapter(final_text="快照"), reg, ctx)
+    crash_loop.publish()
     crash_session.append("turn/start", {"turn": 1})
     crash_session.append("user/message", create_message(
         "user", [text_block("这条消息刚发出就崩了")], {"kind": "user"},
@@ -97,9 +99,15 @@ def main() -> None:
     print(f"  最后一条事件: {last['type']} reason={last['data']['reason']}")
 
     print("\n-- 回放：从日志重建历史并继续对话 --")
+    print("\n-- 回放：从日志重建历史并继续对话 --")
+    crash_loop.dispose()   # 崩溃的 loop 退场（detach demo-002），恢复者接管同一 id
     resumed = AgentLoop(recovered, FakeLlmAdapter(final_text="恢复完成。"), reg, ctx)
+    resumed.publish()
     resumed.followup("继续刚才的任务")
     print(f"  最终回答: {resumed.last_response()}")
+
+    loop.dispose()
+    resumed.dispose()
 
     print("\n" + "=" * 60)
     print("演示完成。清理目录:", tmp)

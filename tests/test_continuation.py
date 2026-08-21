@@ -14,6 +14,7 @@ from miniharness.core.agent_loop.agent import AgentLoop
 from miniharness.core.scope import Context
 from miniharness.core.session import Session, create_message, text_block
 from miniharness.core.session.persistence import JsonlPersistence, SqlitePersistence
+from miniharness.core.session_store import install_sessions
 from miniharness.core.tools import Tool, ToolRegistry
 from miniharness.llm import FakeLlmAdapter, LlmFailure, StreamChunk
 from miniharness.seams.subagent.continuation import (
@@ -53,6 +54,7 @@ async def _wait_until(predicate, timeout=3.0):
 
 def _parent_loop(session_id="parent", adapter=None):
     ctx = Context()
+    install_sessions(ctx)
     reg = ToolRegistry(ctx)
     loop = AgentLoop(Session(session_id), adapter or FakeLlmAdapter(final_text="父响应"),
                      reg, ctx, system_prompt="你是父代理。")

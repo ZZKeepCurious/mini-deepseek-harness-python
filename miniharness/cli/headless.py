@@ -12,7 +12,8 @@
 5. **不开监听端口**；`ctx.appExit` 由启动器持有（mini 由 CLI 提供 exit 函数）。
 
 简化说明（有意保留）：上游 runner 经 Cordis 服务（agents / sessions / agentDefaultModel）
-创建 Agent；mini 经 ctx.sessions.create() 走同一服务面（prepare+enter+announce），
+创建 Agent；mini 经 sessions.prepare + loop.publish() 走同一服务面
+（enter + announce + agent/session-start，店成员资格归 loop、dispose 即 detach），
 但 Agent 本体仍是 Session + AgentLoop 直连（载体差异，契约不变）。
 """
 from __future__ import annotations
@@ -101,35 +102,32 @@ def run_headless(
     store = install_sessions(ctx)
     # 缺省 id 随机 uuid（上游 headless index.ts:112 `session-${randomUUID()}`，
     # 122 bit 熵；此前 12 hex = 48 bit 为分歧，已对齐）
-    # 三段式（对齐上游 agent-loop：prepare → 构造 agent scope → enter(owner=loop.ctx) → announce）：
-    # 会话 owner 是 agent 作用域，session/created|disposed|event|flush 按 owner 路由
+    # 三段式（对齐上游 agent-loop 工厂：prepare → 构造 loop → publish）：
+    # publish = enter + announce + agent/session-start，会话店成员资格归 loop
+    # 所有——dispose 时 detach（离店 + session/disposed）
     session = store.prepare(session_id or f"session-{uuid.uuid4()}",
                             {"meta": {"cwd": os.getcwd()}})
     loop = AgentLoop(session, adapter, tools, ctx)
-    detach = store.enter(session, owner_ctx=loop.ctx)
-    try:
-        store.announce(session)
-    except Exception:
-        detach()
-        raise
+    loop.publish()
     first_seq = session.seq
     try:
         loop.followup(task)
+        if persistence is not None:
+            for ev in session.events:
+                persistence.append(session.session_id, dict(ev))
+            persistence.flush()
+
+        text, reason = summarize(session.events, first_seq)
+        stdout.write(text + "\n")
+        if reason is not None and reason.get("kind") == "error":
+            error = reason.get("error") or {}
+            stderr.write(f"dsh: {error.get('code', 'UNKNOWN')}: {error.get('message', '')}\n")
+        exit_fn(0 if (reason is not None and reason.get("kind") == "completed") else 1)
     except Exception as error:  # 上游 run().catch(fail)：意外失败 stderr 一行 + exit(1)
         stderr.write(f"dsh: {error}\n")
         exit_fn(1)
-        return
-    if persistence is not None:
-        for ev in session.events:
-            persistence.append(session.session_id, dict(ev))
-        persistence.flush()
-
-    text, reason = summarize(session.events, first_seq)
-    stdout.write(text + "\n")
-    if reason is not None and reason.get("kind") == "error":
-        error = reason.get("error") or {}
-        stderr.write(f"dsh: {error.get('code', 'UNKNOWN')}: {error.get('message', '')}\n")
-    exit_fn(0 if (reason is not None and reason.get("kind") == "completed") else 1)
+    finally:
+        loop.dispose()
 
 
 def headless_main(task: str) -> None:

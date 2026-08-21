@@ -54,6 +54,7 @@ from ..skills import install_skills, register_skill_tools
 from ..core.system_prompt import install_system_prompt
 from ..core.agent_loop.agent import AgentLoop
 from ..core.session import Session, create_message, image_block, text_block
+from ..core.session_store import install_sessions
 from ..core.tools import ToolRegistry
 
 # ACP 与核心词汇共享的光栅格式（上游 content.ts IMAGE_MEDIA_TYPES）
@@ -342,10 +343,13 @@ class AcpServer:
         install_jobs(ctx)
         install_skills(ctx)
         install_system_prompt(ctx)
+        install_sessions(ctx)
         reg = ToolRegistry(ctx)
         register_job_tools(reg, ctx.get("jobs"))
         register_skill_tools(reg, ctx.get("skills"))
-        return AgentLoop(Session(session_id), self._adapter, reg, ctx)
+        loop = AgentLoop(Session(session_id), self._adapter, reg, ctx)
+        loop.publish()
+        return loop
 
     # ---------- prompt ----------
 

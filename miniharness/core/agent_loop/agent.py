@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Callable
 
+from ..dsh_scope import scope_target
 from ..scope import Context
 from ..system_prompt import render_prompt
 from ...llm import BlockAssembler, LlmAdapter, LlmFailure, StreamAborted
@@ -105,6 +106,16 @@ class AgentLoop:
         # dispose() 逆序回滚（会话管理按 owner scope 路由 session 事件）。
         self.scope = ctx.create_scope(f"agent:{session.session_id}")
         self.ctx = self.scope
+        # agent 事件载波（上游 dispatch.ts agentCarrier：scopeTarget(agent, agent)，
+        # subject 与 scope 键耦合不可分歧；mini 的 scope 键是 create_scope 铸的身份键
+        # 而非 agent 本体，故键取 loop 自己的 scope 键）。全部 agent/* 事件经此派发：
+        # 未打标监听器（root/全局）全收，打标监听器按"载波键或其祖先"接纳——
+        # 兄弟作用域隔离，事件只向上流。
+        self._carrier = scope_target(self, self.scope.scope_key)
+        # 会话店成员资格归本 loop 所有（上游 prepare().publish() 的 detachSession）：
+        # publish() 捕获 enter 的 detach disposer，dispose() 在拆 scope 后调用——
+        # 会话随 loop 生命周期进/离店。
+        self._detach_session: Callable[[], None] | None = None
         self.system_prompt = system_prompt
         self.max_steps = max_steps
         self.max_parallel_tool_calls = max_parallel_tool_calls   # 阶段 7：并行池上限（上游 DEFAULT_MAX_PARALLEL_TOOL_CALLS）
@@ -114,11 +125,14 @@ class AgentLoop:
         # 通知同时派发 ctx 事件（agent/inbox/inserted|discarded|claimed，扩展点）。
         self.inbox = Inbox(self.session, {
             "inserted": lambda message: self.ctx.emit(
-                "agent/inbox/inserted", {"agent": self, "message": message}),
+                "agent/inbox/inserted", {"agent": self, "message": message},
+                this_arg=self._carrier),
             "discarded": lambda message: self.ctx.emit(
-                "agent/inbox/discarded", {"agent": self, "message": message}),
+                "agent/inbox/discarded", {"agent": self, "message": message},
+                this_arg=self._carrier),
             "claimed": lambda message, turn: self.ctx.emit(
-                "agent/inbox/claimed", {"agent": self, "message": message, "turn": turn}),
+                "agent/inbox/claimed", {"agent": self, "message": message, "turn": turn},
+                this_arg=self._carrier),
         })
         self._turn_open = False
         self._continue = False
@@ -155,13 +169,49 @@ class AgentLoop:
         # resumes the parked queue"）
         self._parked = False
 
-    def dispose(self) -> None:
-        """拆解本 agent 的作用域：逆序回滚作用域上的全部注册（服务/监听器/effect）。
+    def publish(self, source: str = "startup") -> "AgentLoop":
+        """把本 agent 发布为运行态（上游 prepare().publish()，index.ts:556-570）：
 
-        对齐上游生命周期 owner 在 driver 退出后 unwind scope（machine.scope.dispose()）。
-        拆解后作用域拒绝进一步注册（fail loud）。会话本身（session.log）不受影响。
+        enter 会话（捕获 detach disposer 归本 loop 所有）→ announce 公告 →
+        派发 `agent/session-start`（载波路由）。announce 监听器抛错时回滚
+        enter（上游同款：throwing session/created listener rolls the attach
+        back）。会话必须未进店（prepare 产物）；已进店 → enter fail loud。
+
+        @param source 发布来源（上游 'startup' / resume 等调用方措辞）。
+        @returns self（便于链式装配）。
         """
+        sessions = self.ctx.get("sessions")
+        if sessions is None:
+            raise RuntimeError(
+                "publish requires the sessions service: install_sessions(ctx) first")
+        self._detach_session = sessions.enter(self.session)
+        try:
+            sessions.announce(self.session)
+        except Exception:
+            detach, self._detach_session = self._detach_session, None
+            detach()
+            raise
+        self.ctx.emit("agent/session-start",
+                      {"agent": self, "source": source}, this_arg=self._carrier)
+        return self
+
+    def dispose(self) -> None:
+        """拆解本 agent 的生命周期（上游 dispose，index.ts:497-520）：
+
+        cancel({kind:'disposed'}) 关闭在途回合与 inbox → 逆序回滚作用域上的
+        全部注册（服务/监听器/effect；拆解后作用域拒绝进一步注册）→ detach
+        会话（离店 + 补发 session/disposed）。幂等：detach disposer 单发，
+        scope.dispose 幂等。
+
+        载体差异（同步模型）：上游先 await whenIdle 再拆 scope；mini 取消是
+        协作式的，运行中回合在下一检查点中止——dispose 应在静默边界调用
+        （测试/shutdown 处理器均如此）。
+        """
+        self.cancel(cause="disposed")
         self.scope.dispose()
+        detach, self._detach_session = self._detach_session, None
+        if detach is not None:
+            detach()
 
     @property
     def id(self) -> str:
@@ -465,7 +515,8 @@ class AgentLoop:
             return
         self.status = status
         public = "idle" if status == "maintenance" else status
-        self.ctx.emit("agent/status", {"agent": self, "status": public})
+        self.ctx.emit("agent/status", {"agent": self, "status": public},
+                      this_arg=self._carrier)
 
     def _open_turn(self) -> None:
         self._set_status("running")
@@ -534,19 +585,21 @@ class AgentLoop:
                 if self._turn_end is not None and not self.inbox.next_step:
                     await self.ctx.aserial("agent/turn-stopping", {
                         "agent": self, "turn": self._turn, "signal": self._abort_proxy,
-                    })
+                    }, this_arg=self._carrier)
                 if self._turn_end is not None and not self.inbox.next_step:
                     break
         except LlmFailure as e:
             self._turn_end = {"kind": "error", "error": e.failure}
             self.ctx.emit("agent/error", {"agent": self, "turn": self._turn,
-                                          "step": self._step, "error": e.failure})
+                                          "step": self._step, "error": e.failure},
+                          this_arg=self._carrier)
             raise
         except Exception as e:
             failure = {"code": "UNKNOWN", "message": str(e)}
             self._turn_end = {"kind": "error", "error": failure}
             self.ctx.emit("agent/error", {"agent": self, "turn": self._turn,
-                                          "step": self._step, "error": failure})
+                                          "step": self._step, "error": failure},
+                          this_arg=self._carrier)
             raise
         finally:
             if self._turn_open:
@@ -558,7 +611,7 @@ class AgentLoop:
             "messages": claimed,
             "agent": self,
             "signal": self._abort_proxy,
-        })
+        }, this_arg=self._carrier)
         if isinstance(decision, dict) and decision.get("kind") == "reject":
             self._continue = False  # 复位：拒绝即终局（上游 agent.ts:267-269），避免泵循环跑无输入 step
             self._turn_end = {"kind": "blocked"}
@@ -667,7 +720,7 @@ class AgentLoop:
             "model": getattr(self.adapter, "model", None),
             "turn": turn, "step": step, "signal": self._abort_proxy,
         }
-        config = self.ctx.waterfall("agent/request", seed)
+        config = self.ctx.waterfall("agent/request", seed, this_arg=self._carrier)
         if not isinstance(config, dict) or not config.get("provider"):
             raise RuntimeError(
                 f'agent "{self.session.session_id}" has no provider/model: set '
@@ -719,7 +772,7 @@ class AgentLoop:
                     "failure": e,
                     "retryPolicy": getattr(self.adapter, "retry_policy", None),
                     "signal": self._abort_proxy,
-                })
+                }, this_arg=self._carrier)
                 if isinstance(action, dict) and action.get("kind") == "retry":
                     continue
                 raise
@@ -749,7 +802,7 @@ class AgentLoop:
                     "failure": exc,
                     "retryPolicy": getattr(self.adapter, "retry_policy", None),
                     "signal": self._abort_proxy,
-                })
+                }, this_arg=self._carrier)
                 if isinstance(action, dict) and action.get("kind") == "retry":
                     continue
                 raise exc

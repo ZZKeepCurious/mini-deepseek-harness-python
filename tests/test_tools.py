@@ -73,6 +73,37 @@ class TestRegistry(unittest.TestCase):
         self.assertFalse(pred("bash"))
         self.assertFalse(pred("write_file"))
 
+    def test_default_lookup_uses_registry_root_scope(self):
+        # 回归：注册表建在作用域上时，缺省 resolve/names 必须从 root 的 scope
+        # 解析（上游 dispatch 的 exec.agent 视角），而非只看全局层。
+        ctx = Context()
+        scope = ctx.create_scope("agent:x")
+        scope._isolate.setdefault("tools", object())
+        reg = ToolRegistry(scope)
+        reg.register(_make(lambda a, e: "ok"))
+        self.assertEqual(reg.names(), ["t"])
+        self.assertIsNotNone(reg.resolve("t"))
+
+    def test_fiber_dispose_unregisters_tool(self):
+        # 注册即 effect（HMR 契约）：目标 fiber 拆解自动注销。
+        ctx = Context()
+        scope = ctx.create_scope("agent:x")
+        scope._isolate.setdefault("tools", object())
+        reg = ToolRegistry(scope)
+        reg.register(_make(lambda a, e: 1, name="scoped"), scope=scope)
+        self.assertIn("scoped", reg.names(scope))
+        scope.dispose()
+        self.assertNotIn("scoped", reg.names(scope))
+
+    def test_nearest_scope_shadows_global(self):
+        ctx = Context()
+        reg = ToolRegistry(ctx)
+        reg.register(_make(lambda a, e: "global", name="x"))
+        a = ctx.create_scope("a")
+        reg.register(_make(lambda a, e: "local", name="x"), scope=a)
+        self.assertEqual(reg.resolve("x", scope=a).execute(None, None), "local")
+        self.assertEqual(reg.resolve("x").execute(None, None), "global")  # 缺省视角无键 → 全局
+
 
 class TestPipeline(unittest.TestCase):
     def test_success_frozen_result(self):

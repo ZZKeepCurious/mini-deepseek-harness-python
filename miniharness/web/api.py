@@ -99,9 +99,9 @@ class WebApi:
     """web 会话服务核心：session 域 unary 方法 + 路由表。
 
     装配：ctx（根上下文）、adapter、tools。`ctx.sessions` 存在则复用，否则自建
-    SessionStore（挂在根 ctx 上）。每个会话在 create 时挂一个常驻 AgentLoop
-    （driver 模式），owner 作用域 = loop 自己的 scope，session/* 事件沿
-    owner→根祖先链派发（mux 流订阅根即全量收）。
+    SessionStore（挂在根 ctx 上）。每个会话在 create 时经 loop.publish() 挂一个
+    常驻 AgentLoop（driver 模式），店成员资格归 loop 所有——loop.dispose 即
+    detach，列表只列活会话；session/* 事件以 store ctx 的 scope 为键载波派发。
     """
 
     def __init__(self, ctx: Context, adapter: LlmAdapter, tools: ToolRegistry | None = None,
@@ -150,12 +150,10 @@ class WebApi:
 
     def _attach(self, session: Session) -> AgentLoop:
         loop = AgentLoop(session, self.adapter, self.tools, self.ctx)
-        detach = self.store.enter(session, owner_ctx=loop.ctx)
-        try:
-            self.store.announce(session)
-        except Exception:
-            detach()
-            raise
+        # publish = enter + announce + agent/session-start（上游 agent-loop 工厂
+        # 同款）；店成员资格归 loop 所有，loop.dispose 即 detach（离店 +
+        # session/disposed）——web 会话列表只列活会话
+        loop.publish()
         self._agents[session.session_id] = loop
         self.approvals.install(loop)
         try:

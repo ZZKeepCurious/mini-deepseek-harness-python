@@ -31,9 +31,10 @@ host/remote-event（无对应注册表/需应答交互）。
     → host/session-status（maintenance 对事件公开为 idle），agent/error →
     host/agent-error（取 failure.message）。
 
-事件来源：SessionStore 在 owner scope 上派发 session/created|disposed|event，
-AgentLoop 在自身 scope 上派发 agent/status|error；两者都沿父链到根 ctx，故
-hub 只需在根 ctx 注册监听。帧按目标集合（mux/host）分发到每个连接的队列。
+事件来源：SessionStore 以 store ctx 的 scope 为键载波派发
+session/created|disposed|event，AgentLoop 以自身 scope 键为键载波派发
+agent/status|error；两者的载波键链都上溯到根，未打标的根监听器全量接纳，
+故 hub 只需在根 ctx 注册监听。帧按目标集合（mux/host）分发到每个连接的队列。
 
 迭代 1 简化（须在 AGENTS.md 标注）：无 since 恢复游标（重连 = 重开流 +
 重拉 history）；session/jobs 来自 ctx.jobs 的 on_jobs_changed 回调（owner 恒为
