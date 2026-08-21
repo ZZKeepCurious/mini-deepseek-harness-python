@@ -65,7 +65,7 @@ def validate_schema_value(schema: Any, value: Any) -> Any:
 class _Schema:
     """极简 schema 构建器（教学子集；实现 ~standard 协议读取面）。"""
 
-    __slots__ = ("_validate", "_label", "_default")
+    __slots__ = ("_validate", "_label", "_default", "_has_default")
 
     def __init__(self, validate: Callable[[Any], dict], label: str,
                  default: Any = None, has_default: bool = False):

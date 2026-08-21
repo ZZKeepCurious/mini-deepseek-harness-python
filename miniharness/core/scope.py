@@ -1351,30 +1351,53 @@ class Context:
 
     # ---------- 事件派发（四种模式） ----------
 
-    def on(self, event: str, fn: Callable, *, global_: bool = False) -> EffectDisposer:
+    def on(self, event: str, fn: Callable, *, global_: bool = False,
+           prepend: bool = False) -> EffectDisposer:
         """注册监听器，返回 disposer。
 
         双写：祖先链路由（本上下文 _listeners）+ 根全局扁平 hook 表（dsh-scope
         载波路由 _flat_hooks）。global_=True 的监听器无条件接收任何载波事件
-        （对齐上游 hook.global：绕过 filter）。
+        （对齐上游 hook.global：绕过 filter）。prepend=True 插队到现有监听器
+        之前（对齐上游 EventOptions.prepend；上游的 boolean 缩写即 prepend）。
         """
         self._assert_alive()
-        self._listeners.setdefault(event, []).append(fn)
+        listeners = self._listeners.setdefault(event, [])
         root = self.root
         hook = {"ctx": self, "fn": fn, "global": global_}
-        root._flat_hooks.setdefault(event, []).append(hook)
+        hooks = root._flat_hooks.setdefault(event, [])
+        if prepend:
+            listeners.insert(0, fn)
+            hooks.insert(0, hook)
+        else:
+            listeners.append(fn)
+            hooks.append(hook)
 
         def disposer() -> None:
             lst = self._listeners.get(event)
             if lst and fn in lst:
                 lst.remove(fn)
-            hooks = root._flat_hooks.get(event)
-            if hooks:
-                for h in list(hooks):
+            registered = root._flat_hooks.get(event)
+            if registered:
+                for h in list(registered):
                     if h is hook:
-                        hooks.remove(h)
+                        registered.remove(h)
 
         return self.effect(lambda: disposer, f"ctx.on({event})")
+
+    def once(self, event: str, fn: Callable, *, global_: bool = False,
+             prepend: bool = False) -> EffectDisposer:
+        """注册一次性监听器（对齐上游 Events.once）：首次触发时先自注销再调用。
+
+        包装器先取本注册的 disposer 撤销登记，再透传实参调用原监听器——
+        同步/异步、emit/waterfall 载波两路均生效（_hooks_for 与 _listeners_for
+        都在迭代前快照）。
+        """
+        def wrapper(*args):
+            d()
+            return fn(*args)
+
+        d = self.on(event, wrapper, global_=global_, prepend=prepend)
+        return d
 
     def _listeners_for(self, event: str) -> list[Callable]:
         """收集自身 + 祖先链的监听器（子先于父，各层保持注册序）。"""

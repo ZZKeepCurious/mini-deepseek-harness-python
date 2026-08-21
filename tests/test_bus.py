@@ -63,6 +63,41 @@ class TestBus(unittest.TestCase):
         ctx.on("e", lambda p: f"second:{p}")
         self.assertEqual(ctx.serial("e", "x"), ["first:x", "second:x"])
 
+    def test_prepend_listener_runs_first(self):
+        ctx = Context()
+        calls = []
+        ctx.on("e", lambda p: calls.append("a"))
+        ctx.on("e", lambda p: calls.append("b"), prepend=True)
+        ctx.emit("e")
+        self.assertEqual(calls, ["b", "a"])   # 对齐上游 EventOptions.prepend
+
+    def test_once_fires_once(self):
+        # 对齐上游 Events.once：首次触发先自注销再调用
+        ctx = Context()
+        calls = []
+        ctx.once("e", lambda p: calls.append(p))
+        ctx.emit("e", 1)
+        ctx.emit("e", 2)
+        self.assertEqual(calls, [1])
+
+    def test_once_carrier_dispatch_self_removes(self):
+        # 载波路（_flat_hooks）同样生效：once 触发后从扁平表移除
+        from miniharness.core.dsh_scope import scope_target
+        ctx = Context()
+        scope = ctx.create_scope("agent:a")
+        calls = []
+        ctx.once("e", lambda p: calls.append(p))
+        carrier = scope_target(object(), scope.scope_key)
+        ctx.emit("e", 1, this_arg=carrier)    # 未打标监听器：任何载波都收
+        ctx.emit("e", 2, this_arg=carrier)
+        self.assertEqual(calls, [1])
+
+    def test_once_waterfall_passthrough(self):
+        ctx = Context()
+        ctx.once("w", lambda p, nxt: nxt(p + 1))
+        self.assertEqual(ctx.waterfall("w", 1), 2)
+        self.assertEqual(ctx.waterfall("w", 1), 1)   # 已自注销 → 无监听器直通
+
     def test_dispose_rollback(self):
         ctx = Context()
         ctx.on("e", lambda p: None)
@@ -258,6 +293,32 @@ class TestLoggerService(unittest.TestCase):
         ctx = ctx.intercept("logger", {"name": "wired"})
         logger = ctx.logger("")     # 经 ctx.logger 视图：intercept 从访问方 ctx 解析
         self.assertEqual(logger.name, "wired")   # name 经 intercept 配置注入
+
+
+class TestConfigValidation(unittest.TestCase):
+    """core/schema.py：resolveConfig + ValidationError（对齐 fiber.ts）。"""
+
+    def test_valid_config_normalized(self):
+        from miniharness.core.schema import S, resolve_config
+        schema = S.object({"name": S.string(), "n": S.integer().default(3)})
+        cfg = resolve_config(schema, {"name": "x"})
+        self.assertEqual(cfg, {"name": "x", "n": 3})
+
+    def test_invalid_config_raises_aggregated_message(self):
+        from miniharness.core.schema import S, ValidationError, resolve_config
+        schema = S.object({"name": S.string(), "sub": S.object({"k": S.integer()})})
+        with self.assertRaises(ValidationError) as cm:
+            resolve_config(schema, {"name": 1, "sub": {"k": "bad"}, "zzz": 0})
+        msg = str(cm.exception)
+        self.assertTrue(msg.startswith("invalid config:\n"))
+        self.assertIn("  - ", msg)
+        self.assertIn("(at sub.k)", msg)      # issue.path 逐段拼接
+        self.assertEqual(cm.exception.name, "ValidationError")
+        self.assertIsInstance(cm.exception, TypeError)
+
+    def test_no_schema_passthrough(self):
+        from miniharness.core.schema import resolve_config
+        self.assertEqual(resolve_config(None, {"a": 1}), {"a": 1})
 
 
 if __name__ == "__main__":
