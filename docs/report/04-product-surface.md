@@ -363,13 +363,16 @@ mini 简化（教学范围，须在文档中标注）：无 canonical value（re
 对齐上游 `packages/goal/{goal, goal-round-driver, tool-goal, command-goal}` 的 wire/契约核心：
 
 - **事件溯源**：唯一 durable 事实是 `goal/change`（全快照或 clear 墓碑，version 1）+ 进程内通知 `goal/changed`（`{change: notification}`）；`goal/change` 已入 KNOWN_TYPES（25/44），seed 回放 fail-closed。严格重放 fold：decode 校验 kind/version/操作/字段集，非 create 操作要求精确推进一个 revision 且保持计数器/时间戳（对齐 domain.ts / fold.ts）。
-- **round 驱动**（pull 式 GoalDriver）：宿主在回合边界显式 `continue_rounds(loop)`；每条 round 是 goal 来源 user 消息（`source:{kind:'goal', goalId, revision, round}`）经 `agent.followup()` 入 inbox；pre-step 做 fail-closed reservation 校验（active/armed、revision、round==roundsStarted+1、预算），校验失败 reject → turn 以 `{kind:'blocked'}` 闭合；round 预算用尽自动 block（code `round-limit`）、被拒 block `prompt-rejected`、max-tokens → disarm、aborted → pause。
+- **round 驱动**（GoalDriver）：每条 round 是 goal 来源 user 消息（`source:{kind:'goal', goalId, revision, round}`）经 `agent.followup()` 入 inbox；pre-step 做 fail-closed reservation 校验（active/armed、revision、round==roundsStarted+1、预算），校验失败 reject → turn 以 `{kind:'blocked'}` 闭合。两层驱动表面都已对齐上游：
+  - **driver 模式（web/ACP/SDK 的 async 表面）**：GoalDriver 订阅 `agent/status`(idle) 与 `goal/changed`，在 idle 且目标 active+armed 时自动排恰好一个下一轮（对齐上游 goal-round-driver 的 turn/end → continue 事件驱动续跑）；reservation 持久到该 round 回合结束（idle 到达才清除），避免 driver 模式 `followup` 只入队、pre-step 仍需 reservation 校验的竞态。
+  - **同步门面（demo/headless 的 run()）**：无嵌套 asyncio.run，仍由宿主显式 `continue_rounds(loop)` 驱动（保留 pull 式契约；其 reservation 在 `followup` 后 `finally` 清除，因同步模式回合在 followup 内跑完）。
+  - round 预算用尽自动 block（code `round-limit`）、被拒 block `prompt-rejected`、max-tokens → disarm、aborted → pause，两条路径语义一致。
 - **服务**（GoalService，ctx.goals）：compare-and-set 变更全族（create/edit/pause/resume/complete/block/clear）；错误码与上游一致（GOAL_ALREADY_EXISTS / GOAL_STALE_REVISION / GOAL_INVALID_TRANSITION / GOAL_INVALID_OBJECTIVE / GOAL_INVALID_MAX_ROUNDS / GOAL_INVALID_BLOCK_REASON / GOAL_INVALID_EDIT / GOAL_INVALID_STATE / GOAL_NOT_FOUND）；create 仅当前无目标或 complete 时允许；resume 校验 round 预算余量。
 - **模型工具**（tool-goal）：`get_goal` / `create_goal` / `update_goal`（description、参数 schema、canonical 输出 JSON 逐字对齐）；update 是 compare-and-set（stale ref → GOAL_STALE_REVISION，非法引用 → GOAL_TOOL_INVALID_UPDATE）；blocked 需 `{code:'model-reported', message}` 且 goal 轮次内未达连续轮数阈值（默认 3）时拒绝（GOAL_TOOL_BLOCK_THRESHOLD）；`tool:goal` prompt section（order 114）。
 - **人类命令**（command-goal）：`/goal [<objective>|clear|edit <objective>|pause|resume]`，文案逐字对齐（show / create / edit / pause / resume / clear / 错误提示）。
 - **装配序**（示例 `examples/plan_goal_demo.py`）：`install_system_prompt` → `install_commands` → `install_plan_mode` → `install_plan_review` → `install_goals` → `register_goal_tools` → `install_goal_driver` → `install_goal_commands`。
 
-mini 简化（教学范围，须在文档中标注）：无 agent registry 与 assertLive（不存在 registry 内实例身份检查）；无 Typert remote 边界（remoteExport* 未复现）；push→pull 重构（宿主必须显式调 continue_rounds，上游 turn/end 事件自动续跑）；无 reserved attempt 集与 deferred wrapup 摘要注入；权威判定用"当前 step 在 goal 轮次中"近似（authority.kind==='goal-round'，completionAuthority 模块未复现）；execute 直接返回模型可见 JSON 文本（无 canonical value + native renderer 分离）。
+mini 简化（教学范围，须在文档中标注）：无 agent registry 与 assertLive（不存在 registry 内实例身份检查）；无 Typert remote 边界（remoteExport* 未复现）；driver 模式已对齐上游事件驱动续跑（`agent/status` idle + `goal/changed` → 自动排下一轮），同步门面保留 `continue_rounds` pull 式契约；无 competingQueued 竞争护栏（armed 目标在任意 idle 都会续跑，不区分是否刚有人类提示）；无 reserved attempt 集与 deferred wrapup 摘要注入（同步模型下 reservation 只在排队→pre-step 间存活，driver 模式延长到回合结束 idle）；权威判定用"当前 step 在 goal 轮次中"近似（authority.kind==='goal-round'，completionAuthority 模块未复现）；execute 直接返回模型可见 JSON 文本（无 canonical value + native renderer 分离）。
 
 ## 议题 9：上下文压缩与后台作业
 

@@ -62,7 +62,7 @@ miniharness/
 │   ├── domain.py          # goal/change 事件严格重放 fold + GoalError
 │   ├── service.py         # GoalService（ctx.goals：compare-and-set 变更 + 激活）
 │   ├── prompt.py          # goal round 提示词
-│   ├── driver.py          # pull 式 GoalDriver（pre-step reservation 校验 + continue_rounds）
+│   ├── driver.py          # GoalDriver（pre-step reservation 校验 + continue_rounds + driver 模式事件驱动续跑）
 │   ├── tools.py           # get_goal / create_goal / update_goal + tool:goal 节
 │   └── commands.py        # /goal 命令表面
 ├── skills/                # packages/skill（skill + skill-filesystem + tool-skill）
@@ -139,7 +139,7 @@ miniharness/
 | `jobs/`（types + registry + tools） | `packages/jobs/`（seam + jobs-local + tool-jobs） | `run_in_background` 触发入口未复现；无 scope 链/agent registry；execute 直接返回渲染文本（简化标注见模块 docstring） |
 | `plan/`（config + mode + review + projection） | `packages/plan/plan-mode/src/` | 状态机 + plan:policy 节 + 审查 UI（exit_plan_mode / /plan / userQuestions）+ plan 投影；无 canonical value / presentCall（简化标注见模块 docstring） |
 | `commands/` | `packages/interaction/commands/src/` | 命令注册/派发 + `command/run|done` 配对 + commands/change 通知 + normalizeResult fail-loud；handler 签名 `(agent, raw)` 为教学扩展（简化标注见模块 docstring） |
-| `goal/`（domain + service + prompt + driver + tools + commands） | `packages/goal/`（goal + goal-round-driver + tool-goal + command-goal） | 无 agent registry / Typert remote；push→pull 驱动；权威判定近似（简化标注见模块 docstring） |
+| `goal/`（domain + service + prompt + driver + tools + commands） | `packages/goal/`（goal + goal-round-driver + tool-goal + command-goal） | 无 agent registry / Typert remote；driver 模式事件驱动续跑（同步门面保留 `continue_rounds`）；权威判定近似（简化标注见模块 docstring） |
 | `skills/`（registry + filesystem + tool_skill） | `packages/skill/`（skill + skill-filesystem + tool-skill） | 无 chokidar watch、无 ctx.fs 适配、execute 直接返回渲染文本（简化标注见模块 docstring） |
 | `boot/boot.py` | `packages/boot/app-boot` | |
 | `boot/composition.py` | `packages/boot/app-boot` + `apps/cli/src/args.ts` | |

@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from miniharness.core.agent_loop.agent import AgentLoop
 from miniharness.core.scope import Context
 from miniharness.core.session import KNOWN_TYPES, Session, create_message
+from miniharness.core.session_store import install_sessions
 from miniharness.core.system_prompt import install_system_prompt
 from miniharness.core.tools import ToolExec, ToolRegistry
 from miniharness.goal import (
@@ -276,7 +277,7 @@ class GoalServiceTest(unittest.TestCase):
 
 
 class GoalDriverTest(unittest.TestCase):
-    def _make(self, max_rounds=3):
+    def _make(self, max_rounds=3, create=True):
         ctx = _ctx()
         goals = install_goals(ctx)
         reg = ToolRegistry(ctx)
@@ -284,7 +285,8 @@ class GoalDriverTest(unittest.TestCase):
         adapter = FakeLlmAdapter(final_text="完成。")
         loop = AgentLoop(Session("d1"), adapter, reg, ctx)
         driver = install_goal_driver(ctx, goals)
-        created = goals.create(loop, {"objective": "do the thing", "maxGoalRounds": max_rounds})
+        created = goals.create(loop, {"objective": "do the thing", "maxGoalRounds": max_rounds}) \
+            if create else None
         return ctx, goals, loop, driver, created
 
     def test_continue_rounds_round_limit_blocks(self):
@@ -344,6 +346,50 @@ class GoalDriverTest(unittest.TestCase):
         driver.continue_rounds(loop, max_rounds=1)
         self.assertEqual(goals.get(loop)["roundsStarted"], 1)
         self.assertEqual(goals.get(loop)["phase"], "active")
+
+    def test_driver_mode_auto_continues_on_idle(self):
+        """driver 模式（async 表面）：goal/changed 触发首轮，idle 时自动续跑，
+        到 round-limit 自动 block —— 无需宿主显式 continue_rounds()。"""
+        ctx, goals, loop, driver, _ = self._make(max_rounds=3, create=False)
+        install_sessions(ctx)
+        loop.publish()
+
+        async def run():
+            loop.start_driver()
+            # 真实流程中目标在会话进入 driver 模式后才创建（工具/宿主）
+            goals.create(loop, {"objective": "do the thing", "maxGoalRounds": 3})
+            await loop.when_idle_async()
+        asyncio.run(run())
+        view = goals.get(loop)
+        self.assertEqual(view["phase"], "blocked")
+        self.assertEqual(view["blockedReason"]["code"], "round-limit")
+        self.assertEqual(view["roundsStarted"], 3)
+        goal_msgs = [e for e in loop.session.events
+                     if e["type"] == "user/message"
+                     and e["data"]["source"].get("kind") == "goal"]
+        self.assertEqual(len(goal_msgs), 3)
+        # 事件驱动路径下不应残留 reservation（idle 起始已清除）
+        self.assertEqual(len(driver._reservations), 0)
+
+    def test_driver_mode_aborted_pauses_goal(self):
+        """driver 模式：回合 aborted → 目标 pause（对齐上游 aborted→pause）。"""
+        ctx, goals, loop, driver, _ = self._make(max_rounds=3, create=False)
+        install_sessions(ctx)
+
+        def aborting(payload, nxt):
+            if any((m.get("source") or {}).get("kind") == "goal"
+                   for m in payload.get("messages", [])):
+                payload["agent"].cancel("user")
+            return nxt()
+        ctx.on("agent/pre-step", aborting)
+        loop.publish()
+
+        async def run():
+            loop.start_driver()
+            goals.create(loop, {"objective": "do the thing", "maxGoalRounds": 3})
+            await loop.when_idle_async()
+        asyncio.run(run())
+        self.assertEqual(goals.get(loop)["phase"], "paused")
 
 
 class GoalToolsTest(unittest.TestCase):
