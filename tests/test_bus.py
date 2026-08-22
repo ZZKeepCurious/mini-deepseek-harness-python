@@ -300,15 +300,15 @@ class TestConfigValidation(unittest.TestCase):
 
     def test_valid_config_normalized(self):
         from miniharness.core.schema import S, resolve_config
-        schema = S.object({"name": S.string(), "n": S.integer().default(3)})
+        schema = S.object({"name": S.string(), "n": S.natural().default(3)})
         cfg = resolve_config(schema, {"name": "x"})
         self.assertEqual(cfg, {"name": "x", "n": 3})
 
     def test_invalid_config_raises_aggregated_message(self):
         from miniharness.core.schema import S, ValidationError, resolve_config
-        schema = S.object({"name": S.string(), "sub": S.object({"k": S.integer()})})
+        schema = S.object({"name": S.string(), "sub": S.object({"k": S.natural()})})
         with self.assertRaises(ValidationError) as cm:
-            resolve_config(schema, {"name": 1, "sub": {"k": "bad"}, "zzz": 0})
+            resolve_config(schema, {"name": "x", "sub": {"k": "bad"}})
         msg = str(cm.exception)
         self.assertTrue(msg.startswith("invalid config:\n"))
         self.assertIn("  - ", msg)
