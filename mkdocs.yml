@@ -96,3 +96,4 @@ nav:
       - 12 异步化与并行工具: chapters/12-async-parallel-tools.md
       - 13 Cordis 进阶：Service 基类与 intercept: chapters/13-cordis-service-interceptor-logger.md
       - 14 dsh_scope 载波派发模型: chapters/14-dsh-scope-carrier.md
+      - 15 schemastery 配置引擎: chapters/15-schemastery.md
