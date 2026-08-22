@@ -43,7 +43,7 @@
 | 会话管理服务（`ctx.sessions`：create/prepare/enter/announce 生命周期、fork 五错误码、flush 检查点、`session/created|disposed|event|flush` 四事件） | `packages/core/session`（SessionStore） |
 | 会话管理 CLI（`miniharness sessions` 列表/恢复/删除；mini 教学扩展） | web 表面（上游） |
 | 能力扩展口（沙箱后端 / 凭据四层 / 子 agent ACP+SDK+fork 三通道） | capability seams 文档 |
-| 可继续子代理（`start_continuable`/`send_message`、durable 子会话 + 冷恢复、结算投递、异步事件驱动（A8：投递即返回 + watchSettlement + steer 批内合并）、`send_message`/`interrupt_agent`/`list_agents` 控制工具） | `packages/subagent`（subagent + subagent-in-process-driver + tool-subagent-control + tool-subagent-report） |
+| 可继续子代理（`start_continuable`/`send_message`（含初始 prompt）、durable 子会话 + 冷恢复、结算投递、异步事件驱动（A8：投递即返回 + watchSettlement + steer 批内合并 + 所有权记账 waiting/settled）、生命周期事件 `subagent/start`/`subagent/end`（runId 配对 + epochStopReason/foldConsumedWork 终局折叠）、interrupt 授权矩阵（user/ancestor authority + 缺席 no-op）、嵌套续跑（exec.agent 为授权主体，孙代结算通知投直属父）、`send_message`/`interrupt_agent`/`list_agents` 控制工具） | `packages/subagent`（subagent + subagent-in-process-driver + tool-subagent-control + tool-subagent-report） |
 | 预设 / Agent 干预 / 轨迹折叠 / 动态插件 / 审批 | `packages/preset` + `core/agent` + `interaction` |
 | 协议入口（ACP / JSON-RPC SDK / hooks 桥） | `acp` + `sdk` + `hooks` |
 | 官方 Python SDK 互操作（上游 `DeepSeekHarness` 经 `launch_args_override` 驱动 mini worker；`tests/test_upstream_sdk_interop.py`，缺 pydantic/上游源码自动 skip） | `python/sdk` |

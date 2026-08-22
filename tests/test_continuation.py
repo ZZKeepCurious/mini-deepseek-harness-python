@@ -164,16 +164,23 @@ class TestDescriptor(unittest.TestCase):
 
 
 class TestSettlementHelpers(unittest.TestCase):
+    @staticmethod
+    def _turn(turn_no, kind):
+        """一个进入过 step 的完整 turn 事件序列（fold 记账要求 step/start）。"""
+        return [
+            {"type": "turn/start", "data": {"turn": turn_no}},
+            {"type": "step/start", "data": {"turn": turn_no}},
+            {"type": "turn/end", "data": {"turn": turn_no, "reason": {"kind": kind}}},
+        ]
+
     def test_epoch_stop_reason_mapping(self):
-        def turn(kind):
-            return {"type": "turn/end", "data": {"reason": {"kind": kind}}}
-        self.assertEqual(epoch_stop_reason([turn("completed")]), "completed")
-        self.assertEqual(epoch_stop_reason([turn("aborted")]), "aborted")
-        self.assertEqual(epoch_stop_reason([turn("interrupted")]), "aborted")
-        self.assertEqual(epoch_stop_reason([turn("blocked")]), "refusal")
-        self.assertEqual(epoch_stop_reason([turn("max-tokens")]), "max-tokens")
-        self.assertEqual(epoch_stop_reason([turn("error")]), "error")
-        self.assertEqual(epoch_stop_reason([turn("bogus")]), "error")
+        self.assertEqual(epoch_stop_reason(self._turn(1, "completed")), "completed")
+        self.assertEqual(epoch_stop_reason(self._turn(1, "aborted")), "aborted")
+        self.assertEqual(epoch_stop_reason(self._turn(1, "interrupted")), "aborted")
+        self.assertEqual(epoch_stop_reason(self._turn(1, "blocked")), "refusal")
+        self.assertEqual(epoch_stop_reason(self._turn(1, "max-tokens")), "max-tokens")
+        self.assertEqual(epoch_stop_reason(self._turn(1, "error")), "error")
+        self.assertEqual(epoch_stop_reason(self._turn(1, "bogus")), "error")
         self.assertEqual(epoch_stop_reason([]), "completed")
 
     def test_settlement_summary_wording(self):
@@ -360,7 +367,9 @@ class TestContinuationManager(unittest.TestCase):
         activation = mgr._get_or_resume(cid)
         try:
             self.assertIs(mgr._get_or_resume(cid), activation)
-            self.assertEqual(mgr.state_of(cid)["kind"], "running")
+            # stateOf 以 agent 自身状态为准（上游）：仅物化、尚未投递的激活
+            # 无在途回合也无 accepted 投递 → settled
+            self.assertEqual(mgr.state_of(cid)["kind"], "settled")
         finally:
             activation["ctx"].dispose()
             mgr._activations.pop(cid, None)
@@ -388,8 +397,9 @@ class TestContinuationManager(unittest.TestCase):
     def test_interrupt_self_cancel(self):
         mgr = self._manager()
         cid = mgr.start_continuable(label="研")
-        cancel_tool = Tool(name="cancel_self", description="d",
-                           execute=lambda a, e: mgr.interrupt(cid, cause="user"))
+        cancel_tool = Tool(
+            name="cancel_self", description="d",
+            execute=lambda a, e: mgr.interrupt(cid, {"kind": "ancestor", "agent": mgr.parent}))
         # 注入子工具：子注册表复制父全局工具；这里注册到父 → 复制进子
         self.reg.register(cancel_tool)
         child_adapter = FakeLlmAdapter(tool_call={"name": "cancel_self", "arguments": {}})
@@ -409,7 +419,8 @@ class TestContinuationManager(unittest.TestCase):
         # target is an accepted no-op"），不再抛 NOT_FOUND。
         mgr = self._manager()
         cid = mgr.start_continuable(label="研")
-        self.assertIsNone(mgr.interrupt(cid))
+        authority = {"kind": "user", "parentSessionId": self.parent.id}
+        self.assertIsNone(mgr.interrupt(cid, authority))
         self.assertEqual(mgr.state_of(cid)["kind"], "idle")
 
     def test_max_depth(self):
@@ -446,7 +457,7 @@ class TestContinuationManager(unittest.TestCase):
         self.assertEqual(by_id[cid1]["label"], "甲")
         self.assertEqual(by_id[cid1]["depth"], 1)
         self.assertEqual(by_id[cid1]["status"], "idle")
-        self.assertEqual(mgr.list_descendants(), entries)   # mini：descendants == children
+        self.assertEqual(mgr.list_descendants(), entries)   # 无嵌套时 descendants == children
 
 
 class TestControlTools(unittest.TestCase):
@@ -562,9 +573,11 @@ class TestAsyncContinuation(unittest.TestCase):
             mgr = SubagentContinuationManager(
                 self.parent, self.persistence, adapter_factory=lambda p, m: child_adapter)
             cid = mgr.start_continuable(label="研")
-            self.reg.register(Tool(name="cancel_self", description="d",
-                                   parameters={"type": "object", "properties": {}, "required": []},
-                                   execute=lambda a, e: mgr.interrupt(cid, cause="parent")))
+            self.reg.register(Tool(
+                name="cancel_self", description="d",
+                parameters={"type": "object", "properties": {}, "required": []},
+                execute=lambda a, e: mgr.interrupt(
+                    cid, {"kind": "ancestor", "agent": mgr.parent})))
             mgr.send_message(cid, "开始")
             mgr.send_message(cid, "驻留")
             await asyncio.sleep(0.2)

@@ -200,7 +200,7 @@ def install_subagent_delegation_tool(
         )
         if not run_in_background:
             child_id, output, stop = await _run_foreground(
-                manager, label, args["prompt"], persona, tool_filter)
+                manager, label, args["prompt"], persona, tool_filter, parent=parent)
             error = _stop_reason_error(stop)
             if error is not None:
                 raise RuntimeError(_with_partial_text(error, output))
@@ -238,6 +238,7 @@ def _epoch_result(manager: SubagentContinuationManager, child_id: str, base: int
 async def _run_foreground(
     manager: SubagentContinuationManager, label: str, prompt: str,
     persona: str | None, tool_filter: list[str] | None,
+    parent: Any = None,
 ) -> tuple[str, list | None, str]:
     """前台委托：创建子会话 + 循环内内联泵首回合，收集（child_id, 输出, 终局）。
 
@@ -247,10 +248,12 @@ async def _run_foreground(
     与 asyncio.run 的拆除竞速。上游前台对 continuable provider 也等待首回合
     结果（jobs.spec.ts:1115 同款语义：仅显式 run_in_background:false 时等待）；
     结算通知照常投递父代理（父 running → next-step 边界消费）。
+    @param parent - 委托方 agent loop（嵌套时为子代理自身）；授权与所有权主体。
     """
-    child_id = manager.start_continuable(label=label, tool_filter=tool_filter, persona=persona)
+    child_id = manager.start_continuable(label=label, tool_filter=tool_filter,
+                                         persona=persona, parent=parent)
     base = len(manager.persistence.inspect(child_id)["events"])
-    await manager.send_message_async(child_id, prompt, source="parent")
+    await manager.send_message_async(child_id, prompt, source="parent", parent=parent)
     stop, output = _epoch_result(manager, child_id, base)
     return child_id, output, stop
 
@@ -279,13 +282,14 @@ def _start_background(
         raise RuntimeError(
             "background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs"
         )
-    child_id = manager.start_continuable(label=label, tool_filter=tool_filter, persona=persona)
+    child_id = manager.start_continuable(label=label, tool_filter=tool_filter,
+                                         persona=persona, parent=parent)
     base = len(manager.persistence.inspect(child_id)["events"])
     box = JobDoneBox()
 
     def work() -> None:
         try:
-            manager.send_message(child_id, prompt, source="parent")
+            manager.send_message(child_id, prompt, source="parent", parent=parent)
         except BaseException as error:  # noqa: BLE001 - reject → 注册表转 failed
             box.fail(error)
             return
@@ -299,8 +303,10 @@ def _start_background(
         "owner": parent,
         "run": lambda: {
             "done": box,
-            # kill 语义：中断激活中的子代理（已结算 → 接受性 no-op）
-            "cancel": lambda reason=None: manager.interrupt(child_id, cause="parent"),
+            # kill 语义：以委托方 ancestor 身份中断激活中的子代理
+            # （已结算 → 接受性 no-op）
+            "cancel": lambda reason=None: manager.interrupt(
+                child_id, {"kind": "ancestor", "agent": parent}),
         },
     })
     worker.start()

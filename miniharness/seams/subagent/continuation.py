@@ -30,24 +30,22 @@ A8 起执行模型对齐上游异步事件驱动，由"父是否有 driver"自�
     下一步边界捡起）。reportDelivery 'background' → 一律 inbox.append。
 
 简化标注（须在文档中标注；对齐粒度见 AGENTS.md 差异清单）：
-  * **无 subagent/start|end 生命周期 emit 事件**（上游经 ctx.subagents 生命
-    周期发射器发布），结算经 user/message 消息投递。
-  * **droppedUnrun 恒 false**：mini 从不裁剪 inbox（无 agent/inbox/spliced），
-    结算照常进行，completed 不再被重判为 aborted。
-  * **无 sendWaking/admitWaking**：子会话不装 send_message 等控制工具 → 无
-    嵌套 → 父恒无激活（ownedChildren/acquireOwnership/releaseOwnership 为
-    占位，恒空/no-op）；结算投递直接 followup/steer。
-  * **interrupt 无授权矩阵**（上游 ancestor/user authority 校验），mini 仅父
-    调用方，无 UNAUTHORIZED。
-  * **子事件仅在 settle 时整体 flush**（上游 flushFinalState best-effort +
-    崩溃 torn 修复 commitRepair 仍不在 mini，A7 已注）。
-  * LLM 流式已 async 化（2026-08-18 asyncio 化重构），DeepSeek SSE 仍为阻塞读
-    线程桥接（不可中断，超时兜底）——异步窗口真异步，流式本身受载体限制。
+   * **生命周期事件无 scoped dispatch / 无 provider-removed**：subagent/start|end
+     经直接父 ctx.emit 发布（payload 与上游 SubagentRunInfo/SubagentRunEndInfo
+     同形：{runId, provider, id, local} + 终局 {stopReason, lastAssistantMessage?}），
+     监听器异常在发射器处收容；上游按委托父做 scoped dispatch 载体、并有
+     subagent/provider-removed 边与 invariant 运行时校验（mini 无 provider 注册表
+     与 invariant 系统）。
+   * **无 DRAINING 拒绝面**：上游 closingTeardownFor/assertAdmitting 在 manager 或
+     祖先树拆除时拒绝新准入；mini 管理器随进程生存，无 drain 入口。
+   * LLM 流式已 async 化（2026-08-18 asyncio 化重构），DeepSeek SSE 仍为阻塞读
+     线程桥接（不可中断，超时兜底）——异步窗口真异步，流式本身受载体限制。
   """
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 import uuid
 from types import MappingProxyType
@@ -71,11 +69,14 @@ __all__ = [
     "delegation_depth_of",
     "epoch_stop_reason",
     "final_assistant_output",
+    "fold_consumed_work",
     "install_subagent_control_tools",
     "settlement_summary",
 ]
 
 CONTEXT_SUMMARY_MAX_CHARS = 120
+
+logger = logging.getLogger(__name__)
 
 # 结算文案（对齐上游 continuation.ts settlementSummary 措辞，逐字）
 _SETTLEMENT_SUMMARIES = {
@@ -96,6 +97,8 @@ _REPORT_GUIDANCE = (
     "parent agent. Use reportDelivery 'foreground' to wake the parent, or "
     "'background' to leave it running silently."
 )
+
+_REPORT_TOOL_NAME = "report"
 
 
 class SubagentError(Exception):
@@ -122,29 +125,81 @@ def delegation_depth_of(loop: AgentLoop) -> int:
     return 0
 
 
-def epoch_stop_reason(events) -> str:
-    """片段内最后一个 turn/end 的 reason → 结算关键词。
+def _reason_kind(reason: Any) -> Any:
+    """turn/end reason 的 kind（dict 或裸字符串两形态）。"""
+    return reason.get("kind") if isinstance(reason, (dict, MappingProxyType)) else reason
 
-    mini 词汇：max-tokens / aborted / refusal / error / completed（对齐上游
-    settle 的 stopReason 归一）；interrupted 并入 aborted。
+
+def fold_consumed_work(events) -> dict:
+    """把事件流折叠成「已消费工作的交代」（上游 core/agent consumed-work.ts
+    foldConsumedWork，逐语义对齐）。
+
+    返回 {"end": 最新一个对工作有交代的 turn/end 事件或 None,
+          "dropped_unrun": 该 turn 之后是否有被取消且未运行的已接受输入}。
+
+    有交代 = 进入过 model step（step/start），或认领过 inbox 输入后以非
+    completed 结束（blocked/aborted/interrupted/error 都算——拒绝同样把认领
+    的输入一并丢弃）。认领批次被改写清空后正常结束的 no-step turn 不描述
+    工作。agent/inbox/spliced 的 outcome=='canceled' 且 inserted 为空 → 输入
+    被取消未运行；replacement（inserted 非空）让工作在新身份下继续 pending。
     """
-    for ev in reversed(events):
-        if not isinstance(ev, (dict, MappingProxyType)) or ev.get("type") != "turn/end":
+    stepped: set = set()
+    claimed: set = set()
+    open_turn = None
+    end = None
+    dropped_unrun = False
+    for ev in events:
+        if not isinstance(ev, (dict, MappingProxyType)):
             continue
-        reason = ev.get("data", {}).get("reason")
-        kind = reason.get("kind") if isinstance(reason, (dict, MappingProxyType)) else reason
-        if kind == "max-tokens":
-            return "max-tokens"
-        if kind in ("aborted", "interrupted"):
-            return "aborted"
-        if kind == "blocked":
-            return "refusal"
-        if kind == "error":
-            return "error"
-        if kind in ("completed", None):
-            return "completed"
+        etype = ev.get("type")
+        data = ev.get("data") or {}
+        if etype == "turn/start":
+            open_turn = data.get("turn")
+        elif etype == "step/start":
+            stepped.add(data.get("turn"))
+        elif etype == "agent/inbox/spliced":
+            if data.get("removedCount") is None:
+                continue
+            if data.get("outcome") == "canceled":
+                dropped_unrun = dropped_unrun or not data.get("inserted")
+            elif open_turn is not None:
+                claimed.add(open_turn)
+        elif etype == "turn/end":
+            turn = data.get("turn")
+            open_turn = None
+            was_stepped = turn in stepped
+            was_claimed = turn in claimed
+            stepped.discard(turn)
+            claimed.discard(turn)
+            kind = _reason_kind(data.get("reason"))
+            if was_stepped or (was_claimed and kind != "completed"):
+                end = ev
+                dropped_unrun = False     # 此前的 drop 已由该 turn 自己的结局交代
+    return {"end": end, "dropped_unrun": dropped_unrun}
+
+
+def epoch_stop_reason(events) -> str:
+    """片段 → 结算关键词（上游 lifecycle.ts epochStopReason，逐语义对齐）。
+
+    以 fold_consumed_work 的记账 turn/end（而非裸最后一个 turn/end）为准：
+    max-tokens / error 原样；aborted、interrupted 并入 aborted；blocked（pre-step
+    拒绝）→ refusal；干净结束且无记账 turn 时 droppedUnrun 决定 completed 或
+    aborted（已接受的工作被取消且从未运行）；未知 reason → error。
+    """
+    folded = fold_consumed_work(events)
+    end = folded["end"]
+    kind = _reason_kind(end.get("data", {}).get("reason")) if end is not None else None
+    if kind == "max-tokens":
+        return "max-tokens"
+    if kind in ("aborted", "interrupted"):
+        return "aborted"
+    if kind == "blocked":
+        return "refusal"
+    if kind == "error":
         return "error"
-    return "completed"
+    if kind in ("completed", None):
+        return "aborted" if folded["dropped_unrun"] else "completed"
+    return "error"
 
 
 def final_assistant_output(events) -> list | None:
@@ -208,6 +263,10 @@ class SubagentContinuationManager:
         self._adapter_factory = adapter_factory or _default_adapter_factory
         self._activations: dict[str, dict] = {}
         self._persisted: dict[str, int] = {}
+        # 活体注册表（对齐上游 ctx.agents 的 exact-live 校验面）：id → AgentLoop。
+        # 父构造时登记；子激活物化时登记、结算弹出。interrupt 授权矩阵与
+        # 投递 lineage 授权都以"注册表里的同一对象"为准。
+        self._live: dict[str, AgentLoop] = {parent.id: parent}
         # 每 child 一把锁：串行化跨线程的 resume 与 settle 临界区
         # （同步调用方的 send_message / 内联泵 与事件循环线程的 watcher 结算并发）
         self._locks: dict[str, threading.Lock] = {}
@@ -225,22 +284,30 @@ class SubagentContinuationManager:
         label: str | None = None,
         tool_filter: list[str] | None = None,
         persona: str | None = None,
-    ) -> str:
-        """创建可继续子会话（durable before dispatch），返回子 id。
+        prompt: str | dict | None = None,
+        parent: AgentLoop | None = None,
+    ):
+        """创建可继续子会话（durable before dispatch）。
 
-        子会话 = 父 completed-turn 前缀 seed + meta + 描述符事件；全部先
-        落盘。父当前 in-flight 回合未平衡 → seed 为空（全新子会话）。
+        无 prompt（create-only，A7 兼容形态）→ 返回子 id 字符串：子会话 =
+        父 completed-turn 前缀 seed + meta + 描述符事件，全部先落盘；父当前
+        in-flight 回合未平衡 → seed 为空（全新子会话）。
+        有 prompt（对齐上游 startContinuable：创建即投递初始委托）→ 返回
+        {"childId", "messageId"}：初始 prompt 经 send_message 同一条投递路径
+        进入子 inbox（接受边界返回 message id；同步门面会内联跑完首回合）。
+        @param parent - 委托父（嵌套续跑时为子代理自身的 loop）；缺省顶层父。
         """
-        depth = delegation_depth_of(self.parent)
+        parent = parent or self.parent
+        depth = delegation_depth_of(parent)
         if depth >= self.max_depth:
             raise SubagentError(
                 f"子代理嵌套深度 {depth} 达到上限 {self.max_depth}", "MAX_DEPTH_EXCEEDED",
             )
         child_id = "child-" + uuid.uuid4().hex[:12]
         child_depth = depth + 1
-        seed = completed_turn_prefix(self.parent.session.events)
+        seed = completed_turn_prefix(parent.session.events)
         meta: dict[str, Any] = {
-            "parentSession": self.parent.id,
+            "parentSession": parent.id,
             "origin": "subagent",
             "delegationDepth": child_depth,
         }
@@ -254,8 +321,8 @@ class SubagentContinuationManager:
             "mode": "continuable",
             "provider": CONTINUATION_PROVIDER,
             "label": label or "",
-            "agentProvider": getattr(self.parent.adapter, "provider", None),
-            "agentModel": getattr(self.parent.adapter, "model", None),
+            "agentProvider": getattr(parent.adapter, "provider", None),
+            "agentModel": getattr(parent.adapter, "model", None),
         }
         if persona:
             descriptor["persona"] = persona
@@ -268,27 +335,43 @@ class SubagentContinuationManager:
         self.persistence.declare(child_id, meta, created_at=child_session.created_at)
         self._persist_delta(child_session, start=0)
         self._persisted[child_id] = len(child_session.events)
-        return child_id
+        if prompt is None:
+            return child_id
+        message_id = self.send_message(child_id, prompt, source="parent", parent=parent)
+        return {"childId": child_id, "messageId": message_id}
 
-    def send_message(self, child_id: str, message: str | dict, source: str = "parent") -> str:
+    def send_message(self, child_id: str, message: str | dict, source: str = "parent",
+                     parent: AgentLoop | None = None) -> str:
         """向子代理投递一条消息，返回 message id。
 
         同步门面（无驱动模式）：子回合同步 pump 跑完再结算；父有 driver 时
         走 A8 异步路径（投递即返回）。事件循环内调用且父无 driver 时请用
         send_message_async（内联泵保证确定性结算）。
+        @param parent - 委托父（授权与所有权主体）；缺省顶层父。嵌套续跑时
+            为发起委托的子代理 loop（其激活将 owned_children 记账孙代）。
         """
-        activation = self._get_or_resume(child_id)
+        parent = parent or self.parent
+        self._authorize_lineage(parent, child_id)
+        # 所有权先于子物化（上游 submit 顺序）：父正在拆除 → 在建立任何
+        # 激活前拒绝；物化失败回滚 owned 记账
+        self._acquire_ownership(parent, child_id)
+        try:
+            activation = self._get_or_resume(child_id, parent)
+        except BaseException:
+            self._release_ownership(child_id)
+            raise
         msg = message if isinstance(message, dict) else create_message(
             "user", [text_block(message)], {"kind": "user"},
         )
-        if self.parent._driver is not None:
-            self.parent._loop.call_soon_threadsafe(self._submit_on_loop, child_id, activation, msg)
+        if parent._driver is not None:
+            parent._loop.call_soon_threadsafe(self._submit_on_loop, child_id, activation, msg, parent)
         else:
-            self._submit_sync(child_id, activation, msg)
+            self._submit_sync(child_id, activation, msg, parent)
         return msg["id"]
 
     async def send_message_async(self, child_id: str, message: str | dict,
-                                 source: str = "parent") -> str:
+                                 source: str = "parent",
+                                 parent: AgentLoop | None = None) -> str:
         """async 工具契约入口：事件循环内且父无 driver 时内联泵子回合。
 
         旧实现经 _pump_sync_facade 的 in-loop 兜底起 fire-and-forget 子
@@ -296,62 +379,174 @@ class SubagentContinuationManager:
         此处直接内联 `await child._pump_async()`，子 turn/end 先于工具返回
         落盘，结算确定性（对齐 A7 同步语义的循环内版本）。
         """
-        activation = self._get_or_resume(child_id)
+        parent = parent or self.parent
+        self._authorize_lineage(parent, child_id)
+        # 所有权先于子物化（上游 submit 顺序）：父正在拆除 → 在建立任何
+        # 激活前拒绝；物化失败回滚 owned 记账
+        self._acquire_ownership(parent, child_id)
+        try:
+            activation = self._get_or_resume(child_id, parent)
+        except BaseException:
+            self._release_ownership(child_id)
+            raise
         msg = message if isinstance(message, dict) else create_message(
             "user", [text_block(message)], {"kind": "user"},
         )
-        if self.parent._driver is not None:
-            self.parent._loop.call_soon_threadsafe(self._submit_on_loop, child_id, activation, msg)
+        if parent._driver is not None:
+            parent._loop.call_soon_threadsafe(self._submit_on_loop, child_id, activation, msg, parent)
         else:
             try:
                 asyncio.get_running_loop()
             except RuntimeError:
-                self._submit_sync(child_id, activation, msg)
+                self._submit_sync(child_id, activation, msg, parent)
             else:
-                await self._submit_async(child_id, activation, msg)
+                await self._submit_async(child_id, activation, msg, parent)
         return msg["id"]
 
-    def _submit_sync(self, child_id: str, activation: dict, msg: dict) -> None:
-        """同步路径（A7）：子 followup 同步 pump 跑完整个回合，返回后结算。"""
-        child = activation["loop"]
+    # ---------- 投递记账原语（上游 submit / admitWaking / wake / 所有权） ----------
+
+    def _authorize_lineage(self, parent: AgentLoop, child_id: str) -> None:
+        """投递授权（上游 authorizeLineage）：exact-live 调用方 + durable 直属
+        亲缘。其余 agent/祖先/宿主一律 UNAUTHORIZED。"""
+        if self._live.get(parent.id) is not parent:
+            raise SubagentError(
+                f'subagent "{child_id}" delivery requires the exact live parent agent',
+                "UNAUTHORIZED",
+            )
+        info = self.persistence.inspect(child_id)
+        meta = info.get("meta")
+        if not isinstance(meta, dict) or meta.get("parentSession") != parent.id:
+            raise SubagentError(
+                f'subagent "{child_id}" belongs to another parent session', "UNAUTHORIZED",
+            )
+
+    def _acquire_ownership(self, parent: AgentLoop, child_id: str) -> None:
+        """把子登记进 continuation 托管父的 owned 集合，使该父在子在世期间
+        无法被判定 settled（上游 acquireOwnership）。非托管 Agent 无激活，
+        留在等待图之外；正在拆除的父 → ACTIVATION_CLOSING。"""
+        pact = self._activations.get(parent.id)
+        if pact is None:
+            return
+        if pact.get("disposal") is not None:
+            raise SubagentError(
+                f'subagent parent "{parent.id}" is being disposed; the child was not established',
+                "ACTIVATION_CLOSING",
+            )
+        pact["owned_children"].add(child_id)
+
+    def _release_ownership(self, child_id: str) -> None:
+        """从在世持有者摘除并唤醒其结算观察者重观 quiescence（上游
+        releaseOwnership：ownedChildren.delete + wake）。"""
+        for act in list(self._activations.values()):
+            if child_id in act["owned_children"]:
+                act["owned_children"].discard(child_id)
+                self._wake(act)
+
+    def _wake(self, activation: dict) -> None:
+        """让结算观察者重观 quiescence（上游 wake：poke.resolve + 新鲜 poke）。"""
+        poke = activation.get("poke")
+        if poke is not None:
+            poke.set()
+
+    def _admit_waking(self, activation: dict, message_id: str, send: Callable[[], None]) -> str:
+        """把一次 waking send 记账进激活的结算窗口（上游 admitWaking）：先
+        accepted.add 再 send——followup 同步发布 inbox 事件，观察者必须在
+        调用前就看到 busy；send 抛错回滚 accepted；成功后唤醒观察者。"""
+        activation["accepted"].add(message_id)
         try:
-            child.followup(msg)
+            send()
+        except Exception:
+            activation["accepted"].discard(message_id)
+            raise
+        self._wake(activation)
+        return message_id
+
+    def _send_waking(self, parent: AgentLoop, message: dict, send: Callable[[], None]) -> None:
+        """对父执行一次 waking send 并记入父自身激活的结算窗口（上游
+        sendWaking）：父有在世激活且对象同一 → admitWaking 记账后发送；否则
+        直接发送（顶层/非托管父无窗口可记）。"""
+        pact = self._activations.get(parent.id)
+        if pact is not None and pact["loop"] is parent:
+            self._admit_waking(pact, message["id"], send)
+        else:
+            send()
+
+    def _submit_sync(self, child_id: str, activation: dict, msg: dict,
+                     parent: AgentLoop | None = None) -> None:
+        """同步路径（A7）：子 followup 同步泵跑完整个回合，返回后结算。
+
+        子运行失败（pump 落 error turn/end 后重抛，载体差异）在此收容——
+        不向委托调用方冒泡；授权/所有权拒绝在物化前已抛出。finally 保证
+        激活簿记无论如何收敛。"""
+        parent = parent or self.parent
+        try:
+            self._admit(child_id, activation, msg, parent,
+                        lambda: activation["loop"].followup(msg))
         except Exception:
             pass
         finally:
             self._settle(child_id, activation)
 
-    async def _submit_async(self, child_id: str, activation: dict, msg: dict) -> None:
+    async def _submit_async(self, child_id: str, activation: dict, msg: dict,
+                            parent: AgentLoop | None = None) -> None:
         """瞬态循环内联泵：async 工具在循环内调用且父无 driver 时，
         直接内联跑完子回合再结算（确定性，子 turn/end 先于工具返回落盘）。"""
+        parent = parent or self.parent
         child = activation["loop"]
-        try:
+
+        def send() -> None:
             child.inbox.append("next-turn", msg)
             child._parked = False
+
+        self._admit(child_id, activation, msg, parent, send)
+        try:
             await child._pump_async()
         except Exception:
             pass
         finally:
             self._settle(child_id, activation)
 
-    def _submit_on_loop(self, child_id: str, activation: dict, msg: dict) -> None:
+    def _admit(self, child_id: str, activation: dict, msg: dict,
+               parent: AgentLoop, send: Callable[[], None]) -> None:
+        """投递提交共用序列（上游 submit）：所有权先于消息入箱 → 投递。
+
+        driver 路径走 admitWaking 记账（先 accepted.add 再 send，同步失败
+        回滚），成功后 announced=True；同步路径入箱即交代——followup 内部
+        先 inbox.append 再泵，pump 中途失败时消息已认领、工作真实发生，
+        调用方也照常拿到 message id，故 announced 先置位再投递。"""
+        self._acquire_ownership(parent, child_id)
+        if parent._driver is not None:
+            self._admit_waking(activation, msg["id"], send)
+            activation["announced"] = True
+        else:
+            activation["announced"] = True
+            send()
+        activation["status"] = "running"
+
+    def _submit_on_loop(self, child_id: str, activation: dict, msg: dict,
+                        parent: AgentLoop | None = None) -> None:
         """异步路径（A8）：事件循环线程上的投递提交（call_soon_threadsafe 进入）。
 
         与结算竞速（激活已被 watcher 结算弹出）→ 就地冷恢复新激活重投，不丢
         消息（对齐上游 followup 对 disposal 的"等释放后冷恢复"）。首次投递时
         装配 watcher + 子 driver + claimed 钩子。
         """
+        parent = parent or self.parent
         if self._activations.get(child_id) is not activation or activation.get("disposal") is not None:
-            activation = self._get_or_resume(child_id)
+            activation = self._get_or_resume(child_id, parent)
         if not activation["watched"]:
             activation["watched"] = True
             activation["poke"] = asyncio.Event()
             activation["loop"].start_driver()
             activation["loop"].on_message_claimed(self._claimed_hook(child_id))
             activation["watcher"] = asyncio.ensure_future(self._watch_settlement(child_id))
-        activation["accepted"].add(msg["id"])
-        activation["poke"].set()            # 对齐 admitWaking 的 wake
-        activation["loop"].followup(msg)    # driver 模式：入队 + 唤醒，不阻塞
+
+        def send() -> None:
+            activation["loop"].followup(msg)    # driver 模式：入队 + 唤醒，不阻塞
+
+        self._acquire_ownership(parent, child_id)
+        self._admit_waking(activation, msg["id"], send)
+        activation["announced"] = True
         activation["status"] = "running"
 
     def _claimed_hook(self, child_id: str) -> Callable[[dict | None], None]:
@@ -383,35 +578,88 @@ class SubagentContinuationManager:
         if quiet:
             self.parent.inbox.append("next-step", message)
         else:
-            self._deliver(message)
+            # wakeup 报告同样走 waking 记账（上游 deliverReport 'wakeup' →
+            # sendWaking）：父自身是托管激活时先 accepted.add 再发
+            self._send_waking(self.parent, message,
+                              lambda: self._route_to_parent(self.parent, message))
 
-    def interrupt(self, child_id: str, cause: str = "user") -> None:
-        """中断激活中的子代理（child.cancel(keep_inbox=True)）。
+    @staticmethod
+    def _route_to_parent(parent: AgentLoop, message: dict) -> None:
+        """父侧投递路由（结算通知与 wakeup report 共用）：idle → followup；
+        driver 运行中 → steer（批内合并）；同步运行中 → 非唤醒 next-step
+        （下一步边界消费，避免重入泵）。"""
+        if parent.status == "idle":
+            parent.followup(message)
+        elif parent._driver is not None:
+            parent.steer(message)
+        else:
+            parent.inbox.append("next-step", message)
 
-        对齐上游 continuation.ts:528-568：缺省目标是**接受性 no-op**（"An
-        absent target is an accepted no-op without consulting the durable
-        catalog"）——子未激活或已结算 → 直接返回，不抛 NOT_FOUND。
-        中断后 keep_inbox 置 _parked：driver 不再自动续跑，下次 send_message
-        （waking send）清 _parked 恢复驻留队列；watcher 见 aborted turn/end +
-        静默后照常结算（措辞 aborted）。
+    def interrupt(self, child_id: str, authority: dict) -> None:
+        """中断一个在世可继续子的当前 turn（上游 continuation.ts interrupt
+        授权矩阵，逐语义对齐）。
+
+        @param authority - {"kind": "user", "parentSessionId": <durable 直属
+            父会话 id>}（人类客户端呈现的父地址）或 {"kind": "ancestor",
+            "agent": <exact live AgentLoop>}（recorded lineage 必须包含调用方）。
+        授权规则：
+          * ancestor：调用方必须是注册表里的同一活体（stale/同 id 替身 →
+            UNAUTHORIZED，目标缺席也先校验——防同 id 探针）；自指 → UNAUTHORIZED。
+          * user：目标的 durable parentSession 必须与呈现地址一致。
+          * ancestor：目标物化时记录的 live ancestry 必须包含调用方。
+          * 缺席目标 = 接受性 no-op（自然完成竞速 / 重复请求 / one-shot id /
+            未知 id 统一覆盖，不查持久化目录）；disposal 已开同样 no-op。
+        效果：cancel({cause}, keep_inbox=True) 同步返回不等静默；user → cause
+        'user'、ancestor → cause 'parent'。中断后 _parked 驻留，下次 waking
+        send 恢复；watcher 见 aborted turn/end 后照常结算。
         """
+        if authority.get("kind") == "ancestor":
+            caller = authority.get("agent")
+            if not isinstance(caller, AgentLoop) or self._live.get(caller.id) is not caller:
+                raise SubagentError(
+                    f'interrupting "{child_id}" requires the exact live ancestor agent',
+                    "UNAUTHORIZED",
+                )
+            if caller.id == child_id:
+                raise SubagentError(
+                    f'agent "{caller.id}" cannot interrupt itself', "UNAUTHORIZED",
+                )
         activation = self._activations.get(child_id)
-        if activation is None or activation.get("disposal") is not None:
+        if activation is None:
             return
-        activation["status"] = "stopping"
+        if authority.get("kind") == "user":
+            if activation["loop"].session.meta.get("parentSession") != authority.get("parentSessionId"):
+                raise SubagentError(
+                    f'subagent "{child_id}" belongs to another parent session',
+                    "UNAUTHORIZED",
+                )
+        else:
+            caller = authority.get("agent")
+            if caller not in activation["ancestry"]:
+                raise SubagentError(
+                    f'subagent "{child_id}" is not a live descendant of agent "{caller.id}"',
+                    "UNAUTHORIZED",
+                )
+        # disposal 已整体停过目标；再 cancel 只是对关闭中 handle 的冗余信号
+        if activation.get("disposal") is not None:
+            return
         activation["interrupted"] = True
-        activation["loop"].cancel(cause, keep_inbox=True)
+        activation["loop"].cancel(
+            "user" if authority.get("kind") == "user" else "parent", keep_inbox=True,
+        )
 
     def state_of(self, child_id: str) -> dict:
-        """簿记查询（上游 stateOf：running = status running 或 accepted 非空；
-        waiting = ownedChildren 非空；否则 settled）。无激活 → idle。"""
+        """簿记查询（上游 stateOf 词汇与判定顺序）：running = agent status
+        running 或 accepted 非空（Agent.status 单独不足凭——已接受的 waking
+        send 与微任务认领之间仍是 idle）；waiting = ownedChildren 非空；否则
+        settled。无激活 → idle。"""
         act = self._activations.get(child_id)
         if act is None:
             return {"kind": "idle", "id": child_id, "label": child_id}
-        if act.get("owned_children"):
-            kind = "waiting"                    # 无嵌套 → 不可达（保留字段）
-        elif act["status"] == "running" or act["accepted"]:
+        if act["loop"].status == "running" or act["accepted"]:
             kind = "running"
+        elif act.get("owned_children"):
+            kind = "waiting"                    # 静默但仍有未拆除的 owned 子
         else:
             kind = "settled"
         return {"kind": kind, "id": child_id, "label": act.get("label") or child_id}
@@ -423,9 +671,26 @@ class SubagentContinuationManager:
         return [self._child_entry(cid) for cid in self._known_child_ids()]
 
     def list_descendants(self) -> list[dict]:
-        """全部后代。mini 无 agents 注册表且子会话不装控制工具（无嵌套），
-        descendants == children（简化标注）。"""
-        return self.list_children()
+        """全部后代：从本父出发沿持久化 meta.parentSession 链 BFS（嵌套续跑
+        后孙代及更深后代的 parentSession 指向各自直属父）。"""
+        headers = {}
+        for header in self.persistence.list_headers():
+            hid = header.get("id")
+            meta = header.get("meta")
+            if hid and isinstance(meta, dict):
+                headers[hid] = meta
+        descendants: list[str] = []
+        frontier = [self.parent.id]
+        seen = {self.parent.id}
+        while frontier:
+            current = frontier.pop()
+            for cid, meta in headers.items():
+                if cid in seen or meta.get("parentSession") != current:
+                    continue
+                seen.add(cid)
+                descendants.append(cid)
+                frontier.append(cid)
+        return [self._child_entry(cid) for cid in sorted(descendants)]
 
     def _child_entry(self, child_id: str) -> dict:
         depth = 0
@@ -459,7 +724,8 @@ class SubagentContinuationManager:
 
     # ---------- 冷恢复与激活 ----------
 
-    def _get_or_resume(self, child_id: str) -> dict:
+    def _get_or_resume(self, child_id: str, parent: AgentLoop | None = None) -> dict:
+        parent = parent or self.parent
         lock = self._locks.setdefault(child_id, threading.Lock())
         with lock:
             existing = self._activations.get(child_id)
@@ -468,48 +734,57 @@ class SubagentContinuationManager:
                 # 对已有激活直接 submitAdmitted）。同步模型下不可达（sendMessage
                 # 串行且激活在 settle 时弹出）。
                 return existing
-            return self._cold_resume(child_id)
+            return self._cold_resume(child_id, parent)
 
-    def _cold_resume(self, child_id: str) -> dict:
+    def _cold_resume(self, child_id: str, parent: AgentLoop | None = None) -> dict:
+        parent = parent or self.parent
         info = self.persistence.inspect(child_id)
         meta = info["meta"]
-        if not isinstance(meta, dict) or meta.get("parentSession") != self.parent.id:
+        if not isinstance(meta, dict) or meta.get("parentSession") != parent.id:
             raise SubagentError("子会话不存在或不属于当前父代理", "UNAUTHORIZED")
         events = info["events"]
         descriptor = fold_subagent_descriptor(events)
         if descriptor is None or descriptor.get("mode") != "continuable":
             raise SubagentError("子会话不可继续（描述符缺失或非 continuable）", "NOT_RESUMABLE")
         child_session = Session(child_id, seed=events, meta=meta)
-        return self._build_activation(child_session, descriptor, persisted=len(events))
+        return self._build_activation(child_session, descriptor, persisted=len(events),
+                                      parent=parent)
 
-    def _build_activation(self, child_session: Session, descriptor: dict, persisted: int) -> dict:
+    def _build_activation(self, child_session: Session, descriptor: dict, persisted: int,
+                          parent: AgentLoop | None = None) -> dict:
+        parent = parent or self.parent
         child_id = child_session.session_id
-        child_ctx = self.parent.ctx.create_scope(f"subagent:{child_id}")
+        child_ctx = parent.ctx.create_scope(f"subagent:{child_id}")
         # 子作用域独立的 tools/systemPrompt 服务标签（对齐上游 agent scope 层：
         # per-agent 注册进 agent 自己的 realm，root realm 发布是进程级，冲突被拒）
         child_ctx._isolate.setdefault("tools", object())
         child_ctx._isolate.setdefault(SYSTEM_PROMPT_SERVICE, object())
 
         reg = ToolRegistry(child_ctx)
-        # toolFilter {allow?, deny?}（上游 ToolRestriction 形状）
+        # toolFilter {allow?, deny?}（上游 ToolRestriction 形状）；控制工具随父
+        # 注册表继承 → 嵌套续跑天然可用（深度上限由 start_continuable 守门）
         tool_filter = descriptor.get("toolFilter") or {}
         allow = set(tool_filter.get("allow") or [])
         deny = set(tool_filter.get("deny") or [])
-        for name in self.parent.tools.names():
+        for name in parent.tools.names():
             if allow and name not in allow:
                 continue
             if name in deny:
                 continue
-            tool = self.parent.tools.resolve(name)
+            if name == _REPORT_TOOL_NAME:
+                # 上一代子的专属 report 工具不继承（senderSessionId 绑定的是
+                # 错误的直属父）；本代在下方注册自己的 report
+                continue
+            tool = parent.tools.resolve(name)
             if tool is not None:
                 reg.register(tool)
         reg.register(self._report_tool(child_id))
 
         child = AgentLoop(
             child_session, self._resolve_adapter(descriptor), reg, child_ctx,
-            system_prompt=self.parent.system_prompt,
-            max_steps=self.parent.max_steps,
-            max_parallel_tool_calls=self.parent.max_parallel_tool_calls,
+            system_prompt=parent.system_prompt,
+            max_steps=parent.max_steps,
+            max_parallel_tool_calls=parent.max_parallel_tool_calls,
         )
         # publish（上游 agent-loop 工厂同款）：子会话进店 + 公告 +
         # agent/session-start；店成员资格归子 loop，结算 dispose 即 detach
@@ -521,27 +796,56 @@ class SubagentContinuationManager:
         child_ctx.provide(SYSTEM_PROMPT_SERVICE, svc)
         svc.section("persona", 0, descriptor.get("persona") or _DEFAULT_CHILD_PERSONA)
         svc.section("report-guidance", 117, _REPORT_GUIDANCE)
-        svc.section("delegation-context", 120, lambda c: self._delegation_context(child_id))
+        svc.section("delegation-context", 120, lambda c: self._delegation_context(parent, child_id))
 
+        # live ancestry（上游 ancestry WeakSet([handle.agent, *parentLineage])）：
+        # 物化时刻的 exact live 祖先链，interrupt ancestor 授权与嵌套结算都用它
+        pact = self._activations.get(parent.id)
+        lineage = [parent]
+        if pact is not None:
+            lineage.extend(pact["ancestry"])
         activation = {
             "loop": child,
             "ctx": child_ctx,
             "registry": reg,
             "label": descriptor.get("label") or child_id,
             "status": "running",
+            "parent_loop": parent,              # durable 直属父（结算投递目标）
+            "run_id": uuid.uuid4().hex,         # 生命周期事件对的唯一标识
+            "ancestry": tuple([child, *lineage]),
             "persisted": persisted,          # == epoch_start：结算 delta 起点
             "descriptor": descriptor,
             # A8 事件驱动字段：
             "interrupted": False,            # interrupt 已下达（诊断用）
+            "announced": False,              # 已有 message id 交付调用方（结算须交代）
             "accepted": set(),               # 已投递未认领的 message id
             "poke": None,                    # asyncio.Event，_submit_on_loop 首次装配
             "disposal": None,                # 结算/关闭标记（已结算 → 不再投递）
             "watched": False,                # watcher + driver + claimed 钩子已就绪
-            "owned_children": set(),         # 恒空（无嵌套，保留字段指向嵌套场景）
+            "owned_children": set(),         # 本激活委托出的、尚未结算的子代 id
         }
         self._locks.setdefault(child_id, threading.Lock())
         self._activations[child_id] = activation
+        self._live[child_id] = child
+        # 生命周期 start 边（上游 observer.start：任何 turn 运行前发布本 epoch）
+        self._emit_lifecycle(parent, "subagent/start", {
+            "runId": activation["run_id"],
+            "provider": descriptor.get("provider") or CONTINUATION_PROVIDER,
+            "id": child_id,
+            "local": True,
+        })
         return activation
+
+    def _emit_lifecycle(self, parent: AgentLoop, name: str, info: dict) -> None:
+        """生命周期边发布（上游 createLifecycleEmitter）：经委托父作用域逐
+        监听器派发并逐个收容——同步抛错或 rejected promise 记 warn，不饿死
+        同侪监听器、不改变 run。mini 无 scoped dispatch 载体键，payload 即
+        全量信息（SubagentRunInfo / SubagentRunEndInfo）。"""
+        for fn in parent.ctx._hooks_for(name, None):
+            try:
+                fn(info)
+            except Exception as error:
+                logger.warn(f"subagent: {name} listener failed: {error}")
 
     def _resolve_adapter(self, descriptor: dict) -> LlmAdapter:
         """按描述符重建子适配器（上游按 agentProvider/agentModel 重建 provider）。
@@ -553,9 +857,9 @@ class SubagentContinuationManager:
         model = descriptor.get("agentModel") or getattr(self.parent.adapter, "model", None)
         return self._adapter_factory(provider, model)
 
-    def _delegation_context(self, child_id: str) -> str:
+    def _delegation_context(self, parent: AgentLoop, child_id: str) -> str:
         return (
-            f"Parent session: {self.parent.id}. This subagent is {child_id}; "
+            f"Parent session: {parent.id}. This subagent is {child_id}; "
             "it inherits the parent's completed conversation history."
         )
 
@@ -593,16 +897,13 @@ class SubagentContinuationManager:
     def _settle(self, child_id: str, activation: dict) -> bool:
         """结算临界区（同步、无 await；跨线程以 _locks 串行化）。
 
-        返回 True = 已结算（activation 弹出 + 结算投递）；False = 未到结算
-        时机（accepted 非空 / 子仍在跑）。
-        要点：
-          * epoch_start == persisted（激活物化时事件数）→ delta 只算新事件，
-            不误读父 seed（A7 已立教训）。
-          * accepted 排空判据：_settle 只在 idle_fut（= 驱动 _mark_quiescent，
-            inbox 已排空）之后进入；此刻所有投递消息必已认领（claimed hook
-            已 discard）。
-          * 结算先于所有权释放：_deliver_settlement（投递父）在 pop 之后但
-            "所有权释放"在 mini 是 no-op（无嵌套），投递即最后一步，顺序天然满足。
+        返回 True = 已结算；False = 未到结算时机（accepted 非空 / 子仍在跑 /
+        仍有 owned 子代未拆除）。对齐上游 finishDisposal 顺序：cancel（top-down
+        停止传播）→ best-effort final flush（失败仅告警，绝不阻断释放——扣住子
+        代会把整条祖先链永久钉在 waiting）→ capture（终局事实趁子在册时快照）
+        → handle/ctx 拆除 → 摘激活 → **notifySettlement 先于 releaseOwnership**
+        （父此刻仍计着这个子、不可能被误判 settled）→ releaseOwnership →
+        subagent/end 终局边（disposal 结果已知后发布一次，与 start 配对）。
         """
         with self._locks.setdefault(child_id, threading.Lock()):
             if activation.get("disposal") is not None:
@@ -611,34 +912,76 @@ class SubagentContinuationManager:
                 return False                    # stateOf running：仍有未认领投递
             if not activation["loop"].when_idle():
                 return False                    # 仍在跑（重启后的新回合）
+            if activation["owned_children"]:
+                return False                    # stateOf waiting：owned 子未拆完
             activation["disposal"] = True
+            parent = activation["parent_loop"]
             child = activation["loop"]
             epoch = child.session.events[activation["persisted"]:]  # 整 epoch delta
-            stop = epoch_stop_reason(epoch)
-            output = final_assistant_output(epoch)
-            summary = settlement_summary(stop, child_id)
-            self._persist_delta(child.session, start=activation["persisted"])
-            self._persisted[child_id] = len(child.session.events)
-            # 先 loop.dispose（cancel + 拆 loop scope + detach 会话：离店 +
-            # session/disposed，对齐上游 agent-loop dispose 生命周期），再拆
-            # 子作用域 ctx（级联回已拆的 loop.scope，幂等）
-            child.dispose()
-            activation["ctx"].dispose()
+            failure = False
+            try:
+                # top-down 停止传播先于一切 await（上游 cancel({kind:'parent'})；
+                # 静默子上无害）。mini 同步临界区无 await，等价于"cancel→await idle"
+                child.cancel("parent")
+                # best-effort final flush（上游 flushFinalState）：持久层失败只
+                # 告警——teardown 必须继续，所有权必须释放
+                self._persist_delta(child.session, start=activation["persisted"])
+                self._persisted[child_id] = len(child.session.events)
+            except Exception as error:
+                failure = True                  # teardown 失败覆盖 epoch 自身结局
+                logger.warn(
+                    f'subagent "{child_id}" best-effort final session flush failed; '
+                    f"the persisted state may be unavailable or stale on resume: {error}"
+                )
+            # capture：终局事实在子仍在册时算好（上游 observer.capture + terminal：
+            # teardown 失败 → stopReason 'error' 且不交付输出——未能 durable 释放的
+            # 回答不是结果）
+            stop = "error" if failure else epoch_stop_reason(epoch)
+            output = None if failure else final_assistant_output(epoch)
+            try:
+                # 先 loop.dispose（cancel + 拆 loop scope + detach 会话：离店 +
+                # session/disposed），再拆子作用域 ctx（级联回已拆的 loop.scope，幂等）
+                child.dispose()
+                activation["ctx"].dispose()
+            except Exception as error:
+                failure = True
+                stop = "error"
+                logger.warn(f'subagent "{child_id}" activation teardown failed: {error}')
             self._activations.pop(child_id, None)
-        # 锁外投递：先摘激活再投递，父 pump 可对同一子代理再次 send_message
+            self._live.pop(child_id, None)
+        # 锁外收尾：先摘激活再投递，父 pump 可对同一子代理再次 send_message
         # （此时必须冷恢复而非撞既有激活）
-        self._deliver_settlement(child_id, summary, output)
+        self._notify_settlement(activation, stop, output, child_id)
+        self._release_ownership(child_id)
+        # 终局边最后发布（上游 observer.settle 在 releaseOwnership 之后）
+        info = {
+            "runId": activation["run_id"],
+            "provider": activation["descriptor"].get("provider") or CONTINUATION_PROVIDER,
+            "id": child_id,
+            "local": True,
+            "stopReason": stop,
+        }
+        if output is not None:
+            info["lastAssistantMessage"] = output
+        self._emit_lifecycle(parent, "subagent/end", info)
         return True
 
-    def _persist_delta(self, session: Session, start: int) -> None:
-        events = session.events[start:]
-        if not events:
-            return
-        for event in events:
-            self.persistence.append(session.session_id, event)
-        self.persistence.flush()
+    def _notify_settlement(self, activation: dict, stop: str, output: list | None,
+                           child_id: str) -> None:
+        """向 durable 直属父交代子的终局（上游 notifySettlement）。
 
-    def _deliver_settlement(self, child_id: str, summary: str, output: list | None) -> None:
+        无条件面向每个拿到过 id 的子：不考虑它是否 report 过——token 上限、
+        模型失败、取消、teardown 恰恰是子自己来不及选择的情形。announced=False
+        （物化回滚、无人拿到 id）保持沉默。父不在世不是错误：子的 Session 本就
+        是 durable 记录。投递失败记 warn 丢弃——为重试通知扣住子会把整个祖先链
+        钉死在 waiting。
+        """
+        if not activation.get("announced"):
+            return
+        parent = activation.get("parent_loop")
+        if parent is None:
+            return
+        summary = settlement_summary(stop, child_id)
         blocks = [text_block(summary)]
         if output is None:
             blocks.append(text_block("It left no closing message."))
@@ -655,23 +998,30 @@ class SubagentContinuationManager:
                 "senderSessionId": child_id,
             },
         )
-        self._deliver(message)
 
-    def _deliver(self, message: dict) -> None:
-        if self.parent._driver is not None:
-            # A8 异步路径：父 idle → followup（唤醒新回合）；父 running →
-            # steer（批内合并，下一步边界消费）——对齐上游 sendWaking。
-            if self.parent.status == "idle":
-                self.parent.followup(message)
-            else:
-                self.parent.steer(message)
-        else:
-            # A7 同步路径：父 idle → followup；父 running → 非唤醒 inbox
-            # （next-step：下一步边界消费，对齐上游 inject 语义）。
-            if self.parent.status == "idle":
-                self.parent.followup(message)
-            else:
-                self.parent.inbox.append("next-step", message)
+        def send() -> None:
+            # idle 父给一个普通 turn；busy 父 steer（claim 整批下一步输入，
+            # 多子齐结算一次 step 消化而非一子一 turn）；steering 而非 inject
+            # 关闭"driver 在 status 读取与发送之间退役致通知搁浅"的窗口
+            self._route_to_parent(parent, message)
+
+        try:
+            # waking 记账：父自身也是 continuation 托管激活时，先把通知 id 记入
+            # 其结算窗口再发（否则父会在 followup 与微任务认领之间被误判 quiescent）
+            self._send_waking(parent, message, send)
+        except Exception as error:
+            logger.warn(
+                f'subagent "{child_id}" settlement notice was not delivered to its '
+                f"parent: {error}"
+            )
+
+    def _persist_delta(self, session: Session, start: int) -> None:
+        events = session.events[start:]
+        if not events:
+            return
+        for event in events:
+            self.persistence.append(session.session_id, event)
+        self.persistence.flush()
 
     # ---------- 子专属 report 工具 ----------
 
@@ -722,7 +1072,10 @@ def install_subagent_control_tools(
 
 def _send_message_tool(manager: SubagentContinuationManager) -> Tool:
     async def execute(args: dict, exec_: ToolExec):
-        await manager.send_message_async(args["subagentId"], args["message"])
+        # 调用方 agent 即授权与所有权主体（上游 exec.agent → followup(parent,…)）：
+        # 嵌套续跑时子代理经同一工具委托孙代
+        await manager.send_message_async(args["subagentId"], args["message"],
+                                         parent=exec_.agent)
         return f"Message sent to subagent {args['subagentId']}."
 
     return Tool(
@@ -745,7 +1098,9 @@ def _send_message_tool(manager: SubagentContinuationManager) -> Tool:
 
 def _interrupt_agent_tool(manager: SubagentContinuationManager) -> Tool:
     async def execute(args: dict, exec_: ToolExec):
-        manager.interrupt(args["subagentId"], cause="parent")
+        # 服务以 exact live caller 对照目标 recorded lineage 授权（上游
+        # {kind:'ancestor', agent: caller}）；工具自身不附加任何权限
+        manager.interrupt(args["subagentId"], {"kind": "ancestor", "agent": exec_.agent})
         return f"Interrupted subagent {args['subagentId']}."
 
     return Tool(
