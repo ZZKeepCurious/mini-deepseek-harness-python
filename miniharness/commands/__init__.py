@@ -15,28 +15,31 @@ rawInput，分隔空白在内）。
     值在注册表边界 fail-loud（normalizeResult，上游 index.ts:192-218）。
   * commandId 形如 `cmd-<8位uuid前缀>-<单调序号>`（上游 mintCommandId：instance
     token 前缀 + 每实例递增计数，resume 日志不重复）。
-  * 命令名解析不做大小写转换：上游 parseCommand 正则 `/^\/([a-z][a-z0-9_-]*)
-    (?=$|[\t\n\r ])/`，首字符必须小写字母（index.ts:103）。
-  * 注册即 notify：commands/change 事件（上游 notifyChange，非 vetoing，各自
-    回调独立 contain）。
-
-教学扩展（有意保留，须在文档标注）：上游命令由人类 UI 表面（web/CLI）派发，
-handler 收到 CommandInvocation {commandId, agent, rawInput, signal}；mini 无交互
-式 UI，handler 签名保持 `(agent, raw)`（plan/goal 已按此签名注册），命令契约由
-REPL 示例（examples/plan_goal_demo.py）演示。headless / ACP / SDK 是自动化表面，
-不路由命令（对齐上游——命令只属人类 UI）。无 AbortSignal（signal 取消语义未复现，
-与 asyncio 化简化清单一致）。
-"""
+   * 命令名解析不做大小写转换：上游 parseCommand 正则 `/^\\/([a-z][a-z0-9_-]*)
+   (?=$|[\\t\\n\\r ])/`，首字符必须小写字母（index.ts:103）。
+   * 注册即 notify：commands/change 事件（上游 notifyChange，非 vetoing，各自
+     回调独立 contain）。
+   * handler 收到 `CommandInvocation {commandId, agent, rawInput, signal}`（上游
+     index.ts:28-37）：单一调用对象，含派发拥有的 `AbortSignal`。mini 为同步驱动
+     模型，`signal` 在 dispatch 入口检查；handler 可轮询 `signal.aborted` 实现协作式
+     取消（上游 withAbort 同语义，index.ts:126-148）。headless / ACP / SDK 是自动化
+     表面，不路由命令（对齐上游——命令只属人类 UI）；命令契约由 REPL 示例
+     （examples/plan_goal_demo.py）与 web 表面演示。
+ """
 from __future__ import annotations
 
 import re
 import uuid
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from ..core.scope import Context
 from ..core.session import Session
 
 __all__ = [
+    "AbortSignal",
+    "CommandAborted",
+    "CommandInvocation",
     "CommandRegistry",
     "install_commands",
     "parse_command",
@@ -53,6 +56,52 @@ _COMMAND_LINE = re.compile(r"^/([a-z][a-z0-9_-]*)(?=$|[\t\n\r ])")
 #: instance token：每实例前缀，使跨进程 resume 的 commandId 不重复（上游
 #: mintCommandId，uuid 前 8 字符）。
 _instance_token = uuid.uuid4().hex[:8]
+
+
+class AbortSignal:
+    """取消信号（对齐上游 AbortSignal）。
+
+    mini 为同步驱动模型：dispatch 在入口检查 `aborted`；handler 可轮询
+    `aborted` 实现协作式取消（上游 withAbort 在 signal abort 时 reject，
+    index.ts:126-148）。不实现 addEventListener 全事件机，仅暴露布尔与
+    `abort()`（足以覆盖命令派发取消语义）。
+    """
+
+    __slots__ = ("aborted", "reason")
+
+    def __init__(self) -> None:
+        self.aborted: bool = False
+        self.reason: Any = None
+
+    def abort(self, reason: Any = None) -> None:
+        self.aborted = True
+        self.reason = reason
+
+
+class CommandAborted(Exception):
+    """handler 因信号中止时抛出的稳定错误（上游 abortError，index.ts:112-115）。"""
+
+
+def _abort_error(signal: AbortSignal) -> CommandAborted:
+    if isinstance(signal.reason, BaseException):
+        return CommandAborted(str(signal.reason)).with_traceback(signal.reason.__traceback__)
+    return CommandAborted(str(signal.reason) if signal.reason is not None else "command aborted")
+
+
+@dataclass
+class CommandInvocation:
+    """派发给单条已注册命令 handler 的调用对象（上游 index.ts:28-37）。
+
+    * command_id：本 invocation 的配对 id（已写入 `command/run`）。
+    * agent：精确接收命令的 agent。
+    * raw_input：命令名之后的逐字文本（分隔空白在内，与 parseCommand 一致）。
+    * signal：派发拥有的取消信号（已 abort → dispatch 入口即抛 CommandAborted）。
+    """
+
+    command_id: str
+    agent: Any
+    raw_input: str
+    signal: AbortSignal
 
 
 def parse_command(text: str) -> tuple[str, str] | None:
@@ -125,11 +174,14 @@ class CommandRegistry:
         except Exception:  # noqa: BLE001 - 通知失败不影响注册（上游各自 contain）
             pass
 
-    def dispatch(self, agent: Any, text: str) -> dict | None:
+    def dispatch(self, agent: Any, text: str, signal: AbortSignal | None = None) -> dict | None:
         """执行一行命令输入；非命令行/未知命令返回 None。
 
         命令进入 handler 前先落 `command/run`（durable before dispatch，对齐上游），
-        handler 结算后落 `command/done` 配对。返回归一化的 {kind, text}。
+        handler 收到单一 `CommandInvocation`（含派发拥有的 `AbortSignal`）。
+        signal 已 abort → 入口即抛 CommandAborted（上游 withAbort 同语义）；
+        handler 抛错 → 结算为 kind:'error' + 渲染失败。`command/done` 配对收尾。
+        返回归一化的 {kind, text}。
         """
         parsed = parse_command(text)
         if parsed is None:
@@ -138,6 +190,10 @@ class CommandRegistry:
         entry = self._commands.get(name)
         if entry is None:
             return None
+        if signal is None:
+            signal = AbortSignal()
+        if signal.aborted:
+            raise _abort_error(signal)
         session: Session = agent.session
         command_id = self._mint_command_id()
         run_data: dict[str, Any] = {
@@ -148,8 +204,10 @@ class CommandRegistry:
         if entry["record_input"]:
             run_data["args"] = raw
         session.append("command/run", run_data)
+        invocation = CommandInvocation(
+            command_id=command_id, agent=agent, raw_input=raw, signal=signal)
         try:
-            output = entry["handler"](agent, raw)
+            output = entry["handler"](invocation)
         except Exception as error:  # noqa: BLE001 - 抛错的 handler 结算为 error（上游同语义）
             session.append("command/done", {
                 "commandId": command_id, "kind": "error",
@@ -203,15 +261,17 @@ def install_commands(ctx: Context) -> CommandRegistry:
     return registry
 
 
-def route_command(text: str, agent: Any, ctx: Context) -> str | None:
+def route_command(text: str, agent: Any, ctx: Context,
+                  signal: AbortSignal | None = None) -> str | None:
     """表面便捷入口：命中已注册命令返回 handler 文本，否则返回 None。
 
-    无 commands 服务时返回 None（命令不可用即普通文本）。
+    无 commands 服务时返回 None（命令不可用即普通文本）。signal 透传给 dispatch
+    的 AbortSignal（上游 execute 的 signal 参数，index.ts:296-301）。
     """
     commands = ctx.get("commands")
     if commands is None:
         return None
-    result = commands.dispatch(agent, text)
+    result = commands.dispatch(agent, text, signal=signal)
     if result is None:
         return None
     return result["text"]

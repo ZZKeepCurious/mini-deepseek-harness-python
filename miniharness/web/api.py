@@ -44,7 +44,7 @@ import os
 import uuid
 from typing import Any
 
-from ..commands import parse_command
+from ..commands import AbortSignal, parse_command
 from ..core.agent_loop.agent import AgentLoop
 from ..core.scope import Context
 from ..core.session import Session, create_message, text_block
@@ -373,7 +373,7 @@ class WebApi:
         if name is None:
             return self._err(rpc_id, "unknown-command",
                              f'no command named by "{text}"', {"command": text})
-        result = commands.dispatch(loop, text)
+        result = commands.dispatch(loop, text, signal=AbortSignal())
         if result is None:
             return self._err(rpc_id, "unknown-command",
                              f'no command named "/{name}"', {"command": text})

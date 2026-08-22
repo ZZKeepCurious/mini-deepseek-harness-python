@@ -8,6 +8,8 @@ import unittest
 from types import SimpleNamespace
 
 from miniharness.commands import (
+    AbortSignal,
+    CommandAborted,
     CommandRegistry,
     install_commands,
     parse_command,
@@ -53,8 +55,8 @@ class CommandRegistryTest(unittest.TestCase):
         _, registry = self._make()
         agent = _agent()
 
-        def handler(agent, raw):
-            return {"kind": "success", "text": f"got:{raw}"}
+        def handler(inv):
+            return {"kind": "success", "text": f"got:{inv.raw_input}"}
 
         registry.register("echo", "echo back", handler)
         result = registry.dispatch(agent, "/echo hi")
@@ -75,7 +77,7 @@ class CommandRegistryTest(unittest.TestCase):
         _, registry = self._make()
         agent = _agent()
 
-        def handler(agent, raw):
+        def handler(inv):
             raise ValueError("boom")
 
         registry.register("fail", "fails", handler)
@@ -97,14 +99,14 @@ class CommandRegistryTest(unittest.TestCase):
 
     def test_duplicate_registration_fails(self):
         _, registry = self._make()
-        registry.register("dup", "a", lambda a, r: None)
+        registry.register("dup", "a", lambda inv: None)
         with self.assertRaises(RuntimeError):
-            registry.register("dup", "b", lambda a, r: None)
+            registry.register("dup", "b", lambda inv: None)
 
     def test_disposer(self):
         _, registry = self._make()
         agent = _agent()
-        disposer = registry.register("x", "x", lambda a, r: None)
+        disposer = registry.register("x", "x", lambda inv: None)
         self.assertIn("x", registry.names())
         disposer()
         self.assertNotIn("x", registry.names())
@@ -112,7 +114,7 @@ class CommandRegistryTest(unittest.TestCase):
     def test_string_result_fails_loud(self):
         # 对齐上游 normalizeResult：非 CommandResult 返回 fail loud（注册表边界）
         _, registry = self._make()
-        registry.register("s", "s", lambda a, r: "ok")
+        registry.register("s", "s", lambda inv: "ok")
         with self.assertRaises(TypeError):
             registry.dispatch(_agent(), "/s")
 
@@ -122,12 +124,12 @@ class CommandRegistryTest(unittest.TestCase):
 
     def test_route_command_hits(self):
         ctx, registry = self._make()
-        registry.register("plan", "plan", lambda a, r: {"kind": "success", "text": "ok"})
+        registry.register("plan", "plan", lambda inv: {"kind": "success", "text": "ok"})
         self.assertEqual(route_command("/plan off", _agent(), ctx), "ok")
 
     def test_command_id_format_monotonic(self):
         _, registry = self._make()
-        registry.register("a", "a", lambda a, r: {"kind": "success"})
+        registry.register("a", "a", lambda inv: {"kind": "success"})
         agent = _agent()
         registry.dispatch(agent, "/a")
         registry.dispatch(agent, "/a")
@@ -146,21 +148,21 @@ class CommandRegistryTest(unittest.TestCase):
         _, registry = self._make()
         for bad in ("Plan", "1abc", "_x", "-x", "a b"):
             with self.assertRaises(TypeError):
-                registry.register(bad, "d", lambda a, r: None)
-        registry.register("ok_name-1", "d", lambda a, r: None)
+                registry.register(bad, "d", lambda inv: None)
+        registry.register("ok_name-1", "d", lambda inv: None)
 
     def test_register_description_validation(self):
         _, registry = self._make()
         with self.assertRaises(TypeError):
-            registry.register("x", "", lambda a, r: None)
+            registry.register("x", "", lambda inv: None)
         with self.assertRaises(TypeError):
-            registry.register("x", "   ", lambda a, r: None)
+            registry.register("x", "   ", lambda inv: None)
         with self.assertRaises(TypeError):
             registry.register("x", "ok", None)
 
     def test_record_input_false_omits_args(self):
         _, registry = self._make()
-        registry.register("quiet", "q", lambda a, r: {"kind": "success"}, record_input=False)
+        registry.register("quiet", "q", lambda inv: {"kind": "success"}, record_input=False)
         agent = _agent()
         registry.dispatch(agent, "/quiet secret")
         run = [e for e in agent.session.events if e["type"] == "command/run"][0]
@@ -168,7 +170,7 @@ class CommandRegistryTest(unittest.TestCase):
 
     def test_success_source_event_seq_recorded(self):
         _, registry = self._make()
-        registry.register("src", "s", lambda a, r: {"kind": "success", "text": "ok",
+        registry.register("src", "s", lambda inv: {"kind": "success", "text": "ok",
                                                     "sourceEventSeq": 7})
         agent = _agent()
         registry.dispatch(agent, "/src")
@@ -179,22 +181,49 @@ class CommandRegistryTest(unittest.TestCase):
         ctx, registry = self._make()
         events = []
         ctx.on("commands/change", lambda payload: events.append(True))
-        disposer = registry.register("c", "c", lambda a, r: {"kind": "success"})
+        disposer = registry.register("c", "c", lambda inv: {"kind": "success"})
         self.assertEqual(len(events), 1)
         disposer()
         self.assertEqual(len(events), 2)
 
     def test_bad_result_kind_fails_loud(self):
         _, registry = self._make()
-        registry.register("badk", "b", lambda a, r: {"kind": "nope"})
+        registry.register("badk", "b", lambda inv: {"kind": "nope"})
         with self.assertRaises(TypeError):
             registry.dispatch(_agent(), "/badk")
 
     def test_error_result_requires_text(self):
         _, registry = self._make()
-        registry.register("bade", "b", lambda a, r: {"kind": "error"})
+        registry.register("bade", "b", lambda inv: {"kind": "error"})
         with self.assertRaises(TypeError):
             registry.dispatch(_agent(), "/bade")
+
+    def test_aborted_signal_rejected_at_entry(self):
+        # 对齐上游 withAbort：signal 已 abort → dispatch 入口即抛 CommandAborted
+        _, registry = self._make()
+        registry.register("x", "x", lambda inv: {"kind": "success"})
+        signal = AbortSignal()
+        signal.abort("cancelled by user")
+        with self.assertRaises(CommandAborted) as ctx:
+            registry.dispatch(_agent(), "/x", signal=signal)
+        self.assertEqual(str(ctx.exception), "cancelled by user")
+        # 未进 handler：不落 command/run
+        self.assertNotIn("command/run",
+                         [e["type"] for e in _agent().session.events])
+
+    def test_handler_can_observe_signal(self):
+        # handler 经 invocation.signal 拿到派发拥有的取消信号
+        _, registry = self._make()
+        seen = {}
+
+        def handler(inv):
+            seen["signal"] = inv.signal
+            return {"kind": "success"}
+
+        registry.register("y", "y", handler)
+        signal = AbortSignal()
+        registry.dispatch(_agent(), "/y", signal=signal)
+        self.assertIs(seen["signal"], signal)
 
 
 if __name__ == "__main__":

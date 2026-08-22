@@ -138,6 +138,6 @@ def install_goal_commands(ctx, goals) -> Callable | None:
     return commands.register(
         "goal",
         "set or view the goal for a long-running task",
-        lambda agent, raw: _execute_goal_command(goals, agent, raw),
+        lambda inv: _execute_goal_command(goals, inv.agent, inv.raw_input),
         input_hint="[<objective>|clear|edit <objective>|pause|resume]",
     )

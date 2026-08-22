@@ -70,8 +70,9 @@ def _exit_plan_mode_error(message: str) -> ValueError:
 def _plan_command_handler(controller: PlanModeController) -> Callable:
     """/plan 命令 handler（上游 index.ts:274-301 文案逐字对齐）。"""
 
-    def handler(agent: Any, raw_input: str) -> dict:
-        message = raw_input.strip()
+    def handler(invocation: Any) -> dict:
+        agent = invocation.agent
+        message = invocation.raw_input.strip()
         if message == "off":
             outcome = controller.set(agent, False)
             if outcome == "committed":

@@ -219,7 +219,7 @@ class TestSlashCommand(WebApiTest):
     def test_registered_command_runs(self):
         install_commands(self.ctx).register(
             "greet", "greet someone",
-            lambda agent, raw: {"kind": "success", "text": f"hi {raw.strip()}"})
+            lambda inv: {"kind": "success", "text": f"hi {inv.raw_input.strip()}"})
         session_id = self._value(self._create())["sessionId"]
         value = self._value(self.api.dispatch("session.prompt", "rid", {
             "sessionId": session_id, "mode": "queue",
@@ -235,7 +235,7 @@ class TestSlashCommand(WebApiTest):
 
     def test_registered_command_error(self):
         install_commands(self.ctx).register(
-            "boom", "fails", lambda agent, raw: {"kind": "error", "text": "kaput"})
+            "boom", "fails", lambda inv: {"kind": "error", "text": "kaput"})
         session_id = self._value(self._create())["sessionId"]
         error = self._error(self.api.dispatch("session.prompt", "rid", {
             "sessionId": session_id, "mode": "queue",
@@ -246,7 +246,7 @@ class TestSlashCommand(WebApiTest):
 
     def test_unknown_command_name(self):
         install_commands(self.ctx).register(
-            "greet", "greet", lambda agent, raw: {"kind": "success", "text": "ok"})
+            "greet", "greet", lambda inv: {"kind": "success", "text": "ok"})
         session_id = self._value(self._create())["sessionId"]
         error = self._error(self.api.dispatch("session.prompt", "rid", {
             "sessionId": session_id, "mode": "queue",
