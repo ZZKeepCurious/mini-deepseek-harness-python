@@ -68,7 +68,9 @@ flowchart LR
 | [09 Agent 干预面](chapters/09-agent-intervention.md) | steer/inject/cancel/whenIdle/runMaintenance、pre-step/request 瀑布、quiescence 语义、审批能力 seam（ask/never + 审计对）；mini：loop 干预面五方法 + approval.py | `core/agent` + `core/agent-loop` + `interaction/user-approval` | 2-3 天 |
 | [10 轨迹投影引擎](chapters/10-trajectory-projection.md) | 折叠定义 → TrajectorySnapshot，Python 复现；headless summarize 的演进 | `packages/client/ui-trajectory` | 2-3 天 |
 | [11 运行时自我修改](chapters/11-runtime-self-modification.md) | extensions 七工具、进程内存动态插件生命周期（define/run/stop） | `packages/extensions/*` | 2 天 |
-| [12 异步化与并行工具](chapters/12-async-parallel-tools.md) | asyncio 事件总线、并行调度器（屏障/滚动池/模型序提交/取消排干）、`is_concurrency_safe` 分类 | `core/agent-loop` 并行编排 + `core/context` 并发模型 | 2-3 天 |
+| [12 异步化与并行工具](chapters/12-async-parallel-tools.md) | asyncio 事件总线、并行调度器（屏障/滚动池/模型序提交/取消排干）、`is_concurrency_safe` 分类 | 
+| [13 Cordis 进阶：Service 基类与 intercept](chapters/13-cordis-service-interceptor-logger.md) | `Service` 基类（构造即登记 / 可调用 `_invoke` / `_check` / `_init`）、`_resolve_config` 沿 intercept 链合并、`LoggerService` 内置日志（exporter / 绑定视图）、`extend`/`isolate`/`intercept` 三兄弟 | `vendor/cordis/src/service.ts` + `context.ts` + `logger.ts` |
+| [14 dsh_scope 载波派发模型](chapters/14-dsh-scope-carrier.md) | `ScopeKey` 身份键、`scopeParents` 关系（注册向下 / 事件向上）、`scopeTarget` 载波、`ScopedLayers`/`NamedEntries`/`AnonymousEntries` 注册表存储 | `packages/core/scope/src/index.ts` + `store.ts` |`core/agent-loop` 并行编排 + `core/context` 并发模型 | 2-3 天 |
 
 ## 快速开始
 

@@ -94,3 +94,5 @@ nav:
       - 10 轨迹投影引擎: chapters/10-trajectory-projection.md
       - 11 运行时自我修改: chapters/11-runtime-self-modification.md
       - 12 异步化与并行工具: chapters/12-async-parallel-tools.md
+      - 13 Cordis 进阶：Service 基类与 intercept: chapters/13-cordis-service-interceptor-logger.md
+      - 14 dsh_scope 载波派发模型: chapters/14-dsh-scope-carrier.md
