@@ -214,6 +214,27 @@ class TestLoop(unittest.TestCase):
         self.assertEqual(session.events[-1]["type"], "turn/end")
         self.assertEqual(turn_balance(session.events), 0)
 
+    def test_max_steps_default_and_env_override(self):
+        # 默认解析到 DEFAULT_MAX_STEPS（环境变量未设置时）
+        session = Session("s2")
+        ctx = Context()
+        reg = ToolRegistry(ctx)
+        loop_default = AgentLoop(session, FakeLlmAdapter(final_text="ok"), reg, ctx)
+        self.assertEqual(loop_default.max_steps, 50)
+        # 显式构造参数胜出
+        loop_explicit = AgentLoop(session, FakeLlmAdapter(final_text="ok"), reg, ctx, max_steps=7)
+        self.assertEqual(loop_explicit.max_steps, 7)
+        # 环境变量覆盖默认（不传构造参数时）
+        import os
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"MINIHARNESS_MAX_STEPS": "123"}):
+            loop_env = AgentLoop(Session("s3"), FakeLlmAdapter(final_text="ok"), reg, ctx)
+            self.assertEqual(loop_env.max_steps, 123)
+        # 显式参数仍优先于环境变量
+        with mock.patch.dict(os.environ, {"MINIHARNESS_MAX_STEPS": "123"}):
+            loop_both = AgentLoop(Session("s4"), FakeLlmAdapter(final_text="ok"), reg, ctx, max_steps=9)
+            self.assertEqual(loop_both.max_steps, 9)
+
 
 class TestRequestEnvelope(unittest.TestCase):
     """请求信封（request/header + request/context + agent/request waterfall）。

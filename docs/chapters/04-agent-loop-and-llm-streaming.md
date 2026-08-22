@@ -248,13 +248,15 @@ class DeepSeekAdapter(LlmAdapter):
 
 ```python
 class AgentLoop:
-    def __init__(self, session, adapter, tools, ctx, system_prompt="你是一个助手。", max_steps=50):
+    def __init__(self, session, adapter, tools, ctx, system_prompt="你是一个助手。", max_steps=None):
         self.session = session
         self.adapter = adapter
         self.tools = tools
         self.ctx = ctx
         self.system_prompt = system_prompt
-        self.max_steps = max_steps
+        # 死循环守卫：未显式传入时取 DEFAULT_MAX_STEPS（默认 50），
+        # 可被环境变量 MINIHARNESS_MAX_STEPS 覆盖（极大值即等效关闭）
+        self.max_steps = max_steps or DEFAULT_MAX_STEPS
         self.status = "idle"
         self.inbox = deque()        # 排队输入（唯一入口）
         self._turn_open = False
@@ -300,7 +302,7 @@ class AgentLoop:
         while self.inbox or self._continue:
             steps += 1
             if steps > self.max_steps:
-                raise RuntimeError(f"超过最大 step 数 {self.max_steps}，疑似死循环")
+                raise RuntimeError(f"超过最大 step 数 {self.max_steps}（DEFAULT_MAX_STEPS，可经 MINIHARNESS_MAX_STEPS 或构造参数覆盖），疑似死循环")
             self._open_turn()
             claimed = self.inbox.popleft() if self.inbox else None
             self._run_step(claimed)
@@ -308,7 +310,7 @@ class AgentLoop:
                 self._close_turn()
 ```
 
-循环条件：有排队输入，或有工具回灌待继续（`_continue`）。`max_steps` 是死循环守卫：模型如果永远调工具不结束，会在 50 步时报错而不是挂死（测试 `test_max_steps_guard` 钉住）。
+循环条件：有排队输入，或有工具回灌待继续（`_continue`）。`max_steps` 是死循环守卫：模型如果永远调工具不结束，会在上限步数时报错而不是挂死（测试 `test_max_steps_guard` 钉住）。守卫默认 `DEFAULT_MAX_STEPS = 50`，可由构造参数或环境变量 `MINIHARNESS_MAX_STEPS` 覆盖——上游 `AgentLoop` 无硬性 step 上限，mini 保留该保守守卫作安全网。
 
 ### 步骤 4：一个 step
 

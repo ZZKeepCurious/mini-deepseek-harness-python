@@ -33,7 +33,13 @@ status/mini-harness/asyncio-refactor-design.md）：
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import Any, Callable
+
+# 死循环守卫上限（对齐上游：dsh 无硬性 step 上限，由模型停止/宿主干预终止；
+# mini 保留一个保守的可配置守卫避免病态情况下挂死）。可通过构造参数或
+# 环境变量 MINIHARNESS_MAX_STEPS 覆盖（设为极大值即等效关闭）。
+DEFAULT_MAX_STEPS = 50
 
 from ..dsh_scope import scope_target
 from ..scope import Context
@@ -95,7 +101,7 @@ class AgentLoop:
         tools: ToolRegistry,
         ctx: Context,
         system_prompt: str = "你是一个助手。",
-        max_steps: int = 50,
+        max_steps: int | None = None,
         max_parallel_tool_calls: int = 10,
     ):
         self.session = session
@@ -117,7 +123,11 @@ class AgentLoop:
         # 会话随 loop 生命周期进/离店。
         self._detach_session: Callable[[], None] | None = None
         self.system_prompt = system_prompt
-        self.max_steps = max_steps
+        self.max_steps = (
+            max_steps
+            if max_steps is not None
+            else int(os.environ.get("MINIHARNESS_MAX_STEPS", DEFAULT_MAX_STEPS))
+        )
         self.max_parallel_tool_calls = max_parallel_tool_calls   # 阶段 7：并行池上限（上游 DEFAULT_MAX_PARALLEL_TOOL_CALLS）
         self.status = "idle"
         # 双队列 Inbox（上游 agent/src/inbox.ts）：followup → next-turn，
