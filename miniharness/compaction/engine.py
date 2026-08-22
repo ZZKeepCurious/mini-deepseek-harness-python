@@ -130,8 +130,14 @@ class CompactionEngine:
         target = self._routed_target(agent)
         if target is None:
             return None
+        # 可选阶段：toolResultPruner 未安装则跳过模型无关裁剪（上游
+        # compaction-basic index.ts:281 经 ctx.get('toolResultPruner') 取用）
+        prune = self._tool_result_pruner()
         measurement = self.meter.measure(agent.session)
         if trigger == "context-overflow":
+            if prune is not None:
+                prune.prune_session(agent.session)
+                measurement = self.meter.measure(agent.session)
             range_ = select_compactable_range(agent.session, measurement, 0)
             if range_ is None:
                 return None
@@ -148,6 +154,12 @@ class CompactionEngine:
             )
         spec = resolve_spec({**self.config, "target": f"{target['provider']}/{target['model']}"},
                             context_window)
+        if measurement["totalTokens"] < spec["thresholdTokens"]:
+            return None
+        # 压力达标后先落模型无关裁剪，再重新测量；若已降到阈值以下则无需摘要
+        if prune is not None:
+            prune.prune_session(agent.session)
+            measurement = self.meter.measure(agent.session)
         if measurement["totalTokens"] < spec["thresholdTokens"]:
             return None
         result = None
@@ -173,6 +185,10 @@ class CompactionEngine:
 
     async def _compact_region(self, agent, start: int, end: int) -> dict:
         return await compact_surface_region(agent.session, self.meter, agent, self.config, start, end)
+
+    def _tool_result_pruner(self):
+        """取用可选的 toolResultPruner 服务（未安装返回 None）。"""
+        return self.ctx.get("toolResultPruner")
 
     def _routed_target(self, agent):
         """最新 durable 路由请求的 provider/model（request/header 信封

@@ -135,7 +135,7 @@ miniharness/
 | `llm/retry_policy.py` | `packages/llm/llm/src/retry-policy.ts` | |
 | `llm/retry.py` | `packages/llm/llm-retry/src/` | async 恢复决策 + 事件驱动可取消等待（`asyncio.wait`；无 `.event` 信号回退轮询） |
 | `llm/token_meter.py` | `packages/llm/token-meter/src/` | |
-| `compaction/`（config + region + summarizer + engine） | `packages/compaction/compaction-basic/src/`（config / region / summarizer / index.ts） | 前缀重放无 KV cache 语义、无 toolResultPruner（简化标注见模块 docstring） |
+| `compaction/`（config + region + summarizer + engine + tool_result_pruner） | `packages/compaction/compaction-basic/src/` + `compaction-tool-result-pruner/src/`（config / region / summarizer / index.ts） | 前缀重放无 KV cache 语义；toolResultPruner 可选阶段已对齐（`compaction/tool_result_pruner.py`，上游注入 `ctx.toolResultPruner`，mini 经 `ctx.get('toolResultPruner')` 取用） |
 | `jobs/`（types + registry + tools） | `packages/jobs/`（seam + jobs-local + tool-jobs） | `run_in_background` 触发入口未复现；无 scope 链/agent registry；execute 直接返回渲染文本（简化标注见模块 docstring） |
 | `plan/`（config + mode + review + projection） | `packages/plan/plan-mode/src/` | 状态机 + plan:policy 节 + 审查 UI（exit_plan_mode / /plan / userQuestions）+ plan 投影；无 canonical value / presentCall（简化标注见模块 docstring） |
 | `commands/` | `packages/interaction/commands/src/` | 命令注册/派发 + `command/run|done` 配对 + commands/change 通知 + normalizeResult fail-loud；handler 签名 `(agent, raw)` 为教学扩展（简化标注见模块 docstring） |

@@ -14,7 +14,7 @@ from typing import Any, Callable
 
 from ..core.scope import Context
 from ..llm.retry import apply_retry_planner
-from ..compaction import install_compaction
+from ..compaction import install_compaction, install_tool_result_pruner
 from ..jobs import install_jobs
 from ..core.system_prompt import install_system_prompt
 from .default_tools import default_tools
@@ -108,6 +108,7 @@ def resume_session(
         raise ValueError("resume 继续对话需要 adapter")
     apply_retry_planner(ctx)
     install_compaction(ctx)
+    install_tool_result_pruner(ctx)
     install_jobs(ctx)
     install_system_prompt(ctx)
     store = install_sessions(ctx)

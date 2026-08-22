@@ -7,10 +7,13 @@ import asyncio
 import unittest
 
 from miniharness.compaction import (
+    PRUNE_MARKER,
     TargetPressureConfigError,
+    ToolResultPruner,
     compact_surface_region,
     inspect_compaction_entry_state,
     install_compaction,
+    install_tool_result_pruner,
     resolve_config,
     resolve_spec,
     select_compactable_range,
@@ -24,6 +27,7 @@ from miniharness.core.session import (
     create_message,
     derive_messages,
     text_block,
+    tool_result_block,
 )
 from miniharness.core.tools import ToolRegistry
 from miniharness.llm import LlmAdapter, LlmFailure
@@ -411,6 +415,150 @@ class LogResultRoutingTest(unittest.TestCase):
             "(seqs 1-2, ~10 tokens)",
             captured[0]["args"][0],
         )
+
+
+# ---------- tool-result 模型无关裁剪（P0-3，对齐 compaction-tool-result-pruner）----------
+
+
+def _seed_tool_result(session: Session, text: str, call_id: str = "a") -> int:
+    """写 turn/start → user/message → step/start → tool/call → 大 tool/result。
+
+    返回 tool/call 事件的 seq（供 sourceEventSeqs 引用）。
+    """
+    session.append("request/header",
+                   {"header": {"config": {"provider": "fake", "model": "fake-model"}},
+                    "reason": "initial"})
+    session.append("turn/start", {"turn": 1})
+    session.append("user/message",
+                   create_message("user", [text_block("输入")], {"kind": "user"}),
+                   surfaceOp="append")
+    session.append("step/start", {"turn": 1, "step": 1})
+    call = session.append("tool/call",
+                          {"turn": 1, "step": 1, "callId": call_id, "name": "ls",
+                           "arguments": "{}"})
+    msg = create_message(
+        "user",
+        [tool_result_block(call_id, [text_block(text)], is_error=False)],
+        {"kind": "tool", "callId": call_id},
+    )
+    session.append("tool/result", {"turn": 1, "step": 1, "message": msg},
+                  surfaceOp="append", sourceEventSeqs=[call["seq"]])
+    return call["seq"]
+
+
+class ToolResultPrunerUnitTest(unittest.TestCase):
+    def setUp(self):
+        self.pruner = ToolResultPruner(None, {})
+
+    def test_measure_counts_code_points(self):
+        blocks = [{"type": "text", "text": "hello 世界"}, {"type": "image"}]
+        # h e l l o (5) + 空格(1) + 世界(2) = 8 码点；image 不计
+        self.assertEqual(self.pruner.measure_content(blocks), 8)
+
+    def test_within_budget_returns_none(self):
+        blocks = [{"type": "text", "text": "x" * 100}]
+        self.assertIsNone(self.pruner.prune_content(blocks))
+
+    def test_over_budget_keeps_head_marker_tail(self):
+        blocks = [{"type": "text", "text": "y" * 100000}]
+        out = self.pruner.prune_content(blocks)
+        self.assertIsNotNone(out)
+        text = out[0]["text"]
+        # head(4096) + 固定标记 + tail(1024) 三段拼接，且仅一次标记
+        self.assertIn(PRUNE_MARKER, text)
+        self.assertEqual(text.count(PRUNE_MARKER), 1)
+        self.assertTrue(text.startswith("y" * 4096))
+        self.assertTrue(text.endswith("y" * 1024))
+        self.assertLess(self.pruner.measure_content(out),
+                        self.pruner.measure_content(blocks))
+        self.assertLessEqual(self.pruner.measure_content(out), 8192)
+
+    def test_prune_splits_across_text_blocks(self):
+        # 标记落在中间块；前块整段保留头（未触及 removed 区），后块仅保留尾 1024
+        blocks = [
+            {"type": "text", "text": "a" * 3000},
+            {"type": "text", "text": "b" * 10000},
+            {"type": "text", "text": "c" * 3000},
+        ]
+        out = self.pruner.prune_content(blocks)
+        self.assertEqual(out[0]["text"], "a" * 3000)
+        self.assertIn(PRUNE_MARKER, out[1]["text"])
+        # 中间块头 = 4096-3000 = 1096 个 b，标记后无 b（尾落在第三块）
+        self.assertTrue(out[1]["text"].startswith("b" * 1096))
+        self.assertTrue(out[1]["text"].endswith(PRUNE_MARKER))
+        # 尾 1024 个码点落在第三块：仅保留其最后 1024 个 c
+        self.assertEqual(out[2]["text"], "c" * 1024)
+
+
+class ToolResultPrunerSessionTest(unittest.TestCase):
+    def test_prune_session_emits_shadow_and_replace(self):
+        session = Session("p1")
+        _seed_tool_result(session, "z" * 100000)
+        pruner = ToolResultPruner(None, {})
+        result = pruner.prune_session(session)
+        self.assertEqual(len(result["pruned"]), 1)
+        entry = result["pruned"][0]
+        self.assertEqual(entry["callId"], "a")
+        self.assertGreater(entry["charsBefore"], entry["charsAfter"])
+        self.assertEqual(result["charsRemoved"], entry["charsBefore"] - entry["charsAfter"])
+
+        types = [e["type"] for e in session.events]
+        # 紧邻的：compaction/prune 阴影计价事件 + tool/result 替换
+        self.assertIn("compaction/prune", types)
+        prune_ev = next(e for e in session.events if e["type"] == "compaction/prune")
+        self.assertEqual(list(prune_ev["data"]["shadowedSeqs"]), [entry["originalSeq"]])
+        self.assertGreater(prune_ev["data"]["shadowedTokenCount"], 0)
+        replace_ev = session.events[entry["replacementSeq"]]
+        self.assertEqual(replace_ev["type"], "tool/result")
+        self.assertEqual(replace_ev["surfaceOp"], {"op": "replace", "start": entry["originalSeq"],
+                                                    "end": entry["originalSeq"]})
+        self.assertEqual(list(replace_ev["sourceEventSeqs"]), [entry["originalSeq"]])
+        repl_text = replace_ev["data"]["message"]["content"][0]["content"][0]["text"]
+        self.assertIn(PRUNE_MARKER, repl_text)
+
+    def test_prune_session_idempotent_converges(self):
+        session = Session("p2")
+        _seed_tool_result(session, "z" * 100000)
+        pruner = ToolResultPruner(None, {})
+        first = pruner.prune_session(session)
+        self.assertEqual(len(first["pruned"]), 1)
+        # 二次 pass：已裁剪的内容在预算内，不再产生替换
+        second = pruner.prune_session(session)
+        self.assertEqual(second["pruned"], [])
+
+
+class ToolResultPrunerEngineWiringTest(unittest.TestCase):
+    def test_pressure_prunes_before_threshold_returns_none(self):
+        # 安装 pruning，使裁剪后低于阈值 → 不进入摘要（验证模型无关预裁剪）
+        session = Session("p3")
+        ctx = Context(name="root")
+        install_tool_result_pruner(ctx, {})
+        # 30000 字符工具输出：裁剪前 ~7500 token，裁剪后 ~1290 token
+        _seed_tool_result(session, "y" * 30000)
+
+        class _Adapter:
+            provider = "fake"
+            model = "fake-model"
+            context_window = 2500  # thresholdTokens = 2000
+
+        agent = type("A", (), {"session": session, "adapter": _Adapter()})()
+        engine = CompactionEngine(ctx, {})
+        result = asyncio.run(engine.compact_if_needed(agent, "pressure"))
+        self.assertIsNone(result)
+        types = [e["type"] for e in session.events]
+        self.assertIn("compaction/prune", types)
+        # 未进入摘要（无 compaction/start）
+        self.assertNotIn("compaction/start", types)
+
+    def test_no_pruner_installed_skips(self):
+        # 未安装 pruning 服务时，引擎不裁剪（_tool_result_pruner 返回 None）
+        ctx = Context(name="root")
+        engine = CompactionEngine(ctx, {})
+        self.assertIsNone(engine._tool_result_pruner())
+        ctx2 = Context(name="root2")
+        install_tool_result_pruner(ctx2, {})
+        engine2 = CompactionEngine(ctx2, {})
+        self.assertIsNotNone(engine2._tool_result_pruner())
 
 
 if __name__ == "__main__":

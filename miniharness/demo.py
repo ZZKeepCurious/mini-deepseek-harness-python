@@ -11,7 +11,7 @@ from pathlib import Path
 from .core.scope import Context
 from .llm import FakeLlmAdapter
 from .llm.retry import apply_retry_planner
-from .compaction import install_compaction
+from .compaction import install_compaction, install_tool_result_pruner
 from .core.agent_loop.agent import AgentLoop
 from .core.session.persistence import JsonlPersistence, repair_and_replay
 from .core.session import Session, create_message, derive_messages, text_block, turn_balance
@@ -38,6 +38,7 @@ def main() -> None:
     ctx = Context(name="root")
     apply_retry_planner(ctx)
     install_compaction(ctx)
+    install_tool_result_pruner(ctx)
     install_jobs(ctx)
     install_skills(ctx)
     install_system_prompt(ctx)

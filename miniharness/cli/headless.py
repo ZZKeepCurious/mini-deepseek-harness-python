@@ -27,7 +27,7 @@ from typing import Any, Callable
 from ..core.scope import Context
 from ..llm import DeepSeekAdapter, FakeLlmAdapter, LlmAdapter, LlmFailure
 from ..llm.retry import apply_retry_planner
-from ..compaction import install_compaction
+from ..compaction import install_compaction, install_tool_result_pruner
 from ..jobs import install_jobs
 from ..skills import install_skills
 from ..core.agent_loop.agent import AgentLoop
@@ -95,6 +95,7 @@ def run_headless(
     ctx = ctx or Context(name="headless")
     apply_retry_planner(ctx)
     install_compaction(ctx)
+    install_tool_result_pruner(ctx)
     install_jobs(ctx)
     install_skills(ctx)
     install_system_prompt(ctx)

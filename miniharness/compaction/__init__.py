@@ -12,18 +12,21 @@ from . import config as _config
 from . import engine as _engine
 from . import region as _region
 from . import summarizer as _summarizer
+from . import tool_result_pruner as _pruner
 
 __all__ = [
     "CONTEXT_WINDOW_EXCEEDED",
     "TokenMeter",
     "TargetPressureConfigError",
     "CompactionEngine",
+    "ToolResultPruner",
     "compact_surface_region",
     "inspect_compaction_entry_state",
     "select_compactable_range",
     "resolve_config",
     "resolve_spec",
     "install_compaction",
+    "install_tool_result_pruner",
 ]
 
 # ----------------------------------------------------------------------
@@ -43,6 +46,10 @@ select_compactable_range = _region.select_compactable_range  # noqa: F401
 
 resolve_config = _config.resolve_config  # noqa: F401
 resolve_spec = _config.resolve_spec  # noqa: F401
+
+ToolResultPruner = _pruner.ToolResultPruner  # noqa: F401
+install_tool_result_pruner = _pruner.install_tool_result_pruner  # noqa: F401
+PRUNE_MARKER = _pruner.PRUNE_MARKER  # noqa: F401
 
 
 def install_compaction(ctx, config: dict | None = None):

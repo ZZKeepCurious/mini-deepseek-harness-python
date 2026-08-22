@@ -40,6 +40,10 @@ KNOWN_TYPES = frozenset({
     # 三个事件 log-only 非 surface；surface 变更是随后带 replace surfaceOp 的
     # user/message 检查点）
     "compaction/start", "compaction/summary", "compaction/end",
+    # tool-result 裁剪影子计价（上游 compaction-tool-result-pruner：
+    # ``compaction/prune`` 是 log-only 非 surface 的 shadow-price 事件，
+    # 紧邻其后带 replace surfaceOp 的 tool/result 替换）
+    "compaction/prune",
     # 计划模式（上游 plan/plan-mode/src/index.ts SessionEventMap，
     # log-only 非 surface、整值替换：{active: boolean}，最后一条胜出）
     "plan/mode",
