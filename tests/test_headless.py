@@ -173,9 +173,9 @@ class TestHeadlessRun(unittest.TestCase):
                 persistence=pers,
                 stdout=io.out, stderr=io.err, exit_fn=io.exit,
             )
-            files = list(Path(tmp).glob("*.jsonl"))
+            files = pers.list_headers()
             self.assertEqual(len(files), 1)
-            events = pers.load(files[0].stem)
+            events = pers.load(files[0]["id"])
             # flush 在输出与退出之前：turn/end 已落盘（上游先 flush 再汇总）
             self.assertEqual(events[-1]["type"], "turn/end")
 

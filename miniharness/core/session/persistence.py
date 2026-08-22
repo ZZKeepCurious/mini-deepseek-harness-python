@@ -22,6 +22,7 @@ import os
 import sqlite3
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, unquote
 
 from . import (
     KNOWN_TYPES,
@@ -57,31 +58,73 @@ def _header_meta(header: dict) -> dict | None:
     return meta or None
 
 
-class SessionPersistence:
-    """接缝接口：append / flush / load，以及 A7 追加的 declare / inspect / list_headers。"""
+# ---------- 上游 format.ts 目录布局（packages/session/session-persistence-jsonl）----------
+# 上游布局：root/<encodeSegment(cwd)>/<encodeSegment(id)>/session.jsonl(.zstd)
+# mini 不实现 zstd（保留简化），故恒为 .jsonl。
+# encodeSegment 对齐上游 format.ts：encodeURIComponent 后把 '*' 转义为 '~'，
+# 使任意 cwd/id（含路径分隔符）都折成单段安全目录名。
 
-    def append(self, session_id: str, event: dict) -> None:
+def encode_segment(value: str) -> str:
+    """对齐上游 format.ts `encodeSegment`：URL 安全单段编码。"""
+    return quote(value, safe="").replace("*", "~")
+
+
+def decode_segment(value: str) -> str:
+    """对齐上游 format.ts `decodeSegment`：逆变换。"""
+    return unquote(value.replace("~", "*"))
+
+
+def _project_dir(root: Path, cwd: str) -> Path:
+    """对齐上游 format.ts `projectDir`：按 cwd 分项目目录（cwd 空串 → 即 root）。"""
+    return root / encode_segment(cwd) if cwd else Path(root)
+
+
+def _session_dir(root: Path, cwd: str, session_id: str) -> Path:
+    """对齐上游 format.ts `sessionDir`：项目目录 → 会话目录。"""
+    return _project_dir(root, cwd) / encode_segment(session_id)
+
+
+def _log_suffix(compression: str | None) -> str:
+    """对齐上游 format.ts `logSuffix`：明文 .jsonl（mini 不实现 zstd）。"""
+    return ".jsonl" if compression is None else ".jsonl.zstd"
+
+
+def _log_path(root: Path, cwd: str, session_id: str, compression: str | None = None) -> Path:
+    """对齐上游 format.ts `logPath`：会话目录下的固定文件名 session.jsonl。"""
+    name = f"session{_log_suffix(compression)}"
+    return _session_dir(root, cwd, session_id) / name
+
+
+class SessionPersistence:
+    """接缝接口：append / flush / load，以及 A7 追加的 declare / inspect / list_headers。
+
+    cwd 缺省时按上游契约从 header 元数据（meta.cwd）或既有落盘位置反查；无法反查
+    的新会话（测试用）退化到项目目录 = root 的单层布局，保证可写可读。
+    """
+
+    def append(self, session_id: str, event: dict, cwd: str | None = None) -> None:
         raise NotImplementedError
 
     def flush(self) -> None:
         raise NotImplementedError
 
-    def load(self, session_id: str) -> list[dict]:
+    def load(self, session_id: str, cwd: str | None = None) -> list[dict]:
         raise NotImplementedError
 
-    def declare(self, session_id: str, meta: dict | None = None, created_at: int | None = None) -> None:
+    def declare(self, session_id: str, meta: dict | None = None, created_at: int | None = None,
+                cwd: str | None = None) -> None:
         """在首次 append 前写 header 元数据（子会话创建用）；幂等。"""
         raise NotImplementedError
 
-    def inspect(self, session_id: str) -> dict:
+    def inspect(self, session_id: str, cwd: str | None = None) -> dict:
         """返回 {meta, events}：meta 为 header 元数据（无则 None）。"""
         raise NotImplementedError
 
     def list_headers(self) -> list[dict]:
-        """枚举全部会话 header：{id, meta, created_at}（meta 可能为 None）。"""
+        """枚举全部会话 header：{id, meta, created_at, cwd}（meta/cwd 可能为 None）。"""
         raise NotImplementedError
 
-    def commit_repair(self, session_id: str, closers: list[dict]) -> None:
+    def commit_repair(self, session_id: str, closers: list[dict], cwd: str | None = None) -> None:
         """把崩溃修复的 closers 持久化落盘（对齐上游 PersistenceBackend.commitRepair）。
 
         上游以 commitRepair(meta, tornMarker, closers) 截断 torn 尾并追加 closers；
@@ -91,13 +134,22 @@ class SessionPersistence:
 
 
 class JsonlPersistence(SessionPersistence):
-    """JSONL 后端：每会话一个文件；header 行 + 事件行（上游 format.ts）。"""
+    """JSONL 后端：每会话一个文件；header 行 + 事件行（上游 format.ts）。
+
+    目录布局对齐上游 session-persistence-jsonl：
+        root/<encodeSegment(cwd)>/<encodeSegment(id)>/session.jsonl
+    cwd 缺省时按 header.meta.cwd 或既有落盘位置反查；新会话（cwd 反查不到）
+    退化到项目目录 = root 的单层布局（root/<encodeSegment(id)>/session.jsonl），
+    保证可写可读（测试用，真实会话恒带 cwd）。
+    """
 
     def __init__(self, root: Path):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self._pending: dict[str, list[dict]] = {}
         self._created: set[str] = set()
+        # session_id -> 用于布局的 cwd（declare/append 时登记，缺省 ""）
+        self._cwd: dict[str, str] = {}
 
     def _durable(self, path: Path, mode: str, lines: list[str]) -> None:
         """写入 + fsync：对齐上游 JSONL 后端的 fsync 持久化语义。"""
@@ -106,24 +158,68 @@ class JsonlPersistence(SessionPersistence):
             f.flush()
             os.fsync(f.fileno())
 
-    def _path(self, session_id: str) -> Path:
-        safe = session_id.replace("/", "_").replace("\\", "_")
-        return self.root / f"{safe}.jsonl"
+    def _find(self, session_id: str) -> Path | None:
+        """在 root 下递归定位会话文件（按 header.id 匹配），找不到返回 None。"""
+        for path in self.root.glob("**/session.jsonl"):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    first = f.readline()
+                header = json.loads(first) if first.strip() else {}
+            except (ValueError, OSError):
+                continue
+            if isinstance(header, dict) and header.get("id") == session_id:
+                return path
+        return None
 
-    def append(self, session_id, event):
+    def _resolve(self, session_id: str, cwd: str | None) -> Path:
+        """解析会话文件绝对路径：cwd 给定优先 → 记忆 → 扫描 → 退化单层布局。"""
+        if cwd is not None:
+            self._cwd[session_id] = cwd
+        elif session_id in self._cwd:
+            cwd = self._cwd[session_id]
+        else:
+            found = self._find(session_id)
+            if found is not None:
+                # 从落盘位置反查 cwd（项目目录名即 encodeSegment(cwd)）
+                proj_name = found.parent.parent.name
+                cwd = decode_segment(proj_name) if found.parent.parent != self.root else ""
+                self._cwd[session_id] = cwd
+                return found
+            cwd = ""
+            self._cwd[session_id] = cwd
+        return _log_path(self.root, cwd, session_id)
+
+    def path_of(self, session_id: str, cwd: str | None = None) -> Path | None:
+        """对外：返回会话文件绝对路径，不存在返回 None（供 CLI 存在性判断）。"""
+        if cwd is None and session_id in self._cwd:
+            cwd = self._cwd[session_id]
+        if cwd is not None:
+            path = _log_path(self.root, cwd, session_id)
+            return path if path.exists() else None
+        return self._find(session_id)
+
+    def append(self, session_id, event, cwd: str | None = None):
+        if cwd is not None:
+            self._cwd[session_id] = cwd
         self._pending.setdefault(session_id, []).append(event)
 
-    def declare(self, session_id: str, meta: dict | None = None, created_at: int | None = None) -> None:
-        if session_id in self._created or self._path(session_id).exists():
+    def declare(self, session_id: str, meta: dict | None = None, created_at: int | None = None,
+                cwd: str | None = None) -> None:
+        cwd = cwd if cwd is not None else (meta or {}).get("cwd") or ""
+        self._cwd[session_id] = cwd
+        path = _log_path(self.root, cwd, session_id)
+        if session_id in self._created or path.exists():
             return
+        path.parent.mkdir(parents=True, exist_ok=True)
         header = _flat_header(session_id, meta, created_at)
-        self._durable(self._path(session_id), "w", [json.dumps(header, ensure_ascii=False) + "\n"])
+        self._durable(path, "w", [json.dumps(header, ensure_ascii=False) + "\n"])
         self._created.add(session_id)
 
     def _ensure_header(self, session_id: str) -> None:
-        path = self._path(session_id)
+        path = self._resolve(session_id, None)
         if session_id in self._created or path.exists():
             return
+        path.parent.mkdir(parents=True, exist_ok=True)
         header = _flat_header(session_id, None, None)
         self._durable(path, "w", [json.dumps(header, ensure_ascii=False) + "\n"])
         self._created.add(session_id)
@@ -131,13 +227,13 @@ class JsonlPersistence(SessionPersistence):
     def flush(self):
         for sid, events in self._pending.items():
             self._ensure_header(sid)
+            path = self._resolve(sid, None)
             lines = [json.dumps(thaw(ev), ensure_ascii=False) + "\n" for ev in events]
-            self._durable(self._path(sid), "a", lines)
+            self._durable(path, "a", lines)
         self._pending.clear()
 
-    def _read_file(self, session_id):
+    def _read_file(self, path: Path):
         """读回 (header, events)；torn 尾部截断修复（与 load 共享）。"""
-        path = self._path(session_id)
         if not path.exists():
             return None, []
         with open(path, encoding="utf-8") as f:
@@ -163,17 +259,23 @@ class JsonlPersistence(SessionPersistence):
                 events.append(json.loads(line))
         return header, events
 
-    def load(self, session_id):
-        _, events = self._read_file(session_id)
+    def load(self, session_id, cwd: str | None = None):
+        path = self._resolve(session_id, cwd)
+        if path is None:
+            return []
+        _, events = self._read_file(path)
         return events
 
-    def inspect(self, session_id):
-        header, events = self._read_file(session_id)
+    def inspect(self, session_id, cwd: str | None = None):
+        path = self._resolve(session_id, cwd)
+        if path is None:
+            return {"meta": None, "events": []}
+        header, events = self._read_file(path)
         return {"meta": _header_meta(header) if header else None, "events": events}
 
     def list_headers(self):
         headers = []
-        for path in sorted(self.root.glob("*.jsonl")):
+        for path in sorted(self.root.glob("**/session.jsonl")):
             try:
                 with open(path, encoding="utf-8") as f:
                     first = f.readline()
@@ -186,18 +288,21 @@ class JsonlPersistence(SessionPersistence):
                 "id": header.get("id"),
                 "meta": _header_meta(header),
                 "created_at": header.get("createdAt"),
+                "cwd": header.get("cwd"),
             })
         return headers
 
     def _truncate(self, path: Path, kept: list[str]) -> None:
         self._durable(path, "w", kept)
 
-    def commit_repair(self, session_id: str, closers: list[dict]) -> None:
+    def commit_repair(self, session_id: str, closers: list[dict], cwd: str | None = None) -> None:
         if not closers:
             return
         self._ensure_header(session_id)
+        path = self._resolve(session_id, cwd)
+        path.parent.mkdir(parents=True, exist_ok=True)
         lines = [json.dumps(thaw(ev), ensure_ascii=False) + "\n" for ev in closers]
-        self._durable(self._path(session_id), "a", lines)
+        self._durable(path, "a", lines)
 
 
 class SqlitePersistence(SessionPersistence):
@@ -231,10 +336,14 @@ class SqlitePersistence(SessionPersistence):
         self._conn.commit()
         self._pending: dict[str, list[dict]] = {}
 
-    def append(self, session_id, event):
+    def append(self, session_id, event, cwd: str | None = None):
         self._pending.setdefault(session_id, []).append(event)
 
-    def declare(self, session_id: str, meta: dict | None = None, created_at: int | None = None) -> None:
+    def declare(self, session_id: str, meta: dict | None = None, created_at: int | None = None,
+                cwd: str | None = None) -> None:
+        meta = dict(meta) if meta else {}
+        if cwd is not None and "cwd" not in meta:
+            meta["cwd"] = cwd
         self._conn.execute(
             "INSERT INTO sessions VALUES (?, ?, ?) "
             "ON CONFLICT(session_id) DO NOTHING",
@@ -255,25 +364,35 @@ class SqlitePersistence(SessionPersistence):
         self._conn.commit()
         self._pending.clear()
 
-    def load(self, session_id):
+    def load(self, session_id, cwd: str | None = None):
         rows = self._conn.execute(
             "SELECT data FROM events WHERE session_id=? ORDER BY seq", (session_id,)
         ).fetchall()
         return [json.loads(r[0]) for r in rows]
 
-    def inspect(self, session_id):
+    def inspect(self, session_id, cwd: str | None = None):
         row = self._conn.execute(
             "SELECT meta FROM sessions WHERE session_id=?", (session_id,)
         ).fetchone()
-        return {"meta": json.loads(row[0]) if row and row[0] else None, "events": self.load(session_id)}
+        meta = json.loads(row[0]) if row and row[0] else None
+        return {"meta": meta, "events": self.load(session_id, cwd)}
 
     def list_headers(self):
         rows = self._conn.execute(
             "SELECT session_id, meta, created_at FROM sessions ORDER BY session_id"
         ).fetchall()
-        return [{"id": r[0], "meta": json.loads(r[1]) if r[1] else None, "created_at": r[2]} for r in rows]
+        out = []
+        for r in rows:
+            meta = json.loads(r[1]) if r[1] else None
+            out.append({
+                "id": r[0],
+                "meta": meta,
+                "created_at": r[2],
+                "cwd": (meta or {}).get("cwd"),
+            })
+        return out
 
-    def commit_repair(self, session_id: str, closers: list[dict]) -> None:
+    def commit_repair(self, session_id: str, closers: list[dict], cwd: str | None = None) -> None:
         if not closers:
             return
         rows = [

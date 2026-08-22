@@ -300,7 +300,8 @@ class TestSessions(unittest.TestCase):
             sid = self._make_session(root)
             out, err, code = _run_cli(["sessions", "delete", sid], env={"MINIHARNESS_HOME": str(root)})
             self.assertIn("deleted", out)
-            self.assertFalse((root / f"{sid}.jsonl").exists())
+            from miniharness.core.session.persistence import JsonlPersistence
+            self.assertIsNone(JsonlPersistence(root / "sessions").path_of(sid))
 
     def test_delete_missing_fails(self):
         with tempfile.TemporaryDirectory() as tmp:

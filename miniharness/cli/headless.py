@@ -114,7 +114,8 @@ def run_headless(
         loop.followup(task)
         if persistence is not None:
             for ev in session.events:
-                persistence.append(session.session_id, dict(ev))
+                persistence.append(session.session_id, dict(ev),
+                                   cwd=session.meta.get("cwd"))
             persistence.flush()
 
         text, reason = summarize(session.events, first_seq)

@@ -48,7 +48,7 @@ class TestJsonl(unittest.TestCase):
             p = JsonlPersistence(Path(tmp))
             p.append("s1", {"type": "turn/start", "seq": 0, "time": 1, "data": {"turn": 1}})
             p.flush()
-            lines = (Path(tmp) / "s1.jsonl").read_text(encoding="utf-8").splitlines()
+            lines = p.path_of("s1").read_text(encoding="utf-8").splitlines()
             header = json.loads(lines[0])
             # 扁平 header（上游 SessionHeader）：恒带 createdAt（Date.now 语义）
             self.assertEqual(header["version"], SESSION_FORMAT_VERSION)
@@ -60,7 +60,7 @@ class TestJsonl(unittest.TestCase):
             p = JsonlPersistence(Path(tmp))
             p.append("s1", {"type": "turn/start", "seq": 0, "time": 1, "data": {"turn": 1}})
             p.flush()
-            path = Path(tmp) / "s1.jsonl"
+            path = p.path_of("s1")
             lines = path.read_text(encoding="utf-8").splitlines()
             lines[0] = json.dumps({"version": 99, "id": "s1"})
             path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -72,7 +72,7 @@ class TestJsonl(unittest.TestCase):
             p = JsonlPersistence(Path(tmp))
             p.append("s1", {"type": "turn/start", "seq": 0, "time": 1, "data": {"turn": 1}})
             p.flush()
-            path = Path(tmp) / "s1.jsonl"
+            path = p.path_of("s1")
             # 模拟崩溃：第二条事件写到一半
             with open(path, "a", encoding="utf-8") as f:
                 f.write('{"type": "turn/end", "seq": 1, "time": 2, "data": {"turn": 1')

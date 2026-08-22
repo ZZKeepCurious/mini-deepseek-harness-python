@@ -40,11 +40,11 @@ def _fmt_time(ms: int | None) -> str:
 def list_sessions(root: Path) -> list[dict]:
     pers = JsonlPersistence(root)
     out = []
-    for path in sorted(root.glob("*.jsonl")):
-        sid = path.stem
+    for header in pers.list_headers():
+        sid = header["id"]
         entry = {"id": sid, "events": 0, "last": None, "balanced": None, "error": None}
         try:
-            raw = load_events_checked(pers.load(sid))
+            raw = load_events_checked(pers.load(sid, cwd=header.get("cwd")))
         except RuntimeError as e:
             entry["error"] = str(e)
             out.append(entry)
@@ -88,8 +88,7 @@ def resume_session(
     stderr = stderr or sys.stderr
     exit_fn = exit_fn or sys.exit
     pers = JsonlPersistence(root)
-    safe = session_id.replace("/", "_").replace("\\", "_")
-    if not (root / f"{safe}.jsonl").exists():
+    if pers.path_of(session_id) is None:
         stderr.write(f"error: session {session_id!r} not found\n")
         exit_fn(1)
         return
@@ -137,12 +136,19 @@ def resume_session(
 
 
 def delete_session(session_id: str, root: Path, stdout: Any, stderr: Any) -> None:
-    safe = session_id.replace("/", "_").replace("\\", "_")
-    path = root / f"{safe}.jsonl"
-    if not path.exists():
+    pers = JsonlPersistence(root)
+    path = pers.path_of(session_id)
+    if path is None:
         stderr.write(f"error: session {session_id!r} not found\n")
         sys.exit(1)
     path.unlink()
+    # 清掉可能已空的会话目录（含项目目录）
+    sess_dir = path.parent
+    if sess_dir.exists() and not any(sess_dir.iterdir()):
+        sess_dir.rmdir()
+        proj_dir = sess_dir.parent
+        if proj_dir != root and proj_dir.exists() and not any(proj_dir.iterdir()):
+            proj_dir.rmdir()
     stdout.write(f"deleted {session_id}\n")
 
 
@@ -157,8 +163,8 @@ def sessions_main(argv: list[str], adapter: LlmAdapter | None = None, root: Path
             sys.stderr.write('error: usage: miniharness sessions resume <id> [task...]\n')
             sys.exit(1)
         session_id = rest[0]
-        safe = session_id.replace("/", "_").replace("\\", "_")
-        if not (root / f"{safe}.jsonl").exists():
+        pers = JsonlPersistence(root)
+        if pers.path_of(session_id) is None:
             sys.stderr.write(f"error: session {session_id!r} not found\n")
             sys.exit(1)
         task = " ".join(rest[1:])
