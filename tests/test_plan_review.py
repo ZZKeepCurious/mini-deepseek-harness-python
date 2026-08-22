@@ -112,7 +112,11 @@ class ExitPlanModeTest(unittest.TestCase):
         ctx.provide("userQuestions", channel)
         controller.set(loop, True)
         out = _call(reg, {"plan": "# Plan"}, ToolExec(agent=loop))
-        self.assertIn("Plan approved", out)
+        # execute 返回 canonical 值（上游 {approved:true}），不再直接返回文案
+        self.assertEqual(out, {"approved": True})
+        # 模型可见文案经 Tool.render 分离（上游 output.render）
+        tool = reg.resolve(EXIT_PLAN_MODE)
+        self.assertIn("Plan approved", tool.render(out))
         # 批准只排队 silent 选择，durable 状态仍未关闭
         self.assertTrue(fold_plan_mode(loop.session.events))
         # 下一次被接受的 in-turn pre-step 提交关闭

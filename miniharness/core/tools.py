@@ -131,6 +131,7 @@ class Tool:
     timeout_ms: int | None = None                       # 由管线 wrapper 强制
     present_call: Callable | None = None                # UI 挂起卡片（纯函数）
     present_result: Callable | None = None              # UI 完成卡片（纯函数）
+    render: Callable[[Any], Any] | None = None          # canonical 值 → 模型可见 content（上游 output.render）
 
 
 @dataclass(frozen=True)
@@ -394,8 +395,9 @@ def run_pipeline(ctx: Context, tool: Tool, args: dict, exec_: ToolExec | None = 
     if not is_json_safe(raw):
         return ToolResult(ok=False, is_error=True, error="工具返回了不可 JSON 序列化的值")
 
-    # 8. 冻结的权威结果
-    return ToolResult(ok=True, content=deep_freeze(raw))
+    # 8. 冻结的权威结果：render 将 canonical 值转为模型可见 content（上游 output.render）
+    rendered = tool.render(raw) if tool.render is not None else raw
+    return ToolResult(ok=True, content=deep_freeze(rendered))
 
 
 async def _execute_async(tool: Tool, frozen_args: Any, exec_: ToolExec) -> Any:
@@ -452,7 +454,8 @@ async def pipeline_async_body(
         return ToolResult(ok=False, content=raw.get("content"), is_error=True, error=raw.get("error"))
     if not is_json_safe(raw):
         return ToolResult(ok=False, is_error=True, error="工具返回了不可 JSON 序列化的值")
-    return ToolResult(ok=True, content=deep_freeze(raw))
+    rendered = tool.render(raw) if tool.render is not None else raw
+    return ToolResult(ok=True, content=deep_freeze(rendered))
 
 
 async def run_pipeline_async(

@@ -18,9 +18,10 @@
   返回其他字符串 → 继续规划 + 该字符串作为用户反馈；
   返回 None → 用户取消审查（对齐上游 ASK_CANCELLED）。
 
-mini 简化（须在文档中标注）：无 canonical value（execute 直接返回模型可见文本，
-即上游 output.render 的 "Plan approved — ..." 文案）；无 presentCall/presentResult
-（无 UI 渲染层）；审查为同步回调（上游 async interaction.ask + signal）。
+mini 简化（须在文档中标注）：审查为同步回调（上游 async interaction.ask +
+signal）；presentCall/presentResult 已按上游契约提供（index.ts:382-392），但 mini
+无 UI 渲染层消费，仅为契约对齐而存在。execute 已返回 canonical 值 {approved:true}，
+模型可见文案经 Tool.render 分离（上游 output.render，index.ts:319）。
 """
 from __future__ import annotations
 
@@ -60,6 +61,15 @@ EXIT_PLAN_MODE_DESCRIPTION = (
 _APPROVED_TEXT = "Plan approved — plan mode exited; carry out the plan starting with your next step."
 #: markdown `# ` 标题校验（上游 index.ts:327：/^#\s+\S/）。
 _HEADING_PATTERN = re.compile(r"^#\s+\S")
+
+
+def _first_heading(plan: str) -> str | None:
+    """plan 的第一个 markdown 标题（任意级别），无则 None（上游 firstHeading）。"""
+    for line in plan.split("\n"):
+        match = re.match(r"^#{1,6}\s+(.+?)\s*$", line)
+        if match:
+            return match.group(1)
+    return None
 
 
 def _exit_plan_mode_error(message: str) -> ValueError:
@@ -150,6 +160,11 @@ def install_plan_review(ctx: Context, controller: PlanModeController) -> None:
                 f"The user chose to keep planning; their feedback: {answer}")
         # 批准：排队 silent 选择（narrate=False），下次被接受的 in-turn pre-step 提交
         controller._queue_exit(agent)
+        # canonical 值（上游 execute 返回 {approved:true}）；模型可见文案经 render 分离
+        return {"approved": True}
+
+    def _render_approved(_value: Any) -> str:
+        # 上游 output.render（index.ts:319）：canonical {approved:true} → 模型可见文案
         return _APPROVED_TEXT
 
     tools.register(Tool(
@@ -164,6 +179,24 @@ def install_plan_review(ctx: Context, controller: PlanModeController) -> None:
                 },
             },
             "required": ["plan"],
+        },
+        output={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"approved": {"type": "boolean", "const": True, "required": True}},
+        },
+        render=_render_approved,
+        present_call=lambda args: {
+            "card": "generic",
+            "title": (_first_heading(args.get("plan", "")) or "Plan"),
+            "kind": "other",
+            "content": [{"type": "text", "text": args.get("plan", "")}],
+        },
+        present_result=lambda _args, result: {
+            "card": "generic",
+            "title": "Plan review",
+            "content": result["content"] if isinstance(result, dict) and "content" in result
+            else [{"type": "text", "text": _APPROVED_TEXT}],
         },
         execute=execute,
     ))

@@ -174,6 +174,22 @@ class TestPipeline(unittest.TestCase):
         self.assertTrue(result.is_error)
         self.assertIn("策略拒绝", result.error)
 
+    def test_render_separates_canonical_value(self):
+        # 对齐上游 output.render：execute 返回 canonical 值，render 转模型可见 content
+        ctx = Context()
+        tool = _make(lambda a, e: {"approved": True},
+                    render=lambda value: "Plan approved — exit")
+        result = run_pipeline(ctx, tool, {})
+        self.assertTrue(result.ok)
+        self.assertEqual(result.content, "Plan approved — exit")
+
+    def test_no_render_passes_value_through(self):
+        # 无 render 时 content 即 canonical 值（向后兼容）
+        ctx = Context()
+        result = run_pipeline(ctx, _make(lambda a, e: {"approved": True}), {})
+        self.assertTrue(result.ok)
+        self.assertEqual(result.content, {"approved": True})
+
 
 if __name__ == "__main__":
     unittest.main()
