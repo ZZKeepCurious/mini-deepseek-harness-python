@@ -189,12 +189,17 @@ class CompactionEngine:
             return None
         return None
 
-    @staticmethod
-    def _log_result(result: dict, trigger: str) -> None:
+    def _log_result(self, result: dict, trigger: str) -> None:
         count = len(result["shadowedSeqs"])
         shadowed = result["shadowedRange"]
-        print(
-            f"[compaction] ({trigger}): shadowed {count} surface nodes "
+        message = (
+            f"compaction ({trigger}): shadowed {count} surface nodes "
             f"(seqs {shadowed['start']}-{shadowed['end']}, "
             f"~{result['shadowedTokenCount']} tokens)"
         )
+        # 对齐上游 compaction-basic/src/index.ts:140 `ctx.logger.info(...)`，
+        # 经 ctx.logger 门面（上游同款）；无 logger 服务时回退 print 不中断回合
+        if hasattr(self.ctx, "logger"):
+            self.ctx.logger.info(message)
+        else:
+            print(f"[compaction] {message}")

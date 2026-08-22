@@ -391,5 +391,27 @@ class InstallCompactionTest(unittest.TestCase):
             self.assertIn(t, KNOWN_TYPES)
 
 
+class LogResultRoutingTest(unittest.TestCase):
+    def test_log_result_routes_through_ctx_logger(self):
+        # 对齐上游 compaction-basic/src/index.ts:140 `ctx.logger.info(...)`，
+        # 不再走 print（P0-2）
+        captured = []
+        ctx = Context(name="root")
+        ctx.logger.exporter({"export": captured.append})
+        engine = CompactionEngine(ctx, {})
+        result = {
+            "shadowedSeqs": [1, 2],
+            "shadowedRange": {"start": 1, "end": 2},
+            "shadowedTokenCount": 10,
+        }
+        engine._log_result(result, "step pressure")
+        self.assertEqual(len(captured), 1)
+        self.assertIn(
+            "compaction (step pressure): shadowed 2 surface nodes "
+            "(seqs 1-2, ~10 tokens)",
+            captured[0]["args"][0],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
