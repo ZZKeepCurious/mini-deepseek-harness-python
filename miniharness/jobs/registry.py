@@ -8,13 +8,17 @@
     无 agent 调用方永不匹配 owned）
   * 结算 first-wins：一条终态记录 + 一次监听器通知（对迟到的 producer 结算免疫）
   * start 在无已挂 controller 服务该 owner 时拒绝（producer 无法启动 owner
-    收不回/停不下的活）
+    收不回/停不下的活）；controller/监听器/观察者按**注册 scope 分层**——
+    全局层服务所有 owner，scoped 层只服务 owner 链上的成员；unowned 只有
+    全局层能接（上游 ScopedLayers owner-relative，2026-08-22 P1-4a 对齐，
+    拒绝文案逐字 index.ts:133）
   * maxConcurrentJobsPerOwner 默认 10，按精确 owner（或共享 unowned 桶）
     计 running+stopping；终态结算释放容量
 
-mini 简化（有意保留，须在文档标注）：
-  * 无 scope 链：controller/监听器都是全局层（上游 ScopedLayers owner-relative；
-    同进程多组合隔离语义不完整，见 AGENTS.md 简化清单）
+mini 教学适配（有意保留，须在文档标注）：
+  * 上游经 cordis `inject` 把服务方法绑定到注册方 ctx（jobs.spec.ts:87-100）；
+    mini 无 inject 重绑，以显式 `ctx=` 参数承载"注册 scope"（缺省=注册表自身
+    ctx → 全局层），语义等价、载体不同
   * 无 agent registry：owner 不校验"当前注册实例"，只要求 owner.id 与 owner.ctx
   * teardown 排干是限时轮询（同步模型无 await settled），后删记录
   * done 用 JobDoneBox/Future 承载 Promise 语义
@@ -26,6 +30,7 @@ from typing import Any, Callable
 
 from ..core.session import now_ms
 from ..core.scope import Context
+from ..core.dsh_scope import AnonymousEntries, ScopedLayers, scope_of
 from .types import (
     DEFAULT_MAX_CONCURRENT_JOBS_PER_OWNER,
     TERMINAL_STATUSES,
@@ -45,6 +50,35 @@ def _signal_aborted(signal: Any) -> bool:
     return False
 
 
+class _JobLayer:
+    """一个 scope 的贡献：controller + 完成监听器 + 变更观察者。
+
+    三张表都是匿名条目（贡献由自己的 disposer 标识，同名可独立卸载；
+    对齐上游 JobLayer，index.ts:76-84）。isEmpty 三表全空才算空。
+    """
+
+    __slots__ = ("controllers", "listeners", "changed")
+
+    def __init__(self) -> None:
+        self.controllers = AnonymousEntries()
+        self.listeners = AnonymousEntries()
+        self.changed = AnonymousEntries()
+
+    def isEmpty(self) -> bool:
+        return (
+            self.controllers.isEmpty()
+            and self.listeners.isEmpty()
+            and self.changed.isEmpty()
+        )
+
+
+def _scope_of_owner(owner: Any) -> Any:
+    """owner 的 scope 键（无 owner 或无 ctx 的 owner → None，即全局视角）。"""
+    if owner is None:
+        return None
+    return scope_of(getattr(owner, "ctx", None))
+
+
 class LocalJobRegistry:
     """内存 `jobs` 服务：每条记录只在内部可变，对外只给新鲜快照。"""
 
@@ -59,9 +93,9 @@ class LocalJobRegistry:
         self.max_concurrent_jobs_per_owner = max_conc
         self._store: dict[str, dict] = {}
         self._counters: dict[str, int] = {}
-        self._controllers: set[object] = set()
-        self._done_listeners: list[Callable] = []
-        self._changed_listeners: list[Callable] = []
+        # controller/监听器/观察者按注册 scope 分层（上游 ScopedLayers<JobLayer>，
+        # index.ts:104-116）：全局层服务所有 owner，scoped 层只服务 owner 链。
+        self._layers = ScopedLayers(lambda _scope: _JobLayer(), lambda: None)
         self._listeners_closed = False
         self._owner_cleanups: dict[int, Callable] = {}
         # 注册为 ctx.jobs 服务（同 context 二次提供 fail loud）；teardown 清场
@@ -70,21 +104,43 @@ class LocalJobRegistry:
 
     # ---------- 生命周期与接入 ----------
 
-    def attach_controller(self, name: str) -> Callable[[], None]:
-        """挂一个可读/停作业的 controller。每次调用一个独立 token（同名可独立卸）。"""
+    def attach_controller(self, name: str, ctx: Any = None) -> Callable[[], None]:
+        """挂一个可读/停作业的 controller。
+
+        `ctx` 是注册方上下文（上游经 inject 绑定到调用方；mini 显式传参）：
+        其 scope 层持有此贡献，scope 销毁时随 fiber 自动卸载。缺省=注册表
+        自身 ctx（通常为组合根 → 全局层，服务所有 owner）。同名可独立卸。
+        """
         token = object()
-        self._controllers.add(token)
-        return lambda: self._controllers.discard(token)
+        return self._layers.effect(
+            ctx if ctx is not None else self.ctx,
+            lambda layer: layer.controllers.append(token),
+            label="jobs.attachController()",
+        )
 
-    def on_job_done(self, listener: Callable) -> Callable[[], None]:
-        """注册终态监听器（接收 snapshot 与精确 owner，或 unowned 的 None）。"""
-        self._done_listeners.append(listener)
-        return lambda: self._done_listeners.remove(listener) if listener in self._done_listeners else None
+    def on_job_done(self, listener: Callable, ctx: Any = None) -> Callable[[], None]:
+        """注册终态监听器（接收 snapshot 与精确 owner，或 unowned 的 None）。
 
-    def on_jobs_changed(self, listener: Callable) -> Callable[[], None]:
-        """注册可见集变更观察者（接收 owner 或 unowned 的 None）。"""
-        self._changed_listeners.append(listener)
-        return lambda: self._changed_listeners.remove(listener) if listener in self._changed_listeners else None
+        只接收注册 scope 覆盖的 owner 的结算：全局层先投递，再沿 owner 链
+        逐层投递（index.ts:338-342）；链外组合的监听器不投递。
+        """
+        return self._layers.effect(
+            ctx if ctx is not None else self.ctx,
+            lambda layer: layer.listeners.append(listener),
+            label="jobs.onJobDone()",
+        )
+
+    def on_jobs_changed(self, listener: Callable, ctx: Any = None) -> Callable[[], None]:
+        """注册可见集变更观察者（接收 owner 或 unowned 的 None）。
+
+        投递范围与 on_job_done 同规则解析（index.ts:388-392）；不携带
+        notice 语义、不置 reported。
+        """
+        return self._layers.effect(
+            ctx if ctx is not None else self.ctx,
+            lambda layer: layer.changed.append(listener),
+            label="jobs.onJobsChanged()",
+        )
 
     # ---------- 服务面 ----------
 
@@ -92,9 +148,10 @@ class LocalJobRegistry:
         """启动前完整 preflight，之后原子注册，注册后不可失败。返回 `<kind>-N`。"""
         owner = spec.get("owner")
         if not self._serves_owner(owner):
+            # 逐字对齐上游（jobs-local index.ts:133；括注指向上游补救插件）
             raise RuntimeError(
                 "background jobs unavailable: no job controller serves this agent "
-                "(install miniharness.jobs tool set in its composition)"
+                "(load @deepseek-ai/dsh-tool-jobs in its composition)"
             )
         kind = spec["kind"]
         label = spec["label"]
@@ -242,7 +299,7 @@ class LocalJobRegistry:
             return
         self._notify_changed(job["owner"])
         snapshot = self._snapshot(job)
-        for listener in list(self._done_listeners):
+        for listener in self._listeners_for(job["owner"]):
             try:
                 listener(snapshot, job["owner"])
             except Exception as error:
@@ -256,7 +313,29 @@ class LocalJobRegistry:
             print(f"[jobs] {message}")
 
     def _serves_owner(self, owner: Any) -> bool:
-        return bool(self._controllers)
+        """全局层有 controller → 服务所有 owner；否则沿 owner 链找任一
+        有 controller 的 scoped 层（index.ts:315-319）。unowned 无链可走，
+        只有全局层能接。"""
+        if not self._layers.global_layer.controllers.isEmpty():
+            return True
+        return any(
+            not layer.controllers.isEmpty()
+            for layer in self._layers.chain_layers(_scope_of_owner(owner))
+        )
+
+    def _listeners_for(self, owner: Any) -> list[Callable]:
+        """结算监听器投递序：全局层先，再 owner 链各层（index.ts:338-342）。"""
+        listeners = list(self._layers.global_layer.listeners.values())
+        for layer in self._layers.chain_layers(_scope_of_owner(owner)):
+            listeners.extend(layer.listeners.values())
+        return listeners
+
+    def _changed_for(self, owner: Any) -> list[Callable]:
+        """变更观察者投递序：与 _listeners_for 同规则（index.ts:388-392）。"""
+        listeners = list(self._layers.global_layer.changed.values())
+        for layer in self._layers.chain_layers(_scope_of_owner(owner)):
+            listeners.extend(layer.changed.values())
+        return listeners
 
     def _active_task_count(self, owner: Any) -> int:
         return sum(
@@ -296,7 +375,7 @@ class LocalJobRegistry:
         return snap
 
     def _notify_changed(self, owner: Any) -> None:
-        for listener in list(self._changed_listeners):
+        for listener in self._changed_for(owner):
             try:
                 listener(owner)
             except Exception as error:

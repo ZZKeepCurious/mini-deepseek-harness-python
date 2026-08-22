@@ -180,11 +180,14 @@ def validate_job_id(value: Any) -> str:
 
 # ---------- 完成 notice 投递 ----------
 
-def install_completion_delivery(jobs, config: dict | None = None) -> None:
+def install_completion_delivery(jobs: Any, config: dict | None = None,
+                                ctx: Any = None) -> None:
     """注册 onJobDone 监听：unreported 完成投递到精确 owner。
 
     wakeup：idle owner 开 turn（预算 maxConsecutiveWakes，user 输入恢复）；
     busy owner 一律注入（notice 进下一步 inbox，同一步合并多个结算）。
+    `ctx` 为注册方上下文（上游 tool-jobs 从自己组合 scope 注册；mini 显式
+    传参）：监听器只接收该 scope 覆盖的 owner 的结算，缺省=全局层。
     """
     cfg = resolve_config(config)
     delivery = cfg["completionDelivery"]
@@ -215,7 +218,7 @@ def install_completion_delivery(jobs, config: dict | None = None) -> None:
         else:
             owner.inject(notice, source="tool-jobs")
 
-    jobs.on_job_done(on_done)
+    jobs.on_job_done(on_done, ctx)
 
 
 # ---------- 三工具 ----------

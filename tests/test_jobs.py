@@ -699,5 +699,115 @@ class RealLoopIntegrationTest(unittest.TestCase):
             self.assertIsNotNone(reg.resolve(name))
 
 
+class ScopeLayeringTest(unittest.TestCase):
+    """controller/监听器按注册 scope 分层（P1-4a，对齐 jobs-local index.ts
+    ScopedLayers 语义 + jobs.spec.ts:125-160 的 served/unserved 矩阵）。"""
+
+    def setUp(self):
+        self.ctx = Context(name="jobs-scope")
+        self.registry = LocalJobRegistry(self.ctx)
+        # 两个平级 preset scope（对齐上游 createScope 兄弟节点）
+        self.scope_a = self.ctx.create_scope("preset-a")
+        self.scope_b = self.ctx.create_scope("preset-b")
+
+    def _owner(self, owner_id: str, scope):
+        return _fake_owner(owner_id, scope.ctx)
+
+    def _spec(self, owner=None):
+        return {"kind": "bash", "label": "sleep 60",
+                **({"owner": owner} if owner is not None else {}),
+                "run": lambda: {"done": JobDoneBox(), "cancel": lambda r: None}}
+
+    def test_no_controller_rejected_verbatim(self):
+        owner = self._owner("a1", self.scope_a)
+        with self.assertRaises(RuntimeError) as cm:
+            self.registry.start(self._spec(owner))
+        # 逐字对齐上游 jobs-local index.ts:133
+        self.assertEqual(
+            str(cm.exception),
+            "background jobs unavailable: no job controller serves this agent "
+            "(load @deepseek-ai/dsh-tool-jobs in its composition)")
+
+    def test_scoped_controller_serves_only_its_subtree(self):
+        # controller 从 preset-a 的组合 scope 注册（tool-jobs 方式）
+        self.registry.attach_controller("tool-jobs", self.scope_a.ctx)
+        served = self._owner("served", self.scope_a)
+        unserved = self._owner("unserved", self.scope_b)
+        job_id = self.registry.start(self._spec(served))
+        self.assertTrue(job_id.startswith("bash-"))
+        with self.assertRaises(RuntimeError):
+            self.registry.start(self._spec(unserved))
+        # 平级 scope 的链互不覆盖：B 链上没有 A 层
+
+    def test_scoped_controller_does_not_serve_unowned(self):
+        # unowned 无链可走，只有全局层能接（jobs.spec.ts:143 注释语义）
+        self.registry.attach_controller("tool-jobs", self.scope_a.ctx)
+        with self.assertRaises(RuntimeError):
+            self.registry.start(self._spec(None))
+
+    def test_global_controller_serves_everyone(self):
+        self.registry.attach_controller("host", self.ctx)  # 根 ctx → 全局层
+        self.assertTrue(self.registry.start(self._spec(None)))
+        self.assertTrue(self.registry.start(self._spec(self._owner("a1", self.scope_a))))
+        self.assertTrue(self.registry.start(self._spec(self._owner("b1", self.scope_b))))
+
+    def test_descendant_scope_owner_served_by_ancestor_controller(self):
+        # 嵌套 scope 自动成为父 scope 后裔：A 内再开 scope，controller 在 A 层
+        inner = self.scope_a.ctx.create_scope("inner-agent")
+        self.registry.attach_controller("tool-jobs", self.scope_a.ctx)
+        job_id = self.registry.start(self._spec(self._owner("deep", inner)))
+        self.assertTrue(job_id.startswith("bash-"))
+
+    def test_done_listener_delivery_is_scope_relative(self):
+        seen: list[tuple[str, str | None]] = []
+        global_seen: list[tuple[str, str | None]] = []
+        self.registry.attach_controller("tool-jobs", self.scope_a.ctx)
+        self.registry.attach_controller("tool-jobs-b", self.scope_b.ctx)
+        self.registry.on_job_done(
+            lambda snap, owner: seen.append((snap["id"], getattr(owner, "id", None))),
+            self.scope_a.ctx)
+        self.registry.on_job_done(
+            lambda snap, owner: global_seen.append((snap["id"], getattr(owner, "id", None))),
+            self.ctx)
+        box = JobDoneBox()
+        owner_a = self._owner("a1", self.scope_a)
+        job_id = self.registry.start({
+            "kind": "bash", "label": "x", "owner": owner_a,
+            "run": lambda: {"done": box, "cancel": lambda r: None}})
+        box.settle({"status": "completed"})
+        self.assertEqual(seen, [(job_id, "a1")])          # A 层只收 A 链的结算
+        self.assertEqual(global_seen, [(job_id, "a1")])   # 全局层收所有结算
+
+    def test_unowned_settlement_skips_scoped_listener(self):
+        scoped_seen: list = []
+        global_seen: list = []
+        self.registry.attach_controller("host", self.ctx)
+        self.registry.on_job_done(lambda s, o: scoped_seen.append(s["id"]), self.scope_a.ctx)
+        self.registry.on_job_done(lambda s, o: global_seen.append(s["id"]), self.ctx)
+        box = JobDoneBox()
+        job_id = self.registry.start({
+            "kind": "bash", "label": "bg",
+            "run": lambda: {"done": box, "cancel": lambda r: None}})
+        box.settle({"status": "completed"})
+        self.assertEqual(scoped_seen, [])                 # unowned 不进 scoped 监听器
+        self.assertEqual(global_seen, [job_id])
+
+    def test_controller_detaches_on_scope_dispose(self):
+        self.registry.attach_controller("tool-jobs", self.scope_a.ctx)
+        self.scope_a.dispose()
+        owner = self._owner("a1", self.scope_a)
+        with self.assertRaises(RuntimeError):
+            self.registry.start(self._spec(owner))
+
+    def test_duplicate_names_independent_detach(self):
+        d1 = self.registry.attach_controller("a")
+        d2 = self.registry.attach_controller("a")
+        d1()
+        self.assertTrue(self.registry.start(self._spec(None)))  # a 的第二枚 token 仍在
+        d2()
+        with self.assertRaises(RuntimeError):
+            self.registry.start(self._spec(None))
+
+
 if __name__ == "__main__":
     unittest.main()

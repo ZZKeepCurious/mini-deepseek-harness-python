@@ -74,9 +74,11 @@ def install_jobs(ctx, config: dict | None = None) -> LocalJobRegistry:
         registry_config = {k: config[k] for k in _REGISTRY_KEYS if k in config}
         registry = LocalJobRegistry(ctx, registry_config)
     ctx._miniharness_jobs_installed = True
-    registry.attach_controller("tool-jobs")
+    # controller 与 notice 监听从装配 ctx 的 scope 注册（上游 tool-jobs 经
+    # inject 绑定到自己组合 scope；mini 显式传参）：scope 销毁自动卸载
+    registry.attach_controller("tool-jobs", ctx)
     tool_config = {k: v for k, v in config.items() if k not in _REGISTRY_KEYS}
-    _tools.install_completion_delivery(registry, tool_config)
+    _tools.install_completion_delivery(registry, tool_config, ctx=ctx)
     return registry
 
 
