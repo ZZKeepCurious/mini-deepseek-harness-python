@@ -131,3 +131,4 @@ from .descriptor import (  # noqa: E402
     seed_descriptor_turn,
     snapshot_subagent_descriptor,
 )
+from .tool import install_subagent_delegation_tool  # noqa: E402
