@@ -26,6 +26,7 @@ from miniharness.skills import (
     digest_catalog_entries,
     escape_attr,
     escape_text,
+    install_badge_skill,
     install_skills,
     is_model_invocable,
     is_skill_name,
@@ -754,6 +755,35 @@ class FrontmatterSubsetTest(unittest.TestCase):
     def test_tab_indent_raises(self):
         with self.assertRaises(ValueError):
             self._parse("a:\n\tb: 1\n")
+
+
+# ---------- 内置 dsh-badge provider（对齐 packages/skill/skill-badge） ----------
+
+class BadgeProviderTest(unittest.TestCase):
+    def _make(self):
+        ctx = Context(name="badge")
+        registry = install_skills(ctx)
+        install_badge_skill(ctx)
+        return ctx, registry
+
+    def test_provider_registered(self):
+        ctx, registry = self._make()
+        names = [s["name"] for s in registry.list({})]
+        self.assertIn("dsh-badge", names)
+
+    def test_badge_content_loadable(self):
+        ctx, registry = self._make()
+        definition = registry.get("dsh-badge")
+        self.assertIsNotNone(definition)
+        self.assertEqual(definition["provider"], "dsh-badge")
+        self.assertEqual(definition["source"], "bundled")
+        self.assertIn("Powered by DeepSeek Harness", definition["content"])
+
+    def test_badge_invocation_both(self):
+        ctx, registry = self._make()
+        candidate = next(s for s in registry.list({}) if s["name"] == "dsh-badge")
+        self.assertTrue(candidate["invocation"]["modelInvocable"])
+        self.assertTrue(candidate["invocation"]["userInvocable"])
 
 
 if __name__ == "__main__":

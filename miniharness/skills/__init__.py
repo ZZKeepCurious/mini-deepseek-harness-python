@@ -31,6 +31,7 @@ from .registry import (
     render_skill_content,
 )
 from .filesystem import FileSystemSkillProvider
+from .badge import install_badge_skill
 from . import tool_skill as _tool_skill
 
 __all__ = [
@@ -44,6 +45,7 @@ __all__ = [
     "digest_catalog_entries",
     "escape_attr",
     "escape_text",
+    "install_badge_skill",
     "install_skills",
     "is_model_invocable",
     "is_skill_name",
