@@ -299,6 +299,24 @@ class TestRequestEnvelope(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "no provider/model"):
             loop.followup("你好")
 
+    def test_reasoning_effort_in_envelope(self):
+        session, loop, _ = _make_env(extra=[], )
+        # 用带 reasoning_effort 的适配器替换默认 fake（默认无 effort）
+        loop.adapter = FakeLlmAdapter(final_text="ok", reasoning_effort="high")
+        loop.followup("你好")
+        data = self._header_event(session)
+        header = data["header"]
+        # config 携带字符串值；adapterDefaults 携带布尔标记（对齐上游 envelope）
+        self.assertEqual(header["config"]["reasoningEffort"], "high")
+        self.assertEqual(header["adapterDefaults"]["reasoningEffort"], True)
+        # 'off' 省略 adapterDefaults 标记，但仍记录 config 字符串
+        loop2 = _make_env()[1]
+        loop2.adapter = FakeLlmAdapter(final_text="ok", reasoning_effort="off")
+        loop2.followup("你好")
+        data2 = self._header_event(loop2.session)
+        self.assertEqual(data2["header"]["config"]["reasoningEffort"], "off")
+        self.assertNotIn("adapterDefaults", data2["header"])
+
 
 class AbortRaceTest(unittest.TestCase):
     """asyncio 化重构：_aiter_raced 异步竞速桥契约（保序 / 异常透传 / abort 竞速）。"""

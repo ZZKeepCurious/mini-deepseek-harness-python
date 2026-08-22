@@ -59,10 +59,17 @@ from ..tools import ToolExec, ToolRegistry
 def canonical_header(config: dict, *, system: str = "", tools: list | None = None,
                      adapter_defaults: dict | None = None) -> dict:
     """规范化请求信封（上游 session/src/request-header.ts canonicalHeader）：
-    config 必有；adapterDefaults 仅当 reasoningEffort/maxTokens 之一为真；
-    system 非空才带；tools 非空才带。headerEquals 的 mini 版 = 字典相等。
+    config 透传（剔除内部键 turn/step/signal 与 None 值，保留 provider/model/
+    reasoningEffort/maxTokens 等连接默认）；adapterDefaults 仅当
+    reasoningEffort/maxTokens 布尔标记之一为真；system 非空才带；tools 非空才带。
+    headerEquals 的 mini 版 = 字典相等。
     """
-    header = {"config": {"provider": config.get("provider"), "model": config.get("model")}}
+    _INTERNAL = ("turn", "step", "signal")
+    # provider/model 恒携带（即便为 None，保持信封形状稳定）；其余字段仅当非 None
+    cfg = {"provider": config.get("provider"), "model": config.get("model")}
+    cfg.update({k: v for k, v in config.items()
+                if k not in _INTERNAL and k not in ("provider", "model") and v is not None})
+    header = {"config": cfg}
     if adapter_defaults and (adapter_defaults.get("reasoningEffort")
                              or adapter_defaults.get("maxTokens")):
         header["adapterDefaults"] = adapter_defaults
@@ -736,6 +743,9 @@ class AgentLoop:
         seed = {
             "provider": self.adapter.provider,
             "model": getattr(self.adapter, "model", None),
+            "reasoningEffort": getattr(self.adapter, "reasoning_effort", None),
+            "maxTokens": (getattr(self.adapter, "max_tokens", None)
+                          or getattr(self.adapter, "_max_tokens", None)),
             "turn": turn, "step": step, "signal": self._abort_proxy,
         }
         config = self.ctx.waterfall("agent/request", seed, this_arg=self._carrier)
@@ -744,16 +754,25 @@ class AgentLoop:
                 f'agent "{self.session.session_id}" has no provider/model: set '
                 "adapter provider/model or supply both via the agent/request waterfall"
             )
+        # 未设置的字段不进 config（对齐上游：仅当连接默认显式给出）
+        for key in ("reasoningEffort", "maxTokens"):
+            if config.get(key) is None:
+                config.pop(key, None)
         return config
 
     def _adapter_defaults(self) -> dict | None:
         """适配器显式设置的默认值标记（上游 preparedCall.adapterDefaults）：
-        maxTokens 已设 → {maxTokens: True}；mini 无 reasoningEffort 维度。
+        maxTokens 已设 → {maxTokens: True}；reasoningEffort 非 off/已设 →
+        {reasoningEffort: True}（布尔标记；'off' 视为未激活，省略）。
         """
+        defaults: dict[str, bool] = {}
         if (getattr(self.adapter, "max_tokens", None) is not None
                 or getattr(self.adapter, "_max_tokens", None) is not None):
-            return {"maxTokens": True}
-        return None
+            defaults["maxTokens"] = True
+        re = getattr(self.adapter, "reasoning_effort", None)
+        if re and re != "off":
+            defaults["reasoningEffort"] = True
+        return defaults or None
 
     async def _stream_attempt(self) -> list[dict]:
         """一次 step 内的模型请求 attempt 循环（上游 request → retry → 终局）。

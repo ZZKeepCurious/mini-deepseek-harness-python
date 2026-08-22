@@ -214,5 +214,27 @@ class TransportTest(unittest.TestCase):
         self.assertEqual(cm.exception.code, 'TRANSPORT')
 
 
+class ReasoningEffortTest(unittest.TestCase):
+    def test_valid_tiers_sent_on_wire(self):
+        for tier in ("low", "high", "max"):
+            adapter = DeepSeekAdapter(api_key='sk-test', reasoning_effort=tier)
+            body = adapter._build_body([], [])
+            self.assertEqual(body.get("reasoning_effort"), tier)
+
+    def test_off_and_unset_omitted_on_wire(self):
+        off = DeepSeekAdapter(api_key='sk-test', reasoning_effort='off')
+        self.assertNotIn("reasoning_effort", off._build_body([], []))
+        unset = DeepSeekAdapter(api_key='sk-test')
+        self.assertNotIn("reasoning_effort", unset._build_body([], []))
+
+    def test_invalid_tier_rejected(self):
+        with self.assertRaises(ValueError):
+            DeepSeekAdapter(api_key='sk-test', reasoning_effort='medium')
+
+    def test_property_exposes_tier(self):
+        adapter = DeepSeekAdapter(api_key='sk-test', reasoning_effort='high')
+        self.assertEqual(adapter.reasoning_effort, 'high')
+
+
 if __name__ == '__main__':
     unittest.main()

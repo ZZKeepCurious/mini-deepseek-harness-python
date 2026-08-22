@@ -247,14 +247,19 @@ class DeepSeekAdapter(LlmAdapter):
       * per-read idle 超时 300s（对齐上游 fetch watchdog）+ 真取消：abort
         置位即关闭连接（httpx 原生 asyncio 传输，无遗留线程）
 
-    简化标注（2026-08-17 上游 rc.7 审核）：上游推理 effort 提供 off/low/high/max
-    四档（adapter.ts REASONING_EFFORTS，rc.7 新增 low）；mini 请求参数
-    不承载 reasoningEffort（无 connector 配置面，默认走 provider 侧行为），
-    仅接收响应侧 reasoning_content 与 usage.reasoningTokens。语义影响：无
-    请求侧契约（mini 不宣称配置面）。见 AGENTS.md 简化清单。
-    """
+     推理 effort（2026-08-22 对齐上游 rc.7）：请求侧承载 off/low/high/max
+     四档（REASONING_EFFORTS，rc.7 新增 low）；'off'/未设置省略，其余原样
+     透传为 wire 参数 reasoning_effort（对齐 upstream serialize.ts）。值经
+     适配器构造参数 reasoning_effort 注入；request/header 信封的
+     config.reasoningEffort 携带字符串值、adapterDefaults.reasoningEffort 为
+     布尔标记（由 AgentLoop._adapter_defaults 输出）。响应侧 reasoning_content
+     与 usage.reasoningTokens 已支持。见 AGENTS.md 已对齐项。
+     """
 
     provider = "deepseek-official"
+
+    # 上游 llm-deepseek REASONING_EFFORTS（rc.7 新增 low）：'off' 在 wire 上省略
+    REASONING_EFFORTS = ("off", "low", "high", "max")
 
     # 上游 per-read idle watchdog（fetch 流读间隙超时）；连接超时取常用值
     CONNECT_TIMEOUT_S = 30.0
@@ -262,18 +267,33 @@ class DeepSeekAdapter(LlmAdapter):
 
     def __init__(self, api_key: str | None = None, base_url: str | None = None,
                  model: str = "deepseek-chat", max_tokens: int | None = None,
-                 retry_policy: dict | None = None, transport=None):
+                 retry_policy: dict | None = None, transport=None,
+                 reasoning_effort: str | None = None):
         self._key = api_key if api_key is not None else os.environ.get("DEEPSEEK_API_KEY", "")
         self._base = (base_url or os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")).rstrip("/")
         self._model = model
         self._max_tokens = max_tokens
         self._transport = transport  # httpx transport（MockTransport 测试注入口）
+        if reasoning_effort is not None and reasoning_effort not in self.REASONING_EFFORTS:
+            raise ValueError(
+                f"invalid reasoning mode {reasoning_effort!r}; "
+                f"expected one of {self.REASONING_EFFORTS}")
+        self._reasoning_effort = reasoning_effort
         # 上游 llm-deepseek：retryPolicy 省略即 normal 默认（resolveRetryPolicy(undefined)）
         self.retry_policy = resolve_retry_policy(retry_policy, "llm-deepseek: retryPolicy")
 
     @property
     def model(self) -> str | None:
         return self._model
+
+    @property
+    def reasoning_effort(self) -> str | None:
+        """推理 effort 档位（'off'|'low'|'high'|'max'，None 表示未设置）。
+
+        对齐上游 llm-deepseek 的 connection.defaults.reasoningEffort；'off'
+        在 wire 上省略（见 serialize.ts：reasoning_effort 仅在非 off 时入请求体）。
+        """
+        return self._reasoning_effort
 
     def resolve_model_info(self) -> dict:
         """DeepSeek chat-completions 适配器只支持文本输入。
@@ -315,6 +335,9 @@ class DeepSeekAdapter(LlmAdapter):
             ]
         if self._max_tokens is not None:
             body["max_tokens"] = self._max_tokens
+        # 推理 effort：对齐上游 serialize.ts —— 'off'/未设置省略，其余原样透传
+        if self._reasoning_effort and self._reasoning_effort != "off":
+            body["reasoning_effort"] = self._reasoning_effort
         return body
 
     async def _iter_chunks(self, body: dict, abort_event=None):

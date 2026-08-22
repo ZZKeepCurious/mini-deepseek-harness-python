@@ -19,12 +19,13 @@ class FakeLlmAdapter(LlmAdapter):
     provider = "fake"
 
     def __init__(self, tool_call: dict | None = None, final_text: str = "任务完成。",
-                 image: dict | None = None):
+                 image: dict | None = None, reasoning_effort: str | None = None):
         self._tool = tool_call
         self._text = final_text
         # 教学扩展：附带的 image 块（{attachment: ImageAttachmentRef 形状}），
         # 使 assistant 图片输出路径（ACP readImage → base64 内联）可测。
         self._image = image
+        self._reasoning_effort = reasoning_effort
         self.calls = 0
 
     def resolve_model_info(self) -> dict:
@@ -37,6 +38,10 @@ class FakeLlmAdapter(LlmAdapter):
             "model": self.model,
             "input_modalities": ["text", "image"],
         }
+
+    @property
+    def reasoning_effort(self) -> str | None:
+        return self._reasoning_effort
 
     async def stream(self, messages, tools, signal=None):
         self.calls += 1
