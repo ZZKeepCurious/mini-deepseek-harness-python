@@ -234,6 +234,11 @@ class TestLoop(unittest.TestCase):
         with mock.patch.dict(os.environ, {"MINIHARNESS_MAX_STEPS": "123"}):
             loop_both = AgentLoop(Session("s4"), FakeLlmAdapter(final_text="ok"), reg, ctx, max_steps=9)
             self.assertEqual(loop_both.max_steps, 9)
+        # 非法环境变量 fail loud（清晰报错，不抛裸 ValueError）
+        with mock.patch.dict(os.environ, {"MINIHARNESS_MAX_STEPS": "not-a-number"}):
+            with self.assertRaises(ValueError) as cm:
+                AgentLoop(Session("s5"), FakeLlmAdapter(final_text="ok"), reg, ctx)
+            self.assertIn("MINIHARNESS_MAX_STEPS", str(cm.exception))
 
 
 class TestRequestEnvelope(unittest.TestCase):

@@ -123,11 +123,19 @@ class AgentLoop:
         # 会话随 loop 生命周期进/离店。
         self._detach_session: Callable[[], None] | None = None
         self.system_prompt = system_prompt
-        self.max_steps = (
-            max_steps
-            if max_steps is not None
-            else int(os.environ.get("MINIHARNESS_MAX_STEPS", DEFAULT_MAX_STEPS))
-        )
+        if max_steps is not None:
+            self.max_steps = max_steps
+        else:
+            env_val = os.environ.get("MINIHARNESS_MAX_STEPS")
+            if env_val is None:
+                self.max_steps = DEFAULT_MAX_STEPS
+            else:
+                try:
+                    self.max_steps = int(env_val)
+                except ValueError:
+                    raise ValueError(
+                        f"MINIHARNESS_MAX_STEPS 必须是非负整数，收到 {env_val!r}"
+                    )
         self.max_parallel_tool_calls = max_parallel_tool_calls   # 阶段 7：并行池上限（上游 DEFAULT_MAX_PARALLEL_TOOL_CALLS）
         self.status = "idle"
         # 双队列 Inbox（上游 agent/src/inbox.ts）：followup → next-turn，
