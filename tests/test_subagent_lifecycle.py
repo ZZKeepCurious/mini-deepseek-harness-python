@@ -373,7 +373,12 @@ class TestNestedOwnership(unittest.TestCase):
             self.assertLess(ends_by_id[gc], ends_by_id[cid])
             self.assertEqual(self.ends[ends_by_id[gc]]["stopReason"], "completed")
             self.assertEqual(self.ends[ends_by_id[cid]]["stopReason"], "completed")
-            # 子的结算通知投顶层父；孙的通知投直属父（子会话）
+            # 子的结算通知投顶层父；孙的通知投直属父（子会话）。
+            # 通知路由（followup/steer 入箱）与父 driver 消化入账是两个
+            # 步骤——先等通知真实落账再读事件，否则慢宿主上竞速翻车
+            await _wait_until(lambda: any(
+                n["data"]["source"]["senderSessionId"] == cid
+                for n in _settlement_notices(parent.session)), timeout=5.0)
             top_notices = [n["data"]["source"]["senderSessionId"]
                            for n in _settlement_notices(parent.session)]
             self.assertIn(cid, top_notices)
