@@ -23,20 +23,36 @@ sandbox/src/index.ts）：
   * runnerCommand 配置：与 runnerFailureSignatures 必须成对（空/非空
     互斥），非空时跳过内置选择与探测、断言 full 强制。
 
-载体简化（须在文档标注）：landlock 走真实 node-addon launcher，mini 只
-生成同构 grant 参数（readOnly/readWrite 列表）；windows-acl 的 ACL/SID
-物化（workspaceWriteSid / tempWriteSid / AclWriteGrant）mini 以参数形状
-保留、无真实系统调用——两种后端在无对应二进制的宿主机上探测恒失败，
-fail-closed 行为与真实宿主一致。
+载体形态（2026-08-23 Phase C 后）：landlock 经 `seams/landlock_run.py` ctypes
+自限制执行器真执行（同上游 CLI 契约，无编译产物；内核 <5.13 或非 Linux 宿主
+探测干净失败 → fail-closed）；bwrap/seatbelt 为外部程序 argv 包装（上游同款）；
+windows-acl 经 `seams/sandbox_windows_acl/` 包真执行——ctypes FFI 物化上游
+windows-acl-restrict-poc @ 10e4dfb 的全部机制（WRITE_RESTRICTED 双列表令牌、
+DACL 授权、CreateProcessAsUserW spawn、kill-on-close job），runner 以
+`python -m miniharness.seams.sandbox_windows_acl.runner` 缺省调用（稳定 argv
+契约与 exit 127 失败签名同上游）；非 win32 宿主 FFI 加载失败 → 探测恒失败，
+fail-closed 行为不变。
 """
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
+import sys
 import tempfile
+import uuid
 from typing import Callable
 
+from .sandbox_windows_acl import (AclWriteGrant, assert_temp_root_outside_workspace,
+                                  temp_write_sid, workspace_write_sid)
+
 SANDBOX_UNAVAILABLE = "SANDBOX_UNAVAILABLE"
+
+# landlock ctypes 执行器模块名（landlock_launcher_prefix 缺省前缀的组成部分）
+LANDLOCK_LAUNCHER_MODULE = "miniharness.seams.landlock_run"
+
+# windows-acl runner CLI 模块名（缺省 invocation 的组成部分）
+WINDOWS_ACL_RUNNER_MODULE = "miniharness.seams.sandbox_windows_acl.runner"
 
 CONFINED_MODES = ("read-only", "workspace-write")
 
@@ -55,12 +71,14 @@ STATIC_ENFORCEMENT: dict[str, str] = {
     "windows-acl": "partial",
 }
 
-# 每后端被拒文件效果的 stderr 方言（上游 DENIAL_SIGNATURES）
+# 每后端被拒文件效果的 stderr 方言（上游 DENIAL_SIGNATURES；windows-acl 追加
+# 中文 Windows 的 cmd 本地化输出「拒绝访问」——上游仅英文，教学扩展）
 DENIAL_SIGNATURES: dict[str, tuple[str, ...]] = {
     "bwrap": ("read-only file system",),
     "landlock": ("permission denied",),
     "seatbelt": ("operation not permitted",),
-    "windows-acl": ("access is denied", "access to the path", "permission denied"),
+    "windows-acl": ("access is denied", "access to the path", "permission denied",
+                    "拒绝访问"),
     "runnerCommand": ("read-only file system", "permission denied"),
 }
 
@@ -82,6 +100,17 @@ RUNNER_FAILURE_RULES: dict[str, list[dict]] = {
         "fatalSignatures": ["windows-acl-run: "],
     }],
 }
+
+
+def _create_session_temp_dir() -> str:
+    """会话私有 temp 目录：继承 %TEMP% 的 DACL（上游 mkdtempSync(join(tmpdir(),
+    'dsh-')) 语义）。不能用 CPython 的 tempfile.mkdtemp——它以 mode=0700 显式
+    构造安全描述符（SYSTEM/Admins/OWNER RIGHTS，无 user ACE），而 OWNER RIGHTS
+    对 WRITE_RESTRICTED 受限子进程无效（两遍求值中受限主体不被视为 owner），
+    子进程连自己的私有 temp 都写不了。"""
+    path = os.path.join(tempfile.gettempdir(), f"dsh-{uuid.uuid4().hex[:12]}")
+    os.mkdir(path)  # 默认 0777 → CPython 不构造 SD，纯继承
+    return path
 
 
 class SandboxUnavailableError(Exception):
@@ -165,32 +194,18 @@ def seatbelt_profile_args(policy: dict) -> list[str]:
 
 def windows_acl_runner_args(runner_invocation: list[str], policy: dict,
                             temp_dir: str | None = None) -> list[str]:
-    """windows-acl runner 调用：--workspace/--temp/--mode（+ 会话写 SID）。
+    """windows-acl runner 调用的基础形态：--workspace/--temp/--mode 三参数。
 
-    与上游 windowsAclRunnerArgv 同形状：agentless 或 read-only 只带三个
-    基础参数；sessionId + workspace-write 追加 --write-sid 与
-    --temp-write-sid（mini 以派生占位保留参数契约，无真实 ACL 物化——
-    简化标注）。temp 缺省用平台临时根（上游无会话时即 tmpdir()）。
+    与上游 windowsAclRunnerArgv 的 agentless/read-only 分支同形状；带会话的
+    workspace-write 走 provider._runner_argv（先物化授权再拼 --write-sid 对）。
+    temp 缺省用平台临时根（上游无会话时即 tmpdir()）。
     """
-    args = [
+    return [
         *runner_invocation,
         "--workspace", policy["workspaceRoot"],
         "--temp", temp_dir or tempfile.gettempdir(),
         "--mode", policy["mode"],
     ]
-    if policy.get("sessionId") is not None and policy.get("mode") == "workspace-write":
-        args += ["--write-sid", _workspace_write_sid(policy["workspaceRoot"]),
-                 "--temp-write-sid", f"temp:{policy['sessionId']}"]
-    return args
-
-
-def _workspace_write_sid(workspace_root: str) -> str:
-    """按规范工作区路径派生的每工作区写 SID 身份（上游 workspaceWriteSid）。
-
-    上游为每个工作区分配真实 SID 并物化 ACE；mini 保留"同一工作区恒为
-    同一身份"的派生语义，字符串形态为确定性占位（简化标注）。
-    """
-    return "ws-" + format(abs(hash(canonical_path(workspace_root))), "x")
 
 
 # ---------- 探测（上游 defaultProbe*，同形状的 subprocess 探测） ----------
@@ -213,12 +228,48 @@ def probe_seatbelt(seatbelt_exec: str = "sandbox-exec", timeout_ms: int = 5000) 
     return probe.returncode == 0
 
 
+def landlock_launcher_prefix(internals: dict | None = None) -> list[str]:
+    """landlock launcher 调用前缀（Phase A：ctypes 自限制执行器，无外部二进制）。
+
+    internals.landlockLauncher 可注入覆盖：字符串视为可执行文件路径，列表
+    视为完整前缀；缺省经 `python -m miniharness.seams.landlock_run` 复刻上游
+    node-addon-landlock-run 的 CLI 契约（--ro/--rw/--/--probe、exit 125、
+    报告行逐字一致，见 seams/landlock_run.py 模块 docstring）。
+    """
+    override = (internals or {}).get("landlockLauncher")
+    if override is None:
+        return [sys.executable, "-m", LANDLOCK_LAUNCHER_MODULE]
+    if isinstance(override, str):
+        return [override]
+    return list(override)
+
+
+def probe_landlock(launcher: list[str], timeout_ms: int = 5000) -> str:
+    """功能探测：跑真 --probe 并解析报告行 → 'full' | 'partial' | 'unusable'。
+
+    对齐上游 entry 包 probe() 映射：非零退出 = unusable（fail-closed 终点）。
+    """
+    try:
+        proc = subprocess.run([*launcher, "--probe"], timeout=timeout_ms,
+                              capture_output=True)
+    except (OSError, subprocess.TimeoutExpired):
+        return "unusable"
+    if proc.returncode != 0:
+        return "unusable"
+    line = proc.stdout.decode(errors="replace").strip()
+    if line == "landlock: fully enforced":
+        return "full"
+    if line == "landlock: partially enforced (older ABI)":
+        return "partial"
+    return "unusable"
+
+
 def probe_windows_acl(runner_invocation: list[str], timeout_ms: int = 5000) -> bool:
     program = runner_invocation[0] if runner_invocation else None
     if program is None:
         return False
     probe = subprocess.run(
-        [*runner_invocation[1:], "--workspace", tempfile.gettempdir(),
+        [*runner_invocation, "--workspace", tempfile.gettempdir(),
          "--temp", tempfile.gettempdir(), "--mode", "read-only", "--", "cmd", "/c", "exit", "0"],
         timeout=timeout_ms, capture_output=True,
     )
@@ -253,6 +304,9 @@ class LocalSandboxProvider:
         self._runner_failure_signatures = signatures
         self._probe_timeout_ms = probe_timeout_ms
         self._selected: dict | str | None = None
+        # ACL 授权缓存：sessionId → {grant, temp_dir}（上游 provider 的
+        # grants/tempDirs 两张表在 mini 合一——每会话恰一把 grant）。
+        self._acl_grants: dict[str, dict] = {}
 
     # ---------- 主入口 ----------
 
@@ -314,11 +368,10 @@ class LocalSandboxProvider:
             probe = self.internals.get("probeBwrap") or (lambda: probe_bwrap(self._probe_timeout_ms))
             return "full" if probe() else "unusable"
         if runner == "landlock":
+            launcher = landlock_launcher_prefix(self.internals)
             probe = self.internals.get("probeLandlock")
-            launcher = self.internals.get("landlockLauncher") or "landlock-run"
             if probe is None:
-                # 无 node-addon launcher 的宿主机：探测恒不可用（fail closed）
-                return "unusable"
+                return probe_landlock(launcher, self._probe_timeout_ms)
             return probe(launcher)
         if runner == "seatbelt":
             probe = self.internals.get("probeSeatbelt")
@@ -338,22 +391,98 @@ class LocalSandboxProvider:
         if runner == "bwrap":
             return ["bwrap", *bwrap_profile_args(policy)]
         if runner == "landlock":
-            launcher = self.internals.get("landlockLauncher") or "landlock-run"
-            # 旗标拼写对齐上游 entry/index.ts:96-97：`--ro <path>` / `--rw <path>`
-            grant_args = landlock_profile_args(policy)
-            return [launcher, *sum(([ "--ro", r] for r in grant_args["readOnly"]), []),
-                    *sum(([ "--rw", r] for r in grant_args["readWrite"]), [])]
+            grants = landlock_profile_args(policy)
+            # 旗标拼写对齐上游 cli-contract.md 语法：`--ro <path>` / `--rw <path>`
+            argv = landlock_launcher_prefix(self.internals)
+            for path in grants["readOnly"]:
+                argv += ["--ro", path]
+            for path in grants["readWrite"]:
+                argv += ["--rw", path]
+            return argv
         if runner == "seatbelt":
             seatbelt_exec = self.internals.get("seatbeltExec") or "sandbox-exec"
             return [seatbelt_exec, *seatbelt_profile_args(policy)]
         if runner == "windows-acl":
-            return windows_acl_runner_args(self._windows_acl_runner_invocation(), policy)
+            invocation = self._windows_acl_runner_invocation()
+            if policy.get("sessionId") is not None and policy.get("mode") == "workspace-write":
+                record = self._materialize_acl_grant(policy["sessionId"], policy["workspaceRoot"])
+                return [
+                    *invocation,
+                    "--workspace", policy["workspaceRoot"],
+                    "--temp", record["temp_dir"],
+                    "--mode", policy["mode"],
+                    "--write-sid", record["grant"].write_sid,
+                    "--temp-write-sid", temp_write_sid(record["temp_dir"]),
+                ]
+            return windows_acl_runner_args(invocation, policy)
         raise ValueError(f"unknown runner: {runner}")
+
+    # ---------- ACL 授权物化（上游 materializeAclGrant / rmTempDir /
+    # revokeAclGrants 对应物） ----------
+
+    def _materialize_acl_grant(self, session_id: str, workspace_root: str) -> dict:
+        """为会话物化 ACL 授权：常驻 workspace ACE + 私有 temp 目录与其可撤销
+        授权。每会话缓存；同会话重复调用返回既有记录。temp 根 ⊄ workspace
+        断言在任何授权动作之前（provider bug 在边界大声失败）。fail-closed：
+        物化中途失败即 dispose 已授予路径并上抛。"""
+        existing = self._acl_grants.get(session_id)
+        if existing is not None:
+            return existing
+        assert_temp_root_outside_workspace(workspace_root, tempfile.gettempdir())
+        # workspace_root 与 _runner_argv 拼进 --workspace 的是同一份 policy 值
+        # （sandbox-policy 已先 canonical）——SID 派生与 runner 校验同源。
+        grant = AclWriteGrant.create(workspace_write_sid(workspace_root))
+        try:
+            grant.add(workspace_root, standing=True)
+            temp_dir = _create_session_temp_dir()
+            grant.add(temp_dir)
+        except BaseException:
+            grant.dispose()
+            raise
+        record = {"grant": grant, "temp_dir": temp_dir}
+        self._acl_grants[session_id] = record
+        return record
+
+    def remove_temp_dir(self, session_id: str) -> None:
+        """删除会话私有 temp 目录（上游 internals.rmTempDir 注入点的载体）。
+        标准流程不调用它：目录由 revoke_acl_grants 在**撤销 ACE 之后**统一
+        删除（上游 revokeAclGrants 顺序——先 dispose 再 rmSync）。未知会话
+        静默返回。"""
+        record = self._acl_grants.get(session_id)
+        if record is None:
+            return
+        hook = self.internals.get("rmTempDir")
+        if hook is not None:
+            hook(record["temp_dir"])
+            return
+        shutil.rmtree(record["temp_dir"], ignore_errors=True)
+
+    def revoke_acl_grants(self) -> None:
+        """provider 关停：撤销全部可撤销（temp）授权，随后删除各会话私有
+        temp 目录——常驻 workspace ACE 保留作复用缓存。顺序对齐上游
+        revokeAclGrants：先 grant.dispose()（撤销时路径必须在场）再删目录。
+        单项失败不阻断其余，最后聚合上报。"""
+        failures: list[BaseException] = []
+        for record in self._acl_grants.values():
+            try:
+                record["grant"].dispose()
+            except Exception as error:  # noqa: BLE001 - 聚合一切撤销失败
+                failures.append(error)
+        for record in self._acl_grants.values():
+            try:
+                shutil.rmtree(record["temp_dir"], ignore_errors=True)
+            except OSError as error:  # noqa: BLE001 - 同上
+                failures.append(error)
+        self._acl_grants.clear()
+        if failures:
+            raise Exception(
+                f"revokeAclGrants completed with {len(failures)} cleanup failure(s)", failures)
 
     def _windows_acl_runner_invocation(self) -> list[str]:
         override = self.internals.get("windowsAclRunnerArgs")
         if override is not None:
             return list(override)
-        # mini 无打包 runner 入口：缺省探测恒失败（fail closed），真实宿主
-        # 由消费者以 internals.windowsAclRunnerArgs 提供 runner 前缀。
-        return []
+        # 缺省经 `python -m miniharness.seams.sandbox_windows_acl.runner`
+        # 复刻上游打包 runner 入口（Phase C）：非 win32 宿主 FFI 加载失败 →
+        # 探测/执行干净失败 → fail closed。
+        return [sys.executable, "-m", WINDOWS_ACL_RUNNER_MODULE]

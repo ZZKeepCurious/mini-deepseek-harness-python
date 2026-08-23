@@ -5,6 +5,7 @@
 
 import json
 import os
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -28,6 +29,7 @@ from miniharness.seams.sandbox_local import (
     DENIAL_SIGNATURES,
     RUNNER_FAILURE_RULES,
     SANDBOX_UNAVAILABLE,
+    WINDOWS_ACL_RUNNER_MODULE,
     LocalSandboxProvider,
     SandboxUnavailableError,
     bwrap_profile_args,
@@ -175,23 +177,30 @@ class TestSandboxProvider(unittest.TestCase):
     def test_win32_sole_candidate_partial(self):
         provider = LocalSandboxProvider(internals={"platform": "win32"})
         out = provider.confine(["echo", "hi"], {"mode": "read-only", "workspaceRoot": "C:\\ws"})
-        self.assertEqual(out["argv"][:2], ["--workspace", "C:\\ws"])
+        # 缺省 invocation：python -m miniharness.seams.sandbox_windows_acl.runner（Phase C）
+        self.assertEqual(out["argv"][0], sys.executable)
+        self.assertEqual(out["argv"][1:3], ["-m", WINDOWS_ACL_RUNNER_MODULE])
+        self.assertEqual(out["argv"][3:5], ["--workspace", "C:\\ws"])
         self.assertIn("--mode", out["argv"])
         self.assertEqual(out["enforcement"], "partial")
         self.assertEqual(out["runnerFailureRules"], RUNNER_FAILURE_RULES["windows-acl"])
 
-    def test_windows_acl_runner_args_with_session(self):
+    def test_windows_acl_runner_args_basic(self):
+        # 基础形态恒为三参数（agentless/read-only 分支；会话授权走 provider）
         args = windows_acl_runner_args(["node", "runner.js"], {
             "mode": "workspace-write", "workspaceRoot": "C:\\ws",
             "sessionId": "sess-1", })
         self.assertEqual(args[:2], ["node", "runner.js"])
-        self.assertIn("--write-sid", args)
-        self.assertIn("--temp-write-sid", args)
-
-    def test_windows_acl_runner_args_agentless(self):
-        args = windows_acl_runner_args(["node", "runner.js"], {
-            "mode": "workspace-write", "workspaceRoot": "C:\\ws"})
         self.assertNotIn("--write-sid", args)
+        self.assertNotIn("--temp-write-sid", args)
+
+    def test_windows_acl_runner_invocation_override(self):
+        provider = LocalSandboxProvider(
+            internals={"platform": "win32",
+                       "windowsAclRunnerArgs": ["node", "runner.js"]})
+        out = provider.confine(["true"], {"mode": "read-only", "workspaceRoot": "C:\\ws"})
+        self.assertEqual(out["argv"][:4],
+                         ["node", "runner.js", "--workspace", "C:\\ws"])
 
     def test_unknown_platform_fails_closed(self):
         provider = LocalSandboxProvider(internals={"platform": "plan9"})

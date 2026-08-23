@@ -78,11 +78,16 @@ def run_headless(
     stdout: Any | None = None,
     stderr: Any | None = None,
     exit_fn: Callable[[int], None] | None = None,
+    sandbox: bool | dict = False,
 ) -> None:
     """跑一个一次性任务并请求进程退出（对齐上游 headless-runner 的 run()）。
 
     返回前必定：flush（若给了 persistence）→ stdout 写最终文本 →
     按 reason 写 stderr → exit_fn(reason.kind == 'completed' ? 0 : 1)。
+
+    sandbox=True/配置 dict 时装配真实沙箱栈（ctx.sandbox + ctx.sandboxPolicy
+    + 受限 bash 执行器；dict 即 policy Config {mode?, workspaceRoot?}，
+    缺省 read-only fail-safe）——bash 工具随之从 stub 换为真执行。
     """
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
@@ -99,6 +104,14 @@ def run_headless(
     install_jobs(ctx)
     install_skills(ctx)
     install_system_prompt(ctx)
+    if sandbox:
+        from ..seams.sandbox_local import LocalSandboxProvider
+        from ..seams.sandbox_policy import SandboxPolicyService
+        from ..shell import install_bash_executor
+        # provider 是纯能力对象（非 Service）：显式登记 "sandbox" 标签
+        ctx.provide("sandbox", LocalSandboxProvider())
+        SandboxPolicyService(ctx, sandbox if isinstance(sandbox, dict) else {})
+        install_bash_executor(ctx)
     tools = tools or default_tools(ctx)
     store = install_sessions(ctx)
     # 缺省 id 随机 uuid（上游 headless index.ts:112 `session-${randomUUID()}`，

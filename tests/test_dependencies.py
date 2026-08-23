@@ -6,13 +6,20 @@ L0 地基  = core/session、core/scope、core/dsh_scope、core/schema、core/ver
           core.scope↔core.dsh_scope / core.hmr→core.scope 有显式例外）
 L1 领域  = llm/*、core/tools、core/system_prompt、boot/*   （仅 L0）
 L2 编排  = core/agent_loop、compaction、commands、goal、jobs、plan、skills   （L0 + L1）
-L3 应用  = cli/*、protocol/*、seams/*、preset、extensions、interaction、client、web
-  （L0 ~ L2）
+L3 应用  = cli/*、protocol/*、seams/*、preset、extensions、interaction、client、web、
+          shell（L0 ~ L2）
   教学层   = demo.py、example_plugins.py（任意层，但不得被业务模块导入）
 
 补充规则（§5）：
   - protocol/ 内 acp/sdk/hooks 互不依赖；
-  - seams/ 内 sandbox / credentials / subagent 三个子域互不依赖；
+  - seams/ 内 sandbox（sandbox_local + sandbox_policy）/ credentials / subagent
+    互不依赖（policy 与 local 同属沙箱子域，上游 dsh-sandbox-policy 同样
+    依赖 dsh-sandbox）；
+  - shell→seams 有显式例外：bash-sandbox 是 ctx.sandbox 的消费者，上游
+    bash-sandbox 同样依赖 dsh-sandbox（packages/shell/bash-sandbox 的
+    package.json dependencies）——拓扑一致，非分层倒挂；
+  - cli→seams / cli→shell 有显式例外：run_headless 组装沙箱栈与 bash
+    执行器（同 cli→web 先例，上游 bundle/headless 同样依赖这三包）；
   - 顶层 __all__ 收敛至 28（白名单 + FakeLlmAdapter，§6）。
 
 上游对照：无（这是 mini 自身的架构纪律，见 docs/architecture.md §3）。
@@ -54,6 +61,7 @@ LAYER_UNITS = [
     ("interaction", 3),
     ("client", 3),
     ("web", 3),
+    ("shell", 3),
 ]
 
 TEACHING_MODULES = {"miniharness.demo", "miniharness.example_plugins"}
@@ -140,6 +148,21 @@ class ImportDirectionTest(unittest.TestCase):
                     # §5 显式例外（单方向）：launcher 组装 web profile——cli 把
                     # ctx/adapter/tools 交给 web 层运行时；web 层不得反向 import cli
                     continue
+                if src_unit == "cli" and dst_unit == "seams":
+                    # §5 显式例外（单方向）：run_headless 组装沙箱栈——cli 构造
+                    # provider/policy 装进 ctx（上游 bundle/headless 同样依赖
+                    # dsh-sandbox/sandbox-policy）；seams 层不得反向 import cli
+                    continue
+                if src_unit == "cli" and dst_unit == "shell":
+                    # §5 显式例外（单方向）：run_headless 经 install_bash_executor
+                    # 提供 ctx.shell（上游 bundle/headless 同样依赖 bash-sandbox）；
+                    # shell 层不得反向 import cli
+                    continue
+                if src_unit == "shell" and dst_unit == "seams":
+                    # §5 显式例外（单方向）：bash-sandbox 是 ctx.sandbox 的消费者
+                    # （confine + 归因），上游 bash-sandbox 同样依赖 dsh-sandbox；
+                    # seams 层不得反向 import shell
+                    continue
                 if src_unit == "core.scope" and dst_unit == "core.schema":
                     # §5 显式例外：L0 基座叶模块——core.scope 的 config 求值依赖
                     # core.schema 的 resolve_config（两者同为 L0 叶，无更低层可落）
@@ -173,19 +196,26 @@ class ImportDirectionTest(unittest.TestCase):
         self.assertEqual(violations, [])
 
     def test_seams_domains_independent(self):
-        """§5 规则 3：seams/ 内 sandbox / credentials / subagent 互不依赖。"""
-        domains = ("sandbox_local", "credentials_local", "subagent")
+        """§5 规则 3：seams/ 内 sandbox（sandbox_local + sandbox_policy）/
+        credentials / subagent 互不依赖。policy 与 local 同属沙箱子域：
+        上游 dsh-sandbox-policy 同样依赖 dsh-sandbox（canonicalPath/常量）。"""
+        domains = ("sandbox", "credentials_local", "subagent")
+
+        def _domain(name: str) -> str:
+            leaf = name.split(".")[2]
+            return "sandbox" if leaf.startswith("sandbox") else leaf
+
         violations = []
         for module_name, _ in _iter_business_modules():
             src_unit, _ = _unit_of(module_name)
             if src_unit != "seams" or module_name.endswith("__init__"):
                 continue
-            src_domain = module_name.split(".")[2]
+            src_domain = _domain(module_name)
             for dst in _collect_edges(module_name):
                 dst_unit, _ = _unit_of(dst or "")
                 if dst_unit != "seams":
                     continue
-                dst_domain = dst.split(".")[2]
+                dst_domain = _domain(dst)
                 if dst_domain in domains and dst_domain != src_domain:
                     violations.append(f"{module_name}: 跨子域导入 {dst}")
         self.assertEqual(violations, [])

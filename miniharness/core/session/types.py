@@ -58,6 +58,10 @@ KNOWN_TYPES = frozenset({
     # SessionEventMap：model-hidden、log-only 非 surface、首条权威，
     # version 2；冷恢复据此重建子会话组合）
     "subagent/descriptor",
+    # 沙箱模式切换（上游 sandbox/sandbox-policy/src/session-mode.ts
+    # SessionEventMap：{mode, source?: 'delegation'}，log-only 非 surface、
+    # 整值替换最后一条胜出——effective = fold(events) ?? 部署默认）
+    "sandbox/mode",
 })
 
 # 只有这三种事件产生模型消息，可带 surfaceOp（上游 types.ts SurfaceEventType）
