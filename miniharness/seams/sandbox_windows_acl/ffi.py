@@ -34,24 +34,30 @@ LPWSTR = wintypes.LPWSTR
 
 
 class STARTUPINFOW(ctypes.Structure):
-    """x64 布局：cb@0, 三个 wchar_t* @8..24, 十个 DWORD @32..60,
-    wShowWindow/cbReserved2 @64/66, lpReserved2 @72, hStd*@80..96 → 共 104。"""
+    """x64 布局（processthreadsapi.h）：cb@0(4)+pad，lpReserved/lpDesktop/
+    lpTitle @8..31，dwX..dwFlags 八个 DWORD @32..63，wShowWindow@64 与
+    cbReserved2@66（pad 到 72），lpReserved2@72，hStdInput/hStdOutput/
+    hStdError @80..103 → 共 104。
+
+    字段一律用固定宽度 c_uint32/c_uint16（koffi 同款平台无关宽度）：
+    ``wintypes.DWORD = c_ulong`` 在非 Windows 宿主是 8 字节，同一份定义会
+    算出 136，加载期 ABI 断言直接炸掉整个包（Linux CI 实证）。"""
 
     _fields_ = [
-        ("cb", wintypes.DWORD),
+        ("cb", ctypes.c_uint32),
         ("lpReserved", LPWSTR),
         ("lpDesktop", LPWSTR),
         ("lpTitle", LPWSTR),
-        ("dwX", wintypes.DWORD),
-        ("dwY", wintypes.DWORD),
-        ("dwXSize", wintypes.DWORD),
-        ("dwYSize", wintypes.DWORD),
-        ("dwXCountChars", wintypes.DWORD),
-        ("dwYCountChars", wintypes.DWORD),
-        ("dwFillAttribute", wintypes.DWORD),
-        ("dwFlags", wintypes.DWORD),
-        ("wShowWindow", wintypes.WORD),
-        ("cbReserved2", wintypes.WORD),
+        ("dwX", ctypes.c_uint32),
+        ("dwY", ctypes.c_uint32),
+        ("dwXSize", ctypes.c_uint32),
+        ("dwYSize", ctypes.c_uint32),
+        ("dwXCountChars", ctypes.c_uint32),
+        ("dwYCountChars", ctypes.c_uint32),
+        ("dwFillAttribute", ctypes.c_uint32),
+        ("dwFlags", ctypes.c_uint32),
+        ("wShowWindow", ctypes.c_uint16),
+        ("cbReserved2", ctypes.c_uint16),
         ("lpReserved2", ctypes.POINTER(ctypes.c_ubyte)),
         ("hStdInput", HANDLE),
         ("hStdOutput", HANDLE),
@@ -60,11 +66,13 @@ class STARTUPINFOW(ctypes.Structure):
 
 
 class PROCESS_INFORMATION(ctypes.Structure):
+    """同样固定宽度：两个句柄 @0..15 + 两个 DWORD @16..23 → 共 24。"""
+
     _fields_ = [
         ("hProcess", HANDLE),
         ("hThread", HANDLE),
-        ("dwProcessId", wintypes.DWORD),
-        ("dwThreadId", wintypes.DWORD),
+        ("dwProcessId", ctypes.c_uint32),
+        ("dwThreadId", ctypes.c_uint32),
     ]
 
 
