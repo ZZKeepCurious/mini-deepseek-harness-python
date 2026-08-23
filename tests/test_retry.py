@@ -303,11 +303,11 @@ class RecoverDecisionTest(unittest.TestCase):
     def test_aborted_signal_before_wait(self):
         signal = type("S", (), {"aborted": True})()
         result = _recover(self.session, 1, 1, "p", self.failure, self.policy,
-                                     signal=signal)
+                                      signal=signal)
         self.assertIsNone(result)
-        # 对齐上游：normal 分支不在派发前检查 abort——llm/retry 仍落，
-        # 等待段（可取消）立即放弃，不落 llm/retry-started
-        self.assertEqual([e["type"] for e in self.session.events], ["llm/retry"])
+        # 对齐上游 backoff 首行：派发前检查熔合信号——已中止则连 llm/retry
+        # 都不落（等待段自然不会发生，llm/retry-started 同样不落）
+        self.assertEqual(list(self.session.events), [])
 
     def test_aborted_during_wait(self):
         class FlipSignal:
@@ -504,6 +504,190 @@ class TestHttpErrorCode(unittest.TestCase):
         self.assertEqual(self._code(500, "boom"), "SERVER")
         self.assertEqual(self._code(503, "boom"), "SERVER")
         self.assertEqual(self._code(418, "teapot"), "HTTP_418")
+
+
+# ---------- 生命周期信号与多信号熔合（上游 lifetime AbortController） ----------
+
+class RetryLifetimeTest(unittest.TestCase):
+    def test_abort_sets_flag_and_reason(self):
+        from miniharness.llm.retry import RetryLifetime
+        lt = RetryLifetime()
+        self.assertFalse(lt.aborted)
+        reason = RuntimeError("disposed")
+        lt.abort(reason)
+        self.assertTrue(lt.aborted)
+        self.assertIs(lt.reason, reason)
+
+    def test_event_lazy_and_loop_bound(self):
+        from miniharness.llm.retry import RetryLifetime
+        async def main():
+            lt = RetryLifetime()
+            event = lt.event
+            self.assertIsNotNone(event)
+            self.assertIs(lt.event, event)   # 同循环复用
+            return id(asyncio.get_running_loop())
+        loop_id = asyncio.run(main())
+        # 新瞬态循环 → 事件重绑定（不跨 loop 复用）
+        asyncio.run(main())
+        self.assertIsInstance(loop_id, int)
+
+    def test_abort_before_any_event_keeps_flag(self):
+        from miniharness.llm.retry import RetryLifetime
+        lt = RetryLifetime()
+        lt.abort()
+        self.assertTrue(lt.aborted)
+        self.assertIsNone(lt._event)   # 未物化事件也只保留标记
+
+    def test_cancellable_delay_races_multiple_event_signals(self):
+        from miniharness.llm.retry import cancellable_delay
+
+        class Sig:
+            def __init__(self):
+                self.aborted = False
+                self.event = None
+
+            def bind(self):
+                self.event = asyncio.Event()
+
+            def set(self):
+                self.aborted = True
+                if self.event is not None:
+                    self.event.set()
+
+        async def scenario():
+            request, lifetime = Sig(), Sig()
+            request.bind()
+            lifetime.bind()
+            asyncio.get_running_loop().call_later(0.05, request.set)
+            started = asyncio.get_running_loop().time()
+            ok = await cancellable_delay(5000, request, lifetime)
+            elapsed = asyncio.get_running_loop().time() - started
+            self.assertFalse(ok)          # 请求信号中止 → 放弃等待
+            self.assertLess(elapsed, 1.0)  # 事件驱动立即醒（非轮询到超时）
+            self.assertFalse(request.aborted and lifetime.aborted)
+
+        asyncio.run(scenario())
+
+    def test_cancellable_delay_completes_when_lifetime_alive(self):
+        from miniharness.llm.retry import RetryLifetime, cancellable_delay
+
+        async def scenario():
+            lifetime = RetryLifetime()
+            ok = await cancellable_delay(10, None, lifetime)
+            self.assertTrue(ok)
+
+        asyncio.run(scenario())
+
+    def test_lifetime_abort_during_wait_returns_false(self):
+        from miniharness.llm.retry import RetryLifetime, cancellable_delay
+
+        async def scenario():
+            lifetime = RetryLifetime()
+            asyncio.get_running_loop().call_later(0.05, lifetime.abort)
+            ok = await cancellable_delay(5000, None, lifetime)
+            self.assertFalse(ok)
+
+        asyncio.run(scenario())
+
+
+class LifetimeIntegrationTest(unittest.TestCase):
+    """apply_retry_planner 的生命周期面：派发前中止、下游后复查、effect 拆解
+    排干在途恢复、陈旧回调守卫（上游 index.ts apply/backoff/lifetime）。"""
+
+    def _always(self):
+        return {"mode": "always", "initialDelayMs": 1,
+                "maxDelayMs": 2, "jitterRatio": 0}
+
+    def test_lifetime_aborted_suppresses_retry_event(self):
+        from miniharness.llm.retry import RetryLifetime
+        session = _session()
+        lifetime = RetryLifetime()
+        lifetime.abort()
+        result = _recover(session, 1, 1, "p", LlmFailure(RATE_LIMIT, "x"),
+                          resolve_retry_policy({"mode": "normal", "maxRetries": 2}),
+                          lifetime=lifetime)
+        self.assertIsNone(result)
+        self.assertEqual(list(session.events), [])
+
+    def test_always_mode_abort_wins_after_downstream_decision(self):
+        from miniharness.llm.retry import RetryLifetime
+        session = _session()
+        lifetime = RetryLifetime()
+        calls = []
+
+        def next_():
+            calls.append(1)
+            lifetime.abort()   # 委派结算前一刻插件被拆解
+            return {"kind": "retry"}
+
+        result = _recover(session, 1, 1, "p", LlmFailure(AUTH, "x"),
+                          self._always(), next_fn=next_, lifetime=lifetime)
+        self.assertIsNone(result)   # 中止胜过下游 retry 决策与自重回退
+        self.assertEqual(calls, [1])
+        self.assertEqual(list(session.events), [])
+
+    def test_always_mode_downstream_error_warns_via_logger(self):
+        session = _session()
+        warnings = []
+        result = _recover(session, 1, 1, "p", LlmFailure(AUTH, "x"),
+                          self._always(),
+                          next_fn=lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+                          logger=type("L", (), {"warn": staticmethod(
+                              lambda msg: warnings.append(msg))})())
+        self.assertEqual(result, {"kind": "retry"})
+        self.assertEqual(len(warnings), 1)
+        self.assertIn('provider "p"', warnings[0])
+
+    def test_effect_teardown_aborts_and_drains_active_recovery(self):
+        from types import SimpleNamespace
+
+        from miniharness.llm.retry import apply_retry_planner
+
+        async def scenario():
+            ctx = Context(name="root")
+            apply_retry_planner(ctx)
+            session = Session("lifetime-drain")
+            policy = resolve_retry_policy({
+                "mode": "normal", "maxRetries": 2,
+                "backoff": {"initialDelayMs": 5000, "maxDelayMs": 9000,
+                            "jitterRatio": 0},
+            })
+            payload = {
+                "agent": SimpleNamespace(session=session),
+                "turn": 1, "step": 1, "provider": "p",
+                "failure": LlmFailure(RATE_LIMIT, "x"),
+                "retryPolicy": policy,
+            }
+            task = asyncio.ensure_future(ctx.awaterfall("agent/request-error", payload))
+            await asyncio.sleep(0.05)
+            self.assertEqual(
+                [e["type"] for e in session.events], ["llm/retry"])
+            ctx.dispose()   # teardown：注销监听器 + lifetime.abort + 排干在途
+            decision = await asyncio.wait_for(task, 2.0)
+            self.assertIsNone(decision)   # 熔合中止 → 不返回 retry
+            self.assertNotIn(
+                "llm/retry-started", [e["type"] for e in session.events])
+            # 拆解后再派发：监听器已注销，waterfall 链尾透传 payload（无 retry 决策）
+            after = await ctx.awaterfall("agent/request-error", payload)
+            self.assertIs(after, payload)
+
+        asyncio.run(scenario())
+
+    def test_stale_callback_guard_after_dispose(self):
+        from miniharness.llm.retry import apply_retry_planner
+
+        async def scenario():
+            ctx = Context(name="root")
+            apply_retry_planner(ctx)
+            # _flat_hooks 条目是 {ctx, fn, global} 包装记录（白盒取 fn）
+            listener = ctx._flat_hooks["agent/request-error"][0]["fn"]
+            downstream_calls = []
+            await ctx.dispose()
+            result = await listener({}, lambda: downstream_calls.append(1))
+            self.assertIsNone(result)      # 陈旧守卫：不再进入下游策略
+            self.assertEqual(downstream_calls, [])
+
+        asyncio.run(scenario())
 
 
 if __name__ == "__main__":

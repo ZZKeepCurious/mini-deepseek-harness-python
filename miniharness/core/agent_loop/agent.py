@@ -14,8 +14,8 @@
 asyncio 化（2026-08-17 重构，对齐上游异步事件驱动；设计见
 status/mini-harness/asyncio-refactor-design.md）：
   * 唯一 async 引擎 _pump_async（driver 模式下由 _drive 驱动；同步门面
-    经一次性 asyncio.run 驱动——headless/demo/REPL/测试的 run/followup/
-    steer 零改动）。
+    经进程级常驻事件循环驱动（resident_loop.py，对齐上游 Node 单循环
+    载体）——headless/demo/REPL/测试的 run/followup/steer 零改动）。
   * LLM 流式 async 迭代器；取消为协作式（asyncio.Event，对齐上游
     AbortSignal）——cancel 不杀 driver，流桥/重试等待事件驱动退出、
     工具调度器排干 started + 未启动的按模型序补合成错误。
@@ -46,6 +46,7 @@ from ..scope import Context
 from ..system_prompt import render_prompt
 from ...llm import BlockAssembler, LlmAdapter, LlmFailure, StreamAborted
 from .inbox import Inbox
+from .resident_loop import run_on_resident
 from .tool_calls import schedule_tool_calls
 from ..session import (
     Session,
@@ -408,10 +409,10 @@ class AgentLoop:
     def _pump_sync_facade(self) -> None:
         """同步门面：无活跃 driver 时驱动完整回合（对齐旧同步 pump 语义）。
 
-        当前线程无运行 loop → 一次性 asyncio.run(_pump_async)（异常向上抛，
-        对齐 followup 冒泡 LlmFailure 的既有契约）；已处于 loop 内且无 driver
-        → 起 driver + 唤醒（fire-and-forget，无法阻塞当前 loop；现有调用方
-        无此路径，标注为兜底）。
+        当前线程有运行 loop 且无 driver → 起 driver + 唤醒（fire-and-forget，
+        无法阻塞当前 loop；现有调用方无此路径，标注为兜底）；否则提交到
+        进程级常驻事件循环阻塞至完成（resident_loop.py，对齐上游 Node
+        常驻单循环载体；异常向上抛，对齐 followup 冒泡 LlmFailure 的既有契约）。
         """
         try:
             asyncio.get_running_loop()
@@ -422,7 +423,7 @@ class AgentLoop:
             self._ensure_driver()
             self._request_wake()
         else:
-            asyncio.run(self._pump_async())
+            run_on_resident(self._pump_async())
 
     def when_idle_async(self) -> asyncio.Future:
         """驱动静默可等待版（上游 whenIdle）：驱动排空全部工作后 resolve。
@@ -549,11 +550,12 @@ class AgentLoop:
         self._step = 0
         self._turn_open = True
         self._turn_end = None
-        # 每轮新建取消事件（绑定本轮 loop；同步门面下每次 asyncio.run 是新
-        # loop，必须每轮重建以规避跨 loop 复用 Event 的绑定错误）
+        # 每轮新建取消事件（对齐上游 agent.ts:325 每 phase 新建 AbortController）；
+        # 绑定当前运行循环——同步门面固定在常驻循环、run_async 直驱路径绑定
+        # 调用方瞬态循环，逐轮重建规避跨 loop 复用 Event 的绑定错误
         self._cancel_event = asyncio.Event()
         if self._driver is None or self._driver.done():
-            # 同步门面：无 driver 时把 _loop 刷新到当前（瞬态）loop，
+            # 同步门面：无 driver 时把 _loop 刷新到常驻循环，
             # 供 cancel() 从其它线程经 call_soon_threadsafe 置位事件
             self._loop = asyncio.get_running_loop()
         self.session.append("turn/start", {"turn": self._turn})
