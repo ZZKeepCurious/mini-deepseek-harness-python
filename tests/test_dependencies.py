@@ -1,9 +1,9 @@
 """步骤 4 验收：import 方向断言 + 顶层 API 收敛（对照 docs/architecture.md §3/§4）。
 
 用 stdlib AST 静态检查 miniharness/ 包内模块的导入边，钉死分层规则：
-L0 地基  = core/session、core/scope、core/dsh_scope、core/schema、core/version
-          （同层叶模块互不依赖，core.scope↔core.schema / core.scope↔core.dsh_scope
-          有显式例外）
+L0 地基  = core/session、core/scope、core/dsh_scope、core/schema、core/version、
+          core/hmr（同层叶模块互不依赖，core.scope↔core.schema /
+          core.scope↔core.dsh_scope / core.hmr→core.scope 有显式例外）
 L1 领域  = llm/*、core/tools、core/system_prompt、boot/*   （仅 L0）
 L2 编排  = core/agent_loop、compaction、commands、goal、jobs、plan、skills   （L0 + L1）
 L3 应用  = cli/*、protocol/*、seams/*、preset、extensions、interaction、client、web
@@ -30,6 +30,7 @@ LAYER_UNITS = [
     ("core.session", 0),
     ("core.scope", 0),
     ("core.dsh_scope", 0),
+    ("core.hmr", 0),
     ("core.schema", 0),
     ("core.version", 0),
     ("core.session_store", 1),
@@ -146,6 +147,11 @@ class ImportDirectionTest(unittest.TestCase):
                 if src_unit == "core.scope" and dst_unit == "core.dsh_scope":
                     # §5 显式例外：L0 基座叶模块——core.scope 是 dsh-scope 协议的
                     # 门面（事件派发/服务层），协议本尊在 core.dsh_scope（同为 L0）
+                    continue
+                if src_unit == "core.hmr" and dst_unit == "core.scope":
+                    # §5 显式例外：L0 基座叶模块——HMR 服务是 cordis 家族的
+                    # vendored 部件（上游 vendor/hmr 直接建在 cordis 之上），
+                    # 复用 Service/fiber 基座，与 core.dsh_scope 同理落 L0
                     continue
                 if dst_layer >= src_layer:
                     violations.append(

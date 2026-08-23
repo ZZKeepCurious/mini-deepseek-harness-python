@@ -718,5 +718,161 @@ class TestInjectDict(unittest.TestCase):
         self.assertIn("正常输入", texts)
 
 
+class _DrainFixture(unittest.TestCase):
+    """DRAINING / scoped dispatch 公共夹具：顶层父 P + 次级在世父 B。
+
+    注意真实结构：AgentLoop 构造时自铸 scope（agent.py:120-121），loop.ctx 是
+    dsh_scope.Scope 包装、内部 ctx 带自动铸造的 agent 标号；self.host_ctx 才是
+    未打标的宿主根。"""
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        from miniharness.core.session.persistence import JsonlPersistence
+        self.parent, self.host_ctx, reg = _parent_loop("P")
+        self.b_loop, _, _ = _parent_loop("B")
+        self.persistence = JsonlPersistence(self._tmp.name)
+        self.mgr = SubagentContinuationManager(self.parent, self.persistence)
+        self.mgr._live["B"] = self.b_loop
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _install_fake_activation(self, child_id, parent_loop):
+        """给 durable 子会话装一枚假激活（排水测试不需要真泵）。"""
+        from unittest import mock
+        loop = mock.MagicMock()
+        loop.id = child_id
+        loop.session.events = []
+        act = {
+            "loop": loop, "ctx": mock.MagicMock(), "descriptor": {},
+            "run_id": f"run-{child_id}", "parent_loop": parent_loop,
+            "announced": False, "accepted": set(), "owned_children": set(),
+            "disposal": None, "persisted": 0, "status": "running",
+            "label": "", "poke": None,
+        }
+        self.mgr._activations[child_id] = act
+        self.mgr._live[child_id] = loop
+        return act
+
+
+class TestDrainingAdmissionCutoff(_DrainFixture):
+    def test_manager_drain_rejects_new_admissions_with_upstream_wording(self):
+        cid = self.mgr.start_continuable(label="x")
+        self.mgr.drain()
+        with self.assertRaises(SubagentError) as caught:
+            self.mgr.start_continuable(label="y")
+        self.assertEqual(caught.exception.code, "DRAINING")
+        self.assertEqual(
+            str(caught.exception),
+            "continuable subagents are draining; the operation was not admitted")
+        with self.assertRaises(SubagentError) as caught_send:
+            self.mgr.send_message(cid, "跟进", parent=self.parent)
+        self.assertEqual(caught_send.exception.code, "DRAINING")
+
+    def test_drain_disposes_owned_forest_child_first(self):
+        parent_act = self._install_fake_activation("cpar", self.parent)
+        child_act = self._install_fake_activation("ckid", parent_act["loop"])
+        parent_act["owned_children"].add("ckid")
+        order = []
+        for cid in ("cpar", "ckid"):
+            loop = self.mgr._activations[cid]["loop"]
+            loop.dispose.side_effect = lambda *a, c=cid: order.append(c)
+        self.mgr.drain()
+        self.assertEqual(order, ["ckid", "cpar"])  # child-first（上游 disposeRoots）
+        self.assertEqual(self.mgr.activations, {})
+        self.assertNotIn("cpar", self.mgr._live)
+
+    def test_scoped_drain_closes_only_that_tree_and_keeps_others_admitting(self):
+        cid_a = self.mgr.start_continuable(label="a")                    # P 的子
+        cid_b = self.mgr.start_continuable(label="b", parent=self.b_loop)  # B 的子
+        self._install_fake_activation(cid_a, self.parent)
+        self._install_fake_activation(cid_b, self.b_loop)
+
+        self.mgr.drain_descendants([self.b_loop])
+        # B 树被拆；P 的子原样保留
+        self.assertNotIn(cid_b, self.mgr._activations)
+        self.assertIn(cid_a, self.mgr._activations)
+        # B 树准入关闭（scoped 措辞含精确根 id）；P 树照常准入
+        with self.assertRaises(SubagentError) as caught:
+            self.mgr.send_message(cid_b, "再投一条", parent=self.b_loop)
+        self.assertEqual(caught.exception.code, "DRAINING")
+        self.assertEqual(
+            str(caught.exception),
+            f'continuable subagents below parent "{self.b_loop.id}" are draining; '
+            "the operation was not admitted")
+        mid = self.mgr.send_message(cid_a, "P 树不受影响", parent=self.parent)
+        self.assertTrue(mid)
+        # 精确父离开注册表 → scoped 截止随之失效（上游 closingScopes 语义）
+        self.mgr._live.pop("B")
+        self.mgr.drain_descendants([self.b_loop])   # roots 为空 → no-op
+
+    def test_scoped_drain_requires_exact_live_root(self):
+        stale, _, _ = _parent_loop("stale")
+        self.mgr.drain_descendants([stale])   # 不在注册表 → no-op，不误关
+        self.assertEqual(self.mgr._closing_scopes, {})
+
+
+class TestScopedLifecycleDispatch(_DrainFixture):
+    def test_run_edges_carry_parent_carrier_filtering_when_tagged(self):
+        from miniharness.core.dsh_scope import scope_of
+        seen_agent, seen_sibling, seen_untagged = [], [], []
+        # 父 loop 自带 agent 标号（构造时 create_scope 自动铸键）
+        self.assertIsNotNone(scope_of(self.parent.ctx))
+        sibling = self.host_ctx.create_scope("unrelated")   # 同根、无关标号
+        sibling.ctx.on("subagent/start",
+                       lambda info: seen_sibling.append(info))
+        self.host_ctx.on("subagent/start",
+                         lambda info: seen_untagged.append(info))  # 未打标 → 接纳
+        self.parent.ctx.on("subagent/start",
+                           lambda info: seen_agent.append(info))   # 载波键自身 → 接纳
+        self.mgr._emit_lifecycle(self.parent, "subagent/start",
+                                 {"runId": "r1", "provider": "fake", "id": "c1",
+                                  "local": True})
+        self.assertEqual(len(seen_agent), 1)
+        self.assertEqual(len(seen_untagged), 1)
+        self.assertEqual(seen_sibling, [])               # 无关标号 → 排除
+
+    def test_untagged_parent_dispatches_unscoped_along_ancestor_chain(self):
+        # 裸上下文父（无任何标号）→ 无载体派发：this_arg=None 走祖先链监听器
+        from types import SimpleNamespace
+        bare_parent = SimpleNamespace(ctx=self.host_ctx)
+        seen_a, seen_b = [], []
+        self.host_ctx.on("subagent/end", lambda info: seen_a.append(info))
+        self.host_ctx.on("subagent/end", lambda info: seen_b.append(info))
+        self.mgr._emit_lifecycle(bare_parent, "subagent/end",
+                                 {"runId": "r1", "provider": "fake", "id": "c1",
+                                  "local": True, "stopReason": "completed"})
+        self.assertEqual(len(seen_a), 1)
+        self.assertEqual(len(seen_b), 1)
+
+    def test_listener_exception_is_contained_per_listener(self):
+        seen = []
+        self.parent.ctx.on("subagent/start", lambda info: 1 / 0)
+        self.parent.ctx.on("subagent/start", seen.append)
+        self.mgr._emit_lifecycle(self.parent, "subagent/start",
+                                 {"runId": "r1", "provider": "fake", "id": "c1",
+                                  "local": True})
+        self.assertEqual(len(seen), 1)                 # 同侪监听器不被饿死
+
+    def test_provider_removed_edge_fires_unscoped_on_dispose(self):
+        removed = []
+        self.parent.ctx.on("subagent/provider-removed", removed.append)
+        adapter = FakeLlmAdapter(final_text="acme 响应")
+        disposer = self.mgr.register_provider("acme", lambda model: adapter)
+        resolved = self.mgr._resolve_adapter(
+            {"agentProvider": "acme", "agentModel": "m1"})
+        self.assertIs(resolved, adapter)               # 注册表面优先于缺省工厂
+        disposer()
+        self.assertEqual(removed, ["acme"])
+        disposer()                                     # 幂等：不重复发布
+        self.assertEqual(removed, ["acme"])
+        # 注销后回退缺省工厂路径：未知名 fail loud（UNAVAILABLE）
+        with self.assertRaises(SubagentError) as caught:
+            self.mgr._resolve_adapter(
+                {"agentProvider": "acme", "agentModel": "m1"})
+        self.assertEqual(caught.exception.code, "UNAVAILABLE")
+
+
 if __name__ == "__main__":
     unittest.main()

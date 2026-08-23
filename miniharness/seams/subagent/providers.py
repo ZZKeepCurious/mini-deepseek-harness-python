@@ -17,8 +17,9 @@
     经 stdio JSON-RPC（initialize → session/prompt 懒创建会话 → shutdown）；
     无任何 start 期能力（NO_START_CAPABILITIES）；输出经 session.event
     通知流收集。
-  * 子进程 env：父 env 的凭据清洗副本 + 显式 env 转发（mini 简化：直传，
-    标注）。
+   * 子进程 env：父 env 的凭据清洗副本（`seams/subprocess_env.py`，对齐
+     dsh-subprocess `scrubbedParentEnv()`）+ 显式 env 在 scrub 之后合并
+     （上游 `{...scrubbedParentEnv(), ...spec.env}` 同款）。
 
 载体简化（须在文档标注）：上游 async 流式；mini 同步——prompt 请求在
 worker 内跑完整回合后，事件通知先于响应帧写出（上游并发流无顺序契约），
@@ -36,6 +37,7 @@ from typing import Any, Callable
 
 from . import SubAgent, SubAgentProvider
 from ...core.session import Session, thaw
+from ..subprocess_env import scrubbed_parent_env
 
 
 def completed_turn_prefix(events) -> list[dict]:
@@ -175,11 +177,13 @@ class AcpSubAgentProvider(SubAgentProvider):
             raise ValueError("permission must be 'allow' or 'reject'")
         self.permission = permission
 
-    def spawn(self, name: str, system_prompt: str, cwd: str | None = None) -> SubAgent:
+    def spawn(self, name: str, system_prompt: str, cwd: str | None = None,
+              env: dict[str, str] | None = None) -> SubAgent:
         proc = subprocess.Popen(
             _worker_command("acp", ["--permission", self.permission]),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace",
+            env={**scrubbed_parent_env(), **(env or {})},
         )
         client = _StdioRpcClient(proc)
         try:
@@ -234,11 +238,13 @@ class SdkSubAgentProvider(SubAgentProvider):
         self.provider = provider
         self.model = model
 
-    def spawn(self, name: str, system_prompt: str, cwd: str | None = None) -> SubAgent:
+    def spawn(self, name: str, system_prompt: str, cwd: str | None = None,
+              env: dict[str, str] | None = None) -> SubAgent:
         proc = subprocess.Popen(
             _worker_command("sdk"),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace",
+            env={**scrubbed_parent_env(), **(env or {})},
         )
         client = _StdioRpcClient(proc)
         try:

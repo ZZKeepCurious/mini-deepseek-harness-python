@@ -30,17 +30,18 @@ A8 起执行模型对齐上游异步事件驱动，由"父是否有 driver"自�
     下一步边界捡起）。reportDelivery 'background' → 一律 inbox.append。
 
 简化标注（须在文档中标注；对齐粒度见 AGENTS.md 差异清单）：
-   * **生命周期事件无 scoped dispatch / 无 provider-removed**：subagent/start|end
-     经直接父 ctx.emit 发布（payload 与上游 SubagentRunInfo/SubagentRunEndInfo
-     同形：{runId, provider, id, local} + 终局 {stopReason, lastAssistantMessage?}），
-     监听器异常在发射器处收容；上游按委托父做 scoped dispatch 载体、并有
-     subagent/provider-removed 边与 invariant 运行时校验（mini 无 provider 注册表
-     与 invariant 系统）。
-   * **无 DRAINING 拒绝面**：上游 closingTeardownFor/assertAdmitting 在 manager 或
-     祖先树拆除时拒绝新准入；mini 管理器随进程生存，无 drain 入口。
-   * LLM 流式已 async 化（2026-08-18 asyncio 化重构），DeepSeek SSE 仍为阻塞读
-     线程桥接（不可中断，超时兜底）——异步窗口真异步，流式本身受载体限制。
-  """
+   * 生命周期边经委托父做 **scoped dispatch**（2026-08-23 对齐）：父 ctx 有
+     dsh-scope 标号时以 scope_target 载体过滤监听器，无标号退化为无载体
+     全量派发；`subagent/provider-removed` 边由命名 provider 注册表的注销
+     发布（上游 lifecycle.ts:88 无载体边同款，逐监听器收容）。上游另有
+     invariant 运行时校验系统，mini 无对应机制（架构不适用）。
+   * **DRAINING 拒绝面已对齐**（2026-08-23）：drain()/drain_descendants()
+     同步关闭准入（manager 级 / 按父树 scoped），assertAdmitting 在创建与
+     投递边界拒绝新准入并抛 DRAINING（措辞逐字对齐 continuation.ts:855-857）；
+     上游物化窗口的 in-flight 等待在 mini 同步载体无对应窗口。
+    * LLM 流式已 async 化（2026-08-18 asyncio 化重构），DeepSeek SSE 仍为阻塞读
+      线程桥接（不可中断，超时兜底）——异步窗口真异步，流式本身受载体限制。
+   """
 from __future__ import annotations
 
 import asyncio
@@ -52,6 +53,7 @@ from types import MappingProxyType
 from typing import Any, Callable
 
 from ...core.agent_loop.agent import AgentLoop
+from ...core.dsh_scope import scope_of, scope_target
 from ...core.scope import Context
 from ...core.session import Session, create_message, is_json_safe, text_block, thaw
 from ...core.session.persistence import SessionPersistence
@@ -270,12 +272,156 @@ class SubagentContinuationManager:
         # 每 child 一把锁：串行化跨线程的 resume 与 settle 临界区
         # （同步调用方的 send_message / 内联泵 与事件循环线程的 watcher 结算并发）
         self._locks: dict[str, threading.Lock] = {}
+        # DRAINING 准入截止（对齐上游 continuation.ts:364,840-859）：manager 级
+        # 一票 + 按父树的 scoped 成员集（root id → 成员 agent id 集）
+        self._draining = False
+        self._closing_scopes: dict[str, set[str]] = {}
+        # 命名 provider 注册表（上游 provider 注册表的最小同构面）：注销发布
+        # 无载体 subagent/provider-removed 边
+        self._providers: dict[str, Callable[[str], LlmAdapter]] = {}
 
     @property
     def activations(self) -> dict[str, dict]:
         """簿记视图：激活中的子代理（同步模型下仅 sendMessage 期间存在）。"""
         return {cid: {"status": a["status"], "label": a["label"]}
                 for cid, a in self._activations.items()}
+
+    # ---------- 准入截止与排水（对齐上游 draining / closingScopes / drain） ----------
+
+    def assert_admitting(self, parent: AgentLoop) -> None:
+        """manager 或该父树开始排水后拒绝新准入（上游 assertAdmitting，
+        continuation.ts:849-859；错误码与措辞逐字）。"""
+        closing = self._closing_teardown_for(parent)
+        if closing is None:
+            return
+        if closing == "manager":
+            raise SubagentError(
+                "continuable subagents are draining; the operation was not admitted",
+                "DRAINING",
+            )
+        raise SubagentError(
+            f'continuable subagents below parent "{closing}" are draining; '
+            "the operation was not admitted",
+            "DRAINING",
+        )
+
+    def _closing_teardown_for(self, loop: AgentLoop) -> str | None:
+        """关闭该 agent 世系的拆除：'manager' / scoped 根 id / None=准入开放
+        （上游 closingTeardownFor，continuation.ts:840-847）。"""
+        if self._draining:
+            return "manager"
+        lineage = self._live_lineage_ids(loop)
+        for root_id, members in self._closing_scopes.items():
+            if loop.id in members or root_id in lineage:
+                return root_id
+        return None
+
+    def _live_lineage_ids(self, loop: AgentLoop) -> list[str]:
+        """自 loop 向上的在世世系 id 链（上游 liveLineage：首元素恒为自身，
+        其后每一祖先须是注册表当前条目；durable parentSession 元数据驱动）。"""
+        lineage = [loop.id]
+        seen = {loop.id}
+        current = loop.id
+        while True:
+            info = self.persistence.inspect(current)
+            meta = info.get("meta") if isinstance(info, dict) else None
+            parent_session = meta.get("parentSession") if isinstance(meta, dict) else None
+            if not isinstance(parent_session, str) or parent_session in seen:
+                break
+            if self._live.get(parent_session) is None:
+                break
+            lineage.append(parent_session)
+            seen.add(parent_session)
+            current = parent_session
+        return lineage
+
+    def _activation_roots(self) -> list[str]:
+        """无在世持有者的激活集（上游 drain 的 roots 快照判据）。"""
+        owned: set[str] = set()
+        for act in self._activations.values():
+            owned |= act["owned_children"]
+        return [cid for cid in self._activations if cid not in owned]
+
+    def drain(self) -> None:
+        """整管理器排水（上游 ContinuationManager.drain，continuation.ts:704-718）。
+
+        同步关闭 manager 级准入（先于任何后续物化）→ 快照根激活 → 按
+        child-first 序强制结算全部激活（所有权是森林，逐轮摘可拆根；上游
+        disposeRoots 递归同序）→ 任一分支失败聚合抛 ACTIVATION_TEARDOWN_FAILED。
+        上游先等物化窗口收敛；mini 同步载体无 in-flight 物化窗口（简化标注）。
+        """
+        self._draining = True
+        failures: list[BaseException] = []
+        remaining = set(self._activations)
+        while remaining:
+            progressed = False
+            for cid in sorted(remaining):
+                activation = self._activations.get(cid)
+                if activation is None or activation["owned_children"] & remaining:
+                    continue
+                try:
+                    self._settle(cid, activation, force=True)
+                except BaseException as error:  # noqa: BLE001 - 聚合后统一上报
+                    failures.append(error)
+                remaining.discard(cid)
+                progressed = True
+            if not progressed:
+                break  # 所有权环不可能成立；防御性退出避免死循环
+        if failures:
+            raise SubagentError(
+                f"continuable subagent teardown failed for {len(failures)} activation(s): "
+                + "; ".join(str(error) for error in failures),
+                "ACTIVATION_TEARDOWN_FAILED",
+            )
+
+    def drain_descendants(self, parents: list[AgentLoop]) -> None:
+        """只停指定在世宿主父的 continuable 后代（上游 drainDescendants，
+        continuation.ts:729-780）：这些父树的准入保持关闭直至精确父离开
+        注册表；无关树与 manager 级准入不受影响。"""
+        roots = {p.id for p in parents if self._live.get(p.id) is p}
+        if not roots:
+            return
+        # 先发布 scoped 准入截止（上游 index.ts:736-738 同步序）
+        for root_id in roots:
+            self._closing_scopes.setdefault(root_id, {root_id})
+        targets: list[str] = []
+        for cid, activation in list(self._activations.items()):
+            lineage = set(self._live_lineage_ids(activation["loop"]))
+            owners = [rid for rid in roots
+                      if activation["loop"].id != rid and rid in lineage]
+            if not owners:
+                continue
+            targets.append(cid)
+            for rid in owners:
+                self._closing_scopes[rid] |= lineage
+        owned_targets: set[str] = set()
+        for cid in targets:
+            owned_targets |= self._activations[cid]["owned_children"]
+        target_roots = [cid for cid in targets if cid not in owned_targets]
+
+        # child-first 强制结算（同 drain）；失败聚合
+        failures: list[BaseException] = []
+        remaining = set(target_roots)
+        while remaining:
+            progressed = False
+            for cid in sorted(remaining):
+                activation = self._activations.get(cid)
+                if activation is None or activation["owned_children"] & remaining:
+                    continue
+                try:
+                    self._settle(cid, activation, force=True)
+                except BaseException as error:  # noqa: BLE001 - 聚合后统一上报
+                    failures.append(error)
+                remaining.discard(cid)
+                progressed = True
+            if not progressed:
+                break
+        if failures:
+            raise SubagentError(
+                f"continuable subagent teardown failed for {len(failures)} "
+                "scoped activation(s): " + "; ".join(str(error) for error in failures),
+                "ACTIVATION_TEARDOWN_FAILED",
+            )
 
     # ---------- 创建与续跑 ----------
 
@@ -298,6 +444,7 @@ class SubagentContinuationManager:
         @param parent - 委托父（嵌套续跑时为子代理自身的 loop）；缺省顶层父。
         """
         parent = parent or self.parent
+        self.assert_admitting(parent)
         depth = delegation_depth_of(parent)
         if depth >= self.max_depth:
             raise SubagentError(
@@ -351,6 +498,7 @@ class SubagentContinuationManager:
             为发起委托的子代理 loop（其激活将 owned_children 记账孙代）。
         """
         parent = parent or self.parent
+        self.assert_admitting(parent)
         self._authorize_lineage(parent, child_id)
         # 所有权先于子物化（上游 submit 顺序）：父正在拆除 → 在建立任何
         # 激活前拒绝；物化失败回滚 owned 记账
@@ -380,6 +528,7 @@ class SubagentContinuationManager:
         落盘，结算确定性（对齐 A7 同步语义的循环内版本）。
         """
         parent = parent or self.parent
+        self.assert_admitting(parent)
         self._authorize_lineage(parent, child_id)
         # 所有权先于子物化（上游 submit 顺序）：父正在拆除 → 在建立任何
         # 激活前拒绝；物化失败回滚 owned 记账
@@ -837,24 +986,58 @@ class SubagentContinuationManager:
         return activation
 
     def _emit_lifecycle(self, parent: AgentLoop, name: str, info: dict) -> None:
-        """生命周期边发布（上游 createLifecycleEmitter）：经委托父作用域逐
-        监听器派发并逐个收容——同步抛错或 rejected promise 记 warn，不饿死
-        同侪监听器、不改变 run。mini 无 scoped dispatch 载体键，payload 即
-        全量信息（SubagentRunInfo / SubagentRunEndInfo）。"""
-        for fn in parent.ctx._hooks_for(name, None):
+        """生命周期边发布（上游 createLifecycleEmitter，lifecycle.ts:100-123）。
+
+        run 边携带委托父的 scoped dispatch 载体：父 ctx 有 dsh-scope 标号 →
+        scope_target(parent.ctx, key) 过滤（打标监听器须是载波键或其祖先，
+        未打标监听器全局接纳）；父无标号退化为无载体全量派发（mini 顶层
+        父不铸 scope 的等价语义）。逐监听器收容：同步抛错记 warn，不饿死
+        同侪监听器、不改变 run。
+        """
+        key = scope_of(parent.ctx)
+        this_arg = scope_target(parent.ctx, key) if key is not None else None
+        for fn in parent.ctx._hooks_for(name, this_arg):
             try:
                 fn(info)
             except Exception as error:
                 logger.warn(f"subagent: {name} listener failed: {error}")
 
+    def _emit_provider_removed(self, provider: str) -> None:
+        """provider 移除边（上游 lifecycle.ts:88）：无父载体、无 scoped 过滤地
+        达所有监听器；从 disposer 发布，监听器拒绝绝不破坏拆除（逐个收容）。"""
+        for fn in self.parent.ctx._hooks_for("subagent/provider-removed", None):
+            try:
+                fn(provider)
+            except Exception as error:
+                logger.warn(f"subagent: subagent/provider-removed listener failed: {error}")
+
+    def register_provider(self, name: str,
+                          resolve_adapter: Callable[[str], LlmAdapter]) -> Callable[[], None]:
+        """登记命名 provider（上游 provider 注册表的最小同构面）。
+
+        resolve_adapter(model) 按模型重建适配器；_resolve_adapter 优先查注册
+        表。返回同步 disposer：注销并发布 subagent/provider-removed（幂等：
+        重复注销不再发布）。"""
+        self._providers[name] = resolve_adapter
+
+        def dispose() -> None:
+            if self._providers.pop(name, None) is not None:
+                self._emit_provider_removed(name)
+
+        return dispose
+
     def _resolve_adapter(self, descriptor: dict) -> LlmAdapter:
         """按描述符重建子适配器（上游按 agentProvider/agentModel 重建 provider）。
 
+        命名注册表优先（register_provider 面）；未命中回退 adapter_factory。
         总是新建而非复用父适配器：子代理的模型实例彼此独立（共享父适配器
         会串调用计数等状态）。provider/model 缺省继承父。
         """
         provider = descriptor.get("agentProvider") or getattr(self.parent.adapter, "provider", None)
         model = descriptor.get("agentModel") or getattr(self.parent.adapter, "model", None)
+        entry = self._providers.get(provider)
+        if entry is not None:
+            return entry(model)
         return self._adapter_factory(provider, model)
 
     def _delegation_context(self, parent: AgentLoop, child_id: str) -> str:
@@ -894,11 +1077,13 @@ class SubagentContinuationManager:
                 return
             await poke.wait()       # accepted 非空或仍在跑：等下一次 wake
 
-    def _settle(self, child_id: str, activation: dict) -> bool:
+    def _settle(self, child_id: str, activation: dict, force: bool = False) -> bool:
         """结算临界区（同步、无 await；跨线程以 _locks 串行化）。
 
-        返回 True = 已结算；False = 未到结算时机（accepted 非空 / 子仍在跑 /
-        仍有 owned 子代未拆除）。对齐上游 finishDisposal 顺序：cancel（top-down
+        force=True 供排水路径使用：跳过 quiescence 检查强制释放（上游
+        drain 的 disposeRoots 同义——cancel + 释放，不等静默）。返回 True =
+        已结算；False = 未到结算时机（accepted 非空 / 子仍在跑 / 仍有 owned
+        子代未拆除）。对齐上游 finishDisposal 顺序：cancel（top-down
         停止传播）→ best-effort final flush（失败仅告警，绝不阻断释放——扣住子
         代会把整条祖先链永久钉在 waiting）→ capture（终局事实趁子在册时快照）
         → handle/ctx 拆除 → 摘激活 → **notifySettlement 先于 releaseOwnership**
@@ -908,12 +1093,13 @@ class SubagentContinuationManager:
         with self._locks.setdefault(child_id, threading.Lock()):
             if activation.get("disposal") is not None:
                 return True
-            if activation["accepted"]:
-                return False                    # stateOf running：仍有未认领投递
-            if not activation["loop"].when_idle():
-                return False                    # 仍在跑（重启后的新回合）
-            if activation["owned_children"]:
-                return False                    # stateOf waiting：owned 子未拆完
+            if not force:
+                if activation["accepted"]:
+                    return False                # stateOf running：仍有未认领投递
+                if not activation["loop"].when_idle():
+                    return False                # 仍在跑（重启后的新回合）
+                if activation["owned_children"]:
+                    return False                # stateOf waiting：owned 子未拆完
             activation["disposal"] = True
             parent = activation["parent_loop"]
             child = activation["loop"]

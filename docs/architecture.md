@@ -27,6 +27,7 @@ miniharness/
 │   ├── session_store.py   # SessionStore（ctx.sessions 服务：create/prepare/enter/announce + fork + flush）
 │   ├── scope.py           # Context + RegistryService（vendor/cordis 语义）
 │   ├── dsh_scope.py       # dsh-scope 原语（scopeParents 图 + scopeTarget 载波 + createScope，对齐 packages/core/scope）
+│   ├── hmr.py             # Cordis HMR 服务（vendor/hmr：register_config watch + 单飞刷新 + config-update-failed 外泄）
 │   ├── tools.py           # 工具注册表 + 执行管线
 │   ├── system_prompt.py   # SystemPromptService（分节渲染，systemPrompt 服务）
 │   └── agent_loop/        # agent.py（turn/step 状态机）+ tool_calls.py（并行调度）
@@ -123,6 +124,7 @@ miniharness/
 | `core/scope.py` | `vendor/cordis` + `packages/core/scope` | Context（服务仓库 + 事件总线 + 四种派发 + asyncio 变体）+ fiber 生命周期（2026-08-20 对齐 fiber.ts：状态机 PENDING/LOADING/ACTIVE/FAILED/UNLOADING/DISPOSED + `internal/status`；`effect(execute, label)` 上游形态——execute 立即执行、返回值按 None/callable/awaitable/生成器收集为 disposer；单发 + 可 await；注册先于执行 + setup barrier 重入保护；dispose 幂等 join 在途；同步立即逆序、异步并发 unload、错误 contained；装载半边 + 注册表——`RegistryService`（`ctx.plugin` 缩写 + 插件形态归一 + 运行记录按 callback 键控）、fiber 携带 inject 依赖 + epoch 重载（依赖变化卸载→重装）、`restart()`/`update()`（`internal/update` waterfall）、`internal/config` waterfall + schema 校验（`resolve_config`，`core/schema.py`）、`internal/plugin` 每次装载/卸载派发）+ `create_scope` fiber-backed 作用域（父拆解收回子 fiber）+ 服务仓库（reflect.ts 对齐：按隔离标签键控的全局 store，`ctx.get` strict 缺省返回 None，`ctx.isolate(name)` 换标签，per-agent 的 tools/systemPrompt 经隔离不冲撞 root realm，重复提供同一标签 fail loud）；Phase 3（2026-08-20）追加：`Service` 基类（service.ts 对齐：构造即经 `ctx.provide` 自动登记、随 fiber 注销、`_invoke` 可调用、`_check`/`_init`）、`ctx.extend(meta)`/`ctx.intercept(name, config)`（intercept 配置经 `Service._resolve_config` 沿祖先链近根优先合并）、内建 `LoggerService`（logger.ts 对齐：`ctx.logger(name)` 铸具名 Logger 门面 + printf 格式 + exporter 注册/级别过滤/默认缓冲导出器，`ctx.logger` 属性为绑定访问方 ctx 的视图）；Phase 4（2026-08-20）对齐 dsh-scope：事件派发模型改上游形态——`on` 双写 root `_flat_hooks`（全局 Hook 表）+ 祖先链 `_listeners`，dispatch 系加 `this_arg` 载波参数（有载波走扁平表按载波键过滤，无载波保留祖先链）；`create_scope` 返回 Scope 包装 + 自动绑父 scope；`scope_key` = `scope_of(self)`（scopeParents 图）；残余简化标注见模块 docstring |
 | `core/schema.py` | `vendor/schemastery/src/index.ts`（902 行单文件） | schemastery 引擎全量移植（2026-08-22）：可调用 Schema 节点 + `resolve` 分发 + 17 类 resolver（any/never/const/string/number/boolean/function/is/bitset/array/dict/tuple/object/union/intersect/transform/lazy + date/regExp/arrayBuffer 复合体）+ meta 克隆语义 + from/extend + ValidationError(`$path` 前缀) + Options(autofix/ignore/path/strict) + toString 全 formatter + toJSON(uid+refs 共享序列化) + i18n(mergeDesc) + simplify(deepEqual dict-aware)；`S.from_/is_/reg_exp/array_buffer` 等 pythonic 命名（上游名映射进 docstring）；cordis fiber 适配层（`resolve_config`/`ValidationError` 聚合消息）保留文件尾部；L0 叶零内部依赖，cosmokit 助手(deepEqual/isNullable/isPlainObject/clone/valueMap/pick/Binary)内联；callback 不做字符串求值、date/regExp/arrayBuffer 锚定 Python 对应物（载体差异标注） |
 | `core/dsh_scope.py` | `packages/core/scope/src/index.ts` + `store.ts` | dsh-scope 协议本尊（纯库，L0）：ScopeKey 弱引用身份键、scopeParents 图（bind/link/rebind + 环检测）、`scope_parent_of`/`scope_chain_of`（nearest-first）、`scope_target`/`_ScopeCarrier`/`is_scope_carrier`/`carrier_key_of`、`scope_of`（parent 链）、NamedEntries/AnonymousEntries/ScopedLayers 对齐 store.ts；`Context.create_scope` 返回 Scope 包装（delegation 包装，`__slots__` 无 `__dict__`） |
+| `core/hmr.py` | `vendor/hmr/src/index.ts` | Cordis HMR 服务（2026-08-23）：`Hmr(Service)` provide="hmr"；`register_config(filename, refresh)`——findWatchRoot walk-up 根定位（realpath+depth+缺盘拒绝）、重复注册拒绝、初扫已存在目标即刷（chokidar ignoreInitial=false 语义：缺文件无初扫）、disposer 注销+关 watcher+join 在飞刷新；`refresh_config(key)` 单飞+dirty 合并循环、失败 logger.warn + `hmr/config-update-failed` 并行事件外泄不毒化循环；销毁期注册归一 `CordisError(INACTIVE_EFFECT)`。载体 watchdog（上游 chokidar）；Node ESM 模块图热重载（ModuleLoader/externals/accepted）不适用 Python 载体；Windows 短路径两侧 normcase+realpath 归一 |
 | `core/tools.py` | `packages/core/tools` | 作用域化注册表（ScopedLayers/NamedEntries 存储：注册即 effect 归目标 fiber、拆解自动注销；resolve/names 缺省视角 = 注册表 root 的 scope 键，显式 scope 沿键父链最近者胜 + 全局层兜底）+ 守卫执行管线（pre/execute/post waterfall + schema 校验 + 超时） |
 | `core/agent_loop/agent.py` | `packages/core/agent-loop/src/agent.ts` | 单一 async 驱动（`_pump_async`/`_run_step_async`）+ `followup`/`steer` 同步门面（无 driver 时经 `asyncio.run` 瞬态事件循环）+ 协作式取消（`_cancel_event` 每轮新建 + `call_soon_threadsafe` 跨线程置位）；agent/pre-step 决策经 `awaterfall`；publish/dispose 生命周期（enter+announce+agent/session-start / cancel(disposed)+scope.dispose+detach，会话店成员资格归 loop）+ agent/* 事件载波派发（scopeTarget(agent, loop scope 键)，兄弟作用域隔离） |
 | `core/agent_loop/tool_calls.py` | `packages/core/agent-loop/src/tool-calls.ts` | |
@@ -141,7 +143,7 @@ miniharness/
 | `commands/` | `packages/interaction/commands/src/` | 命令注册/派发 + `command/run|done` 配对 + commands/change 通知 + normalizeResult fail-loud；handler 签名 `(agent, raw)` 为教学扩展（简化标注见模块 docstring） |
 | `goal/`（domain + service + prompt + driver + tools + commands） | `packages/goal/`（goal + goal-round-driver + tool-goal + command-goal） | 无 agent registry / Typert remote；driver 模式事件驱动续跑（同步门面保留 `continue_rounds`）；权威判定近似（简化标注见模块 docstring） |
 | `skills/`（registry + filesystem + tool_skill） | `packages/skill/`（skill + skill-filesystem + tool-skill） | 无 chokidar watch、无 ctx.fs 适配、execute 直接返回渲染文本（简化标注见模块 docstring） |
-| `boot/boot.py` | `packages/boot/app-boot` | |
+| `boot/boot.py` | `packages/boot/app-boot` | `load_optional_patches`（缺文件→空层、坏文件 fail loud）+ `watch_user_patches`（2026-08-23 对齐 app-boot watchUserPatches：经 HMR 服务 watch 用户补丁层→刷新重挂；上游经 Include entry.update() 事务性重挂，mini 无 Include 插件由宿主供 remount 回调） |
 | `boot/composition.py` | `packages/boot/app-boot` + `apps/cli/src/args.ts` | |
 | `boot/dotenv.py` | `packages/boot/app-boot`（loadEnv） | |
 | `cli/main.py` | `apps/cli/src/args.ts` | |
@@ -165,7 +167,7 @@ miniharness/
 | `protocol/hooks.py` | `packages/hooks/hook-protocol` + `hooks-claude-code` | 默认 runner 对齐 runner.ts：stdin JSON payload + trailing newline、cwd、CLAUDE_PROJECT_DIR env、缺省 600000ms 超时；保留"异步 + signal"同步近似（subprocess） |
 | `seams/sandbox_local.py` | `packages/sandbox/sandbox-local` + `sandbox-windows-acl` | |
 | `seams/credentials_local.py` | `packages/credentials/credentials-local` | |
-| `seams/subagent/`（`__init__.py` + `providers.py` + `worker.py` + `continuation.py` + `descriptor.py`） | `packages/subagent/subagent` + `subagent-fork-in-process` + `-acp` + `-dsh-sdk` + `subagent-spawn-in-process` + `subagent-in-process-driver` + `tool-subagent-control` + `tool-subagent-report` | 续跑 A8 为异步事件驱动（双路径：父有 driver → 投递即返回 + watchSettlement 结算 + steer 批内合并；无 driver → 回退同步 pump）。简化见 AGENTS.md 差异清单 |
+| `seams/subagent/`（`__init__.py` + `providers.py` + `worker.py` + `continuation.py` + `descriptor.py`） | `packages/subagent/subagent` + `subagent-fork-in-process` + `-acp` + `-dsh-sdk` + `subagent-spawn-in-process` + `subagent-in-process-driver` + `tool-subagent-control` + `tool-subagent-report` | 续跑 A8 为异步事件驱动（双路径：父有 driver → 投递即返回 + watchSettlement 结算 + steer 批内合并；无 driver → 回退同步 pump）。生命周期 scoped dispatch（委托父 scope 载体过滤，无标号退化祖先链）+ provider 注册表（register_provider → 注销发布 subagent/provider-removed）+ DRAINING 拒绝面（drain/drain_descendants + assert_admitting 准入边界）已对齐（2026-08-23）；invariant 运行时校验架构不适用；同步模式结算投递走非唤醒 next-step。简化见 AGENTS.md 差异清单 |
 | `demo.py` | `packages/examples/agent-spine-demo` | 教学入口，保留顶层（`python -m miniharness.demo`） |
 | `example_plugins.py` | `examples/` | 教学示例，保留顶层 |
 
@@ -175,7 +177,7 @@ miniharness/
 
 | 层 | 内容 | 允许依赖 |
 |---|---|---|
-| L0 地基 | `core/session`、`core/scope`、`core/dsh_scope` | 无（互不依赖；core.scope ↔ core.dsh_scope / core.schema 经 §6 例外豁免） |
+| L0 地基 | `core/session`、`core/scope`、`core/dsh_scope`、`core/schema`、`core/hmr` | 无（互不依赖；core.scope ↔ core.dsh_scope / core.schema / core.hmr→core.scope 经 §6 例外豁免） |
 | L1 领域 | `llm/*`、`core/tools`、`core/system_prompt`、`core/session_store`、`attachment`、`boot/*` | 仅 L0 |
 | L2 编排 | `core/agent_loop`、`compaction`、`jobs`、`plan`、`commands`、`goal`、`skills` | L0 + L1 |
 | L3 应用与入口 | `cli/*`、`protocol/*`、`seams/*`、`preset`、`extensions`、`interaction`、`client`、`web` | L0 ~ L2 |
@@ -183,8 +185,9 @@ miniharness/
 
 规则：
 
-1. L_n 只依赖 L_{&lt;n}，禁止依赖同层或上层。三条显式例外：
+1. L_n 只依赖 L_{&lt;n}，禁止依赖同层或上层。四条显式例外：
    - `seams/subagent/worker.py` 依赖 `protocol/*`（同层）：worker 是 ACP / SDK 线协议的服务端载体，复用协议层的帧与信封实现；
+   - `core/hmr.py` 依赖 `core/scope`（同层）：HMR 是 cordis 家族的 vendored 部件（上游 vendor/hmr 直接建在 cordis 之上），复用 Service/fiber 基座，与 core.dsh_scope 同理落 L0；
    - `cli/main.py` 依赖 `web`（同层，单方向）：launcher 组装 web profile——cli 把 ctx/adapter/tools 交给 web 层运行时，web 层不得反向 import cli；
    - `cli/main.py` 依赖 `demo`（教学层）：无 profile 时以 `demo` 兜底（教学扩展入口）。
 2. `protocol/` 内三个模块互不依赖（acp、sdk、hooks 各自独立）。

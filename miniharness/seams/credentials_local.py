@@ -24,12 +24,17 @@ describe/set/unset/assertUnshadowed/assertOwnerOnly/parseCredentialsDocument）�
     遮蔽成无效果）。
   * 文档解析严格（不是跳过）：非映射根、非 POSIX 标识符的 key、非字符串
     值、空串值全部拒绝——"我存的键没效果"比报错更糟；重复键是解析错误。
-  * 权限：POSIX 上组/其他位可读的凭据文档在读之前直接拒绝；创建与替换
-    以 0600（目录 0700）落盘；Windows 无 mode 可查，检查跳过而非假装。
+   * 权限：POSIX 上组/其他位可读的凭据文档在读之前直接拒绝；创建与替换
+     以 0600（目录 0700）落盘；Windows 无 mode 可查，检查跳过而非假装。
+   * 写锁：每次写先取 `<file>.lock` 兄弟锁，读-改-写全程持锁（上游
+     dsh-atomic-write `withFileLock` + credentials-local index.ts:384 同款）；
+     竞争指数退避至 2000ms 期限，超时按上游措辞 fail loud。载体用
+     `filelock` 库：OS 级锁随进程死亡自动释放，比上游 wx-file 协议少了
+     "孤儿锁需人工清理"边（登记为库载体改进，verified-diffs §3.10）。
 
 载体简化（须在文档标注）：上游文档是 YAML（yaml 包），mini 用 JSON
-（stdlib），"严格映射 + 失败即拒"的语义不变；无跨进程写锁与文件 watch
-（进程内同步单线程）；.env 解析覆盖上游 launch-environment 的常见子集
+（stdlib），"严格映射 + 失败即拒"的语义不变；无文件 watch（外部编辑靠
+写入路径的重读折叠生效）；.env 解析覆盖上游 launch-environment 的常见子集
 （KEY=VALUE + # 注释 + 引号剥离）。
 """
 from __future__ import annotations
@@ -40,6 +45,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from filelock import FileLock, Timeout
+
 from ..boot.dotenv import _is_posix_identifier, parse_dotenv
 
 CREDENTIALS_FILENAME = ".credentials.json"
@@ -47,6 +54,15 @@ DOTENV_FILENAME = ".env"
 
 # POSIX 上"组/其他"可读位：凭据文档必须一个都没有（上游 GROUP_OTHER_BITS）
 GROUP_OTHER_BITS = 0o077
+
+#: 写锁等待期限（上游 atomic-write/src/index.ts:79 `LOCK_TIMEOUT_MS = 2_000`
+#: ——协议健壮性不变量而非部署可调项；测试经 mock.patch 缩短）。
+LOCK_TIMEOUT_SECONDS = 2.0
+
+
+class CredentialWriteLocked(RuntimeError):
+    """跨进程写锁在期限内未获得（上游超时措辞逐字）。"""
+
 
 
 def resolve_dsh_home() -> str:
@@ -199,21 +215,35 @@ class LocalCredentialProvider:
 
     def _write(self, key: str, value: str | None) -> None:
         self._assert_unshadowed(key, "set" if value is not None else "unset")
-        # 读-改-写：先重读磁盘折叠外部编辑，再补丁自己的键（上游
-        # reconcileFromDisk + renderDocument 的同步近似）
-        self._reconcile_from_disk()
-        existing = self._values.get(key)
-        if value is None and existing is None:
-            return
-        next_values = dict(self._values)
-        if value is None:
-            del next_values[key]
-        else:
-            next_values[key] = value
-        next_text = json.dumps(next_values, ensure_ascii=False, indent=2) + "\n"
-        self._atomic_write(next_text)
-        self._text = next_text
-        self._values = next_values
+        # 锁的排他创建需要父目录存在（上游 credentials-local index.ts:381：
+        # 先建 0700 目录，再取 <file>.lock 兄弟锁）
+        directory = os.path.dirname(self._filename)
+        os.makedirs(directory, exist_ok=True)
+        if os.name != "nt":
+            os.chmod(directory, 0o700)
+        lock_path = f"{self._filename}.lock"
+        try:
+            with FileLock(lock_path, timeout=LOCK_TIMEOUT_SECONDS):
+                # 读-改-写全程持锁：先重读磁盘折叠外部编辑（含并发写入者
+                # 与 watcher 防抖窗口内的外部编辑），再补丁自己的键（上游
+                # reconcileFromDisk + renderDocument 在 withFileLock 下同款）
+                self._reconcile_from_disk()
+                existing = self._values.get(key)
+                if value is None and existing is None:
+                    return
+                next_values = dict(self._values)
+                if value is None:
+                    del next_values[key]
+                else:
+                    next_values[key] = value
+                next_text = json.dumps(next_values, ensure_ascii=False, indent=2) + "\n"
+                self._atomic_write(next_text)
+                self._text = next_text
+                self._values = next_values
+        except Timeout as error:
+            raise CredentialWriteLocked(
+                f"atomic-write: timed out waiting for the writer lock at {lock_path}"
+            ) from error
 
     def _assert_unshadowed(self, key: str, verb: str) -> None:
         if self._inherited(key) is not None:

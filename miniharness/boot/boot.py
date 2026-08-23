@@ -18,14 +18,16 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import os
 import sys
 from typing import Any, Callable
 
-from ..core.scope import Context, FiberState
+from ..core.hmr import Hmr
+from ..core.scope import CordisError, Context, FiberState, INACTIVE_EFFECT
 
 from .composition import apply_patch, load_composition, load_patch_list, resolve_js_exprs
 
-__all__ = ["boot", "load_plugin"]
+__all__ = ["boot", "load_plugin", "load_optional_patches", "watch_user_patches"]
 
 
 def load_plugin(entry: dict) -> dict:
@@ -116,3 +118,50 @@ def boot(
         if fiber.state == FiberState.ACTIVE
     ]
     return root, activations
+
+
+def load_optional_patches(patch_path: str, bin_name: str = "miniharness") -> list[dict]:
+    """加载可选补丁层：缺失 → []；不可读/不可解析/非数组 → fail loud。
+
+    对齐上游 loadOptionalPatches（app-boot index.ts:278-）："没有补丁文件"
+    是合法态，"存在但坏掉"是 misconfiguration——启动期与热重载期都绝不静默跳过。
+    """
+    if not os.path.exists(patch_path):
+        return []
+    return resolve_js_exprs(load_patch_list(patch_path, bin_name))
+
+
+def watch_user_patches(
+    ctx: Context,
+    filename: str,
+    remount: Callable[[list[dict]], Any],
+    *,
+    bin_name: str = "miniharness",
+    compose: Callable[[list[dict]], list[dict]] | None = None,
+) -> Callable:
+    """watch 用户补丁层，变更时经 HMR 单飞循环事务性重应用（对齐 app-boot
+    watchUserPatches，index.ts:232-265）。
+
+    filename 为被 watch 的补丁文件（相对路径按 HMR baseDir 解析）；每次刷新
+    重读文件并调用 remount(patches)——重挂载由宿主回调承担：上游经根
+    Include entry.update() 走 internal/update waterfall 完成 epoch 卸载/
+    重装，mini 无 Include 插件（登记为已知简化），宿主在 remount 里自行
+    调 fiber.update()/restart() 等价面。compose 允许把用户层插入完整补丁
+    序列的中间（缺省恒等）。HMR 缺席或 watcher 启动失败 fail loud；注册期
+    INACTIVE_EFFECT 表示应用正在退出，返回 no-op disposer（上游同款豁免）。
+    """
+    hmr = ctx.get("hmr")
+    if hmr is None or not isinstance(hmr, Hmr):
+        raise RuntimeError(f"{bin_name}: user patch-layer watching requires the Cordis HMR service")
+
+    def refresh() -> None:
+        user_patches = load_optional_patches(filename, bin_name)
+        patches = compose(user_patches) if compose is not None else user_patches
+        remount(patches)
+
+    try:
+        return hmr.register_config(filename, refresh)
+    except CordisError as error:
+        if error.code == INACTIVE_EFFECT:
+            return lambda: None
+        raise

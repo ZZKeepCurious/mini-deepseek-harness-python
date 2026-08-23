@@ -7,13 +7,22 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 from miniharness.seams.credentials_local import (
+    CredentialWriteLocked,
     LocalCredentialProvider,
     _assert_owner_only,
     parse_credentials_document,
     parse_dotenv,
     resolve_dsh_home,
+)
+from miniharness.seams import credentials_local
+from filelock import FileLock
+from miniharness.seams.subprocess_env import (
+    DSH_ENV_PREFIX,
+    SENSITIVE_ENV_PATTERN,
+    scrubbed_parent_env,
 )
 from miniharness.seams.sandbox_local import (
     DENIAL_SIGNATURES,
@@ -342,6 +351,56 @@ class TestLocalCredentialProvider(unittest.TestCase):
             _assert_owner_only("f", lambda p: type("S", (), {"st_mode": 0o600})())
 
 
+# ==================== 2b) 凭据跨进程写锁（对齐 dsh-atomic-write withFileLock） ====================
+
+class TestCredentialWriterLock(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._dsh_home = os.path.join(self._tmp.name, "dsh")
+        self._filename = os.path.join(self._dsh_home, ".credentials.json")
+        self._lock_path = self._filename + ".lock"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _provider(self):
+        return LocalCredentialProvider(filename=self._filename, dsh_home=self._dsh_home,
+                                       project_dir=os.path.join(self._tmp.name, "proj"))
+
+    def test_lock_is_sibling_and_released_after_write(self):
+        provider = self._provider()
+        provider.set("api_key", "sk-1")
+        # 兄弟锁路径形状（上游 atomic-write index.ts:97 `${filename}.lock`）
+        self.assertEqual(self._lock_path,
+                         os.path.join(self._dsh_home, ".credentials.json.lock"))
+        # 写完即释放：另一把锁可立即获得
+        FileLock(self._lock_path, timeout=0.5).acquire(timeout=0.5)
+
+    def test_contended_write_fails_loud_with_upstream_wording(self):
+        provider = self._provider()
+        holder = FileLock(self._lock_path)
+        holder.acquire()
+        try:
+            with mock.patch.object(credentials_local, "LOCK_TIMEOUT_SECONDS", 0.2):
+                with self.assertRaises(CredentialWriteLocked) as caught:
+                    provider.set("api_key", "sk-1")
+            self.assertIn("atomic-write: timed out waiting for the writer lock at",
+                          str(caught.exception))
+            self.assertIn(".credentials.json.lock", str(caught.exception))
+            # 超时的竞争者绝不移除既有锁（上游 atomic-write index.ts:87）
+            self.assertTrue(holder.is_locked)
+        finally:
+            holder.release()
+
+    def test_interleaved_writers_fold_instead_of_clobber(self):
+        pa, pb = self._provider(), self._provider()
+        pa.set("a", "1")
+        pb.set("b", "2")
+        pa.set("c", "3")
+        reloaded = self._provider()
+        self.assertEqual(reloaded.values, {"a": "1", "b": "2", "c": "3"})
+
+
 # ==================== 3) 子 agent 远程三通道 ====================
 
 def _make_fork_loop(system_prompt, seed):
@@ -499,6 +558,93 @@ class TestSdkChannel(unittest.TestCase):
                          ["agent/inbox/spliced", "assistant/message", "turn/end"])
         turn_nums = [e["data"]["turn"] for e in second if e["type"] == "turn/end"]
         self.assertEqual(turn_nums, [2])
+
+
+# ==================== 6) 子进程 env 清洗（对齐 dsh-subprocess scrubbedParentEnv） ====================
+
+class TestScrubbedParentEnv(unittest.TestCase):
+    AMBIENT = {
+        "PATH": "/usr/bin",
+        "HOME": "/home/u",
+        "DEEPSEEK_API_KEY": "sk-ambient",
+        "MY_PASSWORD": "p",
+        "top_secret": "s",
+        "ACCESS_TOKEN": "t",
+        "DSH_PERMISSION_MODE": "reject",
+        "dsh_stale": "x",
+        "MONKEYKEYS": "k",
+    }
+
+    def test_drops_credential_shaped_names_case_insensitively(self):
+        env = scrubbed_parent_env(self.AMBIENT)
+        for name in ("DEEPSEEK_API_KEY", "MY_PASSWORD", "top_secret", "ACCESS_TOKEN",
+                     "MONKEYKEYS"):
+            self.assertNotIn(name, env)
+
+    def test_drops_dsh_prefix_case_insensitively(self):
+        env = scrubbed_parent_env(self.AMBIENT)
+        self.assertNotIn("DSH_PERMISSION_MODE", env)
+        self.assertNotIn("dsh_stale", env)
+
+    def test_keeps_ordinary_ambient_values(self):
+        env = scrubbed_parent_env(self.AMBIENT)
+        self.assertEqual(env["PATH"], "/usr/bin")
+        self.assertEqual(env["HOME"], "/home/u")
+
+    def test_returns_fresh_dict_and_defaults_to_os_environ(self):
+        scrubbed = scrubbed_parent_env(self.AMBIENT)
+        scrubbed["PATH"] = "mutated"
+        self.assertEqual(self.AMBIENT["PATH"], "/usr/bin")
+        with mock.patch.dict(os.environ, {"PLAIN": "v", "MY_SECRET": "x"}):
+            env = scrubbed_parent_env()
+            self.assertEqual(env.get("PLAIN"), "v")
+            self.assertNotIn("MY_SECRET", env)
+
+    def test_pattern_shape_matches_upstream_regex(self):
+        # 上游 SENSITIVE_ENV_PATTERN = /KEY|PASSWORD|SECRET|TOKEN/i（index.ts:44）
+        self.assertTrue(SENSITIVE_ENV_PATTERN.search("DEEPSEEK_API_KEY"))
+        self.assertFalse(SENSITIVE_ENV_PATTERN.search("EDITOR"))
+        self.assertEqual(DSH_ENV_PREFIX, "DSH_")
+
+
+class TestSpawnEnvLayering(unittest.TestCase):
+    """spawn 的 env 契约：清洗基底 + 显式 env 在 scrub 之后合并（上游 run.ts:123 同款）。"""
+
+    AMBIENT = {"DEEPSEEK_API_KEY": "sk-ambient", "DSH_STALE": "old", "PATH": "/bin"}
+
+    def _capture_popen(self, spawn_call):
+        with mock.patch.dict(os.environ, self.AMBIENT), \
+                mock.patch("miniharness.seams.subagent.providers.subprocess.Popen",
+                           side_effect=RuntimeError("captured")) as popen:
+            with self.assertRaises(RuntimeError):
+                spawn_call()
+        return popen.call_args.kwargs["env"]
+
+    def test_acp_spawn_scrubs_ambient_credentials(self):
+        provider = AcpSubAgentProvider()
+        env = self._capture_popen(lambda: provider.spawn("n", "p"))
+        self.assertNotIn("DEEPSEEK_API_KEY", env)
+        self.assertNotIn("DSH_STALE", env)
+        self.assertEqual(env["PATH"], "/bin")
+
+    def test_acp_spawn_explicit_env_merges_after_scrub(self):
+        provider = AcpSubAgentProvider()
+        env = self._capture_popen(
+            lambda: provider.spawn("n", "p", env={"DEEPSEEK_API_KEY": "deliberate"}))
+        # 刻意提供的凭据存活（上游 README.md:32：显式 env 叠加在清洗后的父环境上）
+        self.assertEqual(env["DEEPSEEK_API_KEY"], "deliberate")
+
+    def test_sdk_spawn_scrubs_ambient_credentials(self):
+        provider = SdkSubAgentProvider()
+        env = self._capture_popen(lambda: provider.spawn("n", "p"))
+        self.assertNotIn("DEEPSEEK_API_KEY", env)
+        self.assertNotIn("DSH_STALE", env)
+
+    def test_sdk_spawn_explicit_env_merges_after_scrub(self):
+        provider = SdkSubAgentProvider()
+        env = self._capture_popen(
+            lambda: provider.spawn("n", "p", env={"DSH_CORDIS_CONFIG": "fresh"}))
+        self.assertEqual(env["DSH_CORDIS_CONFIG"], "fresh")
 
 
 if __name__ == "__main__":

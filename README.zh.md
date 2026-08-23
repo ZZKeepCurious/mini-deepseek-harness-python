@@ -4,7 +4,7 @@
 
 **Mini DeepSeek Harness** 是用 **Python（stdlib 优先，关键协议层精选第三方）** 从零复现 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`，由 [DeepSeek AI](https://deepseek.com) 开发的开源 Agent 运行时）的**教学实现**（`httpx` 承载 DeepSeek SSE 传输、可选 `pyyaml`、可选 `[web]` extra：`fastapi` + `uvicorn` 承载 HTTP/SSE 传输层）。
 
-上游项目整个系统建立在一个设计哲学之上：**一切皆插件**（everything is a plugin），其底层是 [Cordis](https://github.com/cordiverse/cordis)，一个依赖注入 + 事件总线框架，设计思想见论文 [_A Programming Paradigm for Spatiotemporal Composability_](https://github.com/cordiverse/paper)。我们对这一设计深表敬意。本仓库是我们的致敬之作：不止于阅读，而是亲手用 Python 重建其核心约定——事件溯源会话日志、插件事件总线、turn/step Agent Loop、能力扩展口三角色（Service Definition / Service Provider / Consumer），**stdlib 优先**（除 httpx 传输层与可选 pyyaml 外不依赖第三方），任何有 `python3` 的人都可以阅读、运行和修改它们。
+上游项目整个系统建立在一个设计哲学之上：**一切皆插件**（everything is a plugin），其底层是 [Cordis](https://github.com/cordiverse/cordis)，一个依赖注入 + 事件总线框架，设计思想见论文 [_A Programming Paradigm for Spatiotemporal Composability_](https://github.com/cordiverse/paper)。我们对这一设计深表敬意。本仓库是我们的致敬之作：不止于阅读，而是亲手用 Python 重建其核心约定——事件溯源会话日志、插件事件总线、turn/step Agent Loop、能力扩展口三角色（Service Definition / Service Provider / Consumer），**成熟开源库优先**（必需第三方：`httpx` 承载 DeepSeek SSE 传输、`filelock` 承载凭据跨进程写锁、`watchdog` 承载 Cordis HMR 文件监视；可选 `pyyaml` 用于 YAML 配置），任何有 `python3` 的人都可以阅读、运行和修改它们。
 
 > **这是学习项目，不是移植。** 与 DeepSeek AI 官方无关联。我们不追求功能对齐或替代品；我们追求的是理解并讲清楚这些思想。
 
@@ -22,14 +22,15 @@
 | 能力 | 上游对应 |
 |---|---|
 | 事件溯源会话（信封 `{type,seq,time,data}`、1 起 turn/step、deep-freeze、`derive_messages`、interrupted 修复） | `packages/core/session` |
-| 持久化（JSONL / SQLite、header + `SESSION_FORMAT_VERSION=0` fail-closed、flush 栅栏、崩溃恢复） | `packages/session/session-persistence` |
-| 插件事件总线（emit / waterfall / parallel / serial、作用域、依赖驱动激活） | `vendor/cordis` + `core/scope` |
+| 持久化（JSONL / SQLite、`root/<projectDir>/<encoded-id>/session.jsonl` 嵌套布局、header + `SESSION_FORMAT_VERSION=0` fail-closed、flush 栅栏、崩溃恢复） | `packages/session/session-persistence` |
+| 插件事件总线（emit / waterfall / parallel / serial、作用域、依赖驱动激活、经 HMR 服务 + `watch_user_patches` 的 epoch 重载） | `vendor/cordis` + `vendor/hmr` + `core/scope` + `core/hmr` |
+| 配置 schema 引擎（schemastery 全量移植：17 类 resolver、meta 克隆、toString/toJSON/i18n/simplify、`~standard` 协议面） | `vendor/schemastery/src/index.ts` |
 | 工具注册表 + 执行管线（schema 校验、pre/execute/post、timeout） | `packages/core/tools` |
 | Agent Loop（async 驱动 turn/step 状态机 + 同步门面、pre-step 拒绝、工具回灌续跑） | `core/agent-loop` |
-| LLM 扩展口（async `stream(messages, tools, signal)` 契约、假模型、DeepSeek 官方 SSE 适配器（阻塞读经线程桥接）） | `llm/llm` + `llm/llm-deepseek` |
+| LLM 扩展口（async `stream(messages, tools, signal)` 契约、假模型、DeepSeek 官方 SSE 适配器（httpx 异步流式）、reasoning_effort 四档） | `llm/llm` + `llm/llm-deepseek` |
 | 模型请求重试/退避（normal/always 策略、`agent/request-error`、`llm/retry` 审计对、事件驱动可取消等待） | `llm/llm-retry` + `llm/llm/src/retry-policy.ts` |
 | token 计量（增量 fold、usage 折入锚、4 字符/token 启发式） | `llm/token-meter` |
-| 上下文压缩（pre-step 压力 + `CONTEXT_WINDOW_EXCEEDED` 恢复、surface-replace 检查点事务） | `compaction/compaction-basic` |
+| 上下文压缩（pre-step 压力 + `CONTEXT_WINDOW_EXCEEDED` 恢复、surface-replace 检查点事务、可选 tool-result pruner 阶段） | `compaction/compaction-basic` + `compaction-tool-result-pruner` |
 | 后台作业（`job_output`/`job_list`/`job_kill`、完成 notice、per-owner 上限；无 `job/*` 会话事件） | `packages/jobs`（jobs-local + tool-jobs） |
 | plan 模式（log-only `plan/mode` 状态、plan:policy prompt 分节注入、in-turn queued 提交） | `packages/plan/plan-mode` |
 | plan 审查 UI（`/plan` 命令、`exit_plan_mode` 审查工具、userQuestions 通道、plan 投影单元） | `packages/plan/plan-mode` |
@@ -43,7 +44,7 @@
 | 会话管理服务（`ctx.sessions`：create/prepare/enter/announce 生命周期、fork 五错误码、flush 检查点、`session/created|disposed|event|flush` 四事件） | `packages/core/session`（SessionStore） |
 | 会话管理 CLI（`miniharness sessions` 列表/恢复/删除；mini 教学扩展） | web 表面（上游） |
 | 能力扩展口（沙箱后端 / 凭据四层 / 子 agent ACP+SDK+fork 三通道） | capability seams 文档 |
-| 可继续子代理（`start_continuable`/`send_message`（含初始 prompt）、durable 子会话 + 冷恢复、结算投递、异步事件驱动（A8：投递即返回 + watchSettlement + steer 批内合并 + 所有权记账 waiting/settled）、生命周期事件 `subagent/start`/`subagent/end`（runId 配对 + epochStopReason/foldConsumedWork 终局折叠）、interrupt 授权矩阵（user/ancestor authority + 缺席 no-op）、嵌套续跑（exec.agent 为授权主体，孙代结算通知投直属父）、`send_message`/`interrupt_agent`/`list_agents` 控制工具） | `packages/subagent`（subagent + subagent-in-process-driver + tool-subagent-control + tool-subagent-report） |
+| 可继续子代理（`start_continuable`/`send_message`（含初始 prompt）、durable 子会话 + 冷恢复、结算投递、异步事件驱动（A8：投递即返回 + watchSettlement + steer 批内合并 + 所有权记账 waiting/settled）、生命周期事件 `subagent/start`/`subagent/end`（runId 配对 + epochStopReason/foldConsumedWork 终局折叠 + 经委托父 scope 载体的 scoped dispatch）、命名 provider 注册表（`register_provider` → 注销发布 `subagent/provider-removed` 边）、DRAINING 准入截止（`drain`/`drain_descendants` + `assert_admitting`，拒绝措辞逐字）、interrupt 授权矩阵（user/ancestor authority + 缺席 no-op）、嵌套续跑（exec.agent 为授权主体，孙代结算通知投直属父）、模型侧委托工具 `subagent`（三段文案逐字、canonical value + `Tool.render`、`run_in_background` 路由）、`send_message`/`interrupt_agent`/`list_agents` 控制工具） | `packages/subagent`（subagent + subagent-in-process-driver + tool-subagent-control + tool-subagent-report） |
 | 预设 / Agent 干预 / 轨迹折叠 / 动态插件 / 审批 | `packages/preset` + `core/agent` + `interaction` |
 | 协议入口（ACP / JSON-RPC SDK / hooks 桥） | `acp` + `sdk` + `hooks` |
 | 官方 Python SDK 互操作（上游 `DeepSeekHarness` 经 `launch_args_override` 驱动 mini worker；`tests/test_upstream_sdk_interop.py`，缺 pydantic/上游源码自动 skip） | `python/sdk` |
@@ -52,7 +53,7 @@
 
 规划中：上游浏览器前端（`packages/client`，React monorepo）不复现原样——wire 面已全对齐（上游客户端指向 mini 后端可工作），以 vanilla SPA（无构建步）作为消费者落地。
 
-状态：**988 个单元测试全绿**（stdlib 优先；`httpx` 承载 DeepSeek SSE 传输，可选 `pyyaml` 用于 YAML 配置，可选 `[web]` extra 承载 HTTP/SSE 传输层）。
+状态：**1239 个测试全绿**（`httpx` 承载 DeepSeek SSE 传输，`filelock` 承载凭据跨进程写锁，`watchdog` 承载 Cordis HMR 文件监视，可选 `pyyaml` 用于 YAML 配置，可选 `[web]` extra 承载 HTTP/SSE 传输层）；覆盖率 87%。
 
 ## 快速开始
 

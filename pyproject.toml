@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 keywords = ["agent", "deepseek", "harness", "event-sourcing", "llm", "education"]
-dependencies = ["httpx>=0.27"]
+dependencies = ["httpx>=0.27", "filelock>=3.13", "watchdog>=4.0"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",

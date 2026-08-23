@@ -1,10 +1,10 @@
-# Mini DeepSeek Harness (Python)
+﻿# Mini DeepSeek Harness (Python)
 
 English | [中文](README.zh.md)
 
 **Mini DeepSeek Harness** is an educational, from-scratch re-implementation of [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`) — the open-source agent harness developed by [DeepSeek AI](https://deepseek.com) — written in Python (**stdlib-first**, with `httpx` for the DeepSeek SSE transport, optional `pyyaml`, and an optional `[web]` extra: `fastapi` + `uvicorn` for the HTTP/SSE transport layer).
 
-The upstream project builds its entire system on a philosophy where **everything is a plugin**, powered by [Cordis](https://github.com/cordiverse/cordis), a dependency-injection and event-bus framework whose design is described in [_A Programming Paradigm for Spatiotemporal Composability_](https://github.com/cordiverse/paper). We deeply admire this design. This repository is our homage: instead of only reading about it, we re-implement its core contracts — the event-sourced session log, the plugin event bus, the turn/step agent loop, and the capability-seam triangle (Service Definition / Service Provider / Consumer) — **stdlib-first** (the only required third-party package is `httpx`, which carries the DeepSeek SSE transport; `pyyaml` is optional for YAML config), so anyone with `python3` can read, run, and modify them.
+The upstream project builds its entire system on a philosophy where **everything is a plugin**, powered by [Cordis](https://github.com/cordiverse/cordis), a dependency-injection and event-bus framework whose design is described in [_A Programming Paradigm for Spatiotemporal Composability_](https://github.com/cordiverse/paper). We deeply admire this design. This repository is our homage: instead of only reading about it, we re-implement its core contracts — the event-sourced session log, the plugin event bus, the turn/step agent loop, and the capability-seam triangle (Service Definition / Service Provider / Consumer) — preferring mature open-source libraries over hand-rolling (the required third-party packages are `httpx` for the DeepSeek SSE transport, `filelock` for credential cross-process writer locking, and `watchdog` for the Cordis HMR file watch; `pyyaml` is optional for YAML config), so anyone with `python3` can read, run, and modify them.
 
 > **This is a learning project, not a port.** It is not affiliated with DeepSeek AI. We do not aim for feature parity or a drop-in replacement; we aim to understand and teach the ideas.
 
@@ -24,14 +24,15 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 | Capability | Upstream counterpart |
 |---|---|
 | Event-sourced session (envelope `{type,seq,time,data}`, 1-based turn/step, deep-freeze, `derive_messages`, interrupted repair) | `packages/core/session` |
-| Durable storage (JSONL / SQLite, header + `SESSION_FORMAT_VERSION=0` fail-closed, flush barrier, crash recovery) | `packages/session/session-persistence` |
-| Plugin event bus (emit / waterfall / parallel / serial, scopes, dependency-driven activation) | `vendor/cordis` + `core/scope` |
+| Durable storage (JSONL / SQLite, nested `root/<projectDir>/<encoded-id>/session.jsonl` layout, header + `SESSION_FORMAT_VERSION=0` fail-closed, flush barrier, crash recovery) | `packages/session/session-persistence` |
+| Plugin event bus (emit / waterfall / parallel / serial, scopes, dependency-driven activation, epoch reload via HMR service + `watch_user_patches`) | `vendor/cordis` + `vendor/hmr` + `core/scope` + `core/hmr` |
+| Config schema engine (full schemastery port: 17 resolvers, meta clone, toString/toJSON/i18n/simplify, `~standard` protocol face) | `vendor/schemastery/src/index.ts` |
 | Tool registry + execution pipeline (schema validation, pre/execute/post, timeout) | `packages/core/tools` |
 | Agent loop (async-driven turn/step state machine with sync facade, pre-step rejection, tool-feedback continuation) | `core/agent-loop` |
-| LLM seam (async `stream(messages, tools, signal)` contract, fake adapter, official DeepSeek SSE adapter bridged from a blocking reader thread) | `llm/llm` + `llm/llm-deepseek` |
+| LLM seam (async `stream(messages, tools, signal)` contract, fake adapter, official DeepSeek SSE adapter over `httpx` async streaming, four-level `reasoning_effort`) | `llm/llm` + `llm/llm-deepseek` |
 | Model request retry / backoff (normal/always policy, `agent/request-error`, `llm/retry` audit pair, event-driven cancellable wait) | `llm/llm-retry` + `llm/llm/src/retry-policy.ts` |
 | Token metering (incremental fold, usage anchor, 4 chars/token heuristic) | `llm/token-meter` |
-| Context compaction (pre-step pressure + `CONTEXT_WINDOW_EXCEEDED` recovery, surface-replace checkpoint transaction) | `compaction/compaction-basic` |
+| Context compaction (pre-step pressure + `CONTEXT_WINDOW_EXCEEDED` recovery, surface-replace checkpoint transaction, optional tool-result pruner stage) | `compaction/compaction-basic` + `compaction-tool-result-pruner` |
 | Background jobs (`job_output`/`job_list`/`job_kill`, completion notices, per-owner cap; no `job/*` session events) | `packages/jobs` (jobs-local + tool-jobs) |
 | Plan mode (log-only `plan/mode` state, plan:policy prompt-section injection, queued in-turn commit) | `packages/plan/plan-mode` |
 | Plan review UI (`/plan` command, `exit_plan_mode` tool, user-questions channel, plan projection) | `packages/plan/plan-mode` |
@@ -45,7 +46,7 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 | Session management CLI (`miniharness sessions` list/resume/delete; mini teaching extension) | web surface (upstream) |
 | Session store service (`ctx.sessions`: create/prepare/enter/announce lifecycle, fork with 5 error codes, flush checkpoint, `session/created|disposed|event|flush` events) | `packages/core/session` (SessionStore) |
 | Capability seams (sandbox backends / credential layers / subagent ACP+SDK+fork channels) | capability seams docs |
-| Continuable subagents (`start_continuable`/`send_message` (with initial prompt), durable child session + cold resume, settlement delivery, async event-driven A8 (submit-and-return + watchSettlement + steer batch merge + ownership bookkeeping waiting/settled), lifecycle events `subagent/start`/`subagent/end` (runId-paired + epochStopReason/foldConsumedWork outcome folding), interrupt authority matrix (user/ancestor authority + absent-target no-op), nested delegation (exec.agent as authorization subject, grandchild settlement notices to the direct parent), `send_message`/`interrupt_agent`/`list_agents` control tools) | `packages/subagent` (subagent + subagent-in-process-driver + tool-subagent-control + tool-subagent-report) |
+| Continuable subagents (`start_continuable`/`send_message` (with initial prompt), durable child session + cold resume, settlement delivery, async event-driven A8 (submit-and-return + watchSettlement + steer batch merge + ownership bookkeeping waiting/settled), lifecycle events `subagent/start`/`subagent/end` (runId-paired + epochStopReason/foldConsumedWork outcome folding + scoped dispatch via the delegating parent's scope carrier), named provider registry (`register_provider` → `subagent/provider-removed` edge on dispose), DRAINING admission cutoff (`drain`/`drain_descendants` + `assert_admitting`, verbatim refusal wording), interrupt authority matrix (user/ancestor authority + absent-target no-op), nested delegation (exec.agent as authorization subject, grandchild settlement notices to the direct parent), model-side delegation tool `subagent` (verbatim descriptions, canonical value + `Tool.render`, `run_in_background` routing), `send_message`/`interrupt_agent`/`list_agents` control tools) | `packages/subagent` (subagent + subagent-in-process-driver + tool-subagent-control + tool-subagent-report) |
 | Presets / agent intervention / trajectory / dynamic plugins / approval | `packages/preset` + `core/agent` + `interaction` |
 | Protocol entries (ACP / JSON-RPC SDK / hooks bridge) | `acp` + `sdk` + `hooks` |
 | Official Python SDK interop (upstream `DeepSeekHarness` drives mini worker via `launch_args_override`; `tests/test_upstream_sdk_interop.py`, skips without pydantic/upstream sources) | `python/sdk` |
@@ -54,7 +55,7 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 
 Planned: the upstream browser frontend (`packages/client`, React monorepo) is not reproduced verbatim; its wire surface is fully aligned (an upstream client pointed at the mini backend works) and a vanilla SPA (no build step) ships as the consumer.
 
-Status: **988 unit tests passing** (stdlib-first; `httpx` for the DeepSeek SSE transport, optional `pyyaml` for YAML config, optional `[web]` extra for the HTTP/SSE transport layer).
+Status: **1239 tests passing** (`httpx` for the DeepSeek SSE transport, `filelock` for credential cross-process writer locking, `watchdog` for the Cordis HMR file watch, optional `pyyaml` for YAML config, optional `[web]` extra for the HTTP/SSE transport layer). coverage 87%.
 
 ## Getting started
 

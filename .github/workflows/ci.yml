@@ -19,7 +19,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install dependencies
-        run: pip install httpx pyyaml coverage fastapi uvicorn
+        run: pip install httpx pyyaml filelock watchdog coverage fastapi uvicorn
       - name: Compile all sources
         run: python -m compileall -q miniharness tests examples
       - name: Run unit tests with coverage
