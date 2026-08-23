@@ -124,6 +124,14 @@ class SessionPersistence:
         """枚举全部会话 header：{id, meta, created_at, cwd}（meta/cwd 可能为 None）。"""
         raise NotImplementedError
 
+    def read_raw(self, session_id: str, cwd: str | None = None) -> str | None:
+        """读出会话的逐字原始制品文本（上游逐会话 raw artifact）。
+
+        不支持该形态的后端（如 SQLite）抛 NotImplementedError，由调用方
+        判定为 501（does not expose per-session raw artifacts）。
+        """
+        raise NotImplementedError
+
     def commit_repair(self, session_id: str, closers: list[dict], cwd: str | None = None) -> None:
         """把崩溃修复的 closers 持久化落盘（对齐上游 PersistenceBackend.commitRepair）。
 
@@ -197,6 +205,13 @@ class JsonlPersistence(SessionPersistence):
             path = _log_path(self.root, cwd, session_id)
             return path if path.exists() else None
         return self._find(session_id)
+
+    def read_raw(self, session_id: str, cwd: str | None = None) -> str | None:
+        """读出会话的逐字原始制品文本（header 行 + 事件行，未 thaw）。"""
+        path = self.path_of(session_id, cwd)
+        if path is None or not path.exists():
+            return None
+        return path.read_text(encoding="utf-8")
 
     def append(self, session_id, event, cwd: str | None = None):
         if cwd is not None:
@@ -404,6 +419,10 @@ class SqlitePersistence(SessionPersistence):
             rows,
         )
         self._conn.commit()
+
+    def read_raw(self, session_id: str, cwd: str | None = None) -> str | None:
+        """SQLite 后端不暴露逐会话原始制品（事件在行列存储，无 JSONL 形态）。"""
+        raise NotImplementedError
 
     def close(self):
         self._conn.close()

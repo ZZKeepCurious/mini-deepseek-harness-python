@@ -53,7 +53,7 @@
 
 规划中：上游浏览器前端（`packages/client`，React monorepo）不复现原样——wire 面已全对齐（上游客户端指向 mini 后端可工作），以 vanilla SPA（无构建步）作为消费者落地。
 
-状态：**1239 个测试全绿**（`httpx` 承载 DeepSeek SSE 传输，`filelock` 承载凭据跨进程写锁，`watchdog` 承载 Cordis HMR 文件监视，可选 `pyyaml` 用于 YAML 配置，可选 `[web]` extra 承载 HTTP/SSE 传输层）；覆盖率 87%。
+状态：**1265 个测试全绿**（`httpx` 承载 DeepSeek SSE 传输，`filelock` 承载凭据跨进程写锁，`watchdog` 承载 Cordis HMR 文件监视，可选 `pyyaml` 用于 YAML 配置，可选 `[web]` extra 承载 HTTP/SSE 传输层）；覆盖率 87%。
 
 ## 快速开始
 

@@ -21,9 +21,12 @@
     （上游 handler.ts 同款）。仍受 POST 围栏约束（415/400 优先）。
   * 非 `/api/` 的 GET/HEAD → 静态服务（SPA，`web/frontend.py`），其余方法 405。
 
-教学简化（须在 AGENTS.md 标注）：
-  * 无 `GET /api/session.export`（无 downloads 域）、无 CORS 头（上游同样无
-    CORS 头，安全机制 = 415 跨站写围栏，mini 已同款）。
+ 教学简化（须在 AGENTS.md 标注）：
+  * `GET /api/session.export`（downloads 域）已实现（`web/downloads.py`）：
+    无 CORS 头（上游同样无 CORS 头，安全机制 = 415 跨站写围栏，mini 已同款）；
+    上游用 fflate 流式分块 + 响应背压，mini 用 stdlib zipfile 内存成档；媒体
+    条目仅在注入 attachments 服务时产出（mini 无持久化 attachment store，默认
+    省略，日志文本已 verbatim 含引用）。详见 `web/downloads.py` docstring。
   * 载荷 schema 校验在 WebApi 内做（上游先过 zod schema，mini 的 dispatch
     按各方法逐字段查并返回同款 bad-request）。
   * session 日志事件是 mappingproxy/tuple 冻结形态（core/session/json.py
@@ -39,6 +42,7 @@ from fastapi.responses import Response, StreamingResponse
 
 from ..core.session.json import thaw
 from .api import WebApi
+from .downloads import build_session_export, parse_export_query
 from .envelope import parse_message, rpc_id, rpc_receipt_rejected, server_request
 from .frontend import DIST_INDEX, DIST_ROOT, serve_static
 from .streams import StreamHub
@@ -107,6 +111,21 @@ def create_app(api: WebApi, hub: StreamHub) -> FastAPI:
             return _sse_response(hub.mux())
         if method == "GET" and pathname == "/api/events.host":
             return _sse_response(hub.host())
+
+        # 无信封下载通道：GET /api/session.export（handler.ts 物理路由，先于 POST 围栏）。
+        # 对照上游：查询校验失败 → 400；正文与状态码同上 downloads 域。
+        if method in ("GET", "HEAD") and pathname == "/api/session.export":
+            session_id = request.query_params.get("sessionId")
+            include_raw = request.query_params.get("includeDescendants")
+            query = parse_export_query(
+                {"sessionId": session_id or "", "includeDescendants": include_raw})
+            if query is None:
+                return Response("missing or invalid session.export query parameters",
+                                status_code=400)
+            session_id, include_descendants = query
+            result = build_session_export(api.ctx, session_id, include_descendants,
+                                         method=method)
+            return Response(result.body, status_code=result.status, headers=result.headers)
 
         # 载体状态码 404：非 POST 或不在 /api/ 下的路径
         if method != "POST" or not pathname.startswith("/api/"):
