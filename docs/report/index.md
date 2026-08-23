@@ -69,7 +69,9 @@ flowchart LR
 | `packages/acp/acp` | `protocol/acp.py` | 07 §7.7 | 04 议题 2 |
 | `packages/hooks（hook-protocol + hooks-claude-code）` | `protocol/hooks.py` | 07 §7.8 | 04 议题 2 |
 | `core/agent-loop 并行编排 + core/context 并发模型` | `core/agent_loop/tool_calls.py + core/scope.py` | 12 | 02 §2 + 03 §5.1 |
-| `packages/sandbox/sandbox + sandbox-local + sandbox-windows-acl` | `seams/sandbox_local.py` | 06 §6.9 | 02 §2 |
+| `packages/sandbox/sandbox + sandbox-local + sandbox-windows-acl + native/landlock-run` | `seams/sandbox_local.py + seams/landlock_run.py` | 06 §6.9 | 02 §2 |
+| `packages/sandbox/sandbox-policy` | `seams/sandbox_policy.py` | 06 §6.9 | — |
+| `packages/shell/shell + bash-local + bash-sandbox` | `shell/`（bash_local + bash_sandbox + helpers） | 06 §6.9 | — |
 | `packages/credentials/credentials-local` | `seams/credentials_local.py` | 06 §6.9 | 03 §5.4 |
 | `packages/subagent/subagent-fork-in-process + subagent-acp + subagent-dsh-sdk` | `seams/subagent/providers.py + seams/subagent/worker.py` | 06 §6.9 | 04 议题 2 |
 | `packages/llm/llm-retry + llm/llm（retry-policy）+ core/agent（agent/request-error）` | `llm/retry.py + llm/retry_policy.py（+ core/agent_loop/agent.py 接线）` | 04 §4.10 | 04 议题 2 |

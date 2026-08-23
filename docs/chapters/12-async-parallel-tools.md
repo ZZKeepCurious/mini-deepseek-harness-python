@@ -172,4 +172,4 @@ LLM 流式已原生异步（httpx 传输）：`adapter.stream` 是真 async 迭�
 - [ ] 解释"pre-execute 有序、body 重叠"与 `pipeline_policy_async` / `pipeline_async_body` 拆段的关系；
 - [ ] 用 `max_parallel=2` 跑 4 个并行工具，观察 `fill_pool` 的补池节奏；
 - [ ] 构造一次中途取消：哪些结果真实、哪些合成，顺序如何；
-- [ ] 说出 mini 相对上游的简化（fiber/scope carrier 未复现、同步门面无 driver 时经 `asyncio.run` 瞬态事件循环驱动、重试等待以协作式 `asyncio.Event` 近似 AbortSignal、`asyncio.subprocess` 尚未接入工具执行）。
+- [ ] 说出 mini 相对上游的简化（schemastery 为教学子集；重试等待以多信号竞速 `asyncio.Event` 熔合近似上游 `AbortSignal.any`；`asyncio.subprocess` 尚未接入工具执行）。

@@ -69,7 +69,7 @@ MiniHarness 是教学实现，不是移植。下面是简化清单，每一条�
 | 服务按隔离标签键控的全局 store（`ctx.get` 缺省返回 `None`；`ctx.isolate(name)` 换标签实现 per-agent 隔离；declarative `provides` 字段已废除，apply 期 `provide` 动态登记） | 反射 `reflect` 全量协议（`inject`/`provide`/`get`/`set`/`isolate`/`intercept` + `ctx.<name>` 属性代理） |
 | 工具体执行体直接 `await`（async 契约）；同步工具函数经 `_maybe_await` 解包；阻塞调用以 `asyncio.to_thread` 显式放行（第 12 章） | `isConcurrencySafe` 并行池 + 串行屏障 |
 | LLM 流式 async 契约 + httpx 异步 SSE 传输（abort 置位即关闭连接，真取消；per-read idle 300s 对齐上游） | `fetch` + AbortSignal 原生异步流 |
-| 同步门面（`followup`/`steer` 无 driver 时经 `asyncio.run` 瞬态事件循环驱动） | 常驻单事件循环 |
+ | 同步门面经进程级常驻单事件循环驱动（`core/agent_loop/resident_loop.py` 懒加载单例；主线程 Ctrl+C 协作取消） | 常驻单事件循环（Node 进程固有） |
 | JSON/YAML 配置 + 补丁（pyyaml 可选，缺省退化 JSON；`!!js` 仅 `process.env.<NAME>` 子集） | YAML cordis.yml（同样的 id/insert/replace 语义） |
 | LLM 失败以异常抛出（finish 带内 `{kind:'error'|'aborted'}` 与异常同走 `agent/request-error` waterfall） | `LlmError` 编码 `CONTEXT_WINDOW_EXCEEDED` / `EMPTY_RESPONSE`（可重试）等 |
 | `agent/turn-stopping`、`system-prompt/assemble` waterfall 已实现（turn-stopping 为串行终点检查点，见第 4/13 章） | 上游都有 |

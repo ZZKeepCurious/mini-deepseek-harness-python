@@ -13,7 +13,7 @@
     - **loop 片段**：本章 `loop.py` 的 `_append` 方法、字符串 reason、扁平 `assistant/message` 形态均已过时；实现是 ContentBlock 消息对象 + 显式编号 + `request/header` 事件 + 每 chunk 落 `assistant/chunk`（`core/agent_loop/agent.py`）。
     - **重试接线**：真实调用入口必须挂载 `apply_retry_planner`（`llm/retry.py:196`），否则 `agent/request-error` 瀑布不生效（本章 §4.11 真实 API 示例未调用，已修正纪律见 AGENTS.md）。
     - **时序图**：完整时序含 `request/header` 事件与逐 chunk `assistant/chunk` 落盘（见 `core/agent_loop/agent.py` 的 requestHeaderLogged 语义）。
-    - **stream 契约已 async 化**（2026-08-18 asyncio 化重构 + httpx 传输）：实现签名为 `async def stream(self, messages, tools, signal=None)` 异步迭代（`llm/protocol.py`，httpx 原生 asyncio 传输，abort 置位即关闭连接、`_aiter_raced` 竞速抛 `StreamAborted`）；agent 循环为单一 async 驱动 + `followup`/`steer` 同步门面（无 driver 时经 `asyncio.run` 瞬态事件循环）；本章的同步 `def stream` 与同步泵形态已过时。
+    - **stream 契约已 async 化**（2026-08-18 asyncio 化重构 + httpx 传输）：实现签名为 `async def stream(self, messages, tools, signal=None)` 异步迭代（`llm/protocol.py`，httpx 原生 asyncio 传输，abort 置位即关闭连接、`_aiter_raced` 竞速抛 `StreamAborted`）；agent 循环为单一 async 驱动 + `followup`/`steer` 同步门面（经进程级常驻单事件循环驱动，`core/agent_loop/resident_loop.py`）；本章的同步 `def stream` 与同步泵形态已过时。
 
 ## 4.1 这一章要做什么
 
@@ -458,18 +458,29 @@ loop 前调用 `apply_retry_planner(ctx)`（幂等，可重复调用）。
 **恢复决策**（`llm/retry.py`，对齐 llm-retry/index.ts）：
 
 1. 策略 `undefined` → 直接委派（不重试）
-2. `always`：先委派下游——下游给出 retry 决策即采用；失败/未接管则自己无限重试（不判 code）
+2. `always`：派发前检查熔合信号——已中止则失败终局；先委派下游——下游给出 retry
+   决策后**复查熔合信号，中止胜过决策**；下游监听器抛错经 `logger.warn` 容错、
+   按未接管处理；失败/未接管/被中止压制后自己无限重试（不判 code）
 3. `normal`：code 不在白名单 → 委派；同 turn/step/provider/policyKey 的 `llm/retry`
    计数 ≥ `maxRetries` → 委派（放弃）
-4. 每次重试前先落 `llm/retry`（durable，含策略细节/`retryId`/序数/`delayMs`/failure 快照），
-   可取消等待结束后落 `llm/retry-started` 并返回 `{kind:'retry'}`；`retryId` 同一对全程复用
+4. **派发前检查熔合信号**：请求 signal 与重试插件 lifetime 任一已中止 → 连
+   `llm/retry` 都不落、直接委派（上游 backoff 首行检查语义）；否则先落
+   `llm/retry`（durable，含策略细节/`retryId`/序数/`delayMs`/failure 快照），
+   可取消等待结束后落 `llm/retry-started` 并返回 `{kind:'retry'}`；`retryId`
+   同一对全程复用
 5. 延迟决议：`providerRetryAfterMs`（429 的 `Retry-After`，纯数字秒 ×1000 或 HTTP-date）
    有效时优先——超过 `maxDelayMs` 则 normal 放弃 / always 改用本地延迟；否则本地退避
    `min(initial × 2^min(retry-1, 1024), max) × (1 - ratio + 2×ratio×rand)` 再封顶 `maxDelayMs`
-6. 可取消：等待为事件驱动 `asyncio.wait`（`signal.event` 置位即醒；无 `.event` 的
-   信号回退分片轮询 `signal.aborted`——mini 无真实 AbortSignal，取消为协作式
-   `asyncio.Event`，loop 的 `_AbortProxy` 暴露 `.aborted`/`.event`）；normal 分支
-   不在派发前检查 abort——`llm/retry` 仍落、等待立即放弃、不落 started（与上游一致）
+6. 可取消：等待为事件驱动多信号竞速 `asyncio.wait`（等价上游
+   `AbortSignal.any([signal, lifetime.signal])`——请求 signal 是 loop 每 phase 新建的
+   取消 Event（`agent.ts:325` 每 phase 新建 AbortController 的载体对应），lifetime 是
+   重试插件自身的生命周期信号；任一 `.event` 置位即醒；无 `.event` 的裸测试替身信号
+   回退分片轮询 `.aborted`）；normal 分支同样在派发前检查 abort（与上游一致）
+
+**生命周期与拆解**：重试插件经 `ctx.on("agent/request-error", ...)` 挂载监听器，
+并登记 effect teardown（label `'llm-retry: abort and drain active recovery'`）：
+拆解时注销监听器 + lifetime.abort + 排干在途恢复（`gather(..., return_exceptions=True)`
+对齐 allSettled）。已拆解后的迟到回调命中陈旧守卫直接返回（不再进入下游策略）。
 
 **接线语义**：重试是同 step 内重新发起模型请求——`messages` 不变（失败 attempt
 不产生任何消息事件，`derive_messages` 不受 `llm/retry` 影响）、`request/header`
@@ -486,8 +497,9 @@ loop 前调用 `apply_retry_planner(ctx)`（幂等，可重复调用）。
 `maxOverflowRetries`，成功响应/回合结束边界复位。既无压缩也无接管 → 终局
 `turn/end` reason 为 `{kind:'error'}`。
 
-验证：`python -m unittest tests.test_retry -v`（36 项：策略解析、退避边界、
-Retry-After 解析、全部 recover 分支、loop 集成——重试成功/耗尽终局/非白名单终局）；
+验证：`python -m unittest tests.test_retry -v`（51 项：策略解析、退避边界、
+Retry-After 解析、全部 recover 分支、lifetime 信号与竞速等待、插件 teardown
+排干/陈旧守卫、loop 集成——重试成功/耗尽终局/非白名单终局）；
 压缩/溢出见 `tests/test_compaction.py`。
 
 ## 4.9 收尾

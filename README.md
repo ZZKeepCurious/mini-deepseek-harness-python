@@ -28,9 +28,9 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 | Plugin event bus (emit / waterfall / parallel / serial, scopes, dependency-driven activation, epoch reload via HMR service + `watch_user_patches`) | `vendor/cordis` + `vendor/hmr` + `core/scope` + `core/hmr` |
 | Config schema engine (full schemastery port: 17 resolvers, meta clone, toString/toJSON/i18n/simplify, `~standard` protocol face) | `vendor/schemastery/src/index.ts` |
 | Tool registry + execution pipeline (schema validation, pre/execute/post, timeout) | `packages/core/tools` |
-| Agent loop (async-driven turn/step state machine with sync facade, pre-step rejection, tool-feedback continuation) | `core/agent-loop` |
+| Agent loop (async-driven turn/step state machine, sync facade driven by a process-wide resident event loop, pre-step rejection, tool-feedback continuation) | `core/agent-loop` |
 | LLM seam (async `stream(messages, tools, signal)` contract, fake adapter, official DeepSeek SSE adapter over `httpx` async streaming, four-level `reasoning_effort`) | `llm/llm` + `llm/llm-deepseek` |
-| Model request retry / backoff (normal/always policy, `agent/request-error`, `llm/retry` audit pair, event-driven cancellable wait) | `llm/llm-retry` + `llm/llm/src/retry-policy.ts` |
+| Model request retry / backoff (normal/always policy, `agent/request-error`, `llm/retry` audit pair, fused-signal pre-dispatch check, event-driven multi-signal race cancellable wait, plugin teardown draining in-flight recoveries) | `llm/llm-retry` + `llm/llm/src/retry-policy.ts` |
 | Token metering (incremental fold, usage anchor, 4 chars/token heuristic) | `llm/token-meter` |
 | Context compaction (pre-step pressure + `CONTEXT_WINDOW_EXCEEDED` recovery, surface-replace checkpoint transaction, optional tool-result pruner stage) | `compaction/compaction-basic` + `compaction-tool-result-pruner` |
 | Background jobs (`job_output`/`job_list`/`job_kill`, completion notices, per-owner cap; no `job/*` session events) | `packages/jobs` (jobs-local + tool-jobs) |
@@ -45,7 +45,7 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 | Launcher options (`--patch`, `--dump-config` / `--dump-default-config`, read-only composition dump) | `apps/cli/src/args.ts` |
 | Session management CLI (`miniharness sessions` list/resume/delete; mini teaching extension) | web surface (upstream) |
 | Session store service (`ctx.sessions`: create/prepare/enter/announce lifecycle, fork with 5 error codes, flush checkpoint, `session/created|disposed|event|flush` events) | `packages/core/session` (SessionStore) |
-| Capability seams (sandbox backends / credential layers / subagent ACP+SDK+fork channels) | capability seams docs |
+| Capability seams (sandbox backends + policy service + bash consumer executor (`ctx.sandboxPolicy` resolution / `sandbox/mode` log override / `ctx.shell` confined wrap with three-way attribution) / credential layers / subagent ACP+SDK+fork channels) | capability seams docs |
 | Continuable subagents (`start_continuable`/`send_message` (with initial prompt), durable child session + cold resume, settlement delivery, async event-driven A8 (submit-and-return + watchSettlement + steer batch merge + ownership bookkeeping waiting/settled), lifecycle events `subagent/start`/`subagent/end` (runId-paired + epochStopReason/foldConsumedWork outcome folding + scoped dispatch via the delegating parent's scope carrier), named provider registry (`register_provider` → `subagent/provider-removed` edge on dispose), DRAINING admission cutoff (`drain`/`drain_descendants` + `assert_admitting`, verbatim refusal wording), interrupt authority matrix (user/ancestor authority + absent-target no-op), nested delegation (exec.agent as authorization subject, grandchild settlement notices to the direct parent), model-side delegation tool `subagent` (verbatim descriptions, canonical value + `Tool.render`, `run_in_background` routing), `send_message`/`interrupt_agent`/`list_agents` control tools) | `packages/subagent` (subagent + subagent-in-process-driver + tool-subagent-control + tool-subagent-report) |
 | Presets / agent intervention / trajectory / dynamic plugins / approval | `packages/preset` + `core/agent` + `interaction` |
 | Protocol entries (ACP / JSON-RPC SDK / hooks bridge) | `acp` + `sdk` + `hooks` |
@@ -135,6 +135,7 @@ mini-deepseek-harness-python/
 │   │   └── session_cmds.py  # session list / resume / delete
 │   ├── protocol/            # acp / sdk / hooks bridges
 │   ├── seams/               # sandbox / credentials / subagent seams
+│   ├── shell/               # ctx.shell bash executor family (local + sandboxed)
 │   ├── web/                 # apiproxy subset: envelope / api / streams / approvals / server / frontend / launcher
 │   ├── web/static/          # vanilla SPA browser frontend (index.html / app.js / style.css)
 │   ├── preset/  extensions/  interaction/  client/

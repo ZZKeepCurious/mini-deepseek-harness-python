@@ -83,7 +83,7 @@ assert passthrough.run("echo ok") == "ok"
 
 注意 `ReadOnlySandbox` 的"失败即拒"（deny on failure）：检测到写操作标志直接抛错，而不是"试试看能不能写"。dsh 的真实约定也是如此——无法确认安全就拒绝执行。
 
-> 真实 dsh：`sandbox-local` 用 bwrap / Landlock / Seatbelt / Windows ACL 后端；`native/landlock-run` 是 Node 插件。失败即拒是共同约定。
+> 真实 dsh：`sandbox-local` 用 bwrap / Landlock / Seatbelt / Windows ACL 后端；`native/landlock-run` 是独立发布的原生 launcher（C 源码包）。失败即拒是共同约定。
 
 ## 6.4 扩展口 2：凭据（Credentials）
 
@@ -170,7 +170,30 @@ python -m unittest tests.test_seams -v
 
 基础三件套讲清"换 Provider 不改 Consumer"；进阶三件把每个接缝推向与 dsh 对齐的形态（产出：`miniharness/seams/sandbox_local.py` + `credentials_local.py` + `subagent/providers.py` + `subagent/worker.py`，`tests/test_stage6.py` 49 测试）。
 
-**沙箱真后端**（`sandbox_local.py`，对应上游 `sandbox/sandbox-local`）：按平台选链（linux `bwrap → landlock`、darwin `seatbelt`、win32 `windows-acl`），多候选由功能探测仲裁、单候选免探测；候选全不可用 → `SandboxUnavailableError`（`SANDBOX_UNAVAILABLE`）fail closed，命令绝不裸跑。`confine(argv, policy)` 返回 `ConfinedArgv`：包裹后的 argv + `enforcement`（full/partial）+ 该后端专属的 denial 方言与 runner 失败规则——"命令没跑起来"与"被沙箱拦住"可区分。三个 profile 生成器与上游 `profiles.ts` 逐条对齐（bwrap 挂载、landlock grant、seatbelt SBPL 剖面，可写根与进程内 fs fence 共用 `writable_roots` 同一推导）。Windows 宿主机上 windows-acl runner 缺省探测恒失败（fail-closed 与真实宿主一致）；约定测试经 `internals` 注入钩子验证各链选择、探测仲裁与包裹形状（同上游 `SandboxInternals` 思路）。
+**沙箱真后端**（`sandbox_local.py` + `landlock_run.py`，对应上游 `sandbox/sandbox-local` 与 `native/landlock-run`）：按平台选链（linux `bwrap → landlock`、darwin `seatbelt`、win32 `windows-acl`），多候选由功能探测仲裁、单候选免探测；候选全不可用 → `SandboxUnavailableError`（`SANDBOX_UNAVAILABLE`）fail closed，命令绝不裸跑。`confine(argv, policy)` 返回 `ConfinedArgv`：包裹后的 argv + `enforcement`（full/partial）+ 该后端专属的 denial 方言与 runner 失败规则——"命令没跑起来"与"被沙箱拦住"可区分。三个 profile 生成器与上游 `profiles.ts` 逐条对齐（bwrap 挂载、landlock grant、seatbelt SBPL 剖面，可写根与进程内 fs fence 共用 `writable_roots` 同一推导）。landlock 梯队由 `seams/landlock_run.py` ctypes 自限制执行器真执行：上游 `native/landlock-run` 是 C11 launcher 二进制，mini 以 `python -m miniharness.seams.landlock_run` 复刻同一 CLI 契约（`--ro/--rw/--/--probe`、launcher 失败 exit 125 绝不 exec、probe 报告行逐字一致），内核侧走 Landlock UAPI（ABI 协商 → PATH_BENEATH 规则 → `PR_SET_NO_NEW_PRIVS` → `restrict_self` → `execvp`；full ⟺ 内核 ABI ≥ 5，否则 partial 但仍受限；非 Linux 宿主干净退出 125）。
+
+**windows-acl 真后端**（`seams/sandbox_windows_acl/`，对应上游 `sandbox/sandbox-windows-acl` 的进程内 koffi FFI）：ctypes 直调 Win32 三件——`CreateRestrictedToken` 铸 `WRITE_RESTRICTED` 受限令牌，`SetEntriesInAclW` + `SetNamedSecurityInfoW` 把能力 SID 的可写 ACE 物化到授权目录（workspace 常驻、会话私有 temp 可撤销），`CreateProcessAsUserW` 在该令牌下 spawn 子进程。runner 以 `python -m miniharness.seams.sandbox_windows_acl.runner --workspace <dir> --temp <dir> --mode <m> [--write-sid … --temp-write-sid …] -- <argv>` 包裹命令，自身任何失败打印 `windows-acl-run: <detail>` 并 exit 127——消费者靠「127 + fatal 行」双条件区分"没跑起来"与"跑起来后被拒"。约定测试经 `internals` 注入钩子验证链选择与包裹形状；真内核行为由门控 e2e（`MINIHARNESS_INTEGRATION_WINDOWS_ACL=1`）覆盖。
+
+理解这个后端只需要一块内核知识：**受限令牌的两遍求值**。
+
+1. `CreateRestrictedToken(..., WRITE_RESTRICTED)` 产生一个派生令牌：常规组保持原样，额外携带一张**限制列表**。mini 放进三个 SID：本次登录会话的 logon SID、Everyone、以及一个凭空合成的能力 SID（形如 `S-1-4-<hash>`，不对应任何账号）。
+2. 内核对每次访问对同一 DACL 做两遍求值：第一遍以常规组为主体，第二遍以限制列表为主体。**写类访问必须两遍全部放行**；读/执行类只看第一遍。这就是"WRITE_RESTRICTED 只限写"的全部机制。
+3. 能力 SID 的唯一用途就是在第二遍求值中匹配我们授予的 allow ACE——"给目录授能力 SID 写 ACE"即"把目录加入该子进程的白名单"，撤销 ACE 即收回授权。合成 SID 在第二遍完全有效，不需要是真实的组或账号。
+4. 反直觉推论一：**OWNER RIGHTS ACE（S-1-3-4）对受限进程无效**。文件属主自己的非受限令牌能借它拿到全权，但两遍求值都不会把它算给受限主体。
+5. 反直觉推论二：**目录怎么生出来，与授什么 ACE 同等重要**。DACL 里若没有任何一条能让"常规组"过第一遍的 ACE，第二遍再完美也白搭。
+
+用同一受限令牌对不同 DACL 跑 `AccessCheck`，矩阵一目了然（目标位 `FILE_GENERIC_WRITE`，限制列表 `[logon, Everyone, CAP_B]`）：
+
+| 目录 DACL | 非受限令牌 | 受限令牌 |
+|---|---|---|
+| 仅 `CAP_B:(F)` | 拒 | 拒 |
+| `CAP_B` + 用户 SID `:(F)` | 过 | 过 |
+| `CAP_B` + Everyone `:(F)` | 过 | 过 |
+| `CAP_B` + OwnerRights `:(F)` | 过 | **拒** |
+
+"仅 CAP_B 连非受限都被拒"正是第 5 条：这个 DACL 里没有用户侧的第一遍通路。而 CPython 恰好有个坑踩在这里——`tempfile.mkdtemp(0o700)` 会显式构造安全描述符（SYSTEM/Administrators/**OWNER RIGHTS** 三条，唯独没有用户自己的 ACE），于是用它创建的沙箱目录永远过不了第一遍；上游 node 的 `fs.mkdtempSync` 不构造描述符、纯继承父目录 DACL，%TEMP% 链路自带的 `user:(I)(F)` 天然喂饱第一遍。所以 mini 的 runner 私有 temp 与 provider 会话 temp 都用继承式 `os.mkdir` 创建。Everyone 与 logon SID 同时出现在两个列表里，一条 `Everyone:(F)` 能同时喂饱两遍——这正是上游文档标注 enforcement=partial（Everyone 边界）的由来。这条经验超出本例：在 Windows 上做沙箱或临时目录，先问"DACL 从哪继承"，再谈授什么 ACE。
+
+**沙箱策略服务 + bash 消费者**（`seams/sandbox_policy.py` + `shell/`，对应上游 `sandbox/sandbox-policy`、`session-mode.ts` 与 `shell/bash-sandbox`）：策略与强制分属两个服务——ctx.sandboxPolicy 是唯一的共享策略家（Config `{mode: 缺省 read-only, workspaceRoot}` fail-loud 校验；`resolve()` 决议完整策略：显式 mode > 会话日志最后一条 `sandbox/mode` > 部署缺省；workspace 根先 canonical 后词法规范化，会话 cwd 即 workspace-write 边界），ctx.sandbox 把模式物化为 runner argv。会话覆盖以会话日志为存储：`set_sandbox_mode` 追加恰一条 `sandbox/mode` log-only 事件，`effective_sandbox_mode` 纯 fold 逆序取最后——切换即事件本身，重放即状态。三档策略文案经 systemPrompt `.context('sandbox:policy', order=110)` 进模型可见上下文（呈现面是 render_context_snapshot 快照）。消费者在 `shell/` 层：`bash_local.py` 是 ctx.shell 缺省 provider（前台 `bash -c` 直跑），`bash_sandbox.py` 子类每次调用把精确 argv 经 confine 包裹后 spawn 并报告 `{mode, denied, enforcement}`；三路归因对齐上游 helpers.ts——runner 启动失败（ENOENT/EACCES 且错误路径恰为 argv[0]、cwd 可用性独立校验）与 runner 失败规则命中抛 `SandboxUnavailableError` 且优先于 denial，denial = 非零退出 + stderr 大小写不敏感签名命中（普通非零退出仍是正常结算）；danger-full-access 直通不包裹。工具面（`cli/default_tools.py`）检测到 ctx.shell 时把教学 stub 换成真执行器，逐调用以调用方会话决议策略；headless 入口 `run_headless(..., sandbox=配置)` 一键装配全栈。已知简化：mini 尚无 loop 侧 runtime-context 投影（快照有呈现面但未注入对话）、后台进程机制未复现。
 
 **凭据四层**（`credentials_local.py`，对应上游 `credentials-local`）：`env > file > project-env > user-env` 按信任度排序——继承环境只读胜出（CI secret / `-e` 是显式意图且进程内不可编辑）、管理文件层可写（`set`/`unset` 读-改-写补丁单键，外部编辑合并、删掉的条目不残留）、project `.env` 优先于 user `.env`。文档解析严格：非映射根 / 非 POSIX 标识符 key / 非字符串 / 空串值整体拒绝，绝不静默跳过；`describe` 报告 `{configured, source, writable}`（只有 env 层不可写）；env 已提供时 `set`/`unset` 拒绝（写了也被遮蔽成无效果）；POSIX 上组/其他可读的文档读前直接拒绝（Windows 无 mode 可查则跳过）。载体简化：文档用 JSON 替代 YAML（解析语义不变），无跨进程锁与文件 watch。
 
