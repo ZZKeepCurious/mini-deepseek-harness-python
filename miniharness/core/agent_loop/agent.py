@@ -43,10 +43,11 @@ DEFAULT_MAX_STEPS = 50
 
 from ..dsh_scope import scope_target
 from ..scope import Context
-from ..system_prompt import render_prompt
+from ..system_prompt import join_context_sections, render_context_sections, render_prompt
 from ...llm import BlockAssembler, LlmAdapter, LlmFailure, StreamAborted
 from .inbox import Inbox
 from .resident_loop import run_on_resident
+from .runtime_context import RuntimeContextProjection
 from .tool_calls import schedule_tool_calls
 from ..session import (
     Session,
@@ -194,6 +195,9 @@ class AgentLoop:
         # 仅下次唤醒 send（followup/steer 清 _parked）恢复（上游"waking send
         # resumes the parked queue"）
         self._parked = False
+        # P2-19：loop 侧 runtime-context 投影（上游 agent.ts 构造里
+        # new RuntimeContextProjection(ctx, session)）——懒建于首次投影
+        self._rt_projection: RuntimeContextProjection | None = None
 
     def publish(self, source: str = "startup") -> "AgentLoop":
         """把本 agent 发布为运行态（上游 prepare().publish()，index.ts:556-570）：
@@ -632,8 +636,30 @@ class AgentLoop:
             if self._turn_open:
                 self._close_turn(self._turn_end)
 
+    def _project_runtime_context(self) -> dict | None:
+        """P2-19：运行时上下文投影（上游 preStep 的 assemble →
+        renderContextSections → project 段，agent.ts:225-234）。组装
+        systemPrompt 服务的 contexts 渲染为节列表，经投影去重后铸快照
+        user 消息；无 systemPrompt 服务时返回 None（行为与未装服务的历史
+        路径完全一致）。"""
+        service = self.ctx.get("systemPrompt")
+        if service is None:
+            return None
+        assembly = service.assemble({"agent": self, "session": self.session})
+        sections = render_context_sections(assembly)
+        if self._rt_projection is None:
+            self._rt_projection = RuntimeContextProjection(self.session)
+        return self._rt_projection.project(join_context_sections(sections), sections)
+
     async def _run_step_async(self, claimed: list[dict]) -> dict | None:
-        """async step：pre-step 走 awaterfall，工具走并行调度器。"""
+        """async step：pre-step 走 awaterfall，工具走并行调度器。
+
+        P2-19：pre-step waterfall 前先投影 runtime-context（上游同序）；
+        默认进入的 messages = claimed + 快照消息（上游 default enter 工厂）；
+        监听器显式返回 {kind:'enter', messages:[...]} 时整体替换、不追加
+        （上游监听器决策同样完全接管 messages）。
+        """
+        context_message = self._project_runtime_context()
         decision = await self.ctx.awaterfall("agent/pre-step", {
             "messages": claimed,
             "agent": self,
@@ -644,10 +670,13 @@ class AgentLoop:
             self._turn_end = {"kind": "blocked"}
             return {"kind": "blocked"}
         messages = []
+        explicit_enter = isinstance(decision, dict) and decision.get("kind") == "enter"
         if isinstance(decision, dict):
             candidate = decision.get("messages")
             if isinstance(candidate, list):
                 messages = candidate
+        if context_message is not None and not explicit_enter:
+            messages = [*messages, context_message]
 
         self._step += 1
         self._continue = False

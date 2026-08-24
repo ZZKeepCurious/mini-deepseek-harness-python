@@ -10,16 +10,16 @@
 
 代码目录镜像上游的包族结构（`packages/` 下的 `core/`、`llm/`、`boot/`、`sandbox/`……），镜像到**家族粒度**（两级子包），不镜像到每个包，也不按主题平铺：
 
-- 家族级镜像：10 个左右的子包，维护成本低，"去哪个目录找什么"与上游一致；
+- 家族级镜像：约 20 个子包，维护成本低，"去哪个目录找什么"与上游一致；
 - 文件级镜像：只做契约密集处（session、llm、agent-loop），这几处上游"一个文件一个职责"本身就是知识点；
-- 为什么不是 1:1 镜像全部 50 多个包？Python 一个仓库拆 50 个目录，光 `__init__.py` 就有 50 个，对教学项目是过度工程；
+- 为什么不是 1:1 镜像全部近 50 个包？Python 一个仓库拆 50 个目录，光 `__init__.py` 就有 50 个，对教学项目是过度工程；
 - 为什么不是主题平铺？平铺表达不了模块边界：无法声明"哪些是契约、哪些是实现细节"，依赖方向无法用测试约束，环压力只能靠延迟导入绕。
 
 ### 1.2 目录树
 
 ```
 miniharness/
-├── __init__.py            # 教学面再导出，只含契约层（__all__ == 28，见 §6）
+├── __init__.py            # 教学面再导出，只含契约层（__all__ == 28，见 §4）
 ├── core/                  # packages/core
 │   ├── session/           # Session 本体 + types/invariant/json/message/repair/surface，__init__.py 聚合
 │   │   │                  #   message.py 上游在 llm/llm/src/message.ts，mini 保留会话域（L0 不依赖 llm，简化标注）
@@ -28,9 +28,10 @@ miniharness/
 │   ├── scope.py           # Context + RegistryService（vendor/cordis 语义）
 │   ├── dsh_scope.py       # dsh-scope 原语（scopeParents 图 + scopeTarget 载波 + createScope，对齐 packages/core/scope）
 │   ├── hmr.py             # Cordis HMR 服务（vendor/hmr：register_config watch + 单飞刷新 + config-update-failed 外泄）
-│   ├── tools.py           # 工具注册表 + 执行管线
+│   ├── schema.py           # schemastery 配置引擎全量移植（vendor/schemastery）
+│   ├── tools.py            # 工具注册表 + 执行管线
 │   ├── system_prompt.py   # SystemPromptService（分节渲染，systemPrompt 服务）
-│   └── agent_loop/        # agent.py（turn/step 状态机）+ resident_loop.py（常驻单循环）+ tool_calls.py（并行调度）
+│   └── agent_loop/        # agent.py（turn/step 状态机）+ resident_loop.py（常驻单循环）+ tool_calls.py（并行调度）+ inbox.py（双队列收件箱）
 ├── llm/                   # packages/llm
 │   ├── protocol.py        # StreamChunk / LlmAdapter / LlmFailure / BlockAssembler（协议层）
 │   ├── deepseek.py        # DeepSeek wire 序列化 + SSE 适配器
@@ -47,6 +48,7 @@ miniharness/
 │   ├── config.py          # 压缩规格解析（threshold / retain / retries）
 │   ├── region.py          # selectCompactableRange + 压缩事务（surface replace 检查点）
 │   ├── summarizer.py      # 前缀重放摘要 + 检查点框架
+│   ├── tool_result_pruner.py # 可选 tool-result 裁剪阶段（ctx.toolResultPruner 消费者）
 │   └── engine.py          # BasicCompactionEngine（pre-step 压力 / request-error overflow 接线）
 ├── jobs/                  # packages/jobs（seam + jobs-local + tool-jobs）
 │   ├── types.py           # 终态 / 常量 / JobDoneBox（done 的 Promise 替身）
@@ -89,12 +91,14 @@ miniharness/
 │   ├── acp.py             # ACP 服务器子集
 │   ├── sdk.py             # JSON-RPC 信封 + 最小运行服务
 │   └── hooks.py           # hooks 桥（CC 配置 → 拦截决策）
-├── seams/                 # packages/{sandbox, credentials, subagent}
+├── seams/                 # packages/{sandbox, credentials, subprocess, subagent}
 │   ├── sandbox_local.py   # 真沙箱后端（平台链探测 / 失败即拒绝）
 │   ├── sandbox_policy.py  # 沙箱策略服务（部署缺省 + 会话日志覆盖决议）
 │   ├── landlock_run.py    # Landlock 自限制执行器（native/landlock-run 的 ctypes 载体）
+│   ├── sandbox_windows_acl/ # Windows ACL 写限制沙箱（ctypes FFI 物化上游 windows-acl-restrict-poc；非 win32 import 即抛 OSError）
 │   ├── credentials_local.py # 凭据四层
-│   └── subagent/          # 协议面 __init__ + providers.py（三通道）+ worker.py（子进程）
+│   ├── subprocess_env.py  # 子进程环境清洗切片（凭据形 + DSH_* 名剔除，packages/subprocess）
+│   └── subagent/          # __init__ + descriptor + providers（三通道）+ worker（子进程）+ continuation（续跑管理）+ tool（模型侧委托工具）
 ├── shell/                 # packages/shell/{shell, bash-local, bash-sandbox}
 │   ├── bash_local.py      # 本地 bash 执行器（ctx.shell 缺省 provider）
 │   ├── bash_sandbox.py    # 沙箱消费执行器（confine 包裹 + 三路归因）
@@ -105,6 +109,10 @@ miniharness/
 │   ├── envelope.py        # 四象限 RPC 信封 + 39 码错误集（rpc.ts）
 │   ├── api.py             # WebApi 会话服务（unary 方法 + 路由表）
 │   ├── streams.py         # StreamHub（mux/host 事件流 + session/queue 快照重投影）
+│   ├── approvals.py       # 审批桥（tools/ask 问询 ↔ mux 帧 + /api/respond 回执）
+│   ├── downloads.py       # GET /api/session.export 会话日志导出（zip 打包 root + 后代 + 媒体）
+│   ├── frontend.py        # 静态服务契约（遍历 403 / SPA 回退 200 / MIME）
+│   ├── static/            # vanilla SPA 浏览器前端（index.html / app.js / style.css，无构建步）
 │   ├── server.py          # FastAPI 传输层（SSE + POST 载体状态码，handler.ts）
 │   └── launcher.py        # web profile 启动器（build_app / run_web）
 ├── demo.py                # 端到端演示（教学入口，python -m miniharness.demo）
@@ -127,17 +135,18 @@ miniharness/
 | `core/session/`（session + types/invariant/json/message/repair/surface，共 7 文件） | `packages/core/session/src/`（types/invariant/json/repair/surface 等 10 文件，index.ts 聚合）+ `packages/llm/llm/src/message.ts` | message 构造保留在会话域（L0 不依赖 llm，简化标注） |
 | `core/session/persistence.py` | `packages/session/session-persistence-{jsonl,sqlite}` | 上游是独立包组，mini 并入会话域（简化标注）；目录布局对齐上游 `session-persistence-jsonl/src/format.ts`（`root/<encodeSegment(cwd)>/<encodeSegment(id)>/session.jsonl`，cwd 缺省退化单层；zstd 未实现，恒明文 `.jsonl`）；崩溃修复 closers 经 `commit_repair` 落盘（截断 torn 尾 + 追加 closers + fsync，对齐上游 commitRepair） |
 | `core/session_store.py` | `packages/core/session/src/index.ts`（SessionStore 部分） | 内存会话服务：create/prepare/enter/announce 生命周期 + get/list/fork（五错误码）+ flush 检查点 + `session/created|disposed|event|flush` 四事件；create 对齐上游 generator effect（enter 先 yield、announce 抛错自动回滚）；事件派发经 scope_target 载波（carrier=scope_target(session, scope_of(owner_ctx or self.ctx))，对齐上游 enter 的 scopeTarget(session, scopeOf(store.ctx))）；无 typert lookup、flush 为同步近似（简化标注见模块 docstring） |
-| `core/scope.py` | `vendor/cordis` + `packages/core/scope` | Context（服务仓库 + 事件总线 + 四种派发 + asyncio 变体）+ fiber 生命周期（2026-08-20 对齐 fiber.ts：状态机 PENDING/LOADING/ACTIVE/FAILED/UNLOADING/DISPOSED + `internal/status`；`effect(execute, label)` 上游形态——execute 立即执行、返回值按 None/callable/awaitable/生成器收集为 disposer；单发 + 可 await；注册先于执行 + setup barrier 重入保护；dispose 幂等 join 在途；同步立即逆序、异步并发 unload、错误 contained；装载半边 + 注册表——`RegistryService`（`ctx.plugin` 缩写 + 插件形态归一 + 运行记录按 callback 键控）、fiber 携带 inject 依赖 + epoch 重载（依赖变化卸载→重装）、`restart()`/`update()`（`internal/update` waterfall）、`internal/config` waterfall + schema 校验（`resolve_config`，`core/schema.py`）、`internal/plugin` 每次装载/卸载派发）+ `create_scope` fiber-backed 作用域（父拆解收回子 fiber）+ 服务仓库（reflect.ts 对齐：按隔离标签键控的全局 store，`ctx.get` strict 缺省返回 None，`ctx.isolate(name)` 换标签，per-agent 的 tools/systemPrompt 经隔离不冲撞 root realm，重复提供同一标签 fail loud）；Phase 3（2026-08-20）追加：`Service` 基类（service.ts 对齐：构造即经 `ctx.provide` 自动登记、随 fiber 注销、`_invoke` 可调用、`_check`/`_init`）、`ctx.extend(meta)`/`ctx.intercept(name, config)`（intercept 配置经 `Service._resolve_config` 沿祖先链近根优先合并）、内建 `LoggerService`（logger.ts 对齐：`ctx.logger(name)` 铸具名 Logger 门面 + printf 格式 + exporter 注册/级别过滤/默认缓冲导出器，`ctx.logger` 属性为绑定访问方 ctx 的视图）；Phase 4（2026-08-20）对齐 dsh-scope：事件派发模型改上游形态——`on` 双写 root `_flat_hooks`（全局 Hook 表）+ 祖先链 `_listeners`，dispatch 系加 `this_arg` 载波参数（有载波走扁平表按载波键过滤，无载波保留祖先链）；`create_scope` 返回 Scope 包装 + 自动绑父 scope；`scope_key` = `scope_of(self)`（scopeParents 图）；残余简化标注见模块 docstring |
-| `core/schema.py` | `vendor/schemastery/src/index.ts`（902 行单文件） | schemastery 引擎全量移植（2026-08-22）：可调用 Schema 节点 + `resolve` 分发 + 17 类 resolver（any/never/const/string/number/boolean/function/is/bitset/array/dict/tuple/object/union/intersect/transform/lazy + date/regExp/arrayBuffer 复合体）+ meta 克隆语义 + from/extend + ValidationError(`$path` 前缀) + Options(autofix/ignore/path/strict) + toString 全 formatter + toJSON(uid+refs 共享序列化) + i18n(mergeDesc) + simplify(deepEqual dict-aware)；`S.from_/is_/reg_exp/array_buffer` 等 pythonic 命名（上游名映射进 docstring）；cordis fiber 适配层（`resolve_config`/`ValidationError` 聚合消息）保留文件尾部；L0 叶零内部依赖，cosmokit 助手(deepEqual/isNullable/isPlainObject/clone/valueMap/pick/Binary)内联；callback 不做字符串求值、date/regExp/arrayBuffer 锚定 Python 对应物（载体差异标注） |
+| `core/scope.py` | `vendor/cordis` + `packages/core/scope` | Context（服务仓库 + 事件总线 + 四种派发 + asyncio 变体）+ fiber 生命周期（对齐 fiber.ts：状态机 PENDING/LOADING/ACTIVE/FAILED/UNLOADING/DISPOSED + `internal/status`；`effect(execute, label)` 上游形态——execute 立即执行、返回值按 None/callable/awaitable/生成器收集为 disposer；单发 + 可 await；注册先于执行 + setup barrier 重入保护；dispose 幂等 join 在途；同步立即逆序、异步并发 unload、错误 contained；装载半边 + 注册表——`RegistryService`（`ctx.plugin` 缩写 + 插件形态归一 + 运行记录按 callback 键控）、fiber 携带 inject 依赖 + epoch 重载（依赖变化卸载→重装）、`restart()`/`update()`（`internal/update` waterfall）、`internal/config` waterfall + schema 校验（`resolve_config`，`core/schema.py`）、`internal/plugin` 每次装载/卸载派发）+ `create_scope` fiber-backed 作用域（父拆解收回子 fiber）+ 服务仓库（reflect.ts 对齐：按隔离标签键控的全局 store，`ctx.get` strict 缺省返回 None，`ctx.isolate(name)` 换标签，per-agent 的 tools/systemPrompt 经隔离不冲撞 root realm，重复提供同一标签 fail loud）；另含 `Service` 基类（service.ts 对齐：构造即经 `ctx.provide` 自动登记、随 fiber 注销、`_invoke` 可调用、`_check`/`_init`）、`ctx.extend(meta)`/`ctx.intercept(name, config)`（intercept 配置经 `Service._resolve_config` 沿祖先链近根优先合并）、内建 `LoggerService`（logger.ts 对齐：`ctx.logger(name)` 铸具名 Logger 门面 + printf 格式 + exporter 注册/级别过滤/默认缓冲导出器，`ctx.logger` 属性为绑定访问方 ctx 的视图）；dsh-scope 对齐：事件派发模型改上游形态——`on` 双写 root `_flat_hooks`（全局 Hook 表）+ 祖先链 `_listeners`，dispatch 系加 `this_arg` 载波参数（有载波走扁平表按载波键过滤，无载波保留祖先链）；`create_scope` 返回 Scope 包装 + 自动绑父 scope；`scope_key` = `scope_of(self)`（scopeParents 图）；残余简化标注见模块 docstring |
+| `core/schema.py` | `vendor/schemastery/src/index.ts`（902 行单文件） | schemastery 引擎全量移植：可调用 Schema 节点 + `resolve` 分发 + 17 类 resolver（any/never/const/string/number/boolean/function/is/bitset/array/dict/tuple/object/union/intersect/transform/lazy + date/regExp/arrayBuffer 复合体）+ meta 克隆语义 + from/extend + ValidationError(`$path` 前缀) + Options(autofix/ignore/path/strict) + toString 全 formatter + toJSON(uid+refs 共享序列化) + i18n(mergeDesc) + simplify(deepEqual dict-aware)；`S.from_/is_/reg_exp/array_buffer` 等 pythonic 命名（上游名映射进 docstring）；cordis fiber 适配层（`resolve_config`/`ValidationError` 聚合消息）保留文件尾部；L0 叶零内部依赖，cosmokit 助手(deepEqual/isNullable/isPlainObject/clone/valueMap/pick/Binary)内联；callback 不做字符串求值、date/regExp/arrayBuffer 锚定 Python 对应物（载体差异标注） |
 | `core/dsh_scope.py` | `packages/core/scope/src/index.ts` + `store.ts` | dsh-scope 协议本尊（纯库，L0）：ScopeKey 弱引用身份键、scopeParents 图（bind/link/rebind + 环检测）、`scope_parent_of`/`scope_chain_of`（nearest-first）、`scope_target`/`_ScopeCarrier`/`is_scope_carrier`/`carrier_key_of`、`scope_of`（parent 链）、NamedEntries/AnonymousEntries/ScopedLayers 对齐 store.ts；`Context.create_scope` 返回 Scope 包装（delegation 包装，`__slots__` 无 `__dict__`） |
-| `core/hmr.py` | `vendor/hmr/src/index.ts` | Cordis HMR 服务（2026-08-23）：`Hmr(Service)` provide="hmr"；`register_config(filename, refresh)`——findWatchRoot walk-up 根定位（realpath+depth+缺盘拒绝）、重复注册拒绝、初扫已存在目标即刷（chokidar ignoreInitial=false 语义：缺文件无初扫）、disposer 注销+关 watcher+join 在飞刷新；`refresh_config(key)` 单飞+dirty 合并循环、失败 logger.warn + `hmr/config-update-failed` 并行事件外泄不毒化循环；销毁期注册归一 `CordisError(INACTIVE_EFFECT)`。载体 watchdog（上游 chokidar）；Node ESM 模块图热重载（ModuleLoader/externals/accepted）不适用 Python 载体；Windows 短路径两侧 normcase+realpath 归一 |
+| `core/hmr.py` | `vendor/hmr/src/index.ts` | Cordis HMR 服务：`Hmr(Service)` provide="hmr"；`register_config(filename, refresh)`——findWatchRoot walk-up 根定位（realpath+depth+缺盘拒绝）、重复注册拒绝、初扫已存在目标即刷（chokidar ignoreInitial=false 语义：缺文件无初扫）、disposer 注销+关 watcher+join 在飞刷新；`refresh_config(key)` 单飞+dirty 合并循环、失败 logger.warn + `hmr/config-update-failed` 并行事件外泄不毒化循环；销毁期注册归一 `CordisError(INACTIVE_EFFECT)`。载体 watchdog（上游 chokidar）；Node ESM 模块图热重载（ModuleLoader/externals/accepted）不适用 Python 载体；Windows 短路径两侧 normcase+realpath 归一 |
 | `core/tools.py` | `packages/core/tools` | 作用域化注册表（ScopedLayers/NamedEntries 存储：注册即 effect 归目标 fiber、拆解自动注销；resolve/names 缺省视角 = 注册表 root 的 scope 键，显式 scope 沿键父链最近者胜 + 全局层兜底）+ 守卫执行管线（pre/execute/post waterfall + schema 校验 + 超时） |
 | `core/agent_loop/agent.py` | `packages/core/agent-loop/src/agent.ts` | 单一 async 泵（`_pump_async`/`_run_step_async`）+ `followup`/`steer` 同步门面（经常驻单事件循环驱动，见下行 resident_loop）+ 协作式取消（`_cancel_event` 每轮新建 + `call_soon_threadsafe` 跨线程置位——对应上游 agent.ts:325 每 phase 新建 AbortController）；agent/pre-step 决策经 `awaterfall`；publish/dispose 生命周期（enter+announce+agent/session-start / cancel(disposed)+scope.dispose+detach，会话店成员资格归 loop）+ agent/* 事件载波派发（scopeTarget(agent, loop scope 键)，兄弟作用域隔离） |
 | `core/agent_loop/resident_loop.py` | （无独立文件：Node 进程固有单事件循环） | 教学扩展：进程级懒加载单例循环（守护线程 run_forever）；`run_on_resident` 阻塞提交协程、异常冒泡、主线程 Ctrl+C 协作取消在途泵；同步门面由此驱动后跨调用共享同一循环，与上游形态一致 |
 | `core/agent_loop/tool_calls.py` | `packages/core/agent-loop/src/tool-calls.ts` | |
 | `core/agent_loop/inbox.py` | `packages/core/agent-loop/src/inbox.ts` | 双队列（followup→next-turn / steer→next-step）+ `agent/inbox/spliced` 持久化 |
-| `core/system_prompt.py` | `packages/core/system-prompt/src/` | assemble waterfall + contexts/tools/variables 提供器 + `{{variable}}` 严格插值；scope 层叠、运行时上下文快照注入请求历史、assembly.tools→请求工具集成未复现（简化标注见模块 docstring） |
-| `llm/protocol.py` | `packages/llm/llm/src/` | `stream(messages, tools, signal)` async 契约 + `StreamAborted` + `_aiter_raced`（异步迭代与 abort 事件竞速；2026-08-18 asyncio 化重构） |
+| `core/agent_loop/runtime_context.py` | `packages/core/agent-loop/src/runtime-context.ts` | loop 侧运行时上下文投影：retained 三态（undefined/null/{seq,text}）restore（倒序找最近一条仍在 surface 的 owned 快照）+ 按追加序惰性消化新事件；`project(current, sections)` 文本相等去重、变化铸快照 user 消息（sections 非空带 `form:'snapshot'` 归因，空即 CLEARED 哨兵不带归因）；SOURCE/CLEARED 逐字对齐；接线在 `_run_step_async` pre-step waterfall 前（默认进入把快照追加在 claimed 之后，显式 enter 决策整体接管） |
+| `core/system_prompt.py` | `packages/core/system-prompt/src/` | assemble waterfall + contexts/tools/variables 提供器 + `{{variable}}` 严格插值 + `render_context_sections`/`join_context_sections` 节渲染面（上游 renderContextSections/joinContextSections）；scope 层叠、assembly.tools→请求工具集成未复现（简化标注见模块 docstring） |
+| `llm/protocol.py` | `packages/llm/llm/src/` | `stream(messages, tools, signal)` async 契约 + `StreamAborted` + `_aiter_raced`（异步迭代与 abort 事件竞速，asyncio 原生载体） |
 | `llm/deepseek.py` | `packages/llm/llm-deepseek/src/` | httpx 异步传输（原生 asyncio，abort 置位即关闭连接、真取消）+ per-read idle 300s watchdog（对齐上游 fetch）+ SSE spec-strict 解析 |
 | `llm/fake.py` | 无 | 教学扩展 |
 | `attachment/`（types + error + image + store） | `packages/attachment/attachment`（seam + types + error）+ `packages/attachment/attachment-local`（store + image） | 纯 stdlib 头部解析（上游 sharp 全解码）、普通写 + os.replace（上游 fsync + link 原子发布）、显式 root（上游 DSH_HOME/attachments/v1）；简化标注见模块 docstring |
@@ -150,7 +159,7 @@ miniharness/
 | `commands/` | `packages/interaction/commands/src/` | 命令注册/派发 + `command/run|done` 配对 + commands/change 通知 + normalizeResult fail-loud；handler 签名 `(agent, raw)` 为教学扩展（简化标注见模块 docstring） |
 | `goal/`（domain + service + prompt + driver + tools + commands） | `packages/goal/`（goal + goal-round-driver + tool-goal + command-goal） | 无 agent registry / Typert remote；driver 模式事件驱动续跑（同步门面保留 `continue_rounds`）；权威判定近似（简化标注见模块 docstring） |
 | `skills/`（registry + filesystem + tool_skill） | `packages/skill/`（skill + skill-filesystem + tool-skill） | 无 chokidar watch、无 ctx.fs 适配、execute 直接返回渲染文本（简化标注见模块 docstring） |
-| `boot/boot.py` | `packages/boot/app-boot` | `load_optional_patches`（缺文件→空层、坏文件 fail loud）+ `watch_user_patches`（2026-08-23 对齐 app-boot watchUserPatches：经 HMR 服务 watch 用户补丁层→刷新重挂；上游经 Include entry.update() 事务性重挂，mini 无 Include 插件由宿主供 remount 回调） |
+| `boot/boot.py` | `packages/boot/app-boot` | `load_optional_patches`（缺文件→空层、坏文件 fail loud）+ `watch_user_patches`（对齐 app-boot watchUserPatches：经 HMR 服务 watch 用户补丁层→刷新重挂；上游经 Include entry.update() 事务性重挂，mini 无 Include 插件由宿主供 remount 回调） |
 | `boot/composition.py` | `packages/boot/app-boot` + `apps/cli/src/args.ts` | |
 | `boot/dotenv.py` | `packages/boot/app-boot`（loadEnv） | |
 | `cli/main.py` | `apps/cli/src/args.ts` | |
@@ -173,12 +182,14 @@ miniharness/
 | `protocol/acp.py` | `packages/acp/acp` | |
 | `protocol/sdk.py` | `packages/sdk/protocol` + `sdk/server` | messageId 为真实消息 id（与 inbox 回执一致，官方 SDK 依赖）；互操作测试 `tests/test_upstream_sdk_interop.py`（需 pydantic + 上游 SDK 源码，缺则 skip） |
 | `protocol/hooks.py` | `packages/hooks/hook-protocol` + `hooks-claude-code` | 默认 runner 对齐 runner.ts：stdin JSON payload + trailing newline、cwd、CLAUDE_PROJECT_DIR env、缺省 600000ms 超时；保留"异步 + signal"同步近似（subprocess） |
-| `seams/sandbox_local.py` | `packages/sandbox/sandbox-local` + `sandbox-windows-acl` | landlock 后端经 `seams/landlock_run.py` ctypes 自限制执行器真执行（CLI 契约对齐 `native/landlock-run/docs/cli-contract.md`：--ro/--rw/--/--probe、exit 125、报告行逐字）；windows-acl 的 ACL/SID 物化仍参数形状（§3.10） |
+| `seams/sandbox_local.py` | `packages/sandbox/sandbox-local` + `sandbox-windows-acl` | landlock 后端经 `seams/landlock_run.py` ctypes 自限制执行器真执行（CLI 契约对齐 `native/landlock-run/docs/cli-contract.md`：--ro/--rw/--/--probe、exit 125、报告行逐字）；Windows ACL 写限制由 `seams/sandbox_windows_acl/` 物化（见下行） |
+| `seams/sandbox_windows_acl/`（12 模块） | `sandbox/windows-acl-restrict-poc`（单文件 index.ts 分区） | ctypes FFI 物化 WRITE_RESTRICTED 机制：win32_abi / ffi（替上游 koffi）/ errors / acl / token / workspace_sid / path_boundary / grant / spawn / index / runner 一一对应上游分区；runner 为 `python -m` CLI（exit 127 失败签名）；非 win32 平台 import 即抛 OSError；门控 e2e 见 tests/test_windows_acl_e2e.py |
 | `seams/landlock_run.py` | `native/landlock-run`（C11 launcher） | ctypes 复刻同一 CLI 契约与 Landlock UAPI 语义（ABI 协商 / PATH_BENEATH 规则 / PR_SET_NO_NEW_PRIVS → restrict_self → execvp；full ⟺ 内核 ABI ≥ 5，否则 partial 但仍受限；非 Linux 宿主干净退出 125） |
-| `seams/sandbox_policy.py` | `packages/sandbox/sandbox-policy` | ctx.sandboxPolicy：Config {mode 缺省 read-only, workspaceRoot} fail-loud 校验；resolve() = 显式 mode > 会话日志最后一条 `sandbox/mode`（session-mode.ts 的 effectiveSandboxMode fold）> 部署缺省，workspace 根先 canonical 后词法规范化、会话 cwd 即边界；三档策略上下文经 systemPrompt `.context('sandbox:policy', order=110)` 注册（呈现面 render_context_snapshot） |
+| `seams/sandbox_policy.py` | `packages/sandbox/sandbox-policy` | ctx.sandboxPolicy：Config {mode 缺省 read-only, workspaceRoot} fail-loud 校验；resolve() = 显式 mode > 会话日志最后一条 `sandbox/mode`（session-mode.ts 的 effectiveSandboxMode fold）> 部署缺省，workspace 根先 canonical 后词法规范化、会话 cwd 即边界；三档策略上下文经 systemPrompt `.context('sandbox:policy', order=110)` 注册，loop 侧投影在变化时把快照注入对话消息流（`core/agent_loop/runtime_context.py`） |
 | `shell/bash_local.py` + `bash_sandbox.py` + `helpers.py` | `packages/shell/{shell, bash-local, bash-sandbox}` | ctx.shell 前台 `bash -c` 执行器族：本地直跑 / 经 ctx.sandbox confine 包裹并报告 {mode, denied, enforcement}；三路归因对齐 helpers.ts——runner 启动失败（ENOENT/EACCES 且 argv[0] 证据 + cwd 可用性独立校验）与 runner 失败规则命中抛 SandboxUnavailableError 且优先于 denial，denial = 非零退出 + stderr 大小写不敏感签名；danger-full-access 直通不包裹。后台进程机制未复现（mini 后台面是 jobs registry，§3.5） |
 | `seams/credentials_local.py` | `packages/credentials/credentials-local` | |
-| `seams/subagent/`（`__init__.py` + `providers.py` + `worker.py` + `continuation.py` + `descriptor.py`） | `packages/subagent/subagent` + `subagent-fork-in-process` + `-acp` + `-dsh-sdk` + `subagent-spawn-in-process` + `subagent-in-process-driver` + `tool-subagent-control` + `tool-subagent-report` | 续跑 A8 为异步事件驱动（双路径：父有 driver → 投递即返回 + watchSettlement 结算 + steer 批内合并；无 driver → 回退同步 pump）。生命周期 scoped dispatch（委托父 scope 载体过滤，无标号退化祖先链）+ provider 注册表（register_provider → 注销发布 subagent/provider-removed）+ DRAINING 拒绝面（drain/drain_descendants + assert_admitting 准入边界）已对齐（2026-08-23）；invariant 运行时校验架构不适用；同步模式结算投递走非唤醒 next-step。简化见 AGENTS.md 差异清单 |
+| `seams/subprocess_env.py` | `packages/subprocess/subprocess/src/index.ts` + `types.ts` | 环境清洗切片：SENSITIVE_ENV_PATTERN 凭据形启发式 + DSH_ENV_PREFIX 大小写不敏感剔除；显式 env 在 scrub 之后合并（providers spawn 层叠） |
+| `seams/subagent/`（`__init__.py` + `descriptor.py` + `providers.py` + `worker.py` + `continuation.py` + `tool.py`） | `packages/subagent/subagent` + `subagent-fork-in-process` + `-acp` + `-dsh-sdk` + `subagent-spawn-in-process` + `subagent-in-process-driver` + `tool-subagent-control` + `tool-subagent-report` | 续跑 A8 为异步事件驱动（双路径：父有 driver → 投递即返回 + watchSettlement 结算 + steer 批内合并；无 driver → 回退同步 pump）。生命周期 scoped dispatch（委托父 scope 载体过滤，无标号退化祖先链）+ provider 注册表（register_provider → 注销发布 subagent/provider-removed）+ DRAINING 拒绝面（drain/drain_descendants + assert_admitting 准入边界）已对齐；invariant 运行时校验架构不适用；同步模式结算投递走非唤醒 next-step |
 | `demo.py` | `packages/examples/agent-spine-demo` | 教学入口，保留顶层（`python -m miniharness.demo`） |
 | `example_plugins.py` | `examples/` | 教学示例，保留顶层 |
 
@@ -188,7 +199,7 @@ miniharness/
 
 | 层 | 内容 | 允许依赖 |
 |---|---|---|
-| L0 地基 | `core/session`、`core/scope`、`core/dsh_scope`、`core/schema`、`core/hmr` | 无（互不依赖；core.scope ↔ core.dsh_scope / core.schema / core.hmr→core.scope 经 §6 例外豁免） |
+| L0 地基 | `core/session`、`core/scope`、`core/dsh_scope`、`core/schema`、`core/hmr` | 无（互不依赖；core.scope ↔ core.dsh_scope / core.schema / core.hmr→core.scope 经 §3 例外豁免） |
 | L1 领域 | `llm/*`、`core/tools`、`core/system_prompt`、`core/session_store`、`attachment`、`boot/*` | 仅 L0 |
 | L2 编排 | `core/agent_loop`、`compaction`、`jobs`、`plan`、`commands`、`goal`、`skills` | L0 + L1 |
 | L3 应用与入口 | `cli/*`、`protocol/*`、`seams/*`、`preset`、`extensions`、`interaction`、`client`、`web`、`shell` | L0 ~ L2 |

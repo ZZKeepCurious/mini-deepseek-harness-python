@@ -12,9 +12,11 @@ mini 范围说明：
     next() 委派）；结果 assembly 权威，但 complete 节 / 运行时上下文抑制在
     waterfall 后恢复（上游同款）。
   * 装配上下文 {agent, session} 由 AgentLoop._system_prompt_text 传入。
-  * runtime-context 快照（contexts）仅提供 render_context_snapshot 呈现面，
-    mini 的请求历史不注入该快照（上游经 durable user 快照消息注入，mini
-    未复现该落盘路径）；assembly.tools 提供器结果同理不直接成为请求工具
+  * runtime-context 快照（contexts）：render_context_sections /
+    join_context_sections 提供节渲染面；AgentLoop 经
+    core/agent_loop/runtime_context.py 投影把变化后的快照铸成 durable user
+    消息注入对话流（上游 agent-loop/src/runtime-context.ts 同款）；无该投影
+    时 contexts 仅存装配面。assembly.tools 提供器结果同理不直接成为请求工具
     列表（实际请求工具来自 ToolRegistry，见 _tool_definitions）。
 
 装配：install_system_prompt(ctx) 提供 ctx "systemPrompt" 服务（幂等）。
@@ -35,7 +37,9 @@ __all__ = [
     "TOOL_ORDER_REST",
     "SystemPromptService",
     "install_system_prompt",
+    "join_context_sections",
     "order_tools",
+    "render_context_sections",
     "render_context_snapshot",
     "render_prompt",
 ]
@@ -152,18 +156,31 @@ def render_prompt(assembly: dict) -> str:
     return "\n\n".join(rendered)
 
 
-def render_context_snapshot(assembly: dict) -> str:
-    """渲染完整运行时上下文快照（上游 renderContextSnapshot）：无活跃上下文
-    返回空串；否则带 "Current runtime context..." 前缀按空行连接。"""
-    sections = [
-        {"name": c["name"], "text": _interpolate(c, assembly.get("variables", {}), "context")}
+def render_context_sections(assembly: dict) -> list[dict]:
+    """渲染运行时上下文节列表（上游 renderContextSections）：逐节插值后
+    过滤空文本，返回 [{name, text}, ...]（保序）。"""
+    variables = assembly.get("variables", {})
+    return [
+        {"name": c["name"], "text": t}
         for c in assembly.get("contexts", [])
+        for t in [_interpolate(c, variables, "context")]
+        if t != ""
     ]
-    sections = [s for s in sections if s["text"] != ""]
+
+
+def join_context_sections(sections: list[dict]) -> str:
+    """连接节列表为完整快照文本（上游 joinContextSections）：空列表返回
+    空串；非空带 "This snapshot supersedes..." 前缀按空行连接。"""
     body = "\n\n".join(s["text"] for s in sections)
     if body == "":
         return ""
     return f"Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\n{body}"
+
+
+def render_context_snapshot(assembly: dict) -> str:
+    """渲染完整运行时上下文快照（上游 renderContextSnapshot）：
+    join_context_sections(render_context_sections(assembly))。"""
+    return join_context_sections(render_context_sections(assembly))
 
 
 class SystemPromptService:
