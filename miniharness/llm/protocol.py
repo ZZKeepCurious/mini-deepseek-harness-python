@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, AsyncIterator
 
-from ..core.session import create_message
+from ..core.session import create_message, reasoning_block
 
 __all__ = [
     "AUTH",
@@ -92,7 +92,8 @@ class StreamAborted(Exception):
     """协作式取消哨兵：适配器流在 abort 事件置位时抛出的中止标记。
 
     对齐上游"stream 抛 AbortError 中止迭代"语义（agent-loop 逐 await 点
-    检查 signal）：agent 的 step 捕获后按回合中止处理（不落部分消息）。
+    检查 signal）：agent 的 step 捕获后按回合中止处理——定稿可安全落盘的
+    前缀（interruptedBlocks）后以 aborted 闭合。
     不是 asyncio.CancelledError——它只是自定义标记，避免与真实任务取消混淆。
     """
 
@@ -101,8 +102,8 @@ async def _aiter_raced(aiter_: AsyncIterator, abort_event=None):
     """把异步迭代器与 abort 事件竞速，abort 置位即在下次取块前抛 StreamAborted。
 
     对齐上游 AbortSignal：一经置位即中止迭代（下一次取块判负即抛），
-    调用方按回合中止语义处理（不落部分消息）。适配器在自身 async-with
-    中消费本迭代器——抛错退出即关闭连接，无遗留线程/资源。
+    调用方按回合中止语义处理（定稿前缀后 aborted 闭合）。适配器在自身
+    async-with 中消费本迭代器——抛错退出即关闭连接，无遗留线程/资源。
     """
     if abort_event is None:
         async for item in aiter_:
@@ -201,10 +202,11 @@ class LlmAdapter:
 class BlockAssembler:
     """按 index 组装 ContentBlock（上游 assembler.ts 的简化版）。
 
-    block-end 携带组装好的块，所以本实现只收集块与终态
-    （usage / finish）；流式 UI 可改为逐片转发 delta。
+    block-end 携带组装好的块，所以正常完成路径只收集闭合块与终态
+    （usage / finish）；流式 UI 可改为逐片转发 delta。同时按流序追踪
+    open 块的增量累积（上游 partials/order 同构），供取消时定稿前缀。
 
-    对齐上游 assembler.ts:136-138：finish.kind == 'max-tokens' 时过滤
+    对齐上游 assembler.ts:136-148：finish.kind == 'max-tokens' 时过滤
     tool-call 块（"cannot be executed safely"，未完成的调用不可执行）。
     """
 
@@ -212,11 +214,39 @@ class BlockAssembler:
         self.blocks: list[dict] = []
         self.usage: dict | None = None
         self.finish: dict | None = None
+        self._order: list[int] = []         # index 首次出现序（上游 order）
+        self._open: dict[int, dict] = {}    # 未闭合块：{blockType, text?}
+        self._closed: dict[int, dict] = {}  # index → 已闭合块
+
+    def _mark_seen(self, index: int) -> None:
+        if index not in self._open and index not in self._closed:
+            self._order.append(index)
+
+    def _ensure_open(self, index: int, default_type: str) -> dict:
+        entry = self._open.get(index)
+        if entry is None:
+            self._mark_seen(index)
+            entry = {"blockType": default_type}
+            self._open[index] = entry
+        return entry
 
     def push(self, chunk: dict) -> None:
         kind = chunk["type"]
-        if kind == "block-end":
-            self.blocks.append(chunk["block"])
+        if kind == "block-start":
+            self._mark_seen(chunk["index"])
+            self._open[chunk["index"]] = {"blockType": chunk.get("blockType")}
+        elif kind == "text-delta":
+            entry = self._ensure_open(chunk["index"], "text")
+            entry["text"] = entry.get("text", "") + chunk.get("text", "")
+        elif kind == "reasoning-delta":
+            entry = self._ensure_open(chunk["index"], "reasoning")
+            entry["text"] = entry.get("text", "") + chunk.get("text", "")
+        elif kind == "block-end":
+            self._mark_seen(chunk["index"])
+            self._open.pop(chunk["index"], None)
+            block = chunk["block"]
+            self.blocks.append(block)
+            self._closed[chunk["index"]] = block
         elif kind == "usage":
             self.usage = chunk["usage"]
         elif kind == "finish":
@@ -228,3 +258,29 @@ class BlockAssembler:
             # 上游：max-tokens 下模型产出的 tool-call 不可安全执行，丢弃
             blocks = [b for b in blocks if b.get("type") != "tool-call"]
         return create_message("assistant", blocks, source or {"kind": "model"})
+
+    def interrupted_blocks(self) -> list[dict]:
+        """被中断的流可安全定稿的前缀（上游 assembler.ts interruptedBlocks）。
+
+        按流序收集 closed/open 的 text/reasoning 块（open 块从累积增量装配）；
+        tool-call 一律丢弃——中断先于派发，保留一个未派发的调用需要伪造结果；
+        未知类型的 open 块同样丢弃；空白内容块不可见，不保留。
+        """
+        kept: list[dict] = []
+        for index in self._order:
+            entry = self._open.get(index)
+            if entry is not None:
+                block_type = entry.get("blockType")
+                if block_type not in ("text", "reasoning"):
+                    continue
+                text = entry.get("text", "")
+                block = (reasoning_block(text) if block_type == "reasoning"
+                         else {"type": "text", "text": text})
+            else:
+                block = self._closed.get(index)
+                if block is None or block.get("type") not in ("text", "reasoning"):
+                    continue
+            if not isinstance(block.get("text"), str) or block["text"].strip() == "":
+                continue
+            kept.append(block)
+        return kept

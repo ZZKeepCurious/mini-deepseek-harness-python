@@ -2,13 +2,15 @@
 
 对应 dsh 真实源码：packages/llm/llm/src/retry-policy.ts。
 
-上游语义（已核实，retry-policy.ts）：
+上游语义（已核实，retry-policy.ts @ dsh-v0.1.1-rc.2）：
   * 两种模式：normal（maxRetries + retryableCodes 白名单）/ always（无限重试）。
-  * 默认值：maxRetries 2、initialDelayMs 500、maxDelayMs 10000、
+  * 默认值：maxRetries 5、initialDelayMs 500、maxDelayMs 10000、
     jitterRatio 0.1、retryableCodes [EMPTY_RESPONSE, RATE_LIMIT, SERVER,
     TIMEOUT, TRANSPORT]（上下文溢出、认证、配额、畸形凭据故意不在默认
     白名单——重试它们只会以相同方式失败）。
-  * 校验严格：未知键拒绝；backoff 的 initial/max 必须正有限且 ≤
+  * 校验严格：未知键拒绝；always 模式容忍残留的 normal-only 键
+    （maxRetries/retryableCodes 接受但忽略——分层配置切换模式后可能
+    残留非活动值），仍拒绝其它未知键；backoff 的 initial/max 必须正有限且 ≤
     MAX_TIMER_DELAY_MS、initial ≤ max、jitter ∈ [0,1]；normal 的
     maxRetries 非负安全整数、retryableCodes 非空/无重复/非空字符串。
   * 解析结果冻结（不可变），供 provider 注册时捕获（每次请求决议时
@@ -23,7 +25,7 @@ from typing import Any
 # Node setTimeout 上限（上游 @deepseek-ai/dsh-timeout MAX_TIMER_DELAY_MS）
 MAX_TIMER_DELAY_MS = 2_147_483_647
 
-DEFAULT_MAX_RETRIES = 2
+DEFAULT_MAX_RETRIES = 5
 DEFAULT_INITIAL_DELAY_MS = 500
 DEFAULT_MAX_DELAY_MS = 10_000
 DEFAULT_JITTER_RATIO = 0.1
@@ -40,7 +42,9 @@ CONTEXT_WINDOW_EXCEEDED = "CONTEXT_WINDOW_EXCEEDED"
 EMPTY_RESPONSE = "EMPTY_RESPONSE"
 
 _NORMAL_KEYS = frozenset({"mode", "maxRetries", "retryableCodes", "backoff"})
-_ALWAYS_KEYS = frozenset({"mode", "backoff"})
+# 分层配置切换模式后可能残留 normal-only 字段；always 接受但忽略这些非活动值
+# （上游 ALWAYS_POLICY_KEYS，retry-policy.ts @ rc.2），仍拒绝其它未知键。
+_ALWAYS_KEYS = frozenset({"mode", "maxRetries", "retryableCodes", "backoff"})
 _BACKOFF_KEYS = frozenset({"initialDelayMs", "maxDelayMs", "jitterRatio"})
 
 

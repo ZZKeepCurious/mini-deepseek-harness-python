@@ -6,9 +6,9 @@ sse.ts + translate.ts）。
   * 请求体 stream:true + stream_options.include_usage
   * SSE 必须出现字面 [DONE]，EOF 未到 [DONE] 抛 STREAM_CLOSED（截断响应不可信）
   * finish reason 与 usage 在 [DONE] 之后发射；空响应抛 EMPTY_RESPONSE
-  * 错误映射：401/403→AUTH、quota 措辞→QUOTA、429→RATE_LIMIT、
-    400 上下文超限→CONTEXT_WINDOW_EXCEEDED（否则 INVALID_REQUEST）、500+→SERVER、
-    其余→HTTP_<status>；LlmError facts（status / providerRetryAfterMs / requestId）
+  * 错误映射：401/403→AUTH、413→INVALID_REQUEST、quota 措辞→QUOTA、
+    429→RATE_LIMIT、400 上下文超限→CONTEXT_WINDOW_EXCEEDED（否则 INVALID_REQUEST）、
+    500+→SERVER、其余→HTTP_<status>；LlmError facts（status / providerRetryAfterMs / requestId）
 """
 from __future__ import annotations
 
@@ -59,9 +59,11 @@ def serialize_messages(messages: list[dict]) -> list[dict]:
     """把 harness 消息序列化为 DeepSeek chat-completions wire 消息。
 
     与上游一致：system → {role:'system'}；assistant 的 text 合并为 content、
-    reasoning 仅在带 tool_calls 时作为 reasoning_content 回传、tool-call 块
-    转为 tool_calls；user role 消息的文本走 {role:'user'}，每个 tool-result 块
-    展开为独立的 {role:'tool', tool_call_id} 消息（空输出用 '(no output)'）。
+    reasoning 凡携带即作为 reasoning_content 回传（rc.2 放宽：旧为仅带
+    tool_calls 时回传——网关转编码其他厂商时靠这段文本恢复该 turn 的
+    thinking signature）、tool-call 块转为 tool_calls；user role 消息的
+    文本走 {role:'user'}，每个 tool-result 块展开为独立的
+    {role:'tool', tool_call_id} 消息（空输出用 '(no output)'）。
 
     image 块显式拒绝（上游 serialize.ts assertTextOnly → UNSUPPORTED_CONTENT）：
     此 wire 路由是纯文本，静默丢弃会丢失图片内容。
@@ -92,7 +94,7 @@ def serialize_messages(messages: list[dict]) -> list[dict]:
             wire.append({
                 "role": "assistant",
                 "content": text,
-                **({"reasoning_content": reasoning} if tool_calls and reasoning else {}),
+                **({"reasoning_content": reasoning} if reasoning else {}),
                 **({"tool_calls": tool_calls} if tool_calls else {}),
             })
             continue
@@ -141,8 +143,9 @@ _QUOTA_EXCEEDED = re.compile(r"\b(?:quota|usage[\s_-]+limit)[\s_-]+(?:exceeded|e
 
 
 def _http_error_code(status: int, body: str) -> str:
-    """上游 httpErrorCode 映射（llm-deepseek/src/adapter.ts:138-149）：
-    401/403→AUTH；quota 措辞（任意状态，先于 429）→QUOTA；429→RATE_LIMIT；
+    """上游 httpErrorCode 映射（llm-deepseek/src/adapter.ts:333-345 @ rc.2）：
+    401/403→AUTH；413（payload too large）→INVALID_REQUEST；quota 措辞
+    （任意状态，先于 429）→QUOTA；429→RATE_LIMIT；
     400 上下文超限→CONTEXT_WINDOW_EXCEEDED、否则→INVALID_REQUEST；
     ≥500→SERVER；其余→HTTP_<status>。
 
@@ -151,6 +154,8 @@ def _http_error_code(status: int, body: str) -> str:
     """
     if status in (401, 403):
         return AUTH
+    if status == 413:
+        return INVALID_REQUEST
     text = body.lower()
     if _QUOTA_INSUFFICIENT.search(text) or _QUOTA_EXCEEDED.search(text):
         return QUOTA
@@ -343,9 +348,10 @@ class DeepSeekAdapter(LlmAdapter):
     async def _iter_chunks(self, body: dict, abort_event=None):
         """httpx 异步传输：发起 POST + 错误映射，逐行喂给 SSE 解析器。
 
-        错误映射对齐上游 adapter.ts：401/403→AUTH、quota 措辞→QUOTA、
-        429→RATE_LIMIT、400 上下文超限→CONTEXT_WINDOW_EXCEEDED（否则
-        INVALID_REQUEST）、500+→SERVER、其余→HTTP_<status>；LlmError facts
+        错误映射对齐上游 adapter.ts:333-345（rc.2）：401/403→AUTH、
+        413→INVALID_REQUEST、quota 措辞→QUOTA、429→RATE_LIMIT、
+        400 上下文超限→CONTEXT_WINDOW_EXCEEDED（否则 INVALID_REQUEST）、
+        500+→SERVER、其余→HTTP_<status>；LlmError facts
         （status / providerRetryAfterMs / requestId）逐项填写。超时→TIMEOUT、
         其它传输错误→TRANSPORT。abort 置位经 _aiter_raced 抛 StreamAborted，
         async-with 退出即关闭连接。

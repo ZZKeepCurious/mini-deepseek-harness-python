@@ -4,10 +4,10 @@ import asyncio
 import unittest
 
 from miniharness.core.scope import Context
-from miniharness.llm import FakeLlmAdapter, LlmFailure, StreamChunk
+from miniharness.llm import BlockAssembler, FakeLlmAdapter, LlmAdapter, LlmFailure, StreamChunk
 from miniharness.llm.protocol import StreamAborted, _aiter_raced
 from miniharness.core.agent_loop.agent import AgentLoop
-from miniharness.core.session import Session, derive_messages, turn_balance
+from miniharness.core.session import Session, derive_messages, thaw, turn_balance
 from miniharness.core.tools import Tool, ToolRegistry
 
 
@@ -316,6 +316,209 @@ class TestRequestEnvelope(unittest.TestCase):
         data2 = self._header_event(loop2.session)
         self.assertEqual(data2["header"]["config"]["reasoningEffort"], "off")
         self.assertNotIn("adapterDefaults", data2["header"])
+
+
+# ---------- 取消前缀定稿（对齐上游 cancel.spec.ts + assembler.interruptedBlocks）----------
+
+
+def _text_script(text):
+    return [
+        StreamChunk("block-start", index=0, blockType="text"),
+        StreamChunk("text-delta", index=0, text=text),
+        StreamChunk("block-end", index=0, block={"type": "text", "text": text}),
+    ]
+
+
+class _ScriptedAdapter(LlmAdapter):
+    """剧本化适配器：每次 stream() 消费一个剧本（耗尽则重复最后一个）。
+
+    产出第 cancel_after 个 chunk 后触发 loop.cancel()；hang=True 时再挂起
+    等 abort 事件 → StreamAborted（桥式适配器的流内退出路径），否则直接
+    停止产出（消费循环自然收尾 → 循环后的取消出口）。"""
+
+    provider = "fake"
+    model = "fake"
+
+    def __init__(self, scripts, cancel_after=None, hang=False):
+        self._scripts = list(scripts)
+        self._cancel_after = cancel_after   # 第几个 chunk 产完后取消（1 起）
+        self._hang = hang
+        self.calls = 0
+        self.loop = None
+
+    def resolve_model_info(self):
+        return {"provider": "fake", "model": "fake", "input_modalities": ["text"]}
+
+    async def stream(self, messages, tools, signal=None):
+        script = self._scripts[min(self.calls, len(self._scripts) - 1)]
+        self.calls += 1
+        stopped = False
+        for i, chunk in enumerate(script):
+            if stopped:
+                break
+            yield chunk
+            if self._cancel_after is not None and i + 1 == self._cancel_after:
+                self.loop.cancel()
+                if self._hang:
+                    event = getattr(signal, "event", None)
+                    if event is not None:
+                        await event.wait()
+                    raise StreamAborted("LLM 流被取消")
+                stopped = True   # 取消后不再产出
+
+
+class CancelPrefixFinalizeTest(unittest.TestCase):
+    """对齐上游 cancel.spec.ts：取消时按流序定稿可安全落盘的前缀
+    （interruptedBlocks：仅 text/reasoning，丢一切 tool-call 与空白块；
+    失败 attempt 永不定稿）。"""
+
+    def _make(self, adapter):
+        session = Session("s-cancel")
+        ctx = Context()
+        adapter.loop = AgentLoop(session, adapter, ToolRegistry(ctx), ctx)
+        return session, adapter.loop
+
+    def _messages(self, session):
+        # 事件信封（sourceEventSeqs 在信封层）；thaw 冻结投影便于整体比较
+        return [e for e in session.events if e["type"] == "assistant/message"]
+
+    @staticmethod
+    def _payload(event):
+        return thaw(event["data"])
+
+    def test_mid_stream_text_prefix_finalized_with_usage(self):
+        # 中途取消：已交付的 text 前缀 + usage 定稿为 interrupted assistant/message
+        script = _text_script("部分回答") + [StreamChunk("usage", usage={"totalTokens": 7})]
+        adapter = _ScriptedAdapter([script], cancel_after=4, hang=True)
+        session, loop = self._make(adapter)
+        loop.followup("写点什么")
+        ev = self._messages(session)[0]
+        self.assertEqual(len(self._messages(session)), 1)
+        data = self._payload(ev)
+        self.assertEqual(data["message"]["content"], [{"type": "text", "text": "部分回答"}])
+        self.assertTrue(data["interrupted"])
+        self.assertEqual(data["usage"], {"totalTokens": 7})
+        # source 经消息工厂补 kind:'model'（与正常完成路径同形状）
+        self.assertEqual(data["message"]["source"],
+                         {"kind": "model", "provider": "fake", "model": "fake"})
+        chunk_seqs = [e["seq"] for e in session.events if e["type"] == "assistant/chunk"]
+        self.assertEqual(ev["sourceEventSeqs"], tuple(chunk_seqs))
+        end = [e for e in session.events if e["type"] == "turn/end"][-1]
+        self.assertEqual(end["data"]["reason"]["kind"], "aborted")
+
+    def test_reasoning_only_stream_finalized(self):
+        script = [
+            StreamChunk("block-start", index=0, blockType="reasoning"),
+            StreamChunk("reasoning-delta", index=0, text="思考中"),
+            StreamChunk("block-end", index=0,
+                        block={"type": "reasoning", "text": "思考中"}),
+        ]
+        adapter = _ScriptedAdapter([script], cancel_after=3)
+        session, loop = self._make(adapter)
+        loop.followup("想一想")
+        msgs = self._messages(session)
+        self.assertEqual(len(msgs), 1)
+        data = self._payload(msgs[0])
+        content = data["message"]["content"]
+        self.assertEqual(content, [{"type": "reasoning", "text": "思考中"}])
+        self.assertTrue(data["interrupted"])
+
+    def test_half_tool_call_dropped_completed_text_kept(self):
+        # 半截工具调用（无 block-end/finish）丢弃；此前已闭合的 text 保留
+        script = [
+            StreamChunk("block-start", index=0, blockType="text"),
+            StreamChunk("text-delta", index=0, text="先说结论"),
+            StreamChunk("block-end", index=0, block={"type": "text", "text": "先说结论"}),
+            StreamChunk("block-start", index=1, blockType="tool-call"),
+            StreamChunk("tool-call-delta", index=1, id="call_9", name="bash",
+                        argumentsDelta='{"c'),
+        ]
+        adapter = _ScriptedAdapter([script], cancel_after=5)
+        session, loop = self._make(adapter)
+        loop.followup("边说边调")
+        msgs = self._messages(session)
+        self.assertEqual(len(msgs), 1)
+        self.assertEqual(self._payload(msgs[0])["message"]["content"],
+                         [{"type": "text", "text": "先说结论"}])
+
+    def test_no_visible_content_no_finalize(self):
+        # 只有未完成的 tool-call → 无可定稿内容，不落 assistant/message
+        script = [
+            StreamChunk("block-start", index=0, blockType="tool-call"),
+            StreamChunk("tool-call-delta", index=0, id="call_9", name="bash",
+                        argumentsDelta="{}"),
+        ]
+        adapter = _ScriptedAdapter([script], cancel_after=2)
+        session, loop = self._make(adapter)
+        loop.followup("只调工具")
+        self.assertEqual(len(self._messages(session)), 0)
+        end = [e for e in session.events if e["type"] == "turn/end"][-1]
+        self.assertEqual(end["data"]["reason"]["kind"], "aborted")
+
+    def test_cancel_during_error_recovery_does_not_finalize_failed_stream(self):
+        # finish {kind:'error'} 后在恢复窗口取消：失败 attempt 不定稿，
+        # 回合以 aborted 闭合（上游 waterfall 后 signal.throwIfAborted 先于 retry）
+        script = [
+            StreamChunk("block-start", index=0, blockType="text"),
+            StreamChunk("text-delta", index=0, text="即将失败"),
+            StreamChunk("finish", reason={"kind": "error",
+                                          "failure": {"code": "RATE_LIMIT"}}),
+        ]
+        adapter = _ScriptedAdapter([script])
+        session, loop = self._make(adapter)
+
+        def on_error(payload, nxt):
+            loop.cancel()
+            return {"kind": "retry"}
+
+        loop.ctx.on("agent/request-error", on_error)
+        loop.followup("会失败吗")
+        self.assertEqual(len(self._messages(session)), 0)
+        end = [e for e in session.events if e["type"] == "turn/end"][-1]
+        self.assertEqual(end["data"]["reason"]["kind"], "aborted")
+
+    def test_retry_discards_failed_attempt_and_cites_own_chunks(self):
+        # 重试成功后唯一的 assistant/message 只引用成功 attempt 的 chunks，
+        # 无 interrupted 标记（失败 attempt 的 chunks 留在日志但不被引用）
+        failed = [
+            StreamChunk("block-start", index=0, blockType="text"),
+            StreamChunk("text-delta", index=0, text="即将失败"),
+            StreamChunk("finish", reason={"kind": "error",
+                                          "failure": {"code": "RATE_LIMIT"}}),
+        ]
+        good = _text_script("最终答案") + [StreamChunk("finish", reason={"kind": "stop"})]
+        adapter = _ScriptedAdapter([failed, good])
+        session, loop = self._make(adapter)
+
+        def on_error(payload, nxt):
+            return {"kind": "retry"}
+
+        loop.ctx.on("agent/request-error", on_error)
+        loop.followup("重试一次")
+        msgs = self._messages(session)
+        self.assertEqual(len(msgs), 1)
+        data = self._payload(msgs[0])
+        self.assertNotIn("interrupted", data)
+        self.assertEqual(data["message"]["content"], [{"type": "text", "text": "最终答案"}])
+        all_chunk_seqs = [e["seq"] for e in session.events if e["type"] == "assistant/chunk"]
+        self.assertEqual(len(all_chunk_seqs), 7)   # 失败 attempt 3 + 成功 attempt 4
+        self.assertEqual(msgs[0]["sourceEventSeqs"], tuple(all_chunk_seqs[3:]))
+
+    def test_interrupted_blocks_filters_whitespace_and_unknown_open(self):
+        # assembler 单元契约：空白 text / 未知类型 open 块不保留（不可见面）
+        assembler = BlockAssembler()
+        assembler.push(StreamChunk("block-start", index=0, blockType="text"))
+        assembler.push(StreamChunk("text-delta", index=0, text="  "))
+        assembler.push(StreamChunk("block-end", index=0, block={"type": "text", "text": "  "}))
+        assembler.push(StreamChunk("block-start", index=1, blockType="tool-call"))
+        assembler.push(StreamChunk("tool-call-delta", index=1, id="c", name="t",
+                                   argumentsDelta="{}"))
+        assembler.push(StreamChunk("block-start", index=2, blockType="mystery"))
+        self.assertEqual(assembler.interrupted_blocks(), [])
+        # 有可见 open 文本时保留且形状与闭合块一致
+        assembler.push(StreamChunk("text-delta", index=3, text="可见"))
+        self.assertEqual(assembler.interrupted_blocks(),
+                         [{"type": "text", "text": "可见"}])
 
 
 class AbortRaceTest(unittest.TestCase):

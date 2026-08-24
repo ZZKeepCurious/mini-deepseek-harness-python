@@ -73,7 +73,16 @@ class ResolveRetryPolicyTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             resolve_retry_policy({"mode": "normal", "nope": 1})
         with self.assertRaises(ValueError):
-            resolve_retry_policy({"mode": "always", "maxRetries": 2})
+            resolve_retry_policy({"mode": "always", "nope": 1})
+
+    def test_always_tolerates_normal_only_keys(self):
+        # rc.2：分层配置切换模式后可能残留 normal-only 字段——always 接受但
+        # 忽略 maxRetries/retryableCodes（上游 ALWAYS_POLICY_KEYS），仍拒绝其它未知键
+        p = resolve_retry_policy({"mode": "always", "maxRetries": 2,
+                                  "retryableCodes": ["RATE_LIMIT"]})
+        self.assertEqual(p["mode"], "always")
+        self.assertNotIn("maxRetries", p)
+        self.assertNotIn("retryableCodes", p)
 
     def test_bad_mode(self):
         with self.assertRaises(ValueError):
@@ -449,7 +458,8 @@ class LoopRetryTest(unittest.TestCase):
         from miniharness.llm import DeepSeekAdapter
         adapter = DeepSeekAdapter(api_key="sk-test")
         self.assertEqual(adapter.retry_policy["mode"], "normal")
-        self.assertEqual(adapter.retry_policy["maxRetries"], 2)
+        # rc.2：默认 maxRetries 2 → 5（上游 retry-policy.ts DEFAULT_MAX_RETRIES）
+        self.assertEqual(adapter.retry_policy["maxRetries"], 5)
         self.assertEqual(adapter.retry_policy["retryableCodes"], DEFAULT_RETRYABLE_CODES)
 
     def test_empty_response_is_retryable(self):

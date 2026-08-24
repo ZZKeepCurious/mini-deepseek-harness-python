@@ -18,7 +18,9 @@ status/mini-harness/asyncio-refactor-design.md）：
     载体）——headless/demo/REPL/测试的 run/followup/steer 零改动）。
   * LLM 流式 async 迭代器；取消为协作式（asyncio.Event，对齐上游
     AbortSignal）——cancel 不杀 driver，流桥/重试等待事件驱动退出、
-    工具调度器排干 started + 未启动的按模型序补合成错误。
+    工具调度器排干 started + 未启动的按模型序补合成错误；取消时按流序
+    定稿可安全落盘的前缀为 interrupted assistant/message（上游
+    interruptedBlocks：仅 text/reasoning，丢一切 tool-call）。
   * start_driver() 切换到事件驱动模式：followup/steer 只入队 + 线程安全
     唤醒（_request_wake → call_soon_threadsafe），回合由 _drive 在事件
     循环上执行。
@@ -809,9 +811,11 @@ class AgentLoop:
         """一次 step 内的模型请求 attempt 循环（上游 request → retry → 终局）。
 
         每次循环首次都会重新派生 messages，以便 compaction checkpoint
-        的 surface replace 生效。流式 async 迭代 + 每 chunk 取消检查：
-        取消（cancel 置位 → 流桥抛 StreamAborted 或循环提前 break）时不落
-        部分消息，回合以 cancel 置的 aborted 闭合。
+        的 surface replace 生效。流式 async 迭代 + 每 chunk 取消检查：取消
+        （cancel 置位 → 流桥抛 StreamAborted 或循环提前 break）时先按流序
+        定稿可安全落盘的前缀（interruptedBlocks：text/reasoning，丢一切
+        tool-call），回合再以 cancel 置的 aborted 闭合；失败 attempt
+        （LlmFailure / finish-error 路径）永不参与定稿。
         """
         while True:
             messages = self._derive_history()
@@ -830,7 +834,9 @@ class AgentLoop:
                     if self._cancelled:
                         break
             except StreamAborted:
-                return []   # 协作式取消：不落消息，turn 以 aborted 闭合
+                # 协作式取消：定稿前缀后返回空调用列表，turn 以 aborted 闭合
+                self._finalize_interrupted_prefix(assembler, chunk_seqs)
+                return []
             except LlmFailure as e:
                 action = await self.ctx.awaterfall("agent/request-error", {
                     "agent": self,
@@ -841,10 +847,13 @@ class AgentLoop:
                     "retryPolicy": getattr(self.adapter, "retry_policy", None),
                     "signal": self._abort_proxy,
                 }, this_arg=self._carrier)
+                if self._cancelled:
+                    return []   # 取消落在恢复窗口：失败 attempt 不定稿
                 if isinstance(action, dict) and action.get("kind") == "retry":
                     continue
                 raise
             if self._cancelled:
+                self._finalize_interrupted_prefix(assembler, chunk_seqs)
                 return []   # 非桥接适配器提前 break 的取消出口
 
             if assembler.finish is None:
@@ -871,6 +880,8 @@ class AgentLoop:
                     "retryPolicy": getattr(self.adapter, "retry_policy", None),
                     "signal": self._abort_proxy,
                 }, this_arg=self._carrier)
+                if self._cancelled:
+                    return []   # 取消落在恢复窗口：失败 attempt 不定稿
                 if isinstance(action, dict) and action.get("kind") == "retry":
                     continue
                 raise exc
@@ -888,6 +899,30 @@ class AgentLoop:
             return [
                 b for b in assistant_message["content"] if b.get("type") == "tool-call"
             ]
+
+    def _finalize_interrupted_prefix(self, assembler: BlockAssembler,
+                                     chunk_seqs: list[int]) -> None:
+        """取消时定稿流前缀为 interrupted assistant/message（上游 agent.ts
+        catch 路径：interruptedBlocks 非空才落，interrupted:true + usage）。
+
+        source 经消息工厂补 kind:'model'（与正常完成路径同形状）；
+        surfaceOp append + sourceEventSeqs 引用本 attempt 已落盘的 chunk seq。
+        """
+        if not self._cancelled:
+            return
+        content = assembler.interrupted_blocks()
+        if not content:
+            return
+        message = create_message("assistant", content, {
+            "kind": "model",
+            "provider": self.adapter.provider,
+            "model": getattr(self.adapter, "model", None),
+        })
+        self.session.append("assistant/message", {
+            "turn": self._turn, "step": self._step, "message": message,
+            "interrupted": True,
+            **({"usage": assembler.usage} if assembler.usage is not None else {}),
+        }, surfaceOp="append", sourceEventSeqs=chunk_seqs)
 
     async def _execute_tools_async(self, tool_calls: list[dict]) -> bool:
         """并行调度器（exclusive 屏障 + 有界滚动池 + 模型序提交）。
