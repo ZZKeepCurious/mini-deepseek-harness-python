@@ -29,7 +29,7 @@ from miniharness.core.system_prompt import SYSTEM_PROMPT_SERVICE, SystemPromptSe
 from miniharness.core.tools import ToolExec, ToolRegistry
 from miniharness.jobs import install_jobs
 from miniharness.llm import FakeLlmAdapter, StreamChunk
-from miniharness.llm.protocol import StreamAborted
+from miniharness.llm.protocol import LlmFailure, StreamAborted
 from miniharness.seams.subagent import (
     SubagentContinuationManager,
     SubagentError,
@@ -318,6 +318,42 @@ class TestBackgroundDelegation(unittest.TestCase):
         snap = self._job_snapshots(ctx, parent)[0]
         self.assertEqual(snap["id"], "subagent-1")
         self.assertEqual(snap["kind"], "subagent")
+
+    def test_failed_background_job_detail_carries_diagnostic(self):
+        # rc.2 run-settlement failureDetail：失败 outcome 的 detail 附 "; diagnostic: ..."
+        class BoomChild(FakeLlmAdapter):
+            async def stream(self, messages, tools, signal=None):
+                raise LlmFailure("RATE_LIMIT", "429 Too Many Requests")
+                yield  # noqa: unreachable —— 使本函数成为异步生成器（对齐适配器协议）
+
+        parent, ctx, reg = _parent_loop(adapter=_DelegatingParent(
+            {"description": "炸", "prompt": "去失败", "run_in_background": True}))
+        install_jobs(ctx)
+        mgr = SubagentContinuationManager(
+            parent, self.persistence, adapter_factory=lambda p, m: BoomChild())
+        install_subagent_delegation_tool(ctx, reg, mgr)
+        parent.run("委派任务")
+        _wait_until(lambda: any(s["status"] == "failed"
+                                for s in ctx.get("jobs").list(caller=parent)))
+        snap = next(s for s in ctx.get("jobs").list(caller=parent)
+                    if s["status"] == "failed")
+        self.assertEqual(
+            snap["detail"],
+            "subagent run failed; diagnostic: RATE_LIMIT: 429 Too Many Requests")
+
+    def test_job_outcome_diagnostic_wording(self):
+        # 纯函数面：aborted → killed 不带诊断；失败 detail 拼接诊断
+        self.assertEqual(delegation_tool._job_outcome("error", None),
+                         {"status": "failed", "detail": "subagent run failed"})
+        self.assertEqual(
+            delegation_tool._job_outcome("error", "RATE_LIMIT: 429"),
+            {"status": "failed",
+             "detail": "subagent run failed; diagnostic: RATE_LIMIT: 429"})
+        self.assertEqual(
+            delegation_tool._job_outcome("max-tokens", "上下文超限"),
+            {"status": "failed",
+             "detail":
+                 "subagent run hit its token limit before finishing; diagnostic: 上下文超限"})
 
     def test_missing_jobs_service_verbatim_error(self):
         # ctx 无 jobs 服务 → 逐字报错（index.ts 同款补救指引）

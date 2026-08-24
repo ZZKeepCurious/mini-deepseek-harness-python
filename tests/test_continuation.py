@@ -15,7 +15,7 @@ from miniharness.core.scope import Context
 from miniharness.core.session import Session, create_message, text_block
 from miniharness.core.session.persistence import JsonlPersistence, SqlitePersistence
 from miniharness.core.session_store import install_sessions
-from miniharness.core.tools import Tool, ToolRegistry
+from miniharness.core.tools import Tool, ToolExec, ToolRegistry
 from miniharness.llm import FakeLlmAdapter, LlmFailure, StreamChunk
 from miniharness.seams.subagent.continuation import (
     CONTEXT_SUMMARY_MAX_CHARS,
@@ -429,15 +429,52 @@ class TestContinuationManager(unittest.TestCase):
             mgr.start_continuable(label="研")
         self.assertEqual(cm.exception.code, "MAX_DEPTH_EXCEEDED")
 
+    def test_reserved_child_id_honored(self):
+        # rc.2 ContinuableStartSpec.childId：预留 id 原样采用
+        mgr = self._manager()
+        cid = mgr.start_continuable(label="研", child_id="child-fixed001")
+        self.assertEqual(cid, "child-fixed001")
+        info = self.persistence.inspect(cid)
+        self.assertEqual(info["meta"]["parentSession"], "parent")
+
+    def test_duplicate_child_id_rejected(self):
+        # 预留 id 已持久化 → DUPLICATE_CHILD（上游 continuation.ts:455 措辞逐字）
+        mgr = self._manager()
+        mgr.start_continuable(label="研", child_id="child-dup00001")
+        with self.assertRaises(SubagentError) as cm:
+            mgr.start_continuable(label="又", child_id="child-dup00001")
+        self.assertEqual(cm.exception.code, "DUPLICATE_CHILD")
+        self.assertEqual(str(cm.exception), 'subagent "child-dup00001" already exists')
+
+    def test_duplicate_child_id_live_registry(self):
+        # 活体注册表分支：在世 agent 的 id 同样不可预留
+        mgr = self._manager()
+        with self.assertRaises(SubagentError) as cm:
+            mgr.start_continuable(child_id=self.parent.id)
+        self.assertEqual(cm.exception.code, "DUPLICATE_CHILD")
+
+    def test_invalid_report_delivery_config_rejected(self):
+        with self.assertRaises(ValueError):
+            self._manager(report_delivery="foreground")
+
+    def test_drain_children_requires_exact_live_parent(self):
+        mgr = self._manager()
+        ghost, _, _ = _parent_loop("ghost")
+        with self.assertRaises(SubagentError) as cm:
+            mgr.drain_children(ghost, [])
+        self.assertEqual(cm.exception.code, "UNAUTHORIZED")
+        self.assertEqual(str(cm.exception),
+                         "selected child teardown requires the exact live parent agent")
+
     def test_report_wakeup_and_quiet(self):
         mgr = self._manager()
         cid = mgr.start_continuable(label="研")
-        # 前台：父 idle → 唤醒
-        mgr.report_from(cid, "进展1", quiet=False)
+        # next-step：父 idle → 唤醒（rc.2 词汇：'wakeup' 改名 'next-step'）
+        mgr.report_from(cid, "进展1", delivery="next-step")
         self.assertEqual([e["data"]["source"]["kind"] for e in self.parent.session.events
                           if e["type"] == "user/message"], ["subagent-report"])
-        # 后台：不唤醒，等下一次 pump
-        mgr.report_from(cid, "进展2", quiet=True)
+        # quiet：不唤醒，等下一次 pump
+        mgr.report_from(cid, "进展2", delivery="quiet")
         self.assertEqual(len([e for e in self.parent.session.events if e["type"] == "user/message"]), 1)
         self.parent.followup("再来一轮")
         sources = [e["data"]["source"]["kind"] for e in self.parent.session.events
@@ -458,6 +495,53 @@ class TestContinuationManager(unittest.TestCase):
         self.assertEqual(by_id[cid1]["depth"], 1)
         self.assertEqual(by_id[cid1]["status"], "idle")
         self.assertEqual(mgr.list_descendants(), entries)   # 无嵌套时 descendants == children
+
+
+class TestReportTool(unittest.TestCase):
+    """子作用域 report 工具对齐上游 tool-subagent-report（rc.2）：参数仅
+    output、投递取部署配置、返回 {messageId} + render 一句话确认。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.persistence = JsonlPersistence(self.tmp.name)
+        self.parent, self.ctx, self.reg = _parent_loop()
+
+    def _tool(self, cid, **kwargs):
+        mgr = SubagentContinuationManager(self.parent, self.persistence, **kwargs)
+        return mgr, mgr._report_tool(cid)
+
+    def test_schema_output_only_no_per_call_delivery(self):
+        _, tool = self._tool("child-x")
+        self.assertEqual(tool.parameters["required"], ["output"])
+        self.assertEqual(set(tool.parameters["properties"]), {"output"})
+        self.assertIn("Reporting does not end your turn", tool.description)
+
+    def test_execute_returns_message_id_and_renders_confirmation(self):
+        mgr, tool = self._tool("child-y")
+
+        async def scenario():
+            self.parent.start_driver()   # 运行循环内 followup 走 driver 路径
+            result = await tool.execute({"output": "结论X"}, ToolExec(agent=None))
+            await self.parent.when_idle_async()
+            return result
+
+        result = asyncio.run(scenario())
+        self.assertTrue(result["messageId"])
+        render = tool.render(result)
+        self.assertEqual(render[0]["text"],
+                         f"report accepted by the agent that started you as message {result['messageId']}")
+        # next-step 投递唤醒 idle 父：报告作为 user/message 落父会话
+        sources = [e["data"]["source"] for e in self.parent.session.events
+                   if e["type"] == "user/message"]
+        self.assertEqual([s["kind"] for s in sources], ["subagent-report"])
+        self.assertEqual(sources[0]["senderSessionId"], "child-y")
+
+    def test_quiet_delivery_from_config_does_not_wake_parent(self):
+        mgr, tool = self._tool("child-z", report_delivery="quiet")
+        asyncio.run(tool.execute({"output": "静默进展"}, ToolExec(agent=None)))
+        self.assertEqual([e for e in self.parent.session.events if e["type"] == "user/message"], [])
+        self.assertTrue(self.parent.when_idle())   # 未开回合
 
 
 class TestControlTools(unittest.TestCase):
@@ -612,6 +696,54 @@ class TestAsyncContinuation(unittest.TestCase):
             self.assertEqual(len(_settlement_notices(self.parent.session)), 2)
         asyncio.run(scenario())
 
+    def test_async_drain_children_releases_selected_direct_children(self):
+        # rc.2 drainChildren：exact live 父授权、直属校验（非直属 UNAUTHORIZED
+        # 且收集先于任何拆除）、非驻留 id 静默跳过、选中目标强制结算。
+        async def scenario():
+            release = asyncio.Event()
+
+            async def hold(_args, _exec):
+                await asyncio.wait_for(release.wait(), 2.0)
+                return "released"
+
+            self.reg.register(Tool(name="hold", description="d",
+                                   parameters={"type": "object", "properties": {}, "required": []},
+                                   execute=hold))
+            mgr = SubagentContinuationManager(
+                self.parent, self.persistence,
+                adapter_factory=lambda p, m: FakeLlmAdapter(tool_call={"name": "hold", "arguments": {}}))
+            self.parent.start_driver()
+            cid1 = mgr.start_continuable(label="甲")
+            cid2 = mgr.start_continuable(label="乙")
+            mgr.send_message(cid1, "跑")
+            mgr.send_message(cid2, "也跑")
+            await _wait_until(lambda: len(mgr.activations) == 2)
+            # 第二根宿主与其直属子（真实部署中根宿主经注册表面登记）
+            parent_b, _, _reg_b = _parent_loop("parent-b")
+            parent_b.start_driver()
+            mgr._live[parent_b.id] = parent_b
+            cid_b = mgr.start_continuable(label="外", parent=parent_b)
+            mgr.send_message(cid_b, "外跑", parent=parent_b)
+            await _wait_until(lambda: cid_b in mgr.activations)
+
+            with self.assertRaises(SubagentError) as cm:
+                mgr.drain_children(self.parent, [cid1, cid_b])
+            self.assertEqual(cm.exception.code, "UNAUTHORIZED")
+            self.assertEqual(
+                str(cm.exception),
+                f'subagent "{cid_b}" is not a direct child of agent "{self.parent.id}"')
+            self.assertIn(cid1, mgr.activations)   # 授权失败时未拆任何目标
+
+            mgr.drain_children(parent_b, [cid_b])   # exact live 直属父放行
+            mgr.drain_children(self.parent, [cid1, "child-unknown00", cid2])
+            await _wait_until(lambda: not mgr.activations)
+            self.assertEqual(mgr.state_of(cid1)["kind"], "idle")
+            self.assertEqual(mgr.state_of(cid2)["kind"], "idle")
+            self.assertEqual(mgr.state_of(cid_b)["kind"], "idle")
+            release.set()
+            await asyncio.sleep(0.05)
+        asyncio.run(scenario())
+
     def test_async_child_error_settles(self):
         # 子回合抛 LlmFailure → error turn/end 闭合并结算 "failed before it finished"。
         class BoomAdapter(FakeLlmAdapter):
@@ -696,7 +828,7 @@ class TestAsyncContinuation(unittest.TestCase):
         async def scenario():
             self.parent.start_driver()
             cid = self.mgr.start_continuable(label="研")
-            self.mgr.report_from(cid, "进展报告", quiet=False)
+            self.mgr.report_from(cid, "进展报告", delivery="next-step")
             await asyncio.wait_for(self.parent.when_idle_async(), 1.0)
             self.assertEqual([e["data"]["source"]["kind"]
                               for e in self.parent.session.events if e["type"] == "user/message"],

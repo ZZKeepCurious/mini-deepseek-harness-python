@@ -42,7 +42,6 @@ from ..attachment import (
     AttachmentStore,
     ImageAttachmentRef,
     SaveImageAttachment,
-    image_media_type,
     is_image_admission_error,
 )
 from ..core.scope import Context

@@ -1,183 +1,230 @@
-"""光栅探测：受理时解析头部取得格式/尺寸，读取时仅复验（不完整解码）。
+"""光栅探测：受理时完整解码，读取路径仅头部复验。
 
-对应 dsh 真实源码：packages/attachment/attachment-local/src/image.ts（已核实）。
+对应 dsh 真实源码：packages/attachment/attachment-local/src/image.ts（rc.2
+已核实）。载体：sharp → Pillow（依赖政策 2026-08-23 修订：成熟开源库优先；
+原 stdlib 头解析近似已退役——Pillow 能检出像素级损坏与 16-bit 深度，闭合
+旧登记的语义缺口）。
 
 上游语义（image.ts）：
-  * detectImage 完整解码（sharp）→ {mediaType, width, height}，超过
-    maxPixels 抛 IMAGE_TOO_MANY_PIXELS；畸形抛 INVALID_IMAGE；
-  * probeImage 仅头部探测（读路径复用，避免历史重放时的逐请求解码放大）；
-  * 支持 png / jpeg / webp / gif 四种光栅。
-
-载体简化：上游以 sharp 完整解码像素做权威校验；mini 纯 stdlib（无图像解码
-库），以头部结构解析 + 签名校验近似（可检出"缺头/尺寸异常/类型不符"），
-无法检出像素级损坏——语义等价于"受理校验存在性 + 尺寸 + 限制"，深度受
-stdlib 限制，标注于 WRITING-STYLE §4.1。读取路径与上游同为头部复验。
+  * detectImage 完整解码 → DetectedImage{mediaType, width, height, animated,
+    carriesMetadata, depth, space, hasAlpha}；超 maxPixels 抛
+    IMAGE_TOO_MANY_PIXELS、超单边 maxDimension 抛 IMAGE_DIMENSION_TOO_LARGE；
+    畸形抛 INVALID_IMAGE；width/height 已应用 EXIF 定向（5-8 转置感知轴）；
+  * probeImage 仅头部探测（摘要验证过的读取路径复用：受理已证明这些字节可
+    完整解码，重放不再付全量栅格解码的逐请求像素放大）；
+  * encodedAlphaIsCompatible：本包编码器产物中 WebP 允许省略全不透明 alpha
+    平面，其余增删都不兼容。
 """
 from __future__ import annotations
 
-import struct
+import io
+
+from PIL import Image, ImageOps
 
 from .error import (
+    IMAGE_DIMENSION_TOO_LARGE,
     IMAGE_TOO_MANY_PIXELS,
     INVALID_IMAGE,
-    IMAGE_TYPE_MISMATCH,
     AttachmentError,
 )
 
-__all__ = ["DetectedImage", "detect_image", "probe_image", "image_media_type"]
+__all__ = [
+    "DetectedImage",
+    "detect_image",
+    "encoded_alpha_is_compatible",
+    "probe_image",
+]
 
-_PNG_SIG = b"\x89PNG\r\n\x1a\n"
-_JPEG_SIG = b"\xff\xd8"
-_GIF_SIGS = (b"GIF87a", b"GIF89a")
-_WEBP_RIFF = b"RIFF"
-_WEBP_WEBP = b"WEBP"
+_FORMAT_MEDIA_TYPES: dict[str, str] = {
+    "PNG": "image/png",
+    "JPEG": "image/jpeg",
+    "WEBP": "image/webp",
+    "GIF": "image/gif",
+}
 
-# JPEG SOF 标记（含高度/宽度的帧头）；排除 DHT(C4)/DAC(CC)/DQT(DB)/DRI(DD)/APPn/E0-EF 等
-_JPEG_SOF_MARKERS = frozenset(
-    {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
-)
+# Pillow mode → vips depth 近似（上游 sharp metadata.depth 词表）
+_MODE_DEPTH: dict[str, str] = {
+    "1": "uchar",
+    "L": "uchar",
+    "LA": "uchar",
+    "P": "uchar",
+    "PA": "uchar",
+    "RGB": "uchar",
+    "RGBA": "uchar",
+    "RGBX": "uchar",
+    "CMYK": "uchar",
+    "YCbCr": "uchar",
+    "HSV": "uchar",
+    "I;16": "ushort",
+    "I;16B": "ushort",
+    "I;16L": "ushort",
+    "I;16N": "ushort",
+    "I": "int",
+    "F": "float",
+}
+
+# Pillow mode → vips interpret/space 近似
+_MODE_SPACE: dict[str, str] = {
+    "RGB": "srgb",
+    "RGBA": "srgb",
+    "RGBX": "srgb",
+    "P": "srgb",
+    "PA": "srgb",
+    "YCbCr": "srgb",
+    "HSV": "srgb",
+    "L": "b-w",
+    "LA": "b-w",
+    "1": "b-w",
+    "I": "b-w",
+    "F": "b-w",
+    "CMYK": "cmyk",
+}
 
 
 class DetectedImage:
-    """已解析光栅的元数据：格式 + 固有尺寸。"""
+    """受支持图片的解码元数据（上游 DetectedImage）。"""
 
-    __slots__ = ("media_type", "width", "height")
+    __slots__ = ("media_type", "width", "height", "animated", "carries_metadata",
+                 "depth", "space", "has_alpha")
 
-    def __init__(self, media_type: str, width: int, height: int):
+    def __init__(
+        self,
+        media_type: str,
+        width: int,
+        height: int,
+        animated: bool,
+        carries_metadata: bool,
+        depth: str,
+        space: str,
+        has_alpha: bool,
+    ):
         self.media_type = media_type
         self.width = width
         self.height = height
+        self.animated = animated
+        self.carries_metadata = carries_metadata
+        self.depth = depth
+        self.space = space
+        self.has_alpha = has_alpha
 
 
-def image_media_type(header: bytes) -> str | None:
-    """按签名白名单探测媒体类型（上游 MEDIA_TYPES 映射的 stdlib 近似）。"""
-    if header.startswith(_PNG_SIG):
-        return "image/png"
-    if header.startswith(_JPEG_SIG):
-        return "image/jpeg"
-    if header.startswith(_GIF_SIGS):
-        return "image/gif"
-    if header.startswith(_WEBP_RIFF) and len(header) >= 12 and header[8:12] == _WEBP_WEBP:
-        return "image/webp"
-    return None
-
-
-def _parse_png(data: bytes) -> DetectedImage:
-    # PNG：签名 8B + IHDR 长度 4B + "IHDR" 4B 后为 width/height（大端）
-    if len(data) < 24:
+def _detected_from_image(image: Image.Image) -> DetectedImage:
+    fmt = image.format if image.format is not None else ""
+    media_type = _FORMAT_MEDIA_TYPES.get(fmt)
+    if media_type is None:
         raise AttachmentError("Unsupported or malformed image data.", INVALID_IMAGE)
-    if data[12:16] != b"IHDR":
+    # EXIF 定向 5-8 转置存储栅格：报告观看者感知的轴，让限制、来源事实与
+    # 坐标建议共享同一坐标系（上游 transposed 同款）。
+    orientation = 0
+    try:
+        exif = image.getexif()
+        orientation = int(exif.get(274, 0) or 0)
+    except Exception:
+        orientation = 0
+    transposed = 5 <= orientation <= 8
+    stored_width, stored_height = image.size
+    mode = image.mode
+    info = image.info or {}
+    carries_metadata = any(
+        key in info for key in ("exif", "xmp", "icc_profile", "comment", "photoshop")
+    ) or orientation != 0
+    try:
+        frames = getattr(image, "n_frames", 1)
+    except Exception:
+        frames = 1
+    return DetectedImage(
+        media_type=media_type,
+        width=stored_height if transposed else stored_width,
+        height=stored_width if transposed else stored_height,
+        animated=frames > 1,
+        carries_metadata=carries_metadata,
+        depth=_MODE_DEPTH.get(mode, "uchar"),
+        space=_MODE_SPACE.get(mode, mode.lower()),
+        has_alpha=image.mode in ("RGBA", "LA", "PA") or (
+            image.mode == "P" and "transparency" in info
+        ),
+    )
+
+
+def _open(data: bytes, *, full_decode: bool = True) -> Image.Image:
+    if len(data) == 0:
         raise AttachmentError("Unsupported or malformed image data.", INVALID_IMAGE)
-    width, height = struct.unpack(">II", data[16:24])
-    return DetectedImage("image/png", width, height)
+    try:
+        image = Image.open(io.BytesIO(data))
+        if full_decode:
+            image.load()
+        return image
+    except AttachmentError:
+        raise
+    except Exception as error:
+        raise AttachmentError(
+            "Unsupported or malformed image data.", INVALID_IMAGE
+        ) from error
 
 
-def _parse_jpeg(data: bytes) -> DetectedImage:
-    # JPEG：FF xx 标记流；SOF 帧头在长度后为 precision(1) + height(2) + width(2)
-    i = 2
-    n = len(data)
-    while i + 4 <= n:
-        if data[i] != 0xFF:
-            i += 1
-            continue
-        marker = data[i + 1]
-        if marker == 0xFF or marker == 0x00:
-            i += 1
-            continue
-        if 0xD0 <= marker <= 0xD9:  # RST/SOI/EOI 无长度
-            if marker == 0xD9:
-                break
-            i += 2
-            continue
-        if i + 4 > n:
-            break
-        length = struct.unpack(">H", data[i + 2:i + 4])[0]
-        if marker in _JPEG_SOF_MARKERS and length >= 7:
-            precision = data[i + 4]
-            if precision == 8 and i + 8 <= n:
-                height, width = struct.unpack(">HH", data[i + 5:i + 9])
-                return DetectedImage("image/jpeg", width, height)
-        i += 2 + length
-    raise AttachmentError("Unsupported or malformed image data.", INVALID_IMAGE)
+def detect_image(
+    data: bytes,
+    max_pixels: int | None = None,
+    max_dimension: int | None = None,
+) -> DetectedImage:
+    """完整解码受支持光栅并返回固有元数据（上游 detectImage）。
 
-
-def _parse_gif(data: bytes) -> DetectedImage:
-    # GIF：签名 6B + 逻辑屏幕宽度/高度（小端）
-    if len(data) < 10:
-        raise AttachmentError("Unsupported or malformed image data.", INVALID_IMAGE)
-    width, height = struct.unpack("<HH", data[6:10])
-    return DetectedImage("image/gif", width, height)
-
-
-def _parse_webp(data: bytes) -> DetectedImage:
-    # WebP：RIFF 4B + 大小 4B + WEBP 4B 后按块类型解析
-    if len(data) < 30:
-        raise AttachmentError("Unsupported or malformed image data.", INVALID_IMAGE)
-    kind = data[12:16]
-    if kind == b"VP8X":
-        # VP8X：flags 1B + 3B 宽-1 + 3B 高-1（小端 24 位）
-        if len(data) < 30:
-            raise AttachmentError("Unsupported or malformed image data.", INVALID_IMAGE)
-        width = int.from_bytes(data[24:27], "little") + 1
-        height = int.from_bytes(data[27:30], "little") + 1
-        return DetectedImage("image/webp", width, height)
-    if kind == b"VP8 ":
-        # 有损 VP8：帧头后 3B 同步码 + 14 位宽/14 位高（小端）
-        if len(data) < 30:
-            raise AttachmentError("Unsupported or malformed image data.", INVALID_IMAGE)
-        if data[23:26] != b"\x9d\x01\x2a":
-            raise AttachmentError("Unsupported or malformed image data.", INVALID_IMAGE)
-        width = int.from_bytes(data[26:28], "little") & 0x3FFF
-        height = int.from_bytes(data[28:30], "little") & 0x3FFF
-        return DetectedImage("image/webp", width, height)
-    if kind == b"VP8L":
-        # 无损 VP8L：签名 0x2f + 4B（14 位宽-1 + 14 位高-1，小端）
-        if len(data) < 25 or data[20] != 0x2F:
-            raise AttachmentError("Unsupported or malformed image data.", INVALID_IMAGE)
-        bits = int.from_bytes(data[21:25], "little")
-        width = (bits & 0x3FFF) + 1
-        height = ((bits >> 14) & 0x3FFF) + 1
-        return DetectedImage("image/webp", width, height)
-    raise AttachmentError("Unsupported or malformed image data.", INVALID_IMAGE)
-
-
-def _probe(data: bytes) -> DetectedImage:
-    if len(data) < 12:
-        raise AttachmentError("Unsupported or malformed image data.", INVALID_IMAGE)
-    media_type = image_media_type(data[:12])
-    if media_type == "image/png":
-        return _parse_png(data)
-    if media_type == "image/jpeg":
-        return _parse_jpeg(data)
-    if media_type == "image/gif":
-        return _parse_gif(data)
-    if media_type == "image/webp":
-        return _parse_webp(data)
-    raise AttachmentError("Unsupported or malformed image data.", INVALID_IMAGE)
+    顺序与上游一致：先取头部事实，再校验固有尺寸限制，最后付全量解码。"""
+    image = _open(data, full_decode=False)
+    try:
+        detected = _detected_from_image(image)
+        if max_pixels is not None and detected.width * detected.height > max_pixels:
+            raise AttachmentError(
+                "Image exceeds the configured decoded-pixel limit.", IMAGE_TOO_MANY_PIXELS
+            )
+        if max_dimension is not None and max(detected.width, detected.height) > max_dimension:
+            raise AttachmentError(
+                "Image exceeds the configured per-side pixel limit.",
+                IMAGE_DIMENSION_TOO_LARGE,
+            )
+        image.load()
+        return detected
+    except AttachmentError:
+        raise
+    except Exception as error:
+        raise AttachmentError(
+            "Unsupported or malformed image data.", INVALID_IMAGE
+        ) from error
 
 
 def probe_image(data: bytes) -> DetectedImage:
-    """解析光栅头部，返回格式与固有尺寸（读取路径：不复验像素）。"""
-    return _probe(data)
+    """解析受支持光栅头部并返回元数据，不解码像素（上游 probeImage）。
 
-
-def detect_image(data: bytes, max_pixels: int | None = None) -> DetectedImage:
-    """受理路径：解析 + 像素限制校验（上游 detectImage 的 stdlib 近似）。
-
-    简化标注：上游以 sharp 完整解码像素（可拒绝解码中途损坏的光栅）；mini
-    纯 stdlib 无解码库，仅做头部结构 + 签名校验，像素级损坏无法检出。
-    """
-    detected = _probe(data)
-    if max_pixels is not None and detected.width * detected.height > max_pixels:
+    读取路径专用：受理已证明这些确切字节可完整解码，这里只重导引用字段。"""
+    if len(data) == 0:
+        raise AttachmentError("Unsupported or malformed image data.", INVALID_IMAGE)
+    try:
+        image = Image.open(io.BytesIO(data))
+    except Exception as error:
         raise AttachmentError(
-            "Image exceeds the configured decoded-pixel limit.", IMAGE_TOO_MANY_PIXELS
-        )
-    return detected
-
-
-def assert_media_type_matches(detected: DetectedImage, declared: str) -> None:
-    """声明媒体类型与字节解析结果不一致 → IMAGE_TYPE_MISMATCH。"""
-    if detected.media_type != declared:
+            "Unsupported or malformed image data.", INVALID_IMAGE
+        ) from error
+    try:
+        return _detected_from_image(image)
+    except AttachmentError:
+        raise
+    except Exception as error:
         raise AttachmentError(
-            "Declared image type does not match its bytes.", IMAGE_TYPE_MISMATCH
-        )
+            "Unsupported or malformed image data.", INVALID_IMAGE
+        ) from error
+
+
+def encoded_alpha_is_compatible(
+    source_has_alpha: bool | None,
+    output_media_type: str,
+    output_has_alpha: bool,
+) -> bool:
+    """检查本包编码器产物的 alpha 元数据是否与源事实兼容（上游同名函数）。
+
+    libvips/sharp 与 Pillow 的 WebP 编码器都可能省略全不透明的 alpha 平面：
+    源带 alpha 而 WebP 输出无 alpha 是唯一允许的差异，其余增删皆不兼容。"""
+    return (
+        source_has_alpha is None
+        or output_has_alpha == source_has_alpha
+        or (source_has_alpha and not output_has_alpha and output_media_type == "image/webp")
+    )

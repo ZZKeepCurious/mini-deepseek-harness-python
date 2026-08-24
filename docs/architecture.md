@@ -40,10 +40,13 @@ miniharness/
 │   ├── retry.py           # agent/request-error 恢复 + 退避
 │   └── token_meter.py     # TokenMeter 增量 fold + usage 折入锚
 ├── attachment/             # packages/attachment（attachment + attachment-local）
-│   ├── types.py            # ImageAttachmentRef / SaveImageAttachment / ImageAttachmentLimits
-│   ├── error.py            # AttachmentError + 13 错误码 + is_image_admission_error
-│   ├── image.py            # 光栅探测（纯 stdlib 头部解析，简化标注）
-│   └── store.py            # LocalAttachmentStore（sha256 内容寻址 + 完整性复验）
+│   ├── types.py            # ImageAttachmentRef（含 originalDimensions）/ SaveImageAttachment / ImageAttachmentLimits / ImageRequestPolicy / RequestImageAttachment
+│   ├── error.py            # AttachmentError + 15 错误码 + is_image_admission_error
+│   ├── encoding.py         # encodeFirstWithinLimit 惰性编码候选执行
+│   ├── normalization.py    # provider 无关规范化管线（直通/低彩色分流/缩边循环）
+│   ├── request_image.py    # variantId 确定身份的请求图缓存版本
+│   ├── admission.py        # canonical base64 wire 受理入口
+│   └── store.py            # LocalAttachmentStore（规范化字节 sha256 内容寻址 + 完整性复验）
 ├── compaction/            # packages/compaction
 │   ├── config.py          # 压缩规格解析（threshold / retain / retries）
 │   ├── region.py          # selectCompactableRange + 压缩事务（surface replace 检查点）
@@ -149,7 +152,7 @@ miniharness/
 | `llm/protocol.py` | `packages/llm/llm/src/` | `stream(messages, tools, signal)` async 契约 + `StreamAborted` + `_aiter_raced`（异步迭代与 abort 事件竞速，asyncio 原生载体） |
 | `llm/deepseek.py` | `packages/llm/llm-deepseek/src/` | httpx 异步传输（原生 asyncio，abort 置位即关闭连接、真取消）+ per-read idle 300s watchdog（对齐上游 fetch）+ SSE spec-strict 解析 |
 | `llm/fake.py` | 无 | 教学扩展 |
-| `attachment/`（types + error + image + store） | `packages/attachment/attachment`（seam + types + error）+ `packages/attachment/attachment-local`（store + image） | 纯 stdlib 头部解析（上游 sharp 全解码）、普通写 + os.replace（上游 fsync + link 原子发布）、显式 root（上游 DSH_HOME/attachments/v1）；简化标注见模块 docstring |
+| `attachment/`（types + error + image + encoding + normalization + request_image + admission + store） | `packages/attachment/attachment`（seam + types + error + admission）+ `packages/attachment/attachment-local`（store + image + encoding + normalization + request-image） | sharp→Pillow（权威全量解码/EXIF 定向/重编码）；规范化管线与 variantId 请求图缓存对齐 rc.2；CompressionLimiter 并发闸与 SharedRequest 单飞登记架构不适用（同步载体天然串行）；显式 root（上游 DSH_HOME/attachments/v1）；见 verified-diffs §3.9 |
 | `llm/retry_policy.py` | `packages/llm/llm/src/retry-policy.ts` | |
 | `llm/retry.py` | `packages/llm/llm-retry/src/` | async 恢复决策（派发前熔合信号检查 + always 派发后复查中止胜过决策）+ 事件驱动多信号竞速可取消等待（等价 `AbortSignal.any`；裸测试替身信号回退轮询）+ 插件 effect teardown（注销监听器 + lifetime.abort + 排干在途恢复） |
 | `llm/token_meter.py` | `packages/llm/token-meter/src/` | |
@@ -187,9 +190,9 @@ miniharness/
 | `seams/landlock_run.py` | `native/landlock-run`（C11 launcher） | ctypes 复刻同一 CLI 契约与 Landlock UAPI 语义（ABI 协商 / PATH_BENEATH 规则 / PR_SET_NO_NEW_PRIVS → restrict_self → execvp；full ⟺ 内核 ABI ≥ 5，否则 partial 但仍受限；非 Linux 宿主干净退出 125） |
 | `seams/sandbox_policy.py` | `packages/sandbox/sandbox-policy` | ctx.sandboxPolicy：Config {mode 缺省 read-only, workspaceRoot} fail-loud 校验；resolve() = 显式 mode > 会话日志最后一条 `sandbox/mode`（session-mode.ts 的 effectiveSandboxMode fold）> 部署缺省，workspace 根先 canonical 后词法规范化、会话 cwd 即边界；三档策略上下文经 systemPrompt `.context('sandbox:policy', order=110)` 注册，loop 侧投影在变化时把快照注入对话消息流（`core/agent_loop/runtime_context.py`） |
 | `shell/bash_local.py` + `bash_sandbox.py` + `helpers.py` | `packages/shell/{shell, bash-local, bash-sandbox}` | ctx.shell 前台 `bash -c` 执行器族：本地直跑 / 经 ctx.sandbox confine 包裹并报告 {mode, denied, enforcement}；三路归因对齐 helpers.ts——runner 启动失败（ENOENT/EACCES 且 argv[0] 证据 + cwd 可用性独立校验）与 runner 失败规则命中抛 SandboxUnavailableError 且优先于 denial，denial = 非零退出 + stderr 大小写不敏感签名；danger-full-access 直通不包裹。后台进程机制未复现（mini 后台面是 jobs registry，§3.5） |
-| `seams/credentials_local.py` | `packages/credentials/credentials-local` | |
+| `seams/credentials_local.py` | `packages/credentials/credentials-local` | 文档为 version-1 JSON 布局 `{version:1, refs, records}`（上游 YAML）：fail-closed 解析 + 可识别 flat 文档启动自动迁移；records 仅准入+保留（无服务侧写方，§3.10 P2-20）；authorization 包未跟进 |
 | `seams/subprocess_env.py` | `packages/subprocess/subprocess/src/index.ts` + `types.ts` | 环境清洗切片：SENSITIVE_ENV_PATTERN 凭据形启发式 + DSH_ENV_PREFIX 大小写不敏感剔除；显式 env 在 scrub 之后合并（providers spawn 层叠） |
-| `seams/subagent/`（`__init__.py` + `descriptor.py` + `providers.py` + `worker.py` + `continuation.py` + `tool.py`） | `packages/subagent/subagent` + `subagent-fork-in-process` + `-acp` + `-dsh-sdk` + `subagent-spawn-in-process` + `subagent-in-process-driver` + `tool-subagent-control` + `tool-subagent-report` | 续跑 A8 为异步事件驱动（双路径：父有 driver → 投递即返回 + watchSettlement 结算 + steer 批内合并；无 driver → 回退同步 pump）。生命周期 scoped dispatch（委托父 scope 载体过滤，无标号退化祖先链）+ provider 注册表（register_provider → 注销发布 subagent/provider-removed）+ DRAINING 拒绝面（drain/drain_descendants + assert_admitting 准入边界）已对齐；invariant 运行时校验架构不适用；同步模式结算投递走非唤醒 next-step |
+| `seams/subagent/`（`__init__.py` + `descriptor.py` + `providers.py` + `worker.py` + `continuation.py` + `tool.py`） | `packages/subagent/subagent` + `subagent-fork-in-process` + `-acp` + `-dsh-sdk` + `subagent-spawn-in-process` + `subagent-in-process-driver` + `tool-subagent-control` + `tool-subagent-report` | 续跑 A8 为异步事件驱动（双路径：父有 driver → 投递即返回 + watchSettlement 结算 + steer 批内合并；无 driver → 回退同步 pump）。生命周期 scoped dispatch（委托父 scope 载体过滤，无标号退化祖先链）+ provider 注册表（register_provider → 注销发布 subagent/provider-removed）+ DRAINING 拒绝面（drain/drain_descendants/drain_children + assert_admitting 准入边界）+ report 工具逐字契约（output 参数、部署级 reportDelivery 'quiet'\|'next-step'、{messageId} 返回与 render）+ childId 预留 DUPLICATE_CHILD 断言已对齐；invariant 运行时校验架构不适用；同步模式结算投递走非唤醒 next-step |
 | `demo.py` | `packages/examples/agent-spine-demo` | 教学入口，保留顶层（`python -m miniharness.demo`） |
 | `example_plugins.py` | `examples/` | 教学示例，保留顶层 |
 

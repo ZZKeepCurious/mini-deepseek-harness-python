@@ -1,11 +1,17 @@
-"""Plan 投影单元：纯双事件折叠（session-projection 的 `plan` 键，上游 index.ts:244-266）。
+"""Plan 投影单元：纯事件折叠（session-projection 的 `plan` 键，上游 index.ts:268-278
+@ dsh-v0.1.1-rc.2）。
 
-`command/run`(name='plan') 记录用户已落盘的 /plan 选择（args.trim() !== 'off'）；
-`plan/mode` 记录该选择并清空 pending。pending 因此是纯重放量：宿主重启、其他
-tab、冷读都能只从日志恢复（上游同注释）。
+三事件成功结算制（rc.2）：`command/run`(name='plan') 只记 running 执行
+（{commandId, wanted}）；配对 `command/done` 结算——kind:'success' 且目标异于
+生效态才升格为 wanted（失败/幂等选择清除）；`plan/mode` 记录该选择并清空
+wanted。pending 因此是纯重放量：宿主重启、其他 tab、冷读都能只从日志恢复
+（上游同注释）。
 
-view 语义（上游 index.ts:260-263）：
+view 语义（上游 index.ts wire.view）：
+  wanted = running.wanted ?? wanted；
   {active: 生效状态, pending: wanted != null 且 wanted != active}
+——执行未结算时 pending 反映运行中意图（上游 PlanUnitState.running，
+stateVersion 2；mini 无注册表/持久化缓存，version 仅登记不消费）。
 """
 from __future__ import annotations
 
@@ -21,21 +27,28 @@ def fold_plan_projection(events: tuple, end: int | None = None) -> dict:
     """
     active = False
     wanted = None  # None = 无未决选择；否则为目标模式
+    running: dict | None = None  # 最近一次 /plan 执行待其 command/done 结算
     for index, event in enumerate(events):
         if end is not None and index >= end:
             break
-        if event["type"] == "command/run" and event["data"].get("name") == "plan":
-            args = event["data"].get("args")
+        data = event["data"]
+        if event["type"] == "command/run" and data.get("name") == "plan":
+            args = data.get("args")
             if args is None:
-                continue  # args 缺失（recordInput: false）不构成选择（上游 index.ts:251-252）
-            target = args.strip() != "off"
-            if target == wanted:
-                continue
-            wanted = target
+                continue  # args 缺失（recordInput: false）不构成选择（上游同守卫）
+            # rc.2：不再与 wanted 去重——每次执行都进入 running 等结算
+            running = {"commandId": data["commandId"], "wanted": args.strip() != "off"}
+        elif event["type"] == "command/done" and running is not None \
+                and data.get("commandId") == running["commandId"]:
+            # 只有成功且目标异于生效态的选择才成为 wanted（失败/幂等 → 清除）
+            wanted = running["wanted"] if (data.get("kind") == "success"
+                                           and running["wanted"] != active) else None
+            running = None
         elif event["type"] == "plan/mode":
-            active = event["data"]["active"]
+            active = data["active"]
             wanted = None
+    effective = running["wanted"] if running is not None else wanted
     return {
         "active": active,
-        "pending": wanted is not None and wanted != active,
+        "pending": effective is not None and effective != active,
     }

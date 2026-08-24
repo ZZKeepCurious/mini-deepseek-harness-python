@@ -16,6 +16,7 @@ from miniharness.seams.credentials_local import (
     _assert_owner_only,
     parse_credentials_document,
     parse_dotenv,
+    render_flat_layout_migration,
     resolve_dsh_home,
 )
 from miniharness.seams import credentials_local
@@ -225,19 +226,85 @@ class TestSandboxProvider(unittest.TestCase):
 
 class TestCredentialsParsing(unittest.TestCase):
     def test_parse_document_strict(self):
-        self.assertEqual(parse_credentials_document('{"api_key": "sk-1"}', "f"),
-                         {"api_key": "sk-1"})
+        # version-1 布局（rc.2）：refs 段准入规则不变
+        self.assertEqual(parse_credentials_document(
+            '{"version": 1, "refs": {"api_key": "sk-1"}}', "f"),
+            {"refs": {"api_key": "sk-1"}, "records": {}})
         with self.assertRaises(TypeError):
             parse_credentials_document('["a"]', "f")
         with self.assertRaises(ValueError):
-            parse_credentials_document('{"bad key!": "v"}', "f")
+            parse_credentials_document(
+                '{"version": 1, "refs": {"bad key!": "v"}}', "f")
         with self.assertRaises(TypeError):
-            parse_credentials_document('{"api_key": 42}', "f")
+            parse_credentials_document(
+                '{"version": 1, "refs": {"api_key": 42}}', "f")
         with self.assertRaises(ValueError):
-            parse_credentials_document('{"api_key": ""}', "f")
+            parse_credentials_document(
+                '{"version": 1, "refs": {"api_key": ""}}', "f")
         # 重复键是解析错误（上游 uniqueKeys:true，credentials-local index.ts:160）
         with self.assertRaisesRegex(ValueError, "duplicate key"):
-            parse_credentials_document('{"api_key": "a", "api_key": "b"}', "f")
+            parse_credentials_document(
+                '{"version": 1, "refs": {"api_key": "a", "api_key": "b"}}', "f")
+
+    def test_parse_document_versioning(self):
+        # 空（或纯空白）文档 = 空存储，无需 version
+        self.assertEqual(parse_credentials_document("", "f"),
+                         {"refs": {}, "records": {}})
+        self.assertEqual(parse_credentials_document("   \n", "f"),
+                         {"refs": {}, "records": {}})
+        # 非空无 version = pre-release flat 布局 → 拒读并指路（措辞逐字）
+        with self.assertRaisesRegex(
+                ValueError,
+                r"uses the pre-release flat layout\. Add `version: 1` and nest "
+                r"the existing 2 entries under `refs:`\. No values need to change\."):
+            parse_credentials_document('{"a": "1", "b": "2"}', "f")
+        # 单条目时 entry 用单数
+        with self.assertRaisesRegex(ValueError, "the existing 1 entry under"):
+            parse_credentials_document('{"a": "1"}', "f")
+        # version 不符 fail-closed
+        with self.assertRaisesRegex(ValueError,
+                                    r'declares version 2; this build reads version 1'):
+            parse_credentials_document('{"version": 2, "refs": {}}', "f")
+        # 未知顶层键 fail-closed
+        with self.assertRaisesRegex(ValueError, 'unknown top-level key "extra"'):
+            parse_credentials_document('{"version": 1, "refs": {}, "extra": {}}', "f")
+
+    def test_parse_records_admission(self):
+        # 合法 api-key / grant 记录原样保留
+        document = parse_credentials_document(json.dumps({
+            "version": 1,
+            "refs": {},
+            "records": {
+                "openai/route-a": {"kind": "api-key", "key": "sk-x",
+                                   "env": {"AWS_PROFILE": "prod"}},
+                "my-plugin/cache": {"kind": "grant", "payload": {"nested": [1, True, None]}},
+            },
+        }), "f")
+        self.assertEqual(document["records"]["openai/route-a"],
+                         {"kind": "api-key", "key": "sk-x", "env": {"AWS_PROFILE": "prod"}})
+        self.assertEqual(document["records"]["my-plugin/cache"],
+                         {"kind": "grant", "payload": {"nested": [1, True, None]}})
+        # 坏键语法 / 缺 kind / 未知 kind / 未知字段 / 无 payload 全部拒绝
+        for bad in ('{"version": 1, "records": {"noseparator": {"kind": "grant", "payload": 1}}}',
+                    '{"version": 1, "records": {"a/b": {}}}',
+                    '{"version": 1, "records": {"a/b": {"kind": "mystery", "payload": 1}}}',
+                    '{"version": 1, "records": {"a/b": {"kind": "grant", "payload": 1, "x": 2}}}',
+                    '{"version": 1, "records": {"a/b": {"kind": "grant"}}}',
+                    '{"version": 1, "records": {"a/b": {"kind": "api-key", "key": ""}}}'):
+            with self.assertRaises(Exception):
+                parse_credentials_document(bad, "f")
+
+    def test_render_flat_layout_migration(self):
+        # 可识别：非空映射、无 version、可寻址键、非空字符串值 → 换布局保值
+        migrated = render_flat_layout_migration('{"api_key": "sk-1", "other": "v"}')
+        self.assertEqual(json.loads(migrated),
+                         {"version": 1, "refs": {"api_key": "sk-1", "other": "v"}})
+        # 不可识别一律 None（响亮拒绝继续成立）
+        self.assertIsNone(render_flat_layout_migration('{}'))
+        self.assertIsNone(render_flat_layout_migration('{"version": 1, "refs": {}}'))
+        self.assertIsNone(render_flat_layout_migration('{"bad key!": "v"}'))
+        self.assertIsNone(render_flat_layout_migration('{"a": ""}'))
+        self.assertIsNone(render_flat_layout_migration('not json'))
 
     def test_parse_dotenv(self):
         text = "# comment\n\nAPI_KEY=sk-123\nEMPTY=\nQUOTED='hello world'\n"
@@ -326,7 +393,8 @@ class TestLocalCredentialProvider(unittest.TestCase):
     def test_write_preserves_external_edits(self):
         self._provider.set("a", "1")
         with open(self._filename, "w", encoding="utf-8") as handle:
-            json.dump({"a": "1", "external": "kept"}, handle)
+            json.dump({"version": 1,
+                       "refs": {"a": "1", "external": "kept"}}, handle)
         self._provider.set("b", "2")
         self.assertEqual(self._provider.resolve("external"), ("kept", "file"))
         self.assertEqual(self._provider.resolve("b"), ("2", "file"))
@@ -337,15 +405,44 @@ class TestLocalCredentialProvider(unittest.TestCase):
             handle.write('{"api_key": 42}')
         # CI umask 022 会让新建文件 0644，先收紧为 0600 再测文档解析失败
         os.chmod(self._filename, 0o600)
-        with self.assertRaises(TypeError):
+        # 值类型不可识别 → 迁移器拒绝改写 → 落回 flat 布局响亮拒绝
+        with self.assertRaisesRegex(ValueError, "pre-release flat layout"):
             LocalCredentialProvider(filename=self._filename, dsh_home=self._dsh_home,
                                     project_dir=self._project)
+
+    def test_legacy_flat_document_migrated_at_boot(self):
+        # rc.2：可识别 flat 文档启动时自动迁移（持锁重读换布局，值逐字保留）
+        os.makedirs(self._dsh_home, exist_ok=True)
+        with open(self._filename, "w", encoding="utf-8") as handle:
+            handle.write('{"api_key": "sk-old"}')
+        os.chmod(self._filename, 0o600)
+        provider = LocalCredentialProvider(filename=self._filename, dsh_home=self._dsh_home,
+                                           project_dir=self._project)
+        self.assertEqual(provider.resolve("api_key"), ("sk-old", "file"))
+        with open(self._filename, encoding="utf-8") as handle:
+            on_disk = json.load(handle)
+        self.assertEqual(on_disk, {"version": 1, "refs": {"api_key": "sk-old"}})
 
     def test_persisted_document_survives_reload(self):
         self._provider.set("api_key", "sk-1")
         reloaded = LocalCredentialProvider(filename=self._filename, dsh_home=self._dsh_home,
                                            project_dir=self._project)
         self.assertEqual(reloaded.resolve("api_key"), ("sk-1", "file"))
+
+    def test_external_records_preserved_through_ref_writes(self):
+        # mini 无记录写方：外部写入的合法记录在 refs 写路径中原样保留
+        self._provider.set("api_key", "sk-1")
+        with open(self._filename, "w", encoding="utf-8") as handle:
+            json.dump({"version": 1, "refs": {"api_key": "sk-1"},
+                       "records": {"my-plugin/cache":
+                                       {"kind": "grant", "payload": {"n": 1}}}}, handle)
+        os.chmod(self._filename, 0o600)
+        self._provider.set("other", "v")
+        with open(self._filename, encoding="utf-8") as handle:
+            on_disk = json.load(handle)
+        self.assertEqual(on_disk["records"]["my-plugin/cache"],
+                         {"kind": "grant", "payload": {"n": 1}})
+        self.assertEqual(on_disk["refs"], {"api_key": "sk-1", "other": "v"})
 
     def test_world_readable_rejected_on_posix(self):
         import unittest.mock as mock

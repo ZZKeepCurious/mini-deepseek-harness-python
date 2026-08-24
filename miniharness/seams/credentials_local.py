@@ -18,6 +18,15 @@ describe/set/unset/assertUnshadowed/assertOwnerOnly/parseCredentialsDocument）�
   * 文档只放凭据：严格 CredentialRef→字符串映射而非 dotenv 文件——一个
     Harness 拥有、绝不物化进环境的存储不能同时充当环境层，否则会按优先
     级遮蔽非密条目使其静默不可达。
+  * 文档布局 version 1（rc.2 起）：`{version: 1, refs: {...}, records: {...}}`
+    ——refs 是 CredentialRef→非空字符串；records 是 `<scope>/<id>`→带标签
+    记录（api-key {key?, env?} / grant {payload}），mini 无记录写方但按上游
+    准入规则读取与原样保留。空文档（或纯注释）= 空存储，无需 version；
+    非空无 version = pre-release flat 布局 → 拒读并指路（"Add `version: 1`
+    and nest the existing N entries under `refs:`. No values need to
+    change."），但**可识别的 flat 文档在启动时自动迁移**（renderFlatLayout
+    Migration：持锁重读后原值换布局落盘——老构建存的键必须活过布局变更，
+    不需手工编辑）；version 不符 / 未知顶层键 fail-closed。
   * resolve 层级顺序：env → file → project-env → user-env（都没有 →
     undefined）；describe 报告 {configured, source, writable}（只有继承
     环境不可写）；set/unset 在 env 层已提供该 ref 时拒绝（写了也会被
@@ -40,6 +49,7 @@ describe/set/unset/assertUnshadowed/assertOwnerOnly/parseCredentialsDocument）�
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -52,6 +62,10 @@ from ..boot.dotenv import _is_posix_identifier, parse_dotenv
 CREDENTIALS_FILENAME = ".credentials.json"
 DOTENV_FILENAME = ".env"
 
+#: 文档布局版本（上游 credentials-local index.ts:167 DOCUMENT_VERSION = 1；
+#: 序列化字段或 fold 语义变更时递增，旧版本拒读）
+DOCUMENT_VERSION = 1
+
 # POSIX 上"组/其他"可读位：凭据文档必须一个都没有（上游 GROUP_OTHER_BITS）
 GROUP_OTHER_BITS = 0o077
 
@@ -62,6 +76,9 @@ LOCK_TIMEOUT_SECONDS = 2.0
 
 class CredentialWriteLocked(RuntimeError):
     """跨进程写锁在期限内未获得（上游超时措辞逐字）。"""
+
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -80,14 +97,11 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict:
     return seen
 
 
-def parse_credentials_document(text: str, filename: str) -> dict[str, str]:
-    """解析凭据文档：严格映射，任何坏条目整体拒绝（不是跳过）。
-
-    与上游 parseCredentialsDocument 同语义；错误信息只带键名与位置，
-    绝不引用值（值就是秘密）。重复键 fail-closed（上游 uniqueKeys:true）。
-    """
+def _load_json_document(text: str, filename: str) -> Any:
+    """严格 JSON 载体解析：重复键 fail-closed（上游 YAML uniqueKeys:true）；
+    错误信息只带位置与键名，绝不引用值（值就是秘密）。"""
     try:
-        root = json.loads(text, object_pairs_hook=_reject_duplicate_keys)
+        return json.loads(text, object_pairs_hook=_reject_duplicate_keys)
     except json.JSONDecodeError as error:
         raise ValueError(
             f"credentials-local: invalid document at {filename}: "
@@ -97,10 +111,12 @@ def parse_credentials_document(text: str, filename: str) -> dict[str, str]:
         raise ValueError(
             f"credentials-local: invalid document at {filename}: {error}"
         ) from error
-    if not isinstance(root, dict):
-        raise TypeError(f"credentials-local: {filename} must be a mapping of credential reference to value")
+
+
+def _parse_refs(section: Any, filename: str) -> dict[str, str]:
+    """refs 段准入：POSIX 标识符键 over 非空字符串值（上游 parseRefs）。"""
     entries: dict[str, str] = {}
-    for key, value in root.items():
+    for key, value in _as_section(section, "refs", filename).items():
         if not _is_posix_identifier(key):
             raise ValueError(f"credentials-local: invalid credential reference {key!r} in {filename}")
         if not isinstance(value, str):
@@ -109,6 +125,169 @@ def parse_credentials_document(text: str, filename: str) -> dict[str, str]:
             raise ValueError(f'credentials-local: the value for "{key}" in {filename} is empty; remove the key instead')
         entries[key] = value
     return entries
+
+
+def _as_section(section: Any, name: str, filename: str) -> dict[str, Any]:
+    """一段文档作为普通映射；缺省与 null 都表示空段（上游 asSection）。"""
+    if section is None:
+        return {}
+    if not isinstance(section, dict):
+        raise TypeError(f'credentials-local: "{name}" in {filename} must be a mapping')
+    return section
+
+
+def _is_credential_key(key: str) -> bool:
+    """记录地址语法 `<scope>/<id>`：恰好一个 '/'，两半非空且 id 不含 '/'
+    （上游 CredentialKey 品牌；scope=拥有插件的注册名，与 CredentialRef
+    的 POSIX 语法不相交，两个键空间永不碰撞）。"""
+    if not isinstance(key, str) or key.count("/") != 1:
+        return False
+    scope, _, record_id = key.partition("/")
+    return len(scope) > 0 and len(record_id) > 0
+
+
+def _assert_record_fields(key: str, fields: dict[str, Any], allowed: set[str], filename: str) -> None:
+    """拒绝标签未定义的字段——笔误不能被静默丢弃（上游 assertFields）。"""
+    for field in fields:
+        if field not in allowed:
+            raise ValueError(f'credentials-local: record "{key}" in {filename} has unknown field "{field}"')
+
+
+def _parse_record_env(key: str, env: Any, filename: str) -> dict[str, str] | None:
+    """api-key 记录的 provider 环境：POSIX 名 over 非空字符串（上游 parseRecordEnv）。"""
+    if env is None:
+        return None
+    if not isinstance(env, dict):
+        raise TypeError(f'credentials-local: record "{key}" in {filename} has a non-mapping env')
+    parsed: dict[str, str] = {}
+    for name, value in env.items():
+        if not _is_posix_identifier(name):
+            raise ValueError(f'credentials-local: record "{key}" env "{name}" is not addressable')
+        if not isinstance(value, str) or len(value) == 0:
+            raise TypeError(f'credentials-local: record "{key}" env "{name}" must be a non-empty string')
+        parsed[name] = value
+    return parsed
+
+
+def _assert_json_value(label: str, value: Any, seen: set[int]) -> None:
+    """payload 必须经得起 JSON 往返（上游 assertJsonValue）。"""
+    if id(value) in seen:
+        raise ValueError(f"credentials-local: {label} is cyclic")
+    if value is None or isinstance(value, (bool, str)):
+        return
+    if isinstance(value, float) and (value != value or value in (float("inf"), float("-inf"))):
+        raise ValueError(f"credentials-local: {label} is not finite")
+    if isinstance(value, (int, float)):
+        return
+    if isinstance(value, list):
+        seen = seen | {id(value)}
+        for item in value:
+            _assert_json_value(label, item, seen)
+        return
+    if isinstance(value, dict):
+        seen = seen | {id(value)}
+        for item_key, item in value.items():
+            if not isinstance(item_key, str):
+                raise ValueError(f"credentials-local: {label} has a non-string key")
+            _assert_json_value(label, item, seen)
+        return
+    raise TypeError(f"credentials-local: {label} is not JSON")
+
+
+def _parse_record(key: str, value: Any, filename: str) -> dict[str, Any]:
+    """单条记录准入：拒未知标签或字段而非丢弃（上游 parseRecord）。"""
+    if not isinstance(value, dict):
+        raise TypeError(f'credentials-local: record "{key}" in {filename} must be a mapping')
+    kind = value.get("kind")
+    if kind == "api-key":
+        _assert_record_fields(key, value, {"kind", "key", "env"}, filename)
+        api_key = value.get("key")
+        if api_key is not None and (not isinstance(api_key, str) or len(api_key) == 0):
+            raise TypeError(f'credentials-local: record "{key}" in {filename} has a non-string or empty key')
+        env = _parse_record_env(key, value.get("env"), filename)
+        record: dict[str, Any] = {"kind": "api-key"}
+        if api_key is not None:
+            record["key"] = api_key
+        if env is not None:
+            record["env"] = env
+        return record
+    if kind == "grant":
+        _assert_record_fields(key, value, {"kind", "payload"}, filename)
+        if "payload" not in value:
+            raise ValueError(f'credentials-local: record "{key}" in {filename} has no payload')
+        _assert_json_value(f'record "{key}" payload in {filename}', value["payload"], set())
+        return {"kind": "grant", "payload": value["payload"]}
+    if kind is None:
+        raise ValueError(f'credentials-local: record "{key}" in {filename} has no kind')
+    raise ValueError(
+        f'credentials-local: record "{key}" in {filename} has unknown kind {json.dumps(kind)}'
+    )
+
+
+def _parse_records(section: Any, filename: str) -> dict[str, dict[str, Any]]:
+    """records 段准入：`<scope>/<id>` 键 over 带标签映射（上游 parseRecords）。"""
+    entries: dict[str, dict[str, Any]] = {}
+    for key, value in _as_section(section, "records", filename).items():
+        if not _is_credential_key(key):
+            raise ValueError(f"credentials-local: invalid credential key {key!r} in {filename}")
+        entries[key] = _parse_record(key, value, filename)
+    return entries
+
+
+def parse_credentials_document(text: str, filename: str) -> dict[str, dict]:
+    """解析凭据文档为 version-1 布局：任何坏条目整体拒绝（不是跳过）。
+
+    返回 {"refs": {...}, "records": {...}}。空文档（含空白）是空存储、无需
+    version；非空无 version = pre-release flat 布局 → 拒读并指路；version
+    不符 / 未知顶层键 fail-closed。错误信息只带键名与位置，绝不引用值。
+    """
+    root = _load_json_document(text, filename) if text.strip() else {}
+    if not isinstance(root, dict):
+        raise TypeError(f"credentials-local: {filename} must be a mapping")
+    keys = list(root)
+    # 空（或纯注释）文档就是空存储：后续布局不可能赋予它别的含义
+    if len(keys) == 0:
+        return {"refs": {}, "records": {}}
+    if "version" not in root:
+        raise ValueError(
+            f"credentials-local: {filename} uses the pre-release flat layout. "
+            f"Add `version: {DOCUMENT_VERSION}` and nest the existing "
+            f"{len(keys)} {'entry' if len(keys) == 1 else 'entries'} under `refs:`. "
+            "No values need to change."
+        )
+    if root["version"] != DOCUMENT_VERSION:
+        raise ValueError(
+            f"credentials-local: {filename} declares version {json.dumps(root['version'])};"
+            f" this build reads version {DOCUMENT_VERSION}"
+        )
+    for key in keys:
+        if key not in ("version", "refs", "records"):
+            raise ValueError(f'credentials-local: unknown top-level key "{key}" in {filename}')
+    return {"refs": _parse_refs(root.get("refs"), filename),
+            "records": _parse_records(root.get("records"), filename)}
+
+
+def render_flat_layout_migration(text: str) -> str | None:
+    """pre-release flat 文档 → version-1 布局文本；不可识别 → None。
+
+    识别条件（上游 renderFlatLayoutMigration 同款）：非空顶层映射、无
+    version 键、每个键都是可寻址引用名、每个值都是非空字符串。任何本构建
+    无法证明理解的文档都不改写（响亮拒绝继续成立）；可识别时值逐字保留、
+    只换外围布局。
+    """
+    try:
+        flat = _load_json_document(text, filename="migration")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(flat, dict) or len(flat) == 0 or "version" in flat:
+        return None
+    for key, value in flat.items():
+        if not _is_posix_identifier(key):
+            return None
+        if not isinstance(value, str) or len(value) == 0:
+            return None
+    migrated: dict[str, Any] = {"version": DOCUMENT_VERSION, "refs": flat}
+    return json.dumps(migrated, ensure_ascii=False, indent=2) + "\n"
 
 
 def _assert_owner_only(filename: str, stat_fn: Any = os.stat) -> None:
@@ -145,6 +324,9 @@ class LocalCredentialProvider:
         self._user_dotenv = os.path.join(dsh_home or resolve_dsh_home(), DOTENV_FILENAME)
         self._read_env = read_env
         self._values: dict[str, str] = {}
+        # version-1 记录段：mini 无记录写方，但外部写入的合法记录按上游准入
+        # 规则读取并原样保留（写 refs 时 records 不丢）
+        self._records: dict[str, dict] = {}
         self._text: str | None = None
         self._load_initial()
 
@@ -236,7 +418,7 @@ class LocalCredentialProvider:
                     del next_values[key]
                 else:
                     next_values[key] = value
-                next_text = json.dumps(next_values, ensure_ascii=False, indent=2) + "\n"
+                next_text = self._render_document(next_values)
                 self._atomic_write(next_text)
                 self._text = next_text
                 self._values = next_values
@@ -244,6 +426,13 @@ class LocalCredentialProvider:
             raise CredentialWriteLocked(
                 f"atomic-write: timed out waiting for the writer lock at {lock_path}"
             ) from error
+
+    def _render_document(self, refs: dict[str, str]) -> str:
+        """version-1 布局渲染：refs + 保留的 records（无记录省略该段）。"""
+        document: dict[str, Any] = {"version": DOCUMENT_VERSION, "refs": refs}
+        if self._records:
+            document["records"] = self._records
+        return json.dumps(document, ensure_ascii=False, indent=2) + "\n"
 
     def _assert_unshadowed(self, key: str, verb: str) -> None:
         if self._inherited(key) is not None:
@@ -261,7 +450,9 @@ class LocalCredentialProvider:
             text = None
         if text == self._text or text is None:
             return
-        self._values = parse_credentials_document(text, self._filename)
+        document = parse_credentials_document(text, self._filename)
+        self._values = document["refs"]
+        self._records = document["records"]
         self._text = text
 
     def _atomic_write(self, text: str) -> None:
@@ -288,15 +479,47 @@ class LocalCredentialProvider:
     # ---------- 启动 ----------
 
     def _load_initial(self) -> None:
-        """启动读：缺文件 = 空存储；存在的坏文档绝不当"没存凭据"（fail loud）。"""
+        """启动读：缺文件 = 空存储；存在的坏文档绝不当"没存凭据"（fail loud）。
+
+        可识别的 pre-release flat 文档先自动迁移（上游 migrateFlatDocument：
+        持锁重读后换布局落盘，值逐字保留——并发启动竞速时落败方读到非
+        flat 文档则原样交给普通解析）。"""
         _assert_owner_only(self._filename)
         try:
             with open(self._filename, "r", encoding="utf-8") as handle:
                 text = handle.read()
         except FileNotFoundError:
             return
-        self._values = parse_credentials_document(text, self._filename)
+        if render_flat_layout_migration(text) is not None:
+            text = self._migrate_flat_document(text)
+        document = parse_credentials_document(text, self._filename)
+        self._values = document["refs"]
+        self._records = document["records"]
         self._text = text
+
+    def _migrate_flat_document(self, recognized: str) -> str:
+        """一次性升级可识别 flat 布局：写锁内重读磁盘再迁移（并发启动可能
+        已迁移；重读结果不可识别则原样返回交普通解析）。"""
+        directory = os.path.dirname(self._filename)
+        os.makedirs(directory, exist_ok=True)
+        lock_path = f"{self._filename}.lock"
+        try:
+            with FileLock(lock_path, timeout=LOCK_TIMEOUT_SECONDS):
+                with open(self._filename, "r", encoding="utf-8") as handle:
+                    current = handle.read()
+                migrated = render_flat_layout_migration(current)
+                if migrated is None:
+                    return current
+                self._atomic_write(migrated)
+                logger.info(
+                    "credentials-local: migrated %s to the version %d layout; values are unchanged",
+                    self._filename, DOCUMENT_VERSION,
+                )
+                return migrated
+        except Timeout as error:
+            raise CredentialWriteLocked(
+                f"atomic-write: timed out waiting for the writer lock at {lock_path}"
+            ) from error
 
     @property
     def values(self) -> dict[str, str]:

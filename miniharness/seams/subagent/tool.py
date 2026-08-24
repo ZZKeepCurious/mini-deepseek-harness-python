@@ -35,6 +35,7 @@ from .continuation import (
     SubagentError,
     epoch_stop_reason,
     final_assistant_output,
+    subagent_diagnostic,
 )
 
 __all__ = ["install_subagent_delegation_tool"]
@@ -228,11 +229,12 @@ def install_subagent_delegation_tool(
     return tool
 
 
-def _epoch_result(manager: SubagentContinuationManager, child_id: str, base: int) -> tuple[str, list | None]:
-    """从持久化事件折叠本 epoch 的（终局关键词, 最终输出）。"""
+def _epoch_result(manager: SubagentContinuationManager, child_id: str, base: int) -> tuple[str, list | None, str | None]:
+    """从持久化事件折叠本 epoch 的（终局关键词, 最终输出, 失败诊断）。"""
     info = manager.persistence.inspect(child_id)
     epoch = info["events"][base:]
-    return epoch_stop_reason(epoch), final_assistant_output(epoch)
+    return (epoch_stop_reason(epoch), final_assistant_output(epoch),
+            subagent_diagnostic(epoch))
 
 
 async def _run_foreground(
@@ -254,17 +256,24 @@ async def _run_foreground(
                                          persona=persona, parent=parent)
     base = len(manager.persistence.inspect(child_id)["events"])
     await manager.send_message_async(child_id, prompt, source="parent", parent=parent)
-    stop, output = _epoch_result(manager, child_id, base)
+    stop, output, _ = _epoch_result(manager, child_id, base)
     return child_id, output, stop
 
 
-def _job_outcome(stop: str) -> dict:
-    """终局关键词 → JobOutcome（aborted → killed；其余非 completed → failed）。"""
+def _job_outcome(stop: str, diagnostic: str | None = None) -> dict:
+    """终局关键词 → JobOutcome（aborted → killed；其余非 completed → failed）。
+
+    失败 detail 附 "; diagnostic: ..."（上游 run-settlement failureDetail，
+    rc.2 起 SubagentResult.diagnostic 经此进入 jobs 通道；诊断本身不进
+    subagent/end）。"""
     if stop == "completed":
         return {"status": "completed"}
     if stop == "aborted":
         return {"status": "killed"}
-    return {"status": "failed", "detail": _stop_reason_error(stop) or "subagent run failed"}
+    detail = _stop_reason_error(stop) or "subagent run failed"
+    if diagnostic:
+        detail = f"{detail}; diagnostic: {diagnostic}"
+    return {"status": "failed", "detail": detail}
 
 
 def _start_background(
@@ -293,8 +302,8 @@ def _start_background(
         except BaseException as error:  # noqa: BLE001 - reject → 注册表转 failed
             box.fail(error)
             return
-        stop, _ = _epoch_result(manager, child_id, base)
-        box.settle(_job_outcome(stop))
+        stop, _, diagnostic = _epoch_result(manager, child_id, base)
+        box.settle(_job_outcome(stop, diagnostic))
 
     worker = threading.Thread(target=work, name=f"subagent-job-{child_id}", daemon=True)
     job_id_ = jobs.start({

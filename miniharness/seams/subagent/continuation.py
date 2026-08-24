@@ -25,9 +25,11 @@ A8 起执行模型对齐上游异步事件驱动，由"父是否有 driver"自�
     watchSettlement（when_idle_async + poke 竞速）在真静默后结算，结算投递
     父（idle→followup / running→steer 批内合并）；interrupt 缺省 no-op；
     再投递并入既有激活；与结算竞速的投递冷恢复新激活重投不丢消息。
-  * 投递规则（结算通知与 report wakeup 同规则）：父 idle → followup（唤醒
-    新回合）；父 running → driver 模式 steer / 同步模式 inbox.append（非唤醒，
-    下一步边界捡起）。reportDelivery 'background' → 一律 inbox.append。
+   * 投递规则（结算通知与 report 同规则）：父 idle → followup（唤醒
+     新回合）；父 running → driver 模式 steer / 同步模式 inbox.append（非唤醒，
+     下一步边界捡起）。report delivery 'quiet' → 一律非唤醒注入（等价上游
+     parent.inject；rc.2 词汇 'wakeup'→'next-step'，部署配置 reportDelivery
+     取 'quiet' | 'next-step'）。
 
 简化标注（须在文档中标注；对齐粒度见 AGENTS.md 差异清单）：
    * 生命周期边经委托父做 **scoped dispatch**（2026-08-23 对齐）：父 ctx 有
@@ -73,7 +75,9 @@ __all__ = [
     "final_assistant_output",
     "fold_consumed_work",
     "install_subagent_control_tools",
+    "limit_diagnostic",
     "settlement_summary",
+    "subagent_diagnostic",
 ]
 
 CONTEXT_SUMMARY_MAX_CHARS = 120
@@ -94,13 +98,22 @@ _DEFAULT_CHILD_PERSONA = (
     "Complete the task you are given and report the result back."
 )
 
+# 上游 report 工具随附的 system prompt 段文案（tool-subagent-report
+# installReportTool 的 'tool:report' section，order 117，逐字对齐）
 _REPORT_GUIDANCE = (
-    "You may call the report tool to send an interim or final report to the "
-    "parent agent. Use reportDelivery 'foreground' to wake the parent, or "
-    "'background' to leave it running silently."
+    "Deliver your result with the report tool before you finish: call it once with a self-contained "
+    "answer. The agent that started you shares your workspace but does not automatically receive your "
+    "transcript, tool output, or reasoning, so a closing remark such as \"done\" leaves it nothing it can "
+    "use. Report earlier as well whenever a partial finding changes what that agent should do next; "
+    "reporting never ends your turn."
 )
 
 _REPORT_TOOL_NAME = "report"
+
+# 投递词汇（上游 SubagentReportDelivery = 'quiet' | 'next-step'，rc.2 改名：
+# 原 'wakeup' → 'next-step'；jobs 域 CompletionDelivery 不受影响仍为
+# 'quiet' | 'wakeup'）
+REPORT_DELIVERIES = ("quiet", "next-step")
 
 
 class SubagentError(Exception):
@@ -228,6 +241,39 @@ def final_assistant_output(events) -> list | None:
     return last if last is not None else accumulated
 
 
+DIAGNOSTIC_MAX_BYTES = 4096
+
+
+def limit_diagnostic(text: str, max_bytes: int = DIAGNOSTIC_MAX_BYTES) -> str:
+    """诊断文本的共享结果边界：完整文本截到 max_bytes 个 UTF-8 字节以内
+    （上游 SubagentResult.diagnostic 的 4096 字节约束，subagent/src/types.ts:240；
+    多字节边界处安全截断）。"""
+    raw = text.encode("utf-8")
+    if len(raw) <= max_bytes:
+        return text
+    return raw[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def subagent_diagnostic(events) -> str | None:
+    """子本 epoch 的失败诊断（SubagentResult.diagnostic 的 mini 载体）。
+
+    mini 无进程外 provider，诊断从持久化事件派生：记账 turn/end
+    reason.kind=='error' 时取 failure 摘要（code: message），经共享结果边界
+    限长；completed / aborted / refusal 等其余终局无诊断。"""
+    end = fold_consumed_work(events)["end"]
+    reason = end.get("data", {}).get("reason") if end is not None else None
+    if not isinstance(reason, dict) or reason.get("kind") != "error":
+        return None
+    failure = reason.get("error")
+    if isinstance(failure, dict):
+        code, message = failure.get("code"), failure.get("message")
+        text = f"{code}: {message}" if code and message else (message or code)
+        return limit_diagnostic(text) if text else None
+    if isinstance(failure, str) and failure:
+        return limit_diagnostic(failure)
+    return None
+
+
 def settlement_summary(stop: str, child_id: str) -> str:
     """按 stop 关键词构造结算一句话（上游 settlementSummary，逐字对齐）。"""
     if stop in _SETTLEMENT_SUMMARIES:
@@ -250,6 +296,8 @@ class SubagentContinuationManager:
     @param max_depth - 委托深度上限（上游 subagent-max-depth 默认 8）。
     @param adapter_factory - 冷恢复时按 (provider, model) 重建适配器；
         缺省仅支持 'fake'（复用父适配器当 provider 一致时）。
+    @param report_delivery - report 工具的部署级投递配置（上游
+        Config.reportDelivery，默认 'next-step'；'quiet' → 非唤醒注入）。
     """
 
     def __init__(
@@ -258,10 +306,17 @@ class SubagentContinuationManager:
         persistence: SessionPersistence,
         max_depth: int = 8,
         adapter_factory: Callable[[str, str], LlmAdapter] | None = None,
+        report_delivery: str = "next-step",
     ):
+        if report_delivery not in REPORT_DELIVERIES:
+            raise ValueError(
+                f"unknown report delivery {report_delivery!r}; "
+                f"expected one of {REPORT_DELIVERIES}"
+            )
         self.parent = parent
         self.persistence = persistence
         self.max_depth = max_depth
+        self.report_delivery = report_delivery
         self._adapter_factory = adapter_factory or _default_adapter_factory
         self._activations: dict[str, dict] = {}
         self._persisted: dict[str, int] = {}
@@ -423,6 +478,63 @@ class SubagentContinuationManager:
                 "ACTIVATION_TEARDOWN_FAILED",
             )
 
+    def drain_children(self, parent: AgentLoop, child_ids: list[str]) -> None:
+        """释放指定在世直属父的驻留子激活，不关闭其余子代的准入
+        （上游 drainChildren，continuation.ts:817-841）。
+
+        @param parent - 授权主体；必须是注册表里的 exact live 对象。
+        @param child_ids - durable 直属子 id；非驻留 id 静默跳过（幂等），
+            驻留但非直属 → UNAUTHORIZED。所有权后代经同一生命周期递归释放；
+            失败聚合抛 ACTIVATION_TEARDOWN_FAILED（'selected activation(s)'）。
+        """
+        if self._live.get(parent.id) is not parent:
+            raise SubagentError(
+                "selected child teardown requires the exact live parent agent",
+                "UNAUTHORIZED",
+            )
+        targets: list[str] = []
+        for child_id in dict.fromkeys(child_ids):
+            activation = self._activations.get(child_id)
+            if activation is None:
+                continue
+            if (activation["parent_loop"].id != parent.id
+                    or parent not in activation["ancestry"]):
+                raise SubagentError(
+                    f'subagent "{child_id}" is not a direct child of agent "{parent.id}"',
+                    "UNAUTHORIZED",
+                )
+            targets.append(child_id)
+        failures: list[BaseException] = []
+        remaining = set(targets)
+        while remaining:
+            progressed = False
+            for cid in sorted(remaining):
+                activation = self._activations.get(cid)
+                if activation is None or activation["owned_children"] & remaining:
+                    continue
+                try:
+                    self._settle(cid, activation, force=True)
+                except BaseException as error:  # noqa: BLE001 - 聚合后统一上报
+                    failures.append(error)
+                remaining.discard(cid)
+                progressed = True
+            if not progressed:
+                break
+        if failures:
+            raise SubagentError(
+                f"continuable subagent teardown failed for {len(failures)} "
+                "selected activation(s): " + "; ".join(str(error) for error in failures),
+                "ACTIVATION_TEARDOWN_FAILED",
+            )
+
+    def _assert_child_id_available(self, child_id: str) -> None:
+        """拒绝已被在世 Agent / 会话占用的子身份（上游 assertChildIdAvailable +
+        spec.childId 持久化快照检查合并为单点，continuation.ts:453-455,479-482）。"""
+        if (self._live.get(child_id) is not None
+                or self._activations.get(child_id) is not None
+                or self.persistence.inspect(child_id)["meta"] is not None):
+            raise SubagentError(f'subagent "{child_id}" already exists', "DUPLICATE_CHILD")
+
     # ---------- 创建与续跑 ----------
 
     def start_continuable(
@@ -432,6 +544,7 @@ class SubagentContinuationManager:
         persona: str | None = None,
         prompt: str | dict | None = None,
         parent: AgentLoop | None = None,
+        child_id: str | None = None,
     ):
         """创建可继续子会话（durable before dispatch）。
 
@@ -442,6 +555,9 @@ class SubagentContinuationManager:
         {"childId", "messageId"}：初始 prompt 经 send_message 同一条投递路径
         进入子 inbox（接受边界返回 message id；同步门面会内联跑完首回合）。
         @param parent - 委托父（嵌套续跑时为子代理自身的 loop）；缺省顶层父。
+        @param child_id - 预留会话 id（上游 ContinuableStartSpec.childId，
+            rc.2 新增；缺省随机生成）。无论预留或随机都做可用性断言：
+            活体注册表 / 激活表 / 持久化 header 任一命中 → DUPLICATE_CHILD。
         """
         parent = parent or self.parent
         self.assert_admitting(parent)
@@ -450,7 +566,11 @@ class SubagentContinuationManager:
             raise SubagentError(
                 f"子代理嵌套深度 {depth} 达到上限 {self.max_depth}", "MAX_DEPTH_EXCEEDED",
             )
-        child_id = "child-" + uuid.uuid4().hex[:12]
+        # 上游 start 流程在 locks.run 临界区内先 assertChildIdAvailable 再物化；
+        # mini 物化同步无 await 窗口，入口单点检查即等价（活体注册表 +
+        # 激活表 + 持久化 header 三面，覆盖上游 ctx.agents/sessions/persistence）。
+        child_id = child_id or ("child-" + uuid.uuid4().hex[:12])
+        self._assert_child_id_available(child_id)
         child_depth = depth + 1
         seed = completed_turn_prefix(parent.session.events)
         meta: dict[str, Any] = {
@@ -713,24 +833,37 @@ class SubagentContinuationManager:
                 act["poke"].set()
         return hook
 
-    def report_from(self, child_id: str, report: str, quiet: bool = False) -> None:
-        """子代理 report 工具：把报告投递父代理（quiet → 非唤醒 inbox）。"""
+    def report_from(self, child_id: str, report: str,
+                    delivery: str = "next-step") -> str:
+        """子代理 report 工具：把报告投递父代理，返回 message id
+        （上游 deliverReport）。
+
+        @param delivery - 上游 SubagentReportDelivery（rc.2 由 'wakeup' 改名
+            'next-step'）：'quiet' → 非唤醒注入（inbox next-step 段，等价上游
+            inject）；'next-step' → waking 记账后投递（idle 父开新回合，
+            运行中父批内合并）。
+        """
+        if delivery not in REPORT_DELIVERIES:
+            raise ValueError(
+                f"unknown report delivery {delivery!r}; expected one of {REPORT_DELIVERIES}"
+            )
         message = create_message(
             "user",
             [text_block(report)],
             {
                 "kind": "subagent-report",
-                "form": "background-report" if quiet else "report",
+                "form": "background-report" if delivery == "quiet" else "report",
                 "senderSessionId": child_id,
             },
         )
-        if quiet:
+        if delivery == "quiet":
             self.parent.inbox.append("next-step", message)
         else:
-            # wakeup 报告同样走 waking 记账（上游 deliverReport 'wakeup' →
+            # next-step 报告同样走 waking 记账（上游 deliverReport →
             # sendWaking）：父自身是托管激活时先 accepted.add 再发
             self._send_waking(self.parent, message,
                               lambda: self._route_to_parent(self.parent, message))
+        return message["id"]
 
     @staticmethod
     def _route_to_parent(parent: AgentLoop, message: dict) -> None:
@@ -1212,32 +1345,42 @@ class SubagentContinuationManager:
     # ---------- 子专属 report 工具 ----------
 
     def _report_tool(self, child_id: str) -> Tool:
+        """子作用域专属 report 工具（上游 tool-subagent-report installReportTool，
+        逐字对齐）：参数仅 `output`；投递取部署配置 reportDelivery（无 per-call
+        参数）；返回 {messageId}，render 一句话确认。"""
         manager = self
 
         async def execute(args: dict, exec_: ToolExec):
-            quiet = args.get("reportDelivery") == "background"
-            manager.report_from(child_id, args["report"], quiet=quiet)
-            return args["report"]
+            message_id = manager.report_from(child_id, args["output"], manager.report_delivery)
+            return {"messageId": message_id}
 
         return Tool(
             name="report",
             description=(
-                "Send an interim or final report to the parent agent. "
-                "foreground wakes the parent (default); background does not."
+                "Report selected content to the agent that started you. Call this once before you finish, with a "
+                "self-contained final result, and earlier for progress or findings that change what that agent does "
+                "next. That agent shares your workspace but does not automatically receive your transcript, tool "
+                "output, or reasoning, so finishing your work is not itself a result. Reporting does not end your "
+                "turn or finish your work, and only your direct parent receives it. A failed call may still have "
+                "arrived, so do not blindly repeat it."
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "report": {"type": "string", "description": "Report content."},
-                    "reportDelivery": {
+                    "output": {
                         "type": "string",
-                        "enum": ["foreground", "background"],
-                        "description": "foreground wakes the parent; background leaves it idle.",
+                        "description": (
+                            "Actionable content for your parent; summarize conclusions and reference relevant shared paths."
+                        ),
                     },
                 },
-                "required": ["report"],
+                "required": ["output"],
             },
             execute=execute,
+            render=lambda value: [
+                {"type": "text", "text":
+                    f"report accepted by the agent that started you as message {value['messageId']}"},
+            ],
         )
 
 

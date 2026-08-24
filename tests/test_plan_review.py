@@ -192,6 +192,38 @@ class PlanProjectionTest(unittest.TestCase):
                                        "source": {"kind": "user"}})
         self.assertEqual(fold_plan_projection(session.events), {"active": False, "pending": False})
 
+    def test_failed_done_clears_pending(self):
+        # rc.2 成功结算制：command/done kind:'error' 清除待决选择
+        session = Session("p")
+        session.append("plan/mode", {"active": True})
+        session.append("command/run", {"commandId": "c1", "name": "plan", "args": "off",
+                                       "source": {"kind": "user"}})
+        session.append("command/done", {"commandId": "c1", "kind": "error", "text": "boom"})
+        self.assertEqual(fold_plan_projection(session.events), {"active": True, "pending": False})
+
+    def test_running_execution_counts_as_pending(self):
+        # rc.2：已执行未结算 → pending 反映运行中意图（PlanUnitState.running）；
+        # 成功但目标与生效态一致（幂等选择）不构成 pending
+        session = Session("p")
+        session.append("plan/mode", {"active": True})
+        session.append("command/run", {"commandId": "c1", "name": "plan", "args": "off",
+                                       "source": {"kind": "user"}})
+        self.assertEqual(fold_plan_projection(session.events), {"active": True, "pending": True})
+        session.append("command/done", {"commandId": "c1", "kind": "success", "text": "ok"})
+        session.append("command/run", {"commandId": "c2", "name": "plan", "args": "",
+                                       "source": {"kind": "user"}})
+        session.append("command/done", {"commandId": "c2", "kind": "success", "text": "on"})
+        self.assertEqual(fold_plan_projection(session.events), {"active": True, "pending": False})
+
+    def test_unrelated_done_does_not_settle(self):
+        # commandId 不匹配的 command/done 不结算 running
+        session = Session("p")
+        session.append("plan/mode", {"active": True})
+        session.append("command/run", {"commandId": "c1", "name": "plan", "args": "off",
+                                       "source": {"kind": "user"}})
+        session.append("command/done", {"commandId": "other", "kind": "success"})
+        self.assertEqual(fold_plan_projection(session.events), {"active": True, "pending": True})
+
 
 if __name__ == "__main__":
     unittest.main()
