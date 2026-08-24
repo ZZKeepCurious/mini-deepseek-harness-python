@@ -190,7 +190,7 @@ UI 专用格式（fenced console、diff、相对路径）留在卡片投影里�
 
 ### 11.4 常用参考速查
 
-- **事件**：`docs/subsystems/event-producer-consumer.md` + 每包组 subsystems 页；事件 JSDoc 需 `@mode` 与 payload `@param`。
+- **事件**：`docs/event-producer-consumer.md` + 每包组 subsystems 页；事件 JSDoc 需 `@mode` 与 payload `@param`。
 - **测试**：`docs/testing.md`（门禁 `test:coverage` 每文件 100%；模型/用户可见行为要 keyless 快照）。
 - **Cordis 入门**：`docs/cordis-primer.md` + `docs/cordis-tutorial/` 动手教程。
 - **文档规范**：`docs/AGENTS.md`；贡献任何非平凡变更需 Agent Note（`.agents/notes/`），已归档的冻结。

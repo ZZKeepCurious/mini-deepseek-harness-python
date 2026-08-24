@@ -142,7 +142,7 @@ loop = AgentLoop(session, adapter, view, ctx,
 4. **进程级冲突拒绝挂载**：`provides` 命中 host 已有服务 → `RuntimeError`，而不是覆盖。
 5. **未知 preset fail loud**：`resolve` 未知名 → `KeyError`。
 
-验证：`python -m unittest tests.test_presets -v`（9 个用例，全部通过）。
+验证：`python -m unittest tests.test_presets -v`。
 
 ## 8.5 检查点
 

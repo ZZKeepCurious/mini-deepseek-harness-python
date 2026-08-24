@@ -93,7 +93,7 @@ class ToolResult:
 `Tool` 上有几个字段值得先认识：
 
 - `timeout_ms` 由管线强制，**绝不发给模型**。这一点到第 4 章会看到它落进日志时是过滤掉的——工具配置是宿主机密，不是上下文内容。
-- `is_concurrency_safe = False` 是默认值：不确定安全就按不安全处理（串行屏障），宁可慢不能乱。第 7 阶段的并行化就靠这个标记调度。
+- `is_concurrency_safe = False` 是默认值：不确定安全就按不安全处理（串行屏障），宁可慢不能乱。第 12 章的并行化就靠这个标记调度。
 - `present_call` / `present_result` 是给 UI 的"挂起卡片"回调，纯函数，不影响管线语义。常规框架把 UI 逻辑塞进工具内部，dsh 把它抽出来挂在工具声明上。
 
 ### 步骤 3：作用域化注册表
@@ -182,7 +182,7 @@ def run_pipeline(ctx, tool, args, exec_=None):
         t.join(tool.timeout_ms / 1000)
         if t.is_alive():
             exec_.signal.set()      # 通知工具体"你超时了"
-            t.join()                # 排干：等线程真正退出，避免悬挂（实现见 core/tools.py:245-252）
+            t.join()                # 排干：等线程真正退出，避免悬挂（实现见 core/tools.py:341）
             return ToolResult(ok=False, is_error=True, error=f"timeout after {tool.timeout_ms}ms")
     else:
         target()
@@ -232,7 +232,7 @@ python -m unittest tests.test_tools -v
 
 ## 3.5 检查点练习
 
-1. **并行屏障**：实现一个简化版 `is_concurrency_safe` 调度——安全工具并行（async 执行体并发 await），非安全工具串行。给注册表加一个 `concurrency_batches()`，并写测试。
+1. **并行屏障**：实现一个简化版 `is_concurrency_safe` 调度——安全工具并行（async 执行体并发 await），非安全工具串行。给注册表加一个 `concurrency_batches()`，并写测试。（第 12 章有完整版含 `execution_mode` 分类器，建议先自做再对照。）
 2. **重试 wrapper**：写一个挂在 `tools/execute` waterfall 上的监听器，对第一次失败自动重试一次（around-dispatch 语义：`nxt` 包住真实执行）。断言最终结果。
 3. **限制工具集**：用 `restrict` 给一个作用域做"只允许 bash + read_file"的白名单，写测试断言白名单外工具被过滤。
 

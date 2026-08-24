@@ -21,7 +21,7 @@
 | **P1 建立图景** | 知道系统有哪些部件、如何连接 | README.md → docs/architecture.md → packages/README.md → docs/cordis-primer.md | 画出你自己的分层图 + ctx 服务地图 | 能讲清"为什么替换 Provider 能换掉整个产品" |
 | **P2 跑起来** | 可运行、可观察 | docs/development.md；apps/cli/README | `pnpm install` → `pnpm run build` → `pnpm dsh --profile headless "task"`；`pnpm dsh --profile web --dump-config` 观察组合树；`pnpm mock:llm` 无 key 跑通 | 能解释 `--dump-config` 输出的每一层来源 |
 | **P3 核心循环** | 完全掌握 turn/step 状态机 | docs/subsystems/session.md、core.md；docs/agent-lifecycle.md | 读 `packages/core/agent-loop/src` 主 driver；在代码里为 6 个核心包各写一段职责注释 | 能手绘完整 turn/step 时序（含 reject、request-error、turn-stopping 分支） |
-| **P4 事件溯源** | 掌握唯一数据源与持久化 | docs/persistence.md、docs/persistence-catalog.md；读 `packages/session/session-persistence` 双后端源码 | 手动构造一个 JSONL 会话文件并写脚本回放 `deriveMessages()` 的等价逻辑 | 能解释 `interrupted` turn 与 surface replace 的语义 |
+| **P4 事件溯源** | 掌握唯一数据源与持久化 | docs/subsystems/persistence.md、docs/persistence-catalog.md；读 `packages/session/session-persistence` 双后端源码 | 手动构造一个 JSONL 会话文件并写脚本回放 `deriveMessages()` 的等价逻辑 | 能解释 `interrupted` turn 与 surface replace 的语义 |
 | **P5 Cordis 深入** | 理解插件框架本体 | docs/cordis-tutorial/（动手教程）→ `vendor/cordis/src` 的 fiber/context/events；vendor/README.md 本地修改清单 | 读 18 项本地修改，挑 3 项（fiber 生命周期加固、include patch 语义、事务性协调）对应到测试文件 | 能解释"注册=可逆副作用"与 waterfall 短路语义 |
 | **P6 动手写插件 + 横向扩展口** | 从读者变成作者 | docs/cookbook/adding-a-tool.md、adding-a-package.md、adding-an-llm-adapter.md | 写一个最小工具插件并在 preset 中挂载；用 `agent/pre-step` 拦截一次请求；用 `tools/pre-execute` 加权限策略 | 插件能被 `--dump-config` 显示且行为可测 |
 

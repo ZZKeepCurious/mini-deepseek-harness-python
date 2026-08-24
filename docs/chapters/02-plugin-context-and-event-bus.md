@@ -44,7 +44,7 @@ flowchart LR
 | `parallel` | 全部并行执行并收集 | 横切动作必须全部生效 |
 | `serial` | 按序执行，可带返回值 | 依赖前序结果的变换 |
 
-选哪种模式取决于"这个事件要不要否决权"：通知用 `emit`，审批/决策用 `waterfall`，横切用 `parallel`，有前后依赖的变换用 `serial`。MiniHarness 是同步近似：`parallel` 用列表推导模拟，真实 Cordis 是异步的，但语义不变。
+选哪种模式取决于"这个事件要不要否决权"：通知用 `emit`，审批/决策用 `waterfall`，横切用 `parallel`，有前后依赖的变换用 `serial`。本章教学主体是同步近似：`parallel` 用列表推导模拟；实现另提供 `aemit`/`awaterfall`/`aparallel`/`aserial` 异步变体（第 4 章的 `agent/pre-step`、`agent/request-error` 已走 async 变体），真实 Cordis 是异步的，但短路语义不变。
 
 ## 2.3 代码 step-by-step
 
@@ -142,8 +142,6 @@ class FiberState:
 - 处于 `unloading`/`disposed` 的 fiber 拒绝一切注册（`INACTIVE_EFFECT`）——"销毁后拒绝注册"是被测试钉死的硬性规定。
 
 `fiber.dispose()` 幂等：重复调用 join 在途的拆解（`inertia` = 在途转换，竞态共享同一完成）。拆解时全部同步 disposer 立即逆序执行（既有同步调用方零破坏）；含异步 disposer 则返回完成对象，需要时 `await`。异步拆解产生的错误被 contained——记入 fiber 的错误表并记日志，既不静默吞掉也不炸掉拆解本身。
-
-注意这个约定与早期 mini 版本相反（旧版 `effect(fn)` 把 `fn` 当 disposer、注册时不调用）。调用点已全部迁移到上游语义；迁移记录见 `status/mini-harness/migration-log.md`。
 
 ### 步骤 3：事件监听 + 四种派发
 
@@ -281,7 +279,7 @@ python -m unittest tests.test_bus tests.test_fiber -v
 打开 `deepseek-harness/vendor/cordis/src`：
 
 - `context.ts` + `reflect.ts`：`provide`/`get`/`set`/`isolate`/`effect`/`dispose` 的完整实现——`effect` 的 execute 形态、注册先于执行、`disposeAfter(waitForSetup())` 重入保护、按隔离标签键控的全局 store、`notify` 的标签过滤，我们逐条对齐
-- `fiber.ts`：fiber 状态机、`internal/status`、`internal/plugin`、`_setEpoch` 依赖重载、`inertia` 在途转换、`_unload` 的 `Promise.all` 并发拆解——2.2 的 fiber 语义都从这里来（mini 已对齐装载半边 + 注册表；`epoch` 热重载与 `ctx.plugin()` 注册表的剩余语义、SessionStore fiber 化见 `status/mini-harness/tasks.md`）
+- `fiber.ts`：fiber 状态机、`internal/status`、`internal/plugin`、`_setEpoch` 依赖重载、`inertia` 在途转换、`_unload` 的 `Promise.all` 并发拆解——2.2 的 fiber 语义都从这里来（mini 已对齐装载半边与依赖驱动注册表，epoch 热重载经 hmr 与 `watch_user_patches` 路径闭合；已知简化：SessionStore 自持 fiber 未复现）
 - `events.ts`：四种派发模式的异步版本
 - `vendor/README.md`：18 项本地加固清单——挑 3 项读，体会"框架被 vendored 且可审计"意味着什么：不依赖 npm 供应链，代码就躺在仓库里，任何人都能审计每一行。
 

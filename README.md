@@ -2,7 +2,7 @@
 
 English | [中文](README.zh.md)
 
-**Mini DeepSeek Harness** is an educational, from-scratch re-implementation of [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`) — the open-source agent harness developed by [DeepSeek AI](https://deepseek.com) — written in Python (**stdlib-first**, with `httpx` for the DeepSeek SSE transport, optional `pyyaml`, and an optional `[web]` extra: `fastapi` + `uvicorn` for the HTTP/SSE transport layer).
+**Mini DeepSeek Harness** is an educational, from-scratch re-implementation of [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`) — the open-source agent harness developed by [DeepSeek AI](https://deepseek.com) — written in Python (**mature open-source libraries first**, stdlib only where no equivalent library fits — `httpx` for the DeepSeek SSE transport, optional `pyyaml`, and an optional `[web]` extra: `fastapi` + `uvicorn` for the HTTP/SSE transport layer).
 
 The upstream project builds its entire system on a philosophy where **everything is a plugin**, powered by [Cordis](https://github.com/cordiverse/cordis), a dependency-injection and event-bus framework whose design is described in [_A Programming Paradigm for Spatiotemporal Composability_](https://github.com/cordiverse/paper). We deeply admire this design. This repository is our homage: instead of only reading about it, we re-implement its core contracts — the event-sourced session log, the plugin event bus, the turn/step agent loop, and the capability-seam triangle (Service Definition / Service Provider / Consumer) — preferring mature open-source libraries over hand-rolling (the required third-party packages are `httpx` for the DeepSeek SSE transport, `filelock` for credential cross-process writer locking, and `watchdog` for the Cordis HMR file watch; `pyyaml` is optional for YAML config), so anyone with `python3` can read, run, and modify them.
 
@@ -53,13 +53,11 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 | Async event bus, true parallel tools + barrier | `core/agent-loop` |
 | CI (GitHub Actions, Python 3.10~3.13, integration-tagged real-API tests) | — |
 
-Planned: the upstream browser frontend (`packages/client`, React monorepo) is not reproduced verbatim; its wire surface is fully aligned (an upstream client pointed at the mini backend works) and a vanilla SPA (no build step) ships as the consumer.
-
-Status: **1265 tests passing** (`httpx` for the DeepSeek SSE transport, `filelock` for credential cross-process writer locking, `watchdog` for the Cordis HMR file watch, optional `pyyaml` for YAML config, optional `[web]` extra for the HTTP/SSE transport layer). coverage 87%.
+The upstream browser frontend (`packages/client`, React monorepo) is not reproduced verbatim: its wire surface is fully aligned (an upstream client pointed at the mini backend works) and a vanilla SPA (no build step) ships as the consumer.
 
 ## Getting started
 
-Requirements: Python 3.10+ (stdlib-first; `httpx` for the DeepSeek SSE transport, optional `pyyaml` for YAML config files).
+Requirements: Python 3.10+. Required dependencies install with `pip install -e .`: `httpx` (DeepSeek SSE transport), `filelock` (credential cross-process writer locking), `watchdog` (HMR file watch); optional `pyyaml` for YAML config; the web transport layer needs `pip install ".[web]"`.
 
 ```sh
 # run all tests
@@ -134,9 +132,10 @@ mini-deepseek-harness-python/
 │   │   ├── default_tools.py # default toolset for headless
 │   │   └── session_cmds.py  # session list / resume / delete
 │   ├── protocol/            # acp / sdk / hooks bridges
-│   ├── seams/               # sandbox / credentials / subagent seams
+│   ├── seams/               # sandbox / credentials / subagent seams (incl. windows-acl kernel executor)
 │   ├── shell/               # ctx.shell bash executor family (local + sandboxed)
-│   ├── web/                 # apiproxy subset: envelope / api / streams / approvals / server / frontend / launcher
+│   ├── goal/  plan/  jobs/  skills/  commands/  attachment/
+│   ├── web/                 # apiproxy subset: envelope / api / streams / approvals / server / downloads / frontend / launcher
 │   ├── web/static/          # vanilla SPA browser frontend (index.html / app.js / style.css)
 │   ├── preset/  extensions/  interaction/  client/
 │   ├── demo.py              # end-to-end demo
@@ -146,7 +145,7 @@ mini-deepseek-harness-python/
 └── docs/
     ├── index.md            # handbook index (learning map)
     ├── architecture.md      # architecture + upstream mapping
-    ├── chapters/            # 00-setup ~ 12-handbook tutorials
+    ├── chapters/            # 00-setup ~ 15-schemastery tutorials
     └── report/              # analysis report (MkDocs Markdown, Mermaid diagrams)
 ```
 

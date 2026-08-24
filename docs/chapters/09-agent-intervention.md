@@ -111,7 +111,7 @@ loop.run("跑命令")
 4. `run_maintenance`：仅 true idle；running 中调用抛 `RuntimeError`；执行不产生任何会话事件。
 5. `when_idle`：maintenance 期间返回 False。
 
-验证：`python -m unittest tests.test_loop_intervention -v`（11 个用例）。
+验证：`python -m unittest tests.test_loop_intervention -v`。
 
 ## 9.5 审批：干预通道之一（`miniharness/interaction/approval.py`）
 
@@ -139,7 +139,7 @@ decide 顺序与上游一致（`src/index.ts:304-344`）：
 2. 策略 `'never'` → `'rejected'`（服务自己的 request 路径决定，保证注册顺序无关的确定性）；
 3. 否则 `ctx.waterfall('approval/request', req)` 派发 answerer 链——无监听器 / 抛错 / 返回非词汇表值一律归一化为 `'unavailable'`（fail closed）。
 
-## 9.6 硬性规定（审批，被 18 个测试钉住）
+## 9.6 硬性规定（审批）
 
 1. `request` 在 open turn 外调用 → 抛错且零 approval 事件落日志。
 2. `'never'` 拒绝时不咨询任何 answerer（注册顺序无关的确定性）。
@@ -148,7 +148,7 @@ decide 顺序与上游一致（`src/index.ts:304-344`）：
 5. `set_approval_policy` 无效值在日志变更前抛 `TypeError`；`approval/policy` 不产生模型消息。
 6. 审计对不携带 `surfaceOp`（log-only）。
 
-验证：`python -m unittest tests.test_approval -v`（18 个用例，含 waterfall 短路、abort 前置、重放即状态）。
+验证：`python -m unittest tests.test_approval -v`（含 waterfall 短路、abort 前置、重放即状态）。
 
 ## 9.7 检查点
 

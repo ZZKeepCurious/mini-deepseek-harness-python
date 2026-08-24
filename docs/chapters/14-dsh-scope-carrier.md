@@ -7,7 +7,7 @@
 
 第 2 章的 `isolate` 解决"同一个服务名在不同作用域解析到不同实现"。但事件派发还想要一种**更精细的路由**：一个监听器只接收"某个具体身份（agent / session / tool）"相关的事件，而不是整个作用域树。
 
-dsh 用一个极小的原语解决这个问题：**不透明的 scope 键（`ScopeKey`）+ 一条 parent 关系 + 一个"仅用于路由"的事件载波（`scopeTarget`）**。这套机制叫 dsh_scope（上游 `@deepseek-ai/dsh-scope`），它已经被 mini 在 Phase 4（2026-08-20）全量对齐，但此前只在 `architecture.md` 映射行登记，没有逐机制解读——本章补上。
+dsh 用一个极小的原语解决这个问题：**不透明的 scope 键（`ScopeKey`）+ 一条 parent 关系 + 一个"仅用于路由"的事件载波（`scopeTarget`）**。这套机制叫 dsh_scope（上游 `@deepseek-ai/dsh-scope`），它已经被 mini 全量对齐，但此前只在 `architecture.md` 映射行登记，没有逐机制解读——本章补上。
 
 核心洞察（也是整章的题眼）：
 

@@ -77,7 +77,7 @@ fold_events_json(events)   # {"partial":…, "turns":[…], "requests":[…]}
 4. **崩溃尾部 = partial**：末尾仍有未闭合 turn 时 `partial=True`，duration 为 None。
 5. **TTFT**：turn/start 到首个 assistant/chunk 的时间差；无 chunk 则为 None。
 
-验证：`python -m unittest tests.test_trajectory -v`（9 个用例），真实 loop 回合折叠也覆盖（`TestFoldFromRealLoop`）。
+验证：`python -m unittest tests.test_trajectory -v`；真实 loop 回合折叠也覆盖（`TestFoldFromRealLoop`）。
 
 ## 10.6 检查点
 

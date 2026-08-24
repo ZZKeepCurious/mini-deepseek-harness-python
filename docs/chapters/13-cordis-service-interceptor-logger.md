@@ -18,7 +18,7 @@
 >
 > **(2) `intercept` / `extend` / `isolate` 三兄弟**：不改父上下文、只给孩子上下文叠一层"额外配置 / 自有属性 / 隔离标签"的子上下文工厂（对齐 `vendor/cordis/src/context.ts`）。其中 `intercept` 专门给服务注入 per-plugin 配置，是 2.4 讲的"`_resolve_config` 沿祖先链合并"那套机制的入口。
 
-本章把这三块讲透。它们已经在 mini 里全量对齐（Phase 3，2026-08-20），但此前只在 `architecture.md` 的映射行登记，没有像第 2 章那样逐机制解读——本章补上。
+本章把这三块讲透。它们已经在 mini 里全量对齐，但此前只在 `architecture.md` 的映射行登记，没有像第 2 章那样逐机制解读——本章补上。
 
 ## 13.2 概念：服务为什么需要基类
 

@@ -45,7 +45,7 @@
 ```mermaid
 flowchart TD
   subgraph L1["应用层 · apps"]
-    A1["dsh CLI bin<br/>瘦自执行组合"]
+    A1["dsh CLI bin&lt;br/&gt;瘦自执行组合"]
     A2["Web GUI 宿主"]
   end
   subgraph L2["组合层 · bundle / preset / examples"]

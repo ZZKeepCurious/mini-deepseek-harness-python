@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-**Mini DeepSeek Harness** 是用 **Python（stdlib 优先，关键协议层精选第三方）** 从零复现 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`，由 [DeepSeek AI](https://deepseek.com) 开发的开源 Agent 运行时）的**教学实现**（`httpx` 承载 DeepSeek SSE 传输、可选 `pyyaml`、可选 `[web]` extra：`fastapi` + `uvicorn` 承载 HTTP/SSE 传输层）。
+**Mini DeepSeek Harness** 是用 **Python（成熟开源库优先，无语义等价库时才用标准库手写）** 从零复现 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`，由 [DeepSeek AI](https://deepseek.com) 开发的开源 Agent 运行时）的**教学实现**（`httpx` 承载 DeepSeek SSE 传输、可选 `pyyaml`、可选 `[web]` extra：`fastapi` + `uvicorn` 承载 HTTP/SSE 传输层）。
 
 上游项目整个系统建立在一个设计哲学之上：**一切皆插件**（everything is a plugin），其底层是 [Cordis](https://github.com/cordiverse/cordis)，一个依赖注入 + 事件总线框架，设计思想见论文 [_A Programming Paradigm for Spatiotemporal Composability_](https://github.com/cordiverse/paper)。我们对这一设计深表敬意。本仓库是我们的致敬之作：不止于阅读，而是亲手用 Python 重建其核心约定——事件溯源会话日志、插件事件总线、turn/step Agent Loop、能力扩展口三角色（Service Definition / Service Provider / Consumer），**成熟开源库优先**（必需第三方：`httpx` 承载 DeepSeek SSE 传输、`filelock` 承载凭据跨进程写锁、`watchdog` 承载 Cordis HMR 文件监视；可选 `pyyaml` 用于 YAML 配置），任何有 `python3` 的人都可以阅读、运行和修改它们。
 
@@ -39,7 +39,7 @@
 | system prompt 分节（有序节注册 + 渲染进每次请求） | `core/system-prompt` |
 | boot 与组合（YAML/JSON 补丁、`!!js` 环境变量插值、启动断言） | `packages/boot` |
 | headless 一次性任务入口（`--profile headless "task"`：stdout 最终文本、退出码按 turn/end reason） | `packages/bundle/headless` + `apps/cli` |
-| web 传输层 + 浏览器 SPA（`--profile web`：四象限 RPC 信封、WebApi unary 会话服务、mux/host SSE 事件流（splice 重投影 queue 快照 + 每帧独立 rpcId）、审批桥（`approval/requested\|resolved` mux 帧 + `POST /api/respond` RpcReceipt）、FastAPI 载体对齐 `handler.ts` 状态码链 + `/api/respond` + frontend-static 契约、vanilla SPA（会话列表/创建、Trajectory 折叠、审批面板、命令/配置、队列/作业面板）） | `packages/host/apiproxy` + `host/frontend-static` + `host/webserver` |
+| web 传输层 + 浏览器 SPA（`--profile web`：四象限 RPC 信封、WebApi unary 会话服务、mux/host SSE 事件流（splice 重投影 queue 快照 + 每帧独立 rpcId）、审批桥（`approval/requested\|resolved` mux 帧 + `POST /api/respond` RpcReceipt）、FastAPI 载体对齐 `handler.ts` 状态码链 + `/api/respond` + frontend-static 契约、会话日志导出 `GET /api/session.export`（root + 子代理后代 + 被引用媒体打包 zip，200/400/404/501/500 状态码链，错误走私有信封外壳）、vanilla SPA（会话列表/创建、Trajectory 折叠、审批面板、命令/配置、队列/作业面板）） | `packages/host/apiproxy` + `host/frontend-static` + `host/webserver` |
 | 启动器选项（`--patch`、`--dump-config` / `--dump-default-config`、只读组合导出） | `apps/cli/src/args.ts` |
 | 会话管理服务（`ctx.sessions`：create/prepare/enter/announce 生命周期、fork 五错误码、flush 检查点、`session/created|disposed|event|flush` 四事件） | `packages/core/session`（SessionStore） |
 | 会话管理 CLI（`miniharness sessions` 列表/恢复/删除；mini 教学扩展） | web 表面（上游） |
@@ -51,13 +51,11 @@
 | 异步事件总线、真并行工具 + 屏障 | `core/agent-loop` |
 | CI（GitHub Actions、Python 3.10~3.13、integration 标签真实 API 测试） | — |
 
-规划中：上游浏览器前端（`packages/client`，React monorepo）不复现原样——wire 面已全对齐（上游客户端指向 mini 后端可工作），以 vanilla SPA（无构建步）作为消费者落地。
-
-状态：**1265 个测试全绿**（`httpx` 承载 DeepSeek SSE 传输，`filelock` 承载凭据跨进程写锁，`watchdog` 承载 Cordis HMR 文件监视，可选 `pyyaml` 用于 YAML 配置，可选 `[web]` extra 承载 HTTP/SSE 传输层）；覆盖率 87%。
+上游浏览器前端（`packages/client`，React monorepo）不复现原样：wire 面已全对齐（上游客户端指向 mini 后端可工作），以 vanilla SPA（无构建步）作为消费者落地。
 
 ## 快速开始
 
-要求：Python 3.10+，stdlib 优先（`httpx` 承载 DeepSeek SSE 传输，可选 `pyyaml` 用于 YAML 配置；web 传输层需 `pip install ".[web]"`）。
+要求：Python 3.10+。必装依赖随 `pip install -e .` 一并安装：`httpx`（DeepSeek SSE 传输）、`filelock`（凭据跨进程写锁）、`watchdog`（HMR 文件监视）；可选 `pyyaml` 用于 YAML 配置；web 传输层需 `pip install ".[web]"`。
 
 ```sh
 # 跑全部测试
@@ -103,7 +101,7 @@ miniharness
 
 ```
 mini-deepseek-harness-python/
-├── miniharness/             # 核心包（stdlib 优先，家族布局，见 docs/architecture.md）
+├── miniharness/             # 核心包（成熟开源库优先，家族布局，见 docs/architecture.md）
 │   ├── core/                # 上游 packages/core
 │   │   ├── session/         # types / json / message / invariant / repair / surface / session
 │   │   │   └── persistence.py
@@ -132,9 +130,10 @@ mini-deepseek-harness-python/
 │   │   ├── default_tools.py # headless 默认工具集
 │   │   └── session_cmds.py  # 会话 list / resume / delete
 │   ├── protocol/            # acp / sdk / hooks 桥
-│   ├── seams/               # 沙箱 / 凭据 / 子 agent 扩展口
+│   ├── seams/               # 沙箱 / 凭据 / 子 agent 扩展口（含 windows-acl 真内核执行器）
 │   ├── shell/               # ctx.shell bash 执行器族（本地直跑 + 沙箱包裹）
-│   ├── web/                 # apiproxy 子集：envelope / api / streams / approvals / server / frontend / launcher
+│   ├── goal/  plan/  jobs/  skills/  commands/  attachment/
+│   ├── web/                 # apiproxy 子集：envelope / api / streams / approvals / server / downloads / frontend / launcher
 │   ├── web/static/          # vanilla SPA 浏览器前端（index.html / app.js / style.css）
 │   ├── preset/  extensions/  interaction/  client/
 │   ├── demo.py              # 端到端演示
@@ -144,7 +143,7 @@ mini-deepseek-harness-python/
 └── docs/
     ├── index.md            # 手册索引（学习地图）
     ├── architecture.md      # 架构说明与上游对应
-    ├── chapters/            # 00-setup ~ 12-handbook 教程
+    ├── chapters/            # 00-setup ~ 15-schemastery 教程
     └── report/              # 分析报告（MkDocs Markdown + Mermaid 图）
 ```
 

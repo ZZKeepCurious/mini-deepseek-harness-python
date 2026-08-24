@@ -5,10 +5,10 @@
 > 前置：第 1~4 章。产出文件：`miniharness/core/session/persistence.py`、`miniharness/boot/boot.py`、`example_plugins.py` + `tests/test_persistence_boot.py`
 
 !!! warning "早期简化形态"
-    本章代码为**教学简化形态**，与当前实现存在以下差异（学习时以当前实现为准，见 00-setup §0.5 简化表与 AGENTS.md 已核实清单）：
+    本章代码为**教学简化形态**，与当前实现存在以下差异（学习时以当前实现为准，见 00-setup §0.5 简化表）：
 
     - **JSONL 片段**：实现每文件 header 行 + 事件行，`SESSION_FORMAT_VERSION = 0` 不符即拒读（fail-closed，`ignorable` 豁免）；torn 尾部截断修复在 `commitRepair` 中截断 torn tail + 追加 closers + fsync（`core/session/persistence.py` `_read_file`/`commit_repair`）。
-    - **`repair_and_replay`**：本章为逐条 `append` 重放；实现为 seed 回放——从 `session/end-seed` 标记重放，且修复合成的 closers 经 `commit_repair` 持久化落盘（`core/session/persistence.py:305-318`）。
+    - **`repair_and_replay`**：本章为逐条 `append` 重放；实现为 seed 回放——从 `session/end-seed` 标记重放，且修复合成的 closers 经 `commit_repair` 持久化落盘（`core/session/persistence.py`，基类接口 + JSONL 后端实现）。
     - **`turn/end` reason**：本章差异表写 `reason = "interrupted"` 字符串；实现为对象 `{kind:'interrupted'}`（配合 `repair_interrupted_turn` 合成 closers，见第 1 章横幅）。
     - **崩溃演示**：本章 §5.2"kill 进程"实为手动构造未闭合回合来模拟崩溃尾部，非真实 kill（`tests/test_persistence_boot.py` 可复核）。
     - **简化载体**：配置为 YAML（pyyaml 可选，缺省退化 JSON）+ `!!js` 仅 `process.env.<NAME>` 子集；zstd 帧压缩未实现（保留简化，上游为 `root/<projectDir>/<encodeSegment(id)>/session.jsonl(.zstd)`，mini 恒为明文 `.jsonl`）。JSONL 目录布局已对齐上游 `session-persistence-jsonl/src/format.ts`（`root/<encodeSegment(cwd)>/<encodeSegment(id)>/session.jsonl`）。
@@ -191,7 +191,7 @@ def apply_patch(entries, patches):
 
 两个操作：`replace` 按 id 整段替换某条配置，`insert` 追加新条目。为什么 replace 用 id 定位而不是"替换同名插件"？因为同一个插件可能被实例化多次（不同 config），id 才是唯一标识。目标 id 不存在时直接抛错——补丁写错了要当场知道，而不是静默无效。
 
-> 报告第 5.5 节的关键设计：组合、`--dump-config`、标志派发共用同一个补丁算法（纯函数），三者永不漂移。我们把它写成模块级纯函数，测试直接钉住。
+> 报告《流程》篇 §5.5（`docs/report/03-flows.md`）的关键设计：组合、`--dump-config`、标志派发共用同一个补丁算法（纯函数），三者永不漂移。我们把它写成模块级纯函数，测试直接钉住。
 
 ### 步骤 2：boot()
 

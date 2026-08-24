@@ -164,7 +164,7 @@ LLM 流式已原生异步（httpx 传输）：`adapter.stream` 是真 async 迭�
 7. **abort 排干 + 合成**：已启动的真实结果 + 未启动的 `TOOL_ABORTED_BEFORE_DISPATCH`（也按模型序），事件括号完整；
 8. **调度器失败不编造结果**：policy 段抛错 → `tool/call` 保留、无 `tool/result`、抛第一个错误；
 9. **超时排干**：`timeout_ms` 置位 signal，等执行体到静止点；
-10. **同步路径回归不变**：`run` / `followup` 行为与第 4 章一致（既有测试全绿）。
+10. **同步路径回归不变**：`run` / `followup` 行为与第 4 章完全一致。
 
 ## 12.8 检查点练习
 

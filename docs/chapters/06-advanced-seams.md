@@ -1,7 +1,7 @@
 ﻿# 第 6 章：进阶扩展口（选做，任选其一深入）
 
 > 对应 dsh 真实源码：`docs/capability-seams.md` + 各子系统页（sandbox / credentials / subagent）
-> 前置：第 1~5 章。产出文件：`miniharness/seams/subagent/`（基础三件套）+ `seams/sandbox_local.py`、`seams/credentials_local.py`（真后端）+ `tests/test_seams.py`
+> 前置：第 1~5 章。产出文件：`miniharness/seams/subagent/`（基础三件套）+ `seams/sandbox_local.py`、`seams/credentials_local.py`（真后端）+ `tests/test_seams.py`、`tests/test_stage6.py`
 
 ## 6.1 这一章要做什么
 
@@ -168,7 +168,7 @@ python -m unittest tests.test_seams -v
 
 ## 6.9 进阶实现：真后端 / 四层凭据 / 远程三通道
 
-基础三件套讲清"换 Provider 不改 Consumer"；进阶三件把每个接缝推向与 dsh 对齐的形态（产出：`miniharness/seams/sandbox_local.py` + `credentials_local.py` + `subagent/providers.py` + `subagent/worker.py`，`tests/test_stage6.py` 49 测试）。
+基础三件套讲清"换 Provider 不改 Consumer"；进阶三件把每个接缝推向与 dsh 对齐的形态（产出：`miniharness/seams/sandbox_local.py` + `credentials_local.py` + `subagent/providers.py` + `subagent/worker.py`，验收测试在 `tests/test_stage6.py`）。
 
 **沙箱真后端**（`sandbox_local.py` + `landlock_run.py`，对应上游 `sandbox/sandbox-local` 与 `native/landlock-run`）：按平台选链（linux `bwrap → landlock`、darwin `seatbelt`、win32 `windows-acl`），多候选由功能探测仲裁、单候选免探测；候选全不可用 → `SandboxUnavailableError`（`SANDBOX_UNAVAILABLE`）fail closed，命令绝不裸跑。`confine(argv, policy)` 返回 `ConfinedArgv`：包裹后的 argv + `enforcement`（full/partial）+ 该后端专属的 denial 方言与 runner 失败规则——"命令没跑起来"与"被沙箱拦住"可区分。三个 profile 生成器与上游 `profiles.ts` 逐条对齐（bwrap 挂载、landlock grant、seatbelt SBPL 剖面，可写根与进程内 fs fence 共用 `writable_roots` 同一推导）。landlock 梯队由 `seams/landlock_run.py` ctypes 自限制执行器真执行：上游 `native/landlock-run` 是 C11 launcher 二进制，mini 以 `python -m miniharness.seams.landlock_run` 复刻同一 CLI 契约（`--ro/--rw/--/--probe`、launcher 失败 exit 125 绝不 exec、probe 报告行逐字一致），内核侧走 Landlock UAPI（ABI 协商 → PATH_BENEATH 规则 → `PR_SET_NO_NEW_PRIVS` → `restrict_self` → `execvp`；full ⟺ 内核 ABI ≥ 5，否则 partial 但仍受限；非 Linux 宿主干净退出 125）。
 
@@ -193,7 +193,7 @@ python -m unittest tests.test_seams -v
 
 "仅 CAP_B 连非受限都被拒"正是第 5 条：这个 DACL 里没有用户侧的第一遍通路。而 CPython 恰好有个坑踩在这里——`tempfile.mkdtemp(0o700)` 会显式构造安全描述符（SYSTEM/Administrators/**OWNER RIGHTS** 三条，唯独没有用户自己的 ACE），于是用它创建的沙箱目录永远过不了第一遍；上游 node 的 `fs.mkdtempSync` 不构造描述符、纯继承父目录 DACL，%TEMP% 链路自带的 `user:(I)(F)` 天然喂饱第一遍。所以 mini 的 runner 私有 temp 与 provider 会话 temp 都用继承式 `os.mkdir` 创建。Everyone 与 logon SID 同时出现在两个列表里，一条 `Everyone:(F)` 能同时喂饱两遍——这正是上游文档标注 enforcement=partial（Everyone 边界）的由来。这条经验超出本例：在 Windows 上做沙箱或临时目录，先问"DACL 从哪继承"，再谈授什么 ACE。
 
-**沙箱策略服务 + bash 消费者**（`seams/sandbox_policy.py` + `shell/`，对应上游 `sandbox/sandbox-policy`、`session-mode.ts` 与 `shell/bash-sandbox`）：策略与强制分属两个服务——ctx.sandboxPolicy 是唯一的共享策略家（Config `{mode: 缺省 read-only, workspaceRoot}` fail-loud 校验；`resolve()` 决议完整策略：显式 mode > 会话日志最后一条 `sandbox/mode` > 部署缺省；workspace 根先 canonical 后词法规范化，会话 cwd 即 workspace-write 边界），ctx.sandbox 把模式物化为 runner argv。会话覆盖以会话日志为存储：`set_sandbox_mode` 追加恰一条 `sandbox/mode` log-only 事件，`effective_sandbox_mode` 纯 fold 逆序取最后——切换即事件本身，重放即状态。三档策略文案经 systemPrompt `.context('sandbox:policy', order=110)` 进模型可见上下文（呈现面是 render_context_snapshot 快照）。消费者在 `shell/` 层：`bash_local.py` 是 ctx.shell 缺省 provider（前台 `bash -c` 直跑），`bash_sandbox.py` 子类每次调用把精确 argv 经 confine 包裹后 spawn 并报告 `{mode, denied, enforcement}`；三路归因对齐上游 helpers.ts——runner 启动失败（ENOENT/EACCES 且错误路径恰为 argv[0]、cwd 可用性独立校验）与 runner 失败规则命中抛 `SandboxUnavailableError` 且优先于 denial，denial = 非零退出 + stderr 大小写不敏感签名命中（普通非零退出仍是正常结算）；danger-full-access 直通不包裹。工具面（`cli/default_tools.py`）检测到 ctx.shell 时把教学 stub 换成真执行器，逐调用以调用方会话决议策略；headless 入口 `run_headless(..., sandbox=配置)` 一键装配全栈。已知简化：mini 尚无 loop 侧 runtime-context 投影（快照有呈现面但未注入对话）、后台进程机制未复现。
+**沙箱策略服务 + bash 消费者**（`seams/sandbox_policy.py` + `shell/`，对应上游 `sandbox/sandbox-policy`、`session-mode.ts` 与 `shell/bash-sandbox`）：策略与强制分属两个服务——ctx.sandboxPolicy 是唯一的共享策略家（Config `{mode: 缺省 read-only, workspaceRoot}` fail-loud 校验；`resolve()` 决议完整策略：显式 mode > 会话日志最后一条 `sandbox/mode` > 部署缺省；workspace 根先 canonical 后词法规范化，会话 cwd 即 workspace-write 边界），ctx.sandbox 把模式物化为 runner argv。会话覆盖以会话日志为存储：`set_sandbox_mode` 追加恰一条 `sandbox/mode` log-only 事件，`effective_sandbox_mode` 纯 fold 逆序取最后——切换即事件本身，重放即状态。三档策略文案经 systemPrompt `.context('sandbox:policy', order=110)` 进模型可见上下文（loop 侧投影在上下文变化时把快照铸成 durable user 消息注入对话流，见 `core/agent_loop/runtime_context.py`）。消费者在 `shell/` 层：`bash_local.py` 是 ctx.shell 缺省 provider（前台 `bash -c` 直跑），`bash_sandbox.py` 子类每次调用把精确 argv 经 confine 包裹后 spawn 并报告 `{mode, denied, enforcement}`；三路归因对齐上游 helpers.ts——runner 启动失败（ENOENT/EACCES 且错误路径恰为 argv[0]、cwd 可用性独立校验）与 runner 失败规则命中抛 `SandboxUnavailableError` 且优先于 denial，denial = 非零退出 + stderr 大小写不敏感签名命中（普通非零退出仍是正常结算）；danger-full-access 直通不包裹。工具面（`cli/default_tools.py`）检测到 ctx.shell 时把教学 stub 换成真执行器，逐调用以调用方会话决议策略；headless 入口 `run_headless(..., sandbox=配置)` 一键装配全栈。已知简化：后台进程机制未复现。
 
 **凭据四层**（`credentials_local.py`，对应上游 `credentials-local`）：`env > file > project-env > user-env` 按信任度排序——继承环境只读胜出（CI secret / `-e` 是显式意图且进程内不可编辑）、管理文件层可写（`set`/`unset` 读-改-写补丁单键，外部编辑合并、删掉的条目不残留）、project `.env` 优先于 user `.env`。文档解析严格：非映射根 / 非 POSIX 标识符 key / 非字符串 / 空串值整体拒绝，绝不静默跳过；`describe` 报告 `{configured, source, writable}`（只有 env 层不可写）；env 已提供时 `set`/`unset` 拒绝（写了也被遮蔽成无效果）；POSIX 上组/其他可读的文档读前直接拒绝（Windows 无 mode 可查则跳过）。载体简化：文档用 JSON 替代 YAML（解析语义不变），无跨进程锁与文件 watch。
 
@@ -207,7 +207,7 @@ python -m unittest tests.test_seams -v
 
 ## 6.10 手册收尾
 
-全部 6 章做完，你应该能用 Python 亲手证明这三件事（报告第 12 节同样强调）：
+全部 6 章做完，你应该能用 Python 亲手证明这三件事（报告《结语》篇 §12 同样强调）：
 
 1. **事件溯源日志是唯一数据源**（第 1、5 章）
 2. **注册 = 可逆副作用 + waterfall 短路**（第 2、3 章）
@@ -215,6 +215,6 @@ python -m unittest tests.test_seams -v
 
 如果这三件事你现在都能不查资料写出来，对 dsh 的理解就已经到位了。接下来可以：
 
-- 继续第 12 章：把 MiniHarness 换成异步（`asyncio` + 真正的 parallel / parallel barrier）——已完成，见第 12 章
+- 精读第 12 章：MiniHarness 已是异步形态（`asyncio` + 真正的 parallel / 并行屏障），看它如何落地第 2 章的派发语义
 - 用官方 Python SDK（`deepseek-harness-sdk`）驱动真实 harness，对照你的约定
 - 给 dsh 仓库提第一个插件 PR（`docs/cookbook/adding-a-tool.md`）

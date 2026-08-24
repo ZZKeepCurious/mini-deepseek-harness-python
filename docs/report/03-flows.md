@@ -66,19 +66,19 @@ sequenceDiagram
 ```mermaid
 flowchart TD
   M["assistant 消息含 tool-call block"]
-  TC["Session: tool/call<br/>执行前先记录 [durable]"]
+  TC["Session: tool/call&lt;br/&gt;执行前先记录 [durable]"]
   PC["UI 挂起卡片 presentCall(args)"]
-  PRE["tools/pre-execute waterfall<br/>hooks / 权限 / 沙箱"]
-  ASK["ask → ctx.approval 一次性询问<br/>absent / unanswerable → deny"]
-  DEN["denied<br/>工具体被跳过"]
-  G["注册的单调守卫<br/>只能减权 · 乱序无法撤销"]
-  EX["tools/execute waterfall<br/>超时 / 重试 / 度量（around-dispatch）"]
-  BODY["工具 execute() 体<br/>自有事件：todo/write · fs/observed · tool/code-dispatch"]
-  POST["tools/post-execute waterfall<br/>accept / replace / block(+feedback)"]
-  NORM["注册表外层规范化<br/>snapshot 异常 → isError"]
-  FIN["finalizeContent<br/>最后一个内容只读硬性规定"]
-  RES["tools/result 同步通知<br/>冻结的权威结果"]
-  TR["Session: tool/result<br/>唯一模型面向结果 [durable]"]
+  PRE["tools/pre-execute waterfall&lt;br/&gt;hooks / 权限 / 沙箱"]
+  ASK["ask → ctx.approval 一次性询问&lt;br/&gt;absent / unanswerable → deny"]
+  DEN["denied&lt;br/&gt;工具体被跳过"]
+  G["注册的单调守卫&lt;br/&gt;只能减权 · 乱序无法撤销"]
+  EX["tools/execute waterfall&lt;br/&gt;超时 / 重试 / 度量（around-dispatch）"]
+  BODY["工具 execute() 体&lt;br/&gt;自有事件：todo/write · fs/observed · tool/code-dispatch"]
+  POST["tools/post-execute waterfall&lt;br/&gt;accept / replace / block(+feedback)"]
+  NORM["注册表外层规范化&lt;br/&gt;snapshot 异常 → isError"]
+  FIN["finalizeContent&lt;br/&gt;最后一个内容只读硬性规定"]
+  RES["tools/result 同步通知&lt;br/&gt;冻结的权威结果"]
+  TR["Session: tool/result&lt;br/&gt;唯一模型面向结果 [durable]"]
   PR["UI 完成卡片 presentResult"]
   M --> TC
   TC --> PC
@@ -123,12 +123,12 @@ flowchart LR
   EVT["session/event 同步广播"]
   P["持久化插件：先复制事件"]
   Q["异步成批写入队列"]
-  J["JSONL 后端<br/>每会话一个文件 · packed chunk 行"]
-  QL["SQLite 后端<br/>多会话一库 · 单调 SCHEMA_VERSION"]
-  F["session/flush 并行栅栏<br/>下一 turn 前等待 + 错误观察点"]
+  J["JSONL 后端&lt;br/&gt;每会话一个文件 · packed chunk 行"]
+  QL["SQLite 后端&lt;br/&gt;多会话一库 · 单调 SCHEMA_VERSION"]
+  F["session/flush 并行栅栏&lt;br/&gt;下一 turn 前等待 + 错误观察点"]
   NEXT["认领下一个普通 turn"]
-  LOAD["load()：未知事件类型 fail-closed<br/>版本落后 / 超前 = 拒绝，不迁移"]
-  INT["崩溃恢复<br/>合成 turn/end interrupted<br/>保持括号平衡"]
+  LOAD["load()：未知事件类型 fail-closed&lt;br/&gt;版本落后 / 超前 = 拒绝，不迁移"]
+  INT["崩溃恢复&lt;br/&gt;合成 turn/end interrupted&lt;br/&gt;保持括号平衡"]
   S --> EVT --> P --> Q
   Q --> J
   Q --> QL
@@ -181,13 +181,13 @@ sequenceDiagram
 ```mermaid
 flowchart TD
   BOOT["boot()"]
-  ROOT["创建 root context<br/>暴露 dshHomePath 给 !!js 表达式"]
-  LDR["安装 Loader<br/>mountRootInclude：cordis:include + cordis:group 内建"]
+  ROOT["创建 root context&lt;br/&gt;暴露 dshHomePath 给 !!js 表达式"]
+  LDR["安装 Loader&lt;br/&gt;mountRootInclude：cordis:include + cordis:group 内建"]
   PREP["prepare hook（可选，宿主准备）"]
   MNT["挂载 include 树（并发挂载条目）"]
   CHK{"断言条目已加载 + 已激活"}
   OK["返回 root context"]
-  FAIL["dispose 部分 context<br/>标签化错误 + exit(1)"]
+  FAIL["dispose 部分 context&lt;br/&gt;标签化错误 + exit(1)"]
   BOOT --> ROOT --> LDR --> PREP --> MNT --> CHK
   CHK -->|成功| OK
   CHK -->|失败| FAIL
@@ -198,7 +198,7 @@ flowchart TD
     L4["任何 --patch overlay"]
   end
   L1 --> L2 --> L3 --> L4
-  L4 --> SEM["补丁语义<br/>按 id 定位整段替换 / insert 插入 / !!js 挂载时插值"]
+  L4 --> SEM["补丁语义&lt;br/&gt;按 id 定位整段替换 / insert 插入 / !!js 挂载时插值"]
 ```
 
 **关键设计**：组合、配置导出（`--dump-config`）、标志派发共用同一个补丁算法（include 的 `applyEntryPatches` 导出为纯函数），因此三者永不漂移。

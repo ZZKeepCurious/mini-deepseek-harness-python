@@ -1,10 +1,10 @@
 ﻿# 第 00 章：环境准备
 
-> 目标：把 MiniHarness 跑起来，知道代码在哪里、测试怎么跑、每个文件对应什么。读完整本手册不装 Node.js、不装 TypeScript；唯一必需的 pip 包是 SSE 传输层用的 `httpx`（可选 `pyyaml`）。
+> 目标：把 MiniHarness 跑起来，知道代码在哪里、测试怎么跑、每个文件对应什么。读完整本手册不装 Node.js、不装 TypeScript；必需的 pip 包只有三个基础件：SSE 传输用的 `httpx`、跨进程锁用的 `filelock`、文件观察用的 `watchdog`（另有可选 `pyyaml`）。
 
 ## 0.1 前置知识
 
-- Python 3.10+。核心实现只依赖标准库：`unittest`、`json`、`sqlite3`、`threading`、`dataclasses`、`asyncio`；DeepSeek SSE 传输层用 `httpx`（stdlib 优先，关键协议层精选第三方）。
+- Python 3.10+。核心实现以标准库为骨架：`unittest`、`json`、`sqlite3`、`threading`、`dataclasses`、`asyncio`；成熟开源库优先补齐关键能力——`httpx`（SSE 传输）、`filelock`（跨进程锁）、`watchdog`（文件观察），无语义等价库处才手写。
 - 基本的事件 / 回调 / 上下文概念。
 - 了解一个 Agent 回合的 wire 形状：`user message → assistant（可能带 tool call）→ tool result → assistant`。
 
@@ -26,6 +26,7 @@ mini-deepseek-harness-python/        ← 仓库根
 │   ├── boot/                    ← 第 5 章：启动与组合
 │   ├── seams/                   ← 第 6 章：进阶扩展口
 │   ├── cli/ protocol/ preset/ extensions/ interaction/ client/
+│   ├── goal/ plan/ jobs/ skills/ commands/ attachment/ web/
 │   ├── example_plugins.py       ← 第 5 章 boot 演示插件
 │   └── demo.py                  ← 端到端演示（无 key 可跑）
 ├── tests/                       ← 每章验收测试（unittest）
@@ -34,10 +35,11 @@ mini-deepseek-harness-python/        ← 仓库根
 │   ├── test_tools.py
 │   ├── test_loop.py
 │   ├── test_persistence_boot.py
-│   └── test_seams.py
+│   ├── test_seams.py
+│   └── …（cli/composition/goal/plan/jobs/skills 等随对应家族展开）
 └── docs/                        ← 文档
     ├── README.md                ← 本手册索引（学习地图）
-    ├── chapters/                ← 00-setup.md ~ 06-advanced-seams.md（本章所在目录）
+    ├── chapters/                ← 00-setup.md ~ 15-schemastery.md（本章所在目录）
     └── report/                  ← 《DeepSeek Harness 深度学习指南与技术报告》HTML
 ```
 
@@ -74,7 +76,7 @@ MiniHarness 是教学实现，不是移植。下面是简化清单，每一条�
 | LLM 失败以异常抛出（finish 带内 `{kind:'error'|'aborted'}` 与异常同走 `agent/request-error` waterfall） | `LlmError` 编码 `CONTEXT_WINDOW_EXCEEDED` / `EMPTY_RESPONSE`（可重试）等 |
 | `agent/turn-stopping`、`system-prompt/assemble` waterfall 已实现（turn-stopping 为串行终点检查点，见第 4/13 章） | 上游都有 |
 | JSONL 明文行；SQLite 列 `(session_id, seq, type, data)` | JSONL 默认 checksum+Zstandard 压缩；SQLite 列 `(session_id, seq, type, time, data, source_event_seqs, surface_op)` |
-| `assistant/message` source 带 `{kind, provider, model}`（消息无 `id` 语义差异待核） | 消息 `{id, role, content, source}` 全字段 |
+| `assistant/message` source 带 `{kind, provider, model}` | 消息 `{id, role, content, source}` 全字段 |
 
 ## 检查点
 

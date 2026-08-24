@@ -1,11 +1,11 @@
 # Mini DeepSeek Harness（Python）— 文档入口
 
-> 用 Python（stdlib 优先，关键协议层精选第三方如 httpx）从 0 到 1 复现 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 核心能力的教学项目。
+> 用 Python（成熟开源库优先，无语义等价库时才用标准库手写）从 0 到 1 复现 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 核心能力的教学项目。
 > 仓库：https://github.com/ZZKeepCurious/mini-deepseek-harness-python
 
 ## 这是什么
 
-本手册用**纯 Python（stdlib 优先；DeepSeek SSE 传输层用 `httpx`，YAML 可选 `pyyaml`）**从零实现一个 `MiniHarness`：一个最小可用的 Agent 运行时核心子集，逐条复现 DeepSeek Harness（`dsh`）的**约定与硬性规定**。
+本手册用 **Python（成熟开源库优先：SSE 传输 `httpx`、凭据跨进程写锁 `filelock`、文件监视 `watchdog`；YAML 可选 `pyyaml`）** 从零实现一个 `MiniHarness`：一个最小可用的 Agent 运行时核心子集，逐条复现 DeepSeek Harness（`dsh`）的**约定与硬性规定**。
 
 复现目标不是逐行移植 TypeScript，而是**掌握约定**：
 
@@ -39,7 +39,7 @@
 
 ```mermaid
 flowchart LR
-  A["00 环境准备"] --> B["01 事件溯源会话<br/>（整个框架的地基）"]
+  A["00 环境准备"] --> B["01 事件溯源会话&lt;br/&gt;（整个框架的地基）"]
   B --> C["02 插件上下文 + 事件总线"]
   C --> D["03 工具执行管线"]
   D --> E["04 Agent Loop + LLM 流式"]
@@ -50,6 +50,10 @@ flowchart LR
   H --> J["09 Agent 干预面（steer/cancel/approval/quiescence）"]
   H --> K["10 轨迹投影引擎（Trajectory 折叠）"]
   H --> L["11 运行时自我修改（动态插件）"]
+  H --> M["12 异步化与并行工具"]
+  H --> N["13 Cordis 进阶：Service 基类与 intercept"]
+  H --> O["14 dsh_scope 载波派发模型"]
+  H --> P["15 schemastery 配置引擎"]
 ```
 
 ### 章节表
@@ -60,7 +64,7 @@ flowchart LR
 | [01 事件溯源会话](chapters/01-event-sourced-session.md) | `Session` 追加式日志、seq 连续、deep-freeze、`derive_messages` 投影、崩溃修复 | `packages/core/session` | 2-3 天 |
 | [02 插件上下文 + 事件总线](chapters/02-plugin-context-and-event-bus.md) | `Context` 服务仓库、四种派发（emit/waterfall/parallel/serial）、可逆副作用、作用域、依赖驱动激活 | `vendor/cordis` + `core/scope` | 2 天 |
 | [03 工具执行管线](chapters/03-tool-execution-pipeline.md) | 作用域化注册表、schema 校验、pre/execute/post waterfall、超时、规范化 | `packages/core/tools` | 2 天 |
-| [04 Agent Loop + LLM 流式](chapters/04-agent-loop-and-llm-streaming.md) | turn/step 状态机、inbox、StreamChunk 协议、DeepSeek SSE 适配器、模型请求重试/退避（§4.10：retry-policy + llm-retry + agent/request-error） | `core/agent-loop` + `llm/llm` + `llm/llm-deepseek` + `llm/llm-retry` | 3 天 |
+| [04 Agent Loop + LLM 流式](chapters/04-agent-loop-and-llm-streaming.md) | turn/step 状态机、inbox、StreamChunk 协议、DeepSeek SSE 适配器、模型请求重试/退避（§4.9：retry-policy + llm-retry + agent/request-error） | `core/agent-loop` + `llm/llm` + `llm/llm-deepseek` + `llm/llm-retry` | 3 天 |
 | [05 持久化 + 崩溃恢复 + 组合](chapters/05-persistence-recovery-composition.md) | JSONL/SQLite 双后端、flush 栅栏、fail-closed、interrupted 修复、boot + patch | `session/session-persistence` + `boot` | 2 天 |
 | [06 进阶扩展口](chapters/06-advanced-seams.md) | 沙箱 / 凭据 / 子 agent —— "换 Provider 不改 Consumer"；§6.9 进阶实现（真沙箱后端 / 凭据四层 / 远程三通道） | `capability-seams` 各页 | 2-3 天 |
 | [07 外部入口](chapters/07-external-entry-points.md) | 两个产品表面（web/headless）+ 三个协议入口（ACP/SDK/hooks）、headless 深读与复现、web 传输层复现（§7.5：HTTP 载体 + mux/host SSE + approval 通道 + 静态服务 + vanilla SPA）、JSON-RPC 信封子集（§7.6）、ACP 最小子集（§7.7）与 hooks 桥（§7.8）复现 | `apps/cli` + `bundle/{headless,web-app}` + `host/apiproxy` + `host/frontend-static` + `{acp,sdk,hooks}` | 2-3 天 |
@@ -68,10 +72,10 @@ flowchart LR
 | [09 Agent 干预面](chapters/09-agent-intervention.md) | steer/inject/cancel/whenIdle/runMaintenance、pre-step/request 瀑布、quiescence 语义、审批能力 seam（ask/never + 审计对）；mini：loop 干预面五方法 + approval.py | `core/agent` + `core/agent-loop` + `interaction/user-approval` | 2-3 天 |
 | [10 轨迹投影引擎](chapters/10-trajectory-projection.md) | 折叠定义 → TrajectorySnapshot，Python 复现；headless summarize 的演进 | `packages/client/ui-trajectory` | 2-3 天 |
 | [11 运行时自我修改](chapters/11-runtime-self-modification.md) | extensions 七工具、进程内存动态插件生命周期（define/run/stop） | `packages/extensions/*` | 2 天 |
-| [12 异步化与并行工具](chapters/12-async-parallel-tools.md) | asyncio 事件总线、并行调度器（屏障/滚动池/模型序提交/取消排干）、`is_concurrency_safe` 分类 | 
-| [13 Cordis 进阶：Service 基类与 intercept](chapters/13-cordis-service-interceptor-logger.md) | `Service` 基类（构造即登记 / 可调用 `_invoke` / `_check` / `_init`）、`_resolve_config` 沿 intercept 链合并、`LoggerService` 内置日志（exporter / 绑定视图）、`extend`/`isolate`/`intercept` 三兄弟 | `vendor/cordis/src/service.ts` + `context.ts` + `logger.ts` |
-| [14 dsh_scope 载波派发模型](chapters/14-dsh-scope-carrier.md) | `ScopeKey` 身份键、`scopeParents` 关系（注册向下 / 事件向上）、`scopeTarget` 载波、`ScopedLayers`/`NamedEntries`/`AnonymousEntries` 注册表存储 | `packages/core/scope/src/index.ts` + `store.ts` |
-| [15 schemastery 配置引擎](chapters/15-schemastery.md) | `Schema` 可调用节点 + `resolve` 分发（17 类 resolver）、meta 克隆语义、`ValidationError` 的 `$path` 前缀、`toJSON`/`toString`/i18n/simplify、`~standard` 协议面 | `vendor/schemastery/src/index.ts` |`core/agent-loop` 并行编排 + `core/context` 并发模型 | 2-3 天 |
+| [12 异步化与并行工具](chapters/12-async-parallel-tools.md) | asyncio 事件总线、并行调度器（屏障/滚动池/模型序提交/取消排干）、`is_concurrency_safe` 分类 | `core/agent-loop` 并行编排 + `core/context` 并发模型 | 2-3 天 |
+| [13 Cordis 进阶：Service 基类与 intercept](chapters/13-cordis-service-interceptor-logger.md) | `Service` 基类（构造即登记 / 可调用 `_invoke` / `_check` / `_init`）、`_resolve_config` 沿 intercept 链合并、`LoggerService` 内置日志（exporter / 绑定视图）、`extend`/`isolate`/`intercept` 三兄弟 | `vendor/cordis/src/service.ts` + `context.ts` + `logger.ts` | 2 天 |
+| [14 dsh_scope 载波派发模型](chapters/14-dsh-scope-carrier.md) | `ScopeKey` 身份键、`scopeParents` 关系（注册向下 / 事件向上）、`scopeTarget` 载波、`ScopedLayers`/`NamedEntries`/`AnonymousEntries` 注册表存储 | `packages/core/scope/src/index.ts` + `store.ts` | 1-2 天 |
+| [15 schemastery 配置引擎](chapters/15-schemastery.md) | `Schema` 可调用节点 + `resolve` 分发（17 类 resolver）、meta 克隆语义、`ValidationError` 的 `$path` 前缀、`toJSON`/`toString`/i18n/simplify、`~standard` 协议面 | `vendor/schemastery/src/index.ts` | 2 天 |
 
 ## 快速开始
 

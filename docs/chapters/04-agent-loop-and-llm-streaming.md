@@ -5,15 +5,15 @@
 > 前置：第 1~3 章。产出文件：`miniharness/llm/`、`miniharness/core/agent_loop/` + `tests/test_loop.py`
 
 !!! warning "早期简化形态"
-    本章代码为**教学简化形态**，与当前实现存在以下差异（学习时以当前实现为准，见 00-setup §0.5 简化表与 AGENTS.md 已核实清单）：
+    本章代码为**教学简化形态**，与当前实现存在以下差异（学习时以当前实现为准，见 00-setup §0.5 简化表）：
 
-    - **`FakeLlmAdapter` finish reason**：本章为字符串（`"stop"` / `"tool-calls"`）；实现为对象 `{"kind": "stop"}` / `{"kind": "tool-calls"}`（`llm/fake.py:38,45`）。
+    - **`FakeLlmAdapter` finish reason**：本章为字符串（`"stop"` / `"tool-calls"`）；实现为对象 `{"kind": "stop"}` / `{"kind": "tool-calls"}`（`llm/fake.py:58,70`）。
     - **`DeepSeekAdapter` SSE**：实现要求字面 `[DONE]` 必须出现（EOF 未到 `[DONE]` 抛 `STREAM_CLOSED`）、畸形 SSE 载荷抛 `MALFORMED_RESPONSE`、HTTP 错误映射完整（401/403→AUTH、quota 措辞→QUOTA、429→RATE_LIMIT、400 上下文→CONTEXT_WINDOW_EXCEEDED 否则 INVALID_REQUEST、≥500→SERVER、其余 `HTTP_<status>`）、`usage` 归一为 `TokenUsage`（`llm/deepseek.py`，见 `llm/protocol.py` 的 `StreamChunk` 判别字段 `type`）。本章的 `AUTH_ERROR`/`REQUEST_ERROR` 二元映射已过时。
-    - **空响应**：本章 §4.4 声称"空响应未实现"与同章 §4.8/§4.10 自相矛盾——实现已产出 `EMPTY_RESPONSE` 错误且默认可重试（`llm/retry_policy.py` 白名单）。
+    - **空响应**：本章 §4.4 声称"空响应未实现"与同章 §4.8/§4.9 自相矛盾——实现已产出 `EMPTY_RESPONSE` 错误且默认可重试（`llm/retry_policy.py` 白名单）。
     - **loop 片段**：本章 `loop.py` 的 `_append` 方法、字符串 reason、扁平 `assistant/message` 形态均已过时；实现是 ContentBlock 消息对象 + 显式编号 + `request/header` 事件 + 每 chunk 落 `assistant/chunk`（`core/agent_loop/agent.py`）。
-    - **重试接线**：真实调用入口必须挂载 `apply_retry_planner`（`llm/retry.py:196`），否则 `agent/request-error` 瀑布不生效（本章 §4.11 真实 API 示例未调用，已修正纪律见 AGENTS.md）。
+    - **重试接线**：真实调用入口必须挂载 `apply_retry_planner`（`llm/retry.py:298`），否则 `agent/request-error` 瀑布不生效（本章 §4.6 真实 API 示例为教学简化、未挂载；真实装配必须先挂）。
     - **时序图**：完整时序含 `request/header` 事件与逐 chunk `assistant/chunk` 落盘（见 `core/agent_loop/agent.py` 的 requestHeaderLogged 语义）。
-    - **stream 契约已 async 化**（2026-08-18 asyncio 化重构 + httpx 传输）：实现签名为 `async def stream(self, messages, tools, signal=None)` 异步迭代（`llm/protocol.py`，httpx 原生 asyncio 传输，abort 置位即关闭连接、`_aiter_raced` 竞速抛 `StreamAborted`）；agent 循环为单一 async 驱动 + `followup`/`steer` 同步门面（经进程级常驻单事件循环驱动，`core/agent_loop/resident_loop.py`）；本章的同步 `def stream` 与同步泵形态已过时。
+    - **stream 契约已 async 化**（httpx 异步传输）：实现签名为 `async def stream(self, messages, tools, signal=None)` 异步迭代（`llm/protocol.py`，httpx 原生 asyncio 传输，abort 置位即关闭连接、`_aiter_raced` 竞速抛 `StreamAborted`）；agent 循环为单一 async 驱动 + `followup`/`steer` 同步门面（经进程级常驻单事件循环驱动，`core/agent_loop/resident_loop.py`）；本章的同步 `def stream` 与同步泵形态已过时。
 
 ## 4.1 这一章要做什么
 
@@ -240,7 +240,7 @@ class DeepSeekAdapter(LlmAdapter):
 - `baseURL / apiKey` 从环境变量读取，代码里只存引用。凭据的完整处理在第 6 章（凭据扩展口）。
 - 错误在源头就分类（`_http_error_code`，对齐上游 adapter.ts）：401/403→`AUTH`、quota 措辞→`QUOTA`、429→`RATE_LIMIT`、400 上下文超限→`CONTEXT_WINDOW_EXCEEDED`、500+→`SERVER`、其余→`HTTP_<status>`，并携带 `status / providerRetryAfterMs / requestId` 事实——调用方不用猜。
 
-> 传输层为什么用 httpx 而不是 urllib？urllib 的阻塞读无法被真正取消，只能靠固定 120s 超时兜底（producer 线程滞留），与上游"per-read 300s watchdog + fetch 流中断可取消"的语义有差距。httpx 是原生 asyncio 传输：`abort` 置位即抛 `StreamAborted` 并关闭连接，`READ_TIMEOUT_S=300` 对齐上游每读间隙超时，且测试可用 `httpx.MockTransport` 注入、无需打真实网络。这是本手册"stdlib 优先、关键协议层精选第三方"的典型取舍。
+> 传输层为什么用 httpx 而不是 urllib？urllib 的阻塞读无法被真正取消，只能靠固定 120s 超时兜底（producer 线程滞留），与上游"per-read 300s watchdog + fetch 流中断可取消"的语义有差距。httpx 是原生 asyncio 传输：`abort` 置位即抛 `StreamAborted` 并关闭连接，`READ_TIMEOUT_S=300` 对齐上游每读间隙超时，且测试可用 `httpx.MockTransport` 注入、无需打真实网络。这是本手册"成熟开源库优先，无语义等价库处才手写"的典型取舍——存在维护良好的异步 HTTP 库时，不手写传输层。
 
 ## 4.4 代码 step-by-step（loop.py）
 
@@ -410,7 +410,7 @@ print(loop.run("用 bash 执行 echo hello，然后告诉我结果。"))
 print([e["type"] for e in session.events])
 ```
 
-需要环境变量 `DEEPSEEK_API_KEY`（可选 `DEEPSEEK_BASE_URL` 指向兼容代理）。跑完后 `session.events` 里能看到完整回合：turn/step 括号、消息、工具调用与结果，全都在。
+需要环境变量 `DEEPSEEK_API_KEY`（可选 `DEEPSEEK_BASE_URL` 指向兼容代理）。真实装配请在构造 loop 前调用 `apply_retry_planner(ctx)`（§4.9），本示例为教学简化省略。跑完后 `session.events` 里能看到完整回合：turn/step 括号、消息、工具调用与结果，全都在。
 
 ## 4.7 检查点练习
 
@@ -431,12 +431,12 @@ print([e["type"] for e in session.events])
 |---|---|---|
 | `system-prompt/assemble` waterfall | 提示词按片段组装（hook 可注入上下文） | 已实现（`core/system_prompt.py` assemble + contexts/tools/variables 提供器，第 13 章） |
 | `agent/request` waterfall → `llm/stream` | 请求构造拦截（steering） | 已实现（`_request_config`：seed=路由 config，payload 附 turn/step/signal，provider 缺失 fail loud） |
-| `agent/request-error` waterfall | 规范错误（如上下文溢出）后的重试决策 | 已实现（§4.10 重试/退避） |
+| `agent/request-error` waterfall | 规范错误（如上下文溢出）后的重试决策 | 已实现（§4.9 重试/退避） |
 | `agent/turn-stopping` serial | turn 结束前串行终点检查 | 已实现（serial/aserial；step/end 后 next-step 空才派发；pre-step 拒绝→blocked 终局不派发；max-tokens 粘滞不降级） |
-| `finish {kind:'error'\|'aborted'}` 带内失败 | 流中途失败也可经协议传递 | 已实现（带内错误/中止与异常路径同走 `agent/request-error` waterfall，§4.10） |
-| `EMPTY_RESPONSE` 编码 | 空响应 = 规范错误，可重试 | 已实现且默认可重试（§4.10） |
+| `finish {kind:'error'\|'aborted'}` 带内失败 | 流中途失败也可经协议传递 | 已实现（带内错误/中止与异常路径同走 `agent/request-error` waterfall，§4.9） |
+| `EMPTY_RESPONSE` 编码 | 空响应 = 规范错误，可重试 | 已实现且默认可重试（§4.9） |
 
-## 4.10 重试/退避与上下文溢出降级
+## 4.9 重试/退避与上下文溢出降级
 
 对应 dsh：`packages/llm/llm/src/retry-policy.ts` + `packages/llm/llm-retry/src/index.ts` + `packages/core/agent/src/runtime-types.ts`（`agent/request-error`）。
 
@@ -497,11 +497,11 @@ loop 前调用 `apply_retry_planner(ctx)`（幂等，可重复调用）。
 `maxOverflowRetries`，成功响应/回合结束边界复位。既无压缩也无接管 → 终局
 `turn/end` reason 为 `{kind:'error'}`。
 
-验证：`python -m unittest tests.test_retry -v`（51 项：策略解析、退避边界、
+验证：`python -m unittest tests.test_retry -v`（策略解析、退避边界、
 Retry-After 解析、全部 recover 分支、lifetime 信号与竞速等待、插件 teardown
 排干/陈旧守卫、loop 集成——重试成功/耗尽终局/非白名单终局）；
 压缩/溢出见 `tests/test_compaction.py`。
 
-## 4.9 收尾
+## 4.10 收尾
 
 回合跑通的那一刻，前三章的积木全部就位：日志在写、插件在拦、工具在跑、模型在转。这一章最后要记住的是 turn/step 的分层——turn 是对话的括号，step 是括号里的每一轮"请求 + 工具"。下一章处理一个没解决的实际问题：这些日志怎么落盘、崩溃怎么恢复、整个系统怎么组合启动。

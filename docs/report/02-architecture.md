@@ -32,17 +32,17 @@
 ```mermaid
 flowchart LR
   subgraph SPINE["packages/core —— Turn 循环穿过的包"]
-    LOOP["core/agent-loop<br/>Driver：认领输入 · 开闭 turn"]
-    PRE["core/system-prompt<br/>组装前缀 + 工具 schema"]
-    DER["core/session<br/>deriveMessages 派生历史"]
-    LLMSEAM["agent/request → LLM 扩展口<br/>llm/stream 流式"]
-    TOOLSEAM["core/tools<br/>作用域化注册表分发"]
-    LOG["core/session<br/>所有模型可见事实 append 回日志"]
+    LOOP["core/agent-loop&lt;br/&gt;Driver：认领输入 · 开闭 turn"]
+    PRE["core/system-prompt&lt;br/&gt;组装前缀 + 工具 schema"]
+    DER["core/session&lt;br/&gt;deriveMessages 派生历史"]
+    LLMSEAM["agent/request → LLM 扩展口&lt;br/&gt;llm/stream 流式"]
+    TOOLSEAM["core/tools&lt;br/&gt;作用域化注册表分发"]
+    LOG["core/session&lt;br/&gt;所有模型可见事实 append 回日志"]
   end
   subgraph BASE["被循环依赖的基础包"]
-    SCP["core/scope<br/>createScope / scopeOf / scopeTarget"]
-    AG["core/agent<br/>Agent 约定 + initiator 作用域 + agent/* 事件"]
-    DM["core/agent-default-model<br/>部署级默认模型选择"]
+    SCP["core/scope&lt;br/&gt;createScope / scopeOf / scopeTarget"]
+    AG["core/agent&lt;br/&gt;Agent 约定 + initiator 作用域 + agent/* 事件"]
+    DM["core/agent-default-model&lt;br/&gt;部署级默认模型选择"]
   end
   LOOP --> PRE --> DER --> LLMSEAM --> TOOLSEAM --> LOG
   LOG -.下一步骤再次 derive.-> DER
@@ -80,9 +80,9 @@ flowchart LR
 ```mermaid
 flowchart LR
   subgraph SEAM["能力扩展口 = 三角色缺一不可"]
-    D["Service Definition<br/>ctx.llm / ctx.fs / ctx.shell / ctx.sandbox<br/>ctx.subagents / ctx.skills / ctx.sessionPersistence ..."]
-    P["Service Provider<br/>llm-deepseek / local / pwsh / sandbox-local<br/>in-process / fork / ACP / JSONL / SQLite ..."]
-    C["Consumer（模型面向工具）<br/>bash / terminal / read_file / edit<br/>web_search / subagent / skill ..."]
+    D["Service Definition&lt;br/&gt;ctx.llm / ctx.fs / ctx.shell / ctx.sandbox&lt;br/&gt;ctx.subagents / ctx.skills / ctx.sessionPersistence ..."]
+    P["Service Provider&lt;br/&gt;llm-deepseek / local / pwsh / sandbox-local&lt;br/&gt;in-process / fork / ACP / JSONL / SQLite ..."]
+    C["Consumer（模型面向工具）&lt;br/&gt;bash / terminal / read_file / edit&lt;br/&gt;web_search / subagent / skill ..."]
   end
   subgraph WORLD["共享执行世界 —— Provider 联动迁移"]
     F["FS Provider → 指向远程沙箱"]
@@ -117,20 +117,20 @@ flowchart LR
 ```mermaid
 flowchart LR
   subgraph EM["emit · 观察式"]
-    e1["emit(event)"] --> e2["监听器按注册序同步观察<br/>不等待 · 无返回值"]
+    e1["emit(event)"] --> e2["监听器按注册序同步观察&lt;br/&gt;不等待 · 无返回值"]
   end
   subgraph WF["waterfall · 流水线（短路即决策）"]
     w1["waterfall(event, next)"] --> w2["监听器 m1"]
     w2 -->|"调用 next()"| w3["监听器 m2"]
-    w2 -->|"不调 next → 短路"| w4["立即返回 m1 的决策值<br/>拒绝 / 替换 / 拦截"]
+    w2 -->|"不调 next → 短路"| w4["立即返回 m1 的决策值&lt;br/&gt;拒绝 / 替换 / 拦截"]
     w3 -->|"调用 next()"| w5["返回最终值"]
     w3 -->|"不调 next → 短路"| w6["返回 m2 的决策值"]
   end
   subgraph PA["parallel · 并行"]
-    p1["parallel(event)"] --> p2["等待全部监听器完成<br/>收集结果列表"]
+    p1["parallel(event)"] --> p2["等待全部监听器完成&lt;br/&gt;收集结果列表"]
   end
   subgraph SE["serial · 串行"]
-    s1["serial(event)"] --> s2["按序执行<br/>有返回值"]
+    s1["serial(event)"] --> s2["按序执行&lt;br/&gt;有返回值"]
   end
 ```
 
@@ -173,10 +173,10 @@ flowchart LR
 ```mermaid
 flowchart LR
   REG["register(插件)"] --> INJ{"inject 声明的服务是否就绪?"}
-  INJ -->|否| WAIT["Cordis 挂起等待服务出现<br/>加载顺序由依赖关系表达，非手工排序"]
+  INJ -->|否| WAIT["Cordis 挂起等待服务出现&lt;br/&gt;加载顺序由依赖关系表达，非手工排序"]
   WAIT --> INJ
   INJ -->|是| APPLY["apply(ctx) 执行插件体"]
-  APPLY --> FX["安装可逆副作用<br/>ctx.effect / ctx.on / ctx.waterfall / ctx.provide"]
+  APPLY --> FX["安装可逆副作用&lt;br/&gt;ctx.effect / ctx.on / ctx.waterfall / ctx.provide"]
   FX --> DISP["register 返回 disposer"]
   DISP --> UNLOAD["卸载 / HMR 热重载"]
   UNLOAD --> ROLL["按注册逆序回滚副作用"]
@@ -209,12 +209,12 @@ flowchart LR
     E1["user/message · surfaceOp=append"]
     E2["assistant/message · append"]
     E3["tool/result · append"]
-    E4["assistant/message · surfaceOp=replace<br/>（压缩替换旧消息）"]
+    E4["assistant/message · surfaceOp=replace&lt;br/&gt;（压缩替换旧消息）"]
   end
   PROJ["deriveMessages() 纯投影"]
   HIST["模型历史 messages（不另存副本）"]
-  PERS["JSONL / SQLite 持久化<br/>按 seq 顺序追加与回放"]
-  NEWEV["新增模型可见输入<br/>= 新增 SessionEvent 类型"] -.约束.-> LOG
+  PERS["JSONL / SQLite 持久化&lt;br/&gt;按 seq 顺序追加与回放"]
+  NEWEV["新增模型可见输入&lt;br/&gt;= 新增 SessionEvent 类型"] -.约束.-> LOG
   LOG --> PROJ --> HIST
   LOG --> PERS
   PERS -.重启后重新加载.-> LOG
@@ -236,10 +236,10 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  D["Service Definition<br/>接口 + 完整生命周期 + 错误码<br/>+ 取消 + 回滚约定"]
-  P["Service Provider（实现）<br/>local / pwsh / sandbox-local / ACP ..."]
-  P2["另一个 Provider<br/>远程沙箱 / 其他实现"]
-  C["Consumer<br/>只依赖接口，从不 import 具体实现"]
+  D["Service Definition&lt;br/&gt;接口 + 完整生命周期 + 错误码&lt;br/&gt;+ 取消 + 回滚约定"]
+  P["Service Provider（实现）&lt;br/&gt;local / pwsh / sandbox-local / ACP ..."]
+  P2["另一个 Provider&lt;br/&gt;远程沙箱 / 其他实现"]
+  C["Consumer&lt;br/&gt;只依赖接口，从不 import 具体实现"]
   P -.被实现.-> D
   P2 -.整体替换 P.-> D
   C -->|"依赖"| D
@@ -251,7 +251,7 @@ flowchart LR
 
 常规 TS 项目的扩展靠"给接口留可选字段"；dsh 把类型系统本身做成扩展机制，三件套：
 
-1. **`…Map → derived-union` 模式**：接口按判别标签键控，`keyof` 派生联合类型，插件用声明合并扩展。六个规范 map：`ContentBlockMap`、`MessageSourceMap`、`FinishReasonMap`、`TurnTriggerMap`、`TurnEndReasonMap`、`SessionEventMap`。合并可扩展的联合在 `switch` 后落到文档化 default，不可 `assertNever`。
+1. **`…Map → derived-union` 模式**：接口按判别标签键控，`keyof` 派生联合类型，插件用声明合并扩展。六个规范 map：`ContentBlockMap`、`MessageSourceMap`、`FinishReasonMap`、`TurnTriggerMap`、`TurnEndReasonMap`、`SessionEventMap`。合并可扩展的联合在 `switch` 后落到文档化 default——联合随时可能被插件追加新键，穷尽性的 `assertNever` 断言在这里不成立。
 2. **品牌化 ID（`Branded<B>`）**：跨包 ID 结构上是 string、类型上不可互换（`SessionId` ≠ `CallId`）。纯类型包 `util/brand` 零运行时依赖。
 3. **严格类型纪律**：`strict` + `noImplicitAny`；跨边界强制运行时校验（parser、wire、worker、持久化），同进程类型边界信任 TS 不重复校验。
 
@@ -259,12 +259,12 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  MAP["interface SessionEventMap<br/>按判别标签键控"]
+  MAP["interface SessionEventMap&lt;br/&gt;按判别标签键控"]
   KEY["keyof SessionEventMap"]
   UNI["派生判别联合类型 SessionEvent"]
-  EXT["declare module 声明合并<br/>插件追加新事件键，不触碰核心包"]
-  SW["switch 逐键匹配<br/>default 兜底 · 不 assertNever"]
-  BR["Branded(T) 品牌化 ID<br/>SessionId 与 CallId 编译期隔离"]
+  EXT["declare module 声明合并&lt;br/&gt;插件追加新事件键，不触碰核心包"]
+  SW["switch 逐键匹配&lt;br/&gt;default 兜底 · 不 assertNever"]
+  BR["Branded(T) 品牌化 ID&lt;br/&gt;SessionId 与 CallId 编译期隔离"]
   MAP --> KEY --> UNI --> SW
   EXT --> MAP
 ```
@@ -283,9 +283,9 @@ flowchart TD
   A["agent A 作用域 ctx"]
   B["agent B 作用域 ctx"]
   SUB["agent A 的子作用域"]
-  VIS["工具可见性解析<br/>自身注册 + 祖先作用域链 + 全局层"]
-  REST["ToolRestriction<br/>allow / deny 继承过滤"]
-  ROLL["dispose：注册回滚<br/>之后拒绝注册"]
+  VIS["工具可见性解析&lt;br/&gt;自身注册 + 祖先作用域链 + 全局层"]
+  REST["ToolRestriction&lt;br/&gt;allow / deny 继承过滤"]
+  ROLL["dispose：注册回滚&lt;br/&gt;之后拒绝注册"]
   ROOT --> A
   ROOT --> B
   A --> SUB
@@ -307,14 +307,14 @@ flowchart TD
 ```mermaid
 flowchart LR
   SRC["源码 packages/*"]
-  GEN["scripts/gen-*.ts<br/>工具目录 / 配置目录 / 持久化目录 / 模块图 / API 参考"]
+  GEN["scripts/gen-*.ts&lt;br/&gt;工具目录 / 配置目录 / 持久化目录 / 模块图 / API 参考"]
   DOC["docs/ 生成产物"]
   GATE{"doc-sync 新鲜度门禁"}
   SRC --> GEN --> DOC --> GATE
   GATE -->|"过期 → 拒绝"| FAIL["CI 失败"]
   GATE -->|"新鲜"| OK["CI 通过"]
-  SRC --> COV["test:coverage<br/>每文件 100%"]
-  DOC --> TV["verify-type-equiv<br/>类型逐字漂移检测"]
+  SRC --> COV["test:coverage&lt;br/&gt;每文件 100%"]
+  DOC --> TV["verify-type-equiv&lt;br/&gt;类型逐字漂移检测"]
   SRC --> JSDOC["verify-export-jsdoc"]
 ```
 

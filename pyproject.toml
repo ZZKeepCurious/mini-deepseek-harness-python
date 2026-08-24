@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mini-deepseek-harness-python"
 dynamic = ["version"]
-description = "从 0 到 1 复现 DeepSeek Harness 核心能力的实现（stdlib 优先，关键协议层精选第三方如 httpx）"
+description = "从 0 到 1 复现 DeepSeek Harness 核心能力的教学实现（成熟开源库优先）"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

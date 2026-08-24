@@ -1,7 +1,7 @@
 # 第 15 章：schemastery 配置引擎
 
 > 对应 dsh 真实源码：`vendor/schemastery/src/index.ts`（902 行单文件）
-> 前置：第 2 章（Context 服务仓库、`~standard` 协议在 13.2 已引入）、第 13 章（`_resolve_config` 消费 schemastery 产出的规格）。产出文件：`miniharness/core/schema.py`（完整移植）。
+> 前置：第 2 章（Context 服务仓库与插件配置解析）、第 13 章（`_resolve_config` 消费 schemastery 产出的规格）。产出文件：`miniharness/core/schema.py`（完整移植）。
 
 ## 15.1 这一章要做什么
 
@@ -12,7 +12,7 @@
 - **可序列化**：`schema.toJSON()` 产出 JSON-Schema 风格的规格，`schema.toString()` 产出人类可读描述，供 config-doc / web 配置面消费；
 - **`~standard` 协议**：schemastery 的 `toJSON` 形状正是 Cordis `resolveConfig` 用来生成插件配置 UI 的契约（上游 `cordis fiber.ts` 的 `resolveConfig` 消费它）。
 
-它已经在 mini 里**全量对齐**（2026-08-22，把旧教学子集 `S` 升级为完整移植），但此前只在 `architecture.md` 映射行 + 报告概览里出现，没有逐机制解读——本章补上。
+它已经在 mini 里**全量对齐**，但此前只在 `architecture.md` 映射行 + 报告概览里出现，没有逐机制解读——本章补上。
 
 ## 15.2 概念：Schema 是可调用节点 + 分发器
 
@@ -131,7 +131,7 @@ except SchemaValidationError as e:
 ## 15.4 mini 里它长在哪
 
 1. **`core/scope.py` 的 `resolve_config`**：把 cordis 配置对象编译成 schemastery Schema 并 `resolve` 校验（上游 `fiber.ts` `resolveConfig` 的等价物），错误聚合成 `invalid config:\n  - <msg> (at <path>)`。
-2. **`tests/test_schema_full.py`**：44 项逐机制验收（原语 / 复合 / 缺省 / loose / ignore / 序列化 / `~standard` 协议 / `resolve_config` 聚合），消息逐字断言。
+2. **`tests/test_schema_full.py`**：逐机制验收（原语 / 复合 / 缺省 / loose / ignore / 序列化 / `~standard` 协议 / `resolve_config` 聚合），消息逐字断言。
 3. **config-doc / web 配置面**：消费 `toJSON` / `toString`（上游 14 处 `toJSON`、12 处 `toString` 调用）。
 
 ## 15.5 验收：硬性规定
