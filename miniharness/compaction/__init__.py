@@ -25,6 +25,7 @@ __all__ = [
     "select_compactable_range",
     "resolve_config",
     "resolve_spec",
+    "resolve_target_policy",
     "install_compaction",
     "install_tool_result_pruner",
 ]
@@ -46,6 +47,7 @@ select_compactable_range = _region.select_compactable_range  # noqa: F401
 
 resolve_config = _config.resolve_config  # noqa: F401
 resolve_spec = _config.resolve_spec  # noqa: F401
+resolve_target_policy = _config.resolve_target_policy  # noqa: F401
 
 ToolResultPruner = _pruner.ToolResultPruner  # noqa: F401
 install_tool_result_pruner = _pruner.install_tool_result_pruner  # noqa: F401

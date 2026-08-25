@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 from ..llm.token_meter import TokenMeter
-from .config import TargetPressureConfigError, resolve_config, resolve_spec
+from .config import TargetPressureConfigError, resolve_config, resolve_spec, resolve_target_policy
 from .region import compact_surface_region, inspect_compaction_entry_state, select_compactable_range
 
 __all__ = ["CompactionEngine", "CONTEXT_WINDOW_EXCEEDED"]
@@ -37,6 +37,10 @@ class CompactionEngine:
         self._warned_pressure_targets: set[str] = set()
         if self.config["auto"]:
             self._register_automatic()
+
+    def _target_policy(self, target: dict) -> dict:
+        """按 target 合并全局策略 + modelPolicies 精确覆盖（对齐 resolveTargetPolicy）。"""
+        return resolve_target_policy(self.config, target)
 
     # ---------- 自动压缩监听 ----------
 
@@ -152,8 +156,8 @@ class CompactionEngine:
                 f"compaction-basic: no context capacity for {target_key}; "
                 "configure contextWindow on that adapter model",
             )
-        spec = resolve_spec({**self.config, "target": f"{target['provider']}/{target['model']}"},
-                            context_window)
+        merged = self._target_policy(target)
+        spec = resolve_spec(merged, context_window)
         if measurement["totalTokens"] < spec["thresholdTokens"]:
             return None
         # 压力达标后先落模型无关裁剪，再重新测量；若已降到阈值以下则无需摘要

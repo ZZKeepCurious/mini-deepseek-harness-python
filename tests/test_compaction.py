@@ -16,6 +16,7 @@ from miniharness.compaction import (
     install_tool_result_pruner,
     resolve_config,
     resolve_spec,
+    resolve_target_policy,
     select_compactable_range,
 )
 from miniharness.compaction.engine import CompactionEngine
@@ -559,6 +560,263 @@ class ToolResultPrunerEngineWiringTest(unittest.TestCase):
         install_tool_result_pruner(ctx2, {})
         engine2 = CompactionEngine(ctx2, {})
         self.assertIsNotNone(engine2._tool_result_pruner())
+
+
+# ---------- modelPolicies 配置解析 ----------
+
+class ModelPoliciesConfigTest(unittest.TestCase):
+    def test_no_model_policies(self):
+        c = resolve_config()
+        self.assertEqual(c["modelPolicies"], [])
+
+    def test_empty_model_policies(self):
+        c = resolve_config({"modelPolicies": []})
+        self.assertEqual(c["modelPolicies"], [])
+
+    def test_valid_model_policies(self):
+        c = resolve_config({"modelPolicies": [
+            {"provider": "deepseek", "model": "deepseek-v4", "thresholdRatio": 0.5},
+        ]})
+        self.assertEqual(len(c["modelPolicies"]), 1)
+        self.assertEqual(c["modelPolicies"][0]["provider"], "deepseek")
+        self.assertEqual(c["modelPolicies"][0]["model"], "deepseek-v4")
+        self.assertEqual(c["modelPolicies"][0]["thresholdRatio"], 0.5)
+
+    def test_model_policies_not_array_rejected(self):
+        with self.assertRaises(ValueError):
+            resolve_config({"modelPolicies": "bad"})
+
+    def test_model_policies_non_object_rejected(self):
+        with self.assertRaises(ValueError):
+            resolve_config({"modelPolicies": [42]})
+
+    def test_model_policies_empty_provider_rejected(self):
+        with self.assertRaises(ValueError):
+            resolve_config({"modelPolicies": [
+                {"provider": "", "model": "m"},
+            ]})
+
+    def test_model_policies_empty_model_rejected(self):
+        with self.assertRaises(ValueError):
+            resolve_config({"modelPolicies": [
+                {"provider": "p", "model": ""},
+            ]})
+
+    def test_model_policies_missing_provider_rejected(self):
+        with self.assertRaises(ValueError):
+            resolve_config({"modelPolicies": [
+                {"model": "m"},
+            ]})
+
+    def test_model_policies_duplicate_rejected(self):
+        with self.assertRaises(ValueError):
+            resolve_config({"modelPolicies": [
+                {"provider": "p", "model": "m"},
+                {"provider": "p", "model": "m"},
+            ]})
+
+    def test_model_policies_different_models_ok(self):
+        c = resolve_config({"modelPolicies": [
+            {"provider": "p", "model": "m1"},
+            {"provider": "p", "model": "m2"},
+        ]})
+        self.assertEqual(len(c["modelPolicies"]), 2)
+
+    def test_model_policies_bad_ratio_rejected(self):
+        with self.assertRaises(ValueError):
+            resolve_config({"modelPolicies": [
+                {"provider": "p", "model": "m", "thresholdRatio": 0.0},
+            ]})
+
+    def test_model_policies_retain_ratio_above_global_threshold_rejected(self):
+        with self.assertRaises(ValueError):
+            resolve_config({"modelPolicies": [
+                {"provider": "p", "model": "m", "retainRatio": 0.9},
+            ]})
+
+    def test_model_policies_retain_ratio_and_tokens_mutually_exclusive(self):
+        with self.assertRaises(ValueError):
+            resolve_config({"modelPolicies": [
+                {"provider": "p", "model": "m", "retainRatio": 0.1, "retainTokens": 100},
+            ]})
+
+    def test_model_policies_absorb_global_defaults(self):
+        c = resolve_config({"modelPolicies": [
+            {"provider": "p", "model": "m"},
+        ]})
+        # 未覆盖的字段继承全局默认
+        self.assertEqual(c["modelPolicies"][0]["thresholdRatio"], 0.8)
+
+    def test_model_policies_optional_max_tokens_rejected_on_bad_type(self):
+        with self.assertRaises(ValueError):
+            resolve_config({"modelPolicies": [
+                {"provider": "p", "model": "m", "maxTokens": -1},
+            ]})
+
+
+# ---------- resolve_target_policy ----------
+
+class ResolveTargetPolicyTest(unittest.TestCase):
+    def test_no_override_uses_global(self):
+        c = resolve_config()
+        policy = resolve_target_policy(c, {"provider": "any", "model": "any"})
+        self.assertEqual(policy["thresholdRatio"], 0.8)
+        self.assertEqual(policy["retainRatio"], 0.16)
+        self.assertIsNone(policy["retainTokens"])
+        self.assertEqual(policy["maxTokens"], 8192)
+        self.assertEqual(policy["target"], "any/any")
+
+    def test_exact_match_applies_override(self):
+        c = resolve_config({"modelPolicies": [
+            {"provider": "deepseek", "model": "deepseek-v4", "thresholdRatio": 0.5},
+        ]})
+        policy = resolve_target_policy(c, {"provider": "deepseek", "model": "deepseek-v4"})
+        self.assertEqual(policy["thresholdRatio"], 0.5)
+        # retainRatio 继承全局（0.16），因为 override 未覆盖
+        self.assertEqual(policy["retainRatio"], 0.16)
+
+    def test_non_matching_target_uses_global(self):
+        c = resolve_config({"modelPolicies": [
+            {"provider": "deepseek", "model": "deepseek-v4", "thresholdRatio": 0.5},
+        ]})
+        policy = resolve_target_policy(c, {"provider": "other", "model": "other"})
+        self.assertEqual(policy["thresholdRatio"], 0.8)
+
+    def test_override_retain_tokens(self):
+        c = resolve_config({"modelPolicies": [
+            {"provider": "p", "model": "m", "retainTokens": 120},
+        ]})
+        policy = resolve_target_policy(c, {"provider": "p", "model": "m"})
+        self.assertIsNone(policy["retainRatio"])
+        self.assertEqual(policy["retainTokens"], 120)
+
+    def test_override_compaction_retries(self):
+        c = resolve_config({"modelPolicies": [
+            {"provider": "p", "model": "m", "compactionRetries": 3},
+        ]})
+        policy = resolve_target_policy(c, {"provider": "p", "model": "m"})
+        self.assertEqual(policy["compactionRetries"], 3)
+
+    def test_override_max_overflow_retries(self):
+        c = resolve_config({"modelPolicies": [
+            {"provider": "p", "model": "m", "maxOverflowRetries": 2},
+        ]})
+        policy = resolve_target_policy(c, {"provider": "p", "model": "m"})
+        self.assertEqual(policy["maxOverflowRetries"], 2)
+
+    def test_target_key_in_output(self):
+        c = resolve_config()
+        policy = resolve_target_policy(c, {"provider": "ds", "model": "v4"})
+        self.assertEqual(policy["target"], "ds/v4")
+
+    def test_inherits_global_retain_tokens(self):
+        c = resolve_config({"retainTokens": 500, "modelPolicies": [
+            {"provider": "p", "model": "m"},
+        ]})
+        policy = resolve_target_policy(c, {"provider": "p", "model": "m"})
+        self.assertIsNone(policy["retainRatio"])
+        self.assertEqual(policy["retainTokens"], 500)
+
+    def test_spec_from_merged_policy(self):
+        """resolve_target_policy 的输出可直接喂给 resolve_spec。"""
+        c = resolve_config({"modelPolicies": [
+            {"provider": "small", "model": "s", "thresholdRatio": 0.5, "retainTokens": 120},
+        ]})
+        policy = resolve_target_policy(c, {"provider": "small", "model": "s"})
+        spec = resolve_spec(policy, 1000)
+        self.assertEqual(spec["thresholdTokens"], 500)
+        self.assertEqual(spec["retainTokens"], 120)
+
+
+# ---------- modelPolicies 压力触发集成 ----------
+
+class EngineModelPoliciesTest(unittest.TestCase):
+    def test_model_policy_overrides_threshold(self):
+        """全局 thresholdRatio=0.8 不触发，但 per-model 0.5 触发。"""
+        session = Session("mp1")
+        ctx = Context(name="root")
+        adapter = _SummaryAdapter(context_window=500)
+        # _seed_history 写入 request/header (fake/fake-model) + 多回合日志
+        _seed_history(session, n=20)
+        # 覆写 adapter 的 provider/model 以匹配我们的 per-model policy
+        adapter.provider = "small"
+        adapter.model = "s"
+        agent = _agent(session, adapter, ctx)
+        engine = CompactionEngine(ctx, {
+            "thresholdRatio": 0.8,  # 0.8 * 500 = 400，不触发
+            "modelPolicies": [
+                {"provider": "small", "model": "s", "thresholdRatio": 0.5},  # 0.5 * 500 = 250，触发
+            ],
+        })
+        # 需要 request/header 的 provider/model 与 adapter 一致
+        session.append("request/header",
+                       {"header": {"config": {"provider": "small", "model": "s"}},
+                        "reason": "target-switch"})
+        result = asyncio.run(engine.compact_if_needed(agent, "pressure"))
+        self.assertIsNotNone(result, "per-model thresholdRatio 0.5 应触发压缩")
+
+    def test_no_match_uses_global(self):
+        """不匹配 modelPolicies 的 target 走全局默认。"""
+        session = Session("mp2")
+        ctx = Context(name="root")
+        adapter = _SummaryAdapter(context_window=500)
+        _seed_history(session, n=20)
+        agent = _agent(session, adapter, ctx)
+        engine = CompactionEngine(ctx, {
+            "thresholdRatio": 0.8,  # 0.8 * 500 = 400
+            "modelPolicies": [
+                {"provider": "small", "model": "s", "thresholdRatio": 0.3},  # 不匹配 fake/fake-model
+            ],
+        })
+        result = asyncio.run(engine.compact_if_needed(agent, "pressure"))
+        # _seed_history 的 request/header 是 fake/fake-model，走全局 0.8
+        # fake/fake-model 的 context_window=500，threshold=400，日志量 ~144 tokens，不触发
+        self.assertIsNone(result, "不匹配 target 应走全局 0.8 阈值，不触发")
+
+    def test_model_policy_overrides_retain_tokens(self):
+        """per-model retainTokens 控制保留区间。"""
+        session = Session("mp3")
+        ctx = Context(name="root")
+        adapter = _SummaryAdapter(context_window=500)
+        _seed_history(session, n=15)
+        adapter.provider = "p"
+        adapter.model = "m"
+        agent = _agent(session, adapter, ctx)
+        engine = CompactionEngine(ctx, {
+            "thresholdRatio": 0.8,
+            "modelPolicies": [
+                {"provider": "p", "model": "m",
+                 "thresholdRatio": 0.5, "retainTokens": 50},
+            ],
+        })
+        session.append("request/header",
+                       {"header": {"config": {"provider": "p", "model": "m"}},
+                        "reason": "target-switch"})
+        result = asyncio.run(engine.compact_if_needed(agent, "pressure"))
+        self.assertIsNotNone(result, "per-model policy 应触发")
+        self.assertIn("shadowedTokenCount", result)
+
+    def test_per_model_max_overflow_retries(self):
+        """per-model maxOverflowRetries 覆盖全局。"""
+        c = resolve_config({
+            "maxOverflowRetries": 5,
+            "modelPolicies": [
+                {"provider": "p", "model": "m", "maxOverflowRetries": 1},
+            ],
+        })
+        policy = resolve_target_policy(c, {"provider": "p", "model": "m"})
+        spec = resolve_spec(policy, 1000)
+        self.assertEqual(spec["maxOverflowRetries"], 1)
+
+    def test_per_model_summarization_fields_pass_through(self):
+        """per-model summarizationProvider/Model 透传到 policy 输出。"""
+        c = resolve_config({"modelPolicies": [
+            {"provider": "p", "model": "m",
+             "summarizationProvider": "summary-p", "summarizationModel": "summary-m"},
+        ]})
+        policy = resolve_target_policy(c, {"provider": "p", "model": "m"})
+        self.assertEqual(policy.get("summarizationProvider"), "summary-p")
+        self.assertEqual(policy.get("summarizationModel"), "summary-m")
 
 
 if __name__ == "__main__":
