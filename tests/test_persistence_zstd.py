@@ -9,6 +9,7 @@
 
 运行：python -m unittest tests.test_persistence_zstd
 """
+import io
 import json
 import tempfile
 import unittest
@@ -22,6 +23,7 @@ from miniharness.core.session.persistence import (
     SESSION_FORMAT_VERSION,
     JsonlPersistence,
     SessionFormatUnsupportedError,
+    _log_path,
     balanced_after_replay,
     decode_segment,
     decode_storage_record,
@@ -368,6 +370,87 @@ class TestDirectoryLayout(unittest.TestCase):
             p.flush()
             rel = p.path_of("s1").relative_to(Path(tmp)).parts
             self.assertEqual(rel[0], "_no-cwd")
+
+
+def _stream_compress_frame(payload: bytes) -> bytes:
+    """上游写入侧等价物：流式压缩，帧头**不带**内容大小字段。"""
+    buffer = io.BytesIO()
+    with zstandard.ZstdCompressor(write_checksum=True).stream_writer(
+        buffer, closefd=False
+    ) as writer:
+        writer.write(payload)
+    return buffer.getvalue()
+
+
+class TestUpstreamInterop(unittest.TestCase):
+    """跨实现互读回归：上游 Node 栈（流式压缩帧 + 有损 projectKey）产出的
+    真实工件 mini 必须可读——两条路径都曾真实翻车。"""
+
+    def test_stream_compressed_frames_decode(self):
+        """无内容大小字段的帧头必须可解（one-shot API 会拒收）。"""
+        payload = b'{"type":"session","version":0}\n{"type":"turn/start"}\n'
+        frame = _stream_compress_frame(payload)
+        with self.assertRaises(zstandard.ZstdError):
+            zstandard.ZstdDecompressor().decompress(frame)  # one-shot 拒收，证明前提成立
+        self.assertEqual(decompress_zstd_frame(frame), payload)
+        scan = scan_zstd_frames(frame)
+        self.assertEqual(b"".join(decode_frames(frame, scan.frames)), payload)
+        chunks = iter([frame[:5], frame[5:]])
+        self.assertEqual(read_first_frame(lambda: next(chunks)), payload)
+
+    def test_upstream_style_artifact_roundtrip(self):
+        """逐记录流式压缩拼接的工件（上游默认形态）可被 load/read_raw 读回。"""
+        cwd = r"C:\Users\ZHANGZ~1\proj dir"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            header_line = json.dumps(
+                {"type": "session", "version": SESSION_FORMAT_VERSION, "id": "up-1",
+                 "createdAt": 1234, "cwd": cwd, "delegationDepth": 0},
+                separators=(",", ":"),
+            ) + "\n"
+            events = [_plain(i) for i in range(3)]
+            body = "".join(json.dumps(e, separators=(",", ":")) + "\n" for e in events)
+            artifact = (
+                _stream_compress_frame(header_line.encode("utf-8"))
+                + b"".join(
+                    _stream_compress_frame(line.encode("utf-8"))
+                    for line in body.splitlines(keepends=True)
+                )
+            )
+            path = _log_path(root, cwd, "up-1", "zstd")
+            path.parent.mkdir(parents=True)
+            path.write_bytes(artifact)
+
+            p = JsonlPersistence(root)
+            self.assertEqual(p.load("up-1"), events)
+            self.assertEqual(p.read_raw("up-1"), header_line + body)
+            headers = p.list_headers()
+            self.assertEqual([h["id"] for h in headers], ["up-1"])
+            self.assertEqual(headers[0]["meta"]["cwd"], cwd)
+
+    def test_scan_then_cached_reads_on_same_instance(self):
+        """扫描定位后缓存真实路径：projectKey 有损反解码不得污染后续解析。
+
+        曾有 bug：_find 把反解码 projectKey 当 cwd 记忆，第二次 resolve 用它
+        重算出不存在的路径——首次成功、后续全挂。
+        """
+        cwd = r"C:\Users\ZHANGZ~1\tmp dir\x"  # 折叠后不可逆（~1→~007E、\\→-）
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            w = JsonlPersistence(root)
+            w.declare("s-lossy", {"cwd": cwd}, created_at=7)
+            for i in range(2):
+                w.append("s-lossy", _plain(i))
+            w.flush()
+
+            q = JsonlPersistence(root)  # 冷实例：首次走扫描定位
+            self.assertEqual(len(q.load("s-lossy")), 2)
+            # 同一实例上的后续读取全部命中已定位缓存
+            meta = q.inspect("s-lossy")["meta"]
+            self.assertEqual(meta["cwd"], cwd)
+            self.assertIsNotNone(q.read_raw("s-lossy"))
+            self.assertEqual(q.path_of("s-lossy"), q.path_of("s-lossy"))
+            self.assertTrue(str(q.path_of("s-lossy")).endswith("session.jsonl.zstd"))
 
 
 if __name__ == "__main__":

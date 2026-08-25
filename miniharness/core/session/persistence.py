@@ -457,6 +457,8 @@ class JsonlPersistence(SessionPersistence):
         self._created: set[str] = set()
         # session_id -> 用于布局的 cwd（declare/append 时登记，缺省 ""）
         self._cwd: dict[str, str] = {}
+        # session_id -> 已定位的真实日志路径（扫描/存在性确认后缓存）。
+        self._paths: dict[str, Path] = {}
         self._root_encoding_checked = False
 
     # --- 物理编码辅助 ---
@@ -626,7 +628,14 @@ class JsonlPersistence(SessionPersistence):
         return matches[0] if matches else None
 
     def _resolve(self, session_id: str, cwd: str | None) -> Path:
-        """解析会话文件绝对路径：cwd 给定优先 → 记忆 → 扫描 → _no-cwd 布局。"""
+        """解析会话文件绝对路径：已定位缓存 → cwd 给定 → 记忆 → 扫描 → _no-cwd。
+
+        projectKey 是有损编码（分隔符折叠不可逆），扫描命中后缓存**真实路径**
+        而不是把反解码结果当 cwd 复用——后者会让后续解析算出不存在的路径。
+        """
+        cached = self._paths.get(session_id)
+        if cached is not None and cwd is None:
+            return cached
         if cwd is not None:
             self._cwd[session_id] = cwd
         elif session_id in self._cwd:
@@ -635,21 +644,30 @@ class JsonlPersistence(SessionPersistence):
             found = self._find(session_id)
             if found is not None:
                 project_name = found.parent.parent.name
-                cwd = "" if project_name == "_no-cwd" else decode_segment(project_name)
-                self._cwd[session_id] = cwd
+                self._cwd[session_id] = (
+                    "" if project_name == "_no-cwd" else decode_segment(project_name)
+                )
+                self._paths[session_id] = found
                 return found
             cwd = ""
             self._cwd[session_id] = cwd
-        return _log_path(self.root, cwd, session_id, self.compression)
+        path = _log_path(self.root, cwd, session_id, self.compression)
+        if path.exists():
+            self._paths[session_id] = path
+        return path
 
     def path_of(self, session_id: str, cwd: str | None = None) -> Path | None:
-        """对外：返回会话文件绝对路径，不存在返回 None（供 CLI 存在性判断）。"""
-        if cwd is None and session_id in self._cwd:
-            cwd = self._cwd[session_id]
-        if cwd is not None:
-            path = _log_path(self.root, cwd, session_id, self.compression)
-            return path if path.exists() else None
-        return self._find(session_id)
+        """对外：返回会话文件绝对路径，不存在返回 None（供 CLI 存在性判断）。
+
+        已定位缓存优先——`_cwd` 里可能是扫描反解码的有损值，不能直接参与
+        路径计算（见 `_resolve`）。
+        """
+        if cwd is None:
+            cached = self._paths.get(session_id)
+            if cached is not None:
+                return cached if cached.exists() else None
+        path = self._resolve(session_id, cwd)
+        return path if path.exists() else None
 
     # --- 写路径 ---
 
@@ -663,9 +681,11 @@ class JsonlPersistence(SessionPersistence):
         cwd = cwd if cwd is not None else (meta or {}).get("cwd") or ""
         self._cwd[session_id] = cwd
         path = _log_path(self.root, cwd, session_id, self.compression)
-        if session_id in self._created or path.exists():
+        if session_id in self._created:
             return
-        self._materialize_header(path, session_id, meta, created_at)
+        if not path.exists():
+            self._materialize_header(path, session_id, meta, created_at)
+        self._paths[session_id] = path
 
     def _ensure_header(self, session_id: str) -> None:
         if session_id in self._created:

@@ -124,8 +124,13 @@ def compress_zstd_frame(data: bytes | str) -> bytes:
 
 
 def decompress_zstd_frame(frame: bytes) -> bytes:
-    """解压一条结构完整的帧并验证其校验和。"""
-    return zstandard.ZstdDecompressor().decompress(frame)
+    """解压一条结构完整的帧并验证其校验和。
+
+    走流式解码器而非一次性 decompress()：上游写入侧是流式压缩，帧头不带
+    内容大小字段（无 single_segment），one-shot API 会以 "could not determine
+    content size in frame header" 拒绝——跨实现互读必须容忍两种帧头形态。
+    """
+    return zstandard.ZstdDecompressor().decompressobj().decompress(frame)
 
 
 def decompress_zstd_prefix(torn: bytes) -> bytes:
@@ -139,10 +144,14 @@ def decompress_zstd_prefix(torn: bytes) -> bytes:
 
 
 def decode_frames(buffer: bytes, frames: list[ZstdFrameRange]):
-    """按源序解出每条完整帧的明文并验证校验和（惰性生成器）。"""
+    """按源序解出每条完整帧的明文并验证校验和（惰性生成器）。
+
+    与 decompress_zstd_frame 同理走流式解码，兼容无内容大小字段的帧头。
+    """
     decompressor = zstandard.ZstdDecompressor()
     for frame in frames:
-        yield decompressor.decompress(buffer[frame.start : frame.end])
+        obj = decompressor.decompressobj()
+        yield obj.decompress(buffer[frame.start : frame.end])
 
 
 def read_first_frame(read_chunk: callable, chunk_size: int = 8192):
@@ -152,7 +161,6 @@ def read_first_frame(read_chunk: callable, chunk_size: int = 8192):
     完整帧返回 None；首帧解压/校验失败按损坏报错。
     """
     content = b""
-    decompressor = zstandard.ZstdDecompressor()
     while True:
         chunk = read_chunk()
         if not chunk:
@@ -163,7 +171,10 @@ def read_first_frame(read_chunk: callable, chunk_size: int = 8192):
             continue
         frame = scan.frames[0]
         try:
-            return decompressor.decompress(content[frame.start : frame.end])
+            # 流式解码：兼容无内容大小字段的帧头（见 decompress_zstd_frame）。
+            return zstandard.ZstdDecompressor().decompressobj().decompress(
+                content[frame.start : frame.end]
+            )
         except zstandard.ZstdError as error:
             raise ValueError(
                 "corrupt Zstandard session log: header frame failed validation"
