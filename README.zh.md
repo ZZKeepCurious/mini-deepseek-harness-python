@@ -22,7 +22,7 @@
 | 能力 | 上游对应 |
 |---|---|
 | 事件溯源会话（信封 `{type,seq,time,data}`、1 起 turn/step、deep-freeze、`derive_messages`、interrupted 修复） | `packages/core/session` |
-| 持久化（JSONL / SQLite、`root/<projectDir>/<encoded-id>/session.jsonl` 嵌套布局、header + `SESSION_FORMAT_VERSION=0` fail-closed、flush 栅栏、崩溃恢复） | `packages/session/session-persistence` |
+| 持久化（JSONL / SQLite、默认 zstd 拼接帧容器 + StorageRecord 打包行、`root/--<projectKey>--/<encoded-id>/session.jsonl[.zstd]` 布局、header + `SESSION_FORMAT_VERSION=0` 双向拒读、编码/布局错配响亮拒绝、flush 栅栏、崩溃恢复） | `packages/session/session-persistence` |
 | 插件事件总线（emit / waterfall / parallel / serial、作用域、依赖驱动激活、经 HMR 服务 + `watch_user_patches` 的 epoch 重载） | `vendor/cordis` + `vendor/hmr` + `core/scope` + `core/hmr` |
 | 配置 schema 引擎（schemastery 全量移植：17 类 resolver、meta 克隆、toString/toJSON/i18n/simplify、`~standard` 协议面） | `vendor/schemastery/src/index.ts` |
 | 工具注册表 + 执行管线（schema 校验、pre/execute/post、timeout） | `packages/core/tools` |
@@ -104,7 +104,9 @@ mini-deepseek-harness-python/
 ├── miniharness/             # 核心包（成熟开源库优先，家族布局，见 docs/architecture.md）
 │   ├── core/                # 上游 packages/core
 │   │   ├── session/         # types / json / message / invariant / repair / surface / session
-│   │   │   └── persistence.py
+│   │   │   ├── persistence.py
+│   │   │   ├── chunk_rows.py
+│   │   │   └── zstd_frames.py
 │   │   ├── scope.py         # Context / PluginManager
 │   │   ├── tools.py         # 工具注册表 + 执行管线
 │   │   └── agent_loop/      # agent.py + tool_calls.py

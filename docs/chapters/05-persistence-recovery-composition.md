@@ -7,11 +7,11 @@
 !!! warning "早期简化形态"
     本章代码为**教学简化形态**，与当前实现存在以下差异（学习时以当前实现为准，见 00-setup §0.5 简化表）：
 
-    - **JSONL 片段**：实现每文件 header 行 + 事件行，`SESSION_FORMAT_VERSION = 0` 不符即拒读（fail-closed，`ignorable` 豁免）；torn 尾部截断修复在 `commitRepair` 中截断 torn tail + 追加 closers + fsync（`core/session/persistence.py` `_read_file`/`commit_repair`）。
+    - **JSONL 片段**：实现每文件 header 行 + 事件行，`SESSION_FORMAT_VERSION = 0` 不符即拒读（fail-closed，`ignorable` 豁免）；torn 尾部截断修复在 `commitRepair` 中截断 torn tail + 追加 closers + fsync（`core/session/persistence.py` `commit_repair`）。
     - **`repair_and_replay`**：本章为逐条 `append` 重放；实现为 seed 回放——从 `session/end-seed` 标记重放，且修复合成的 closers 经 `commit_repair` 持久化落盘（`core/session/persistence.py`，基类接口 + JSONL 后端实现）。
     - **`turn/end` reason**：本章差异表写 `reason = "interrupted"` 字符串；实现为对象 `{kind:'interrupted'}`（配合 `repair_interrupted_turn` 合成 closers，见第 1 章横幅）。
     - **崩溃演示**：本章 §5.2"kill 进程"实为手动构造未闭合回合来模拟崩溃尾部，非真实 kill（`tests/test_persistence_boot.py` 可复核）。
-    - **简化载体**：配置为 YAML（pyyaml 可选，缺省退化 JSON）+ `!!js` 仅 `process.env.<NAME>` 子集；zstd 帧压缩未实现（保留简化，上游为 `root/<projectDir>/<encodeSegment(id)>/session.jsonl(.zstd)`，mini 恒为明文 `.jsonl`）。JSONL 目录布局已对齐上游 `session-persistence-jsonl/src/format.ts`（`root/<encodeSegment(cwd)>/<encodeSegment(id)>/session.jsonl`）。
+    - **简化载体**：配置为 YAML（pyyaml 可选，缺省退化 JSON）+ `!!js` 仅 `process.env.<NAME>` 子集。JSONL 载体**已对齐上游默认形态**（2026-08-25）：zstd 拼接帧容器 + StorageRecord 打包行 + format.ts 目录布局（`root/--<projectKey(cwd)>--/<encodeSegment(id)>/session.jsonl[.zstd]`，编码互斥/遗留布局响亮拒绝），见 `chunk_rows.py`/`zstd_frames.py` 与 `tests/test_persistence_zstd.py`。
 
 ## 5.1 这一章要做什么
 
@@ -260,7 +260,7 @@ python -m unittest tests.test_persistence_boot -v
 ## 5.7 检查点练习
 
 1. **活会话恢复**：真实 dsh 里"活会话 load 等待权威内存快照持久化"。实现一个 `wait_for_flush(session)`：新事件 append 后 `flush()` 必须立即执行一次（栅栏），写测试验证。
-2. **packed chunk 行**：给 JSONL 后端加 `meta` 行（如 `# meta: {"session_id": ...}`），load 时跳过。写测试。
+2. **打包行手写**：`chunk_rows.py` 已实现 StorageRecord 打包（真实形态）。练习：构造 5 条连续 `assistant/chunk`，断言落盘为 1 行 `*-chunks` 存储行且 `load()` 往返相等；再删掉行内 `dt` 字段，断言 fail-closed 拒读。
 3. **多补丁层叠**：写 3 个 patch 文件依次应用，断言最后一层覆盖前面的（对应 profile/home/overlay 层叠）。
 
 ## 5.8 回到 dsh：真实源码对照
@@ -275,7 +275,7 @@ python -m unittest tests.test_persistence_boot -v
 
 | 细节 | 真实 dsh | 我们的简化 |
 |---|---|---|
-| JSONL 存储 | 默认 checksum + Zstandard 帧压缩（可原始行） | 明文 JSON 行 |
+| JSONL 存储 | 默认 checksum + Zstandard 拼接帧容器（可选原始行） | **已对齐**：默认 zstd 帧容器 + 打包行，明文模式可配（本章教学代码仍为明文逐行） |
 | SQLite 列 | `(session_id, seq, type, time, data, source_event_seqs, surface_op)` | `(session_id, seq, type, data)` |
 | `time` 字段 | 每个事件 epoch 毫秒 | 无 |
 | `sourceEventSeqs` | `assistant/message` 精确引用组成它的 `assistant/chunk` seqs（含显式空列表） | 无（因为不落 chunk） |
