@@ -9,13 +9,14 @@
     quiet 模式一律注入；user 输入消费后恢复预算
   * producer 提供 outputLimitBytes 时，输出读与 notice 都按完整 UTF-8 结果
     字节封顶（含 status 元数据），多字节字符不劈裂
+  * canonical value + output.render 分离（execute 返回结构化数据，render 生成
+    模型可见 content blocks）——字节封顶由 producer 端环形缓冲与 notice 装配
+    承担（job 记录 outputLimitBytes），工具层不做二次截断；上游默认
+    （未配置 policy 可见输出上限时）行为一致（finalizeContent/visibleOutputLimit
+    层 mini 未建，载体差异登记）
 
-mini 简化（须在文档标注）：
-  * 无结构化 canonical value + native renderer 分离：execute 直接返回
-    模型可见渲染文本（tool/result 以文本落日志，语义一致）
-  * 无 finalizeContent/pre-execute 挂钩：字节封顶在 execute 内完成
-  * owner 无 agent/inbox/claimed 会话事件：经 AgentLoop.on_inbox_claimed
-    钩子列表近似（payload 语义对齐，见 AGENTS.md 简化清单）
+owner 无 agent/inbox/claimed 会话事件：经 AgentLoop.on_inbox_claimed
+钩子列表近似（payload 语义对齐，见 AGENTS.md 简化清单）
 """
 from __future__ import annotations
 
@@ -224,7 +225,7 @@ def install_completion_delivery(jobs: Any, config: dict | None = None,
 # ---------- 三工具 ----------
 
 def job_output_tool(jobs, wait_default: int, wait_cap: int) -> Tool:
-    async def execute(args: dict, exec_: Any) -> str:
+    async def execute(args: dict, exec_: Any) -> dict:
         task_id = validate_job_id(args.get("job_id"))
         caller = getattr(exec_, "agent", None)
         jobs.get(task_id, caller)  # 存在性 + 会话栅栏先验
@@ -234,11 +235,12 @@ def job_output_tool(jobs, wait_default: int, wait_cap: int) -> Tool:
             await asyncio.to_thread(jobs.wait, task_id, timeout, caller,
                                     getattr(exec_, "signal", None))
         read = jobs.read(task_id, caller)
-        body = read["text"] if read["text"] else "(no new output)"
-        if body.endswith("\n"):
-            body = body[:-1]
-        suffix = f"\n{status_line(read['snapshot'])}"
-        return fit_with_suffix(body, suffix, read["snapshot"].get("outputLimitBytes"), "\n[output truncated]")
+        return {"text": read["text"], "job": public_job(read["snapshot"])}
+
+    def render(value: dict) -> list[dict]:
+        body = value["text"] if value["text"] else "(no new output)"
+        separator = "" if body.endswith("\n") else "\n"
+        return [{"type": "text", "text": f"{body}{separator}{status_line(value['job'])}"}]
 
     return Tool(
         name="job_output",
@@ -276,35 +278,49 @@ def job_output_tool(jobs, wait_default: int, wait_cap: int) -> Tool:
                 },
             },
         },
+        render=render,
         execute=execute,
     )
 
 
 def job_list_tool(jobs) -> Tool:
-    async def execute(_args: dict, exec_: Any) -> str:
-        visible = [public_job(s) for s in jobs.list(getattr(exec_, "agent", None))]
-        if not visible:
-            return "(no background jobs)"
-        return "\n".join(f"{t['id']} [{t['kind']}] {t['status']} — {t['label']}" for t in visible)
+    async def execute(_args: dict, exec_: Any) -> list[dict]:
+        return [public_job(s) for s in jobs.list(getattr(exec_, "agent", None))]
+
+    def render(jobs_list: list[dict]) -> list[dict]:
+        if not jobs_list:
+            return [{"type": "text", "text": "(no background jobs)"}]
+        lines = "\n".join(
+            f"{t['id']} [{t['kind']}] {t['status']} — {t['label']}" for t in jobs_list
+        )
+        return [{"type": "text", "text": lines}]
 
     return Tool(
         name="job_list",
         description="List your background jobs (running and finished) with their ids, kinds, and statuses.",
         parameters={"type": "object", "properties": {}},
         output={"schema": {"type": "array", "items": PUBLIC_TASK_SCHEMA}},
+        render=render,
         execute=execute,
     )
 
 
 def job_kill_tool(jobs) -> Tool:
-    async def execute(args: dict, exec_: Any) -> str:
+    async def execute(args: dict, exec_: Any) -> dict:
         task_id = validate_job_id(args.get("job_id"))
         caller = getattr(exec_, "agent", None)
         result = jobs.kill(task_id, caller, args.get("reason"))
         snapshot = public_job(jobs.get(task_id, caller))
-        if result == "already-finished":
-            return f"job {task_id} had already finished {status_line(snapshot)}"
-        return f"requested cancellation of job {task_id}"
+        outcome = "cancellation-requested" if result == "requested" else result
+        return {
+            "outcome": outcome,
+            "job": snapshot,
+        }
+
+    def render(value: dict) -> list[dict]:
+        if value["outcome"] == "already-finished":
+            return [{"type": "text", "text": f"job {value['job']['id']} had already finished {status_line(value['job'])}"}]
+        return [{"type": "text", "text": f"requested cancellation of job {value['job']['id']}"}]
 
     return Tool(
         name="job_kill",
@@ -339,6 +355,7 @@ def job_kill_tool(jobs) -> Tool:
                 },
             },
         },
+        render=render,
         execute=execute,
     )
 

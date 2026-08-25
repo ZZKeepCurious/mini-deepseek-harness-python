@@ -20,11 +20,14 @@ mini 教学适配（有意保留，须在文档标注）：
     mini 无 inject 重绑，以显式 `ctx=` 参数承载"注册 scope"（缺省=注册表自身
     ctx → 全局层），语义等价、载体不同
   * 无 agent registry：owner 不校验"当前注册实例"，只要求 owner.id 与 owner.ctx
-  * teardown 排干是限时轮询（同步模型无 await settled），后删记录
+  * teardown 排干等每任务 settled 事件（对齐上游 await Promise.all(settled)：
+    先 cancel-all 再逐任务等待，无时间上限——producer 永不结算会挂起 teardown，
+    上游同款限制；producer 契约要求响应 cancel 并最终结算）
   * done 用 JobDoneBox/Future 承载 Promise 语义
 """
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any, Callable
 
@@ -192,6 +195,7 @@ class LocalJobRegistry:
             "finishedAt": None,
             "reported": False,
             "waiters": 0,
+            "settled": threading.Event(),
             "done": done,
         }
         self._store[task_id] = job
@@ -295,6 +299,8 @@ class LocalJobRegistry:
         job["finishedAt"] = now_ms()
         if job["waiters"] > 0:
             job["reported"] = True
+        # 先放行 teardown 排干（上游 markSettled 在监听器投递前解析 promise）
+        job["settled"].set()
         if self._listeners_closed:
             return
         self._notify_changed(job["owner"])
@@ -421,13 +427,13 @@ class LocalJobRegistry:
                 self._notify_changed(job["owner"])
                 emptied.remove(id(job["owner"]))
 
-    def _drain(self, jobs: list[dict], cap: float = 10.0) -> None:
-        """等待 producer 到达静止（限时轮询；上游 await settled 的同步简化）。"""
-        deadline = time.monotonic() + cap
-        pending = [j for j in jobs if j["status"] not in TERMINAL_STATUSES]
-        while pending and time.monotonic() < deadline:
-            time.sleep(0.02)
-            pending = [j for j in pending if j["status"] not in TERMINAL_STATUSES]
+    def _drain(self, jobs: list[dict]) -> None:
+        """等 producer 到达静止（对齐上游 await Promise.all(settled)：调用方
+        已先 cancel-all，此处逐任务等 settled 事件、无时间上限——producer
+        永不结算会挂起 teardown，上游同款限制；producer 契约要求响应 cancel
+        并最终结算）。"""
+        for job in jobs:
+            job["settled"].wait()
 
     def _cancel_for_teardown(self, jobs: list[dict], reason: str) -> None:
         for job in jobs:

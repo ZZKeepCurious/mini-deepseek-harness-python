@@ -396,7 +396,7 @@ class TeardownTest(unittest.TestCase):
         owner = _fake_owner("o1", Context(name="own"))
         box = JobDoneBox()
         tid = registry.start({"kind": "bash", "label": "s", "owner": owner,
-                              "run": lambda: {"done": box, "cancel": lambda r: None}})
+                              "run": lambda: {"done": box, "cancel": lambda r: box.settle({"status": "killed"})}})
         owner.ctx.dispose()
         self.assertEqual(registry.list(owner), [])
         with self.assertRaises(RuntimeError):
@@ -426,7 +426,9 @@ class TeardownTest(unittest.TestCase):
         registry = LocalJobRegistry(ctx)
         registry.attach_controller("test")
         owner = _fake_owner("o1", Context(name="own"))
-        run = lambda: {"done": JobDoneBox(), "cancel": lambda r: None}  # noqa: E731
+        def run():
+            box = JobDoneBox()
+            return {"done": box, "cancel": lambda r: box.settle({"status": "killed"})}
         registry.start({"kind": "bash", "label": "1", "owner": owner, "run": run})
         registry.start({"kind": "bash", "label": "2", "owner": owner, "run": run})
         owner.ctx.dispose()   # 只注册一次 cleanup，不抛
@@ -597,19 +599,29 @@ class JobsToolsTest(unittest.TestCase):
         register_job_tools(self.tools, self.registry)
 
     def _call(self, name, args, exec_=None):
-        """执行 job 工具（async 契约 → asyncio.run 包装）。"""
+        """执行 job 工具（async 契约 → asyncio.run 包装）；返回 canonical value。"""
         return asyncio.run(self.tools.resolve(name).execute(args, exec_ or self.exec))
+
+    def _render(self, name, value):
+        """调用工具的 render，返回模型可见 content blocks 列表。"""
+        return self.tools.resolve(name).render(value)
 
     def test_job_list_format(self):
         box = JobDoneBox()
         self.registry.start({"kind": "bash", "label": "sleep", "owner": self.owner,
                              "run": lambda: {"done": box, "cancel": lambda r: None}})
-        out = self._call("job_list", {})
-        self.assertEqual(out, "bash-1 [bash] running — sleep")
+        canonical = self._call("job_list", {})
+        self.assertEqual(len(canonical), 1)
+        self.assertEqual(canonical[0]["kind"], "bash")
+        self.assertEqual(canonical[0]["status"], "running")
+        rendered = self._render("job_list", canonical)
+        self.assertEqual(rendered, [{"type": "text", "text": "bash-1 [bash] running — sleep"}])
 
     def test_job_list_empty(self):
-        out = self._call("job_list", {})
-        self.assertEqual(out, "(no background jobs)")
+        canonical = self._call("job_list", {})
+        self.assertEqual(canonical, [])
+        rendered = self._render("job_list", canonical)
+        self.assertEqual(rendered, [{"type": "text", "text": "(no background jobs)"}])
 
     def test_job_output_nonblocking_and_suffix(self):
         box = JobDoneBox()
@@ -622,9 +634,13 @@ class JobsToolsTest(unittest.TestCase):
                                    "run": lambda: {"done": box, "cancel": lambda r: None,
                                                    "read_output": read_output}})
         chunks.append("progress")
-        out = self._call("job_output", {"job_id": tid})
-        self.assertTrue(out.startswith("progress"))
-        self.assertTrue(out.endswith("[status: running]"))
+        canonical = self._call("job_output", {"job_id": tid})
+        self.assertEqual(canonical["text"], "progress")
+        self.assertEqual(canonical["job"]["status"], "running")
+        rendered = self._render("job_output", canonical)
+        body = rendered[0]["text"]
+        self.assertTrue(body.startswith("progress"))
+        self.assertTrue(body.endswith("[status: running]"))
 
     def test_job_output_unknown_job(self):
         with self.assertRaises(RuntimeError):
@@ -643,11 +659,16 @@ class JobsToolsTest(unittest.TestCase):
         box = JobDoneBox()
         tid = self.registry.start({"kind": "bash", "label": "sleep", "owner": self.owner,
                                    "run": lambda: {"done": box, "cancel": lambda r: None}})
-        out = self._call("job_kill", {"job_id": tid})
-        self.assertEqual(out, "requested cancellation of job " + tid)
+        canonical = self._call("job_kill", {"job_id": tid})
+        self.assertEqual(canonical["outcome"], "cancellation-requested")
+        self.assertEqual(canonical["job"]["id"], tid)
+        rendered = self._render("job_kill", canonical)
+        self.assertEqual(rendered, [{"type": "text", "text": f"requested cancellation of job {tid}"}])
         box.settle({"status": "killed"})
-        out2 = self._call("job_kill", {"job_id": tid})
-        self.assertIn("already finished", out2)
+        canonical2 = self._call("job_kill", {"job_id": tid})
+        self.assertEqual(canonical2["outcome"], "already-finished")
+        rendered2 = self._render("job_kill", canonical2)
+        self.assertIn("already finished", rendered2[0]["text"])
 
     def test_job_kill_with_reason(self):
         box = JobDoneBox()
