@@ -76,7 +76,7 @@ class _PersistCase(unittest.TestCase):
     def setUp(self):
         import tempfile
         self.tmp = tempfile.TemporaryDirectory()
-        self.persistence = JsonlPersistence(self.tmp.name)
+        self.persistence = JsonlPersistence(self.tmp.name, compression="none")
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -241,7 +241,7 @@ class TestMediaEntries(unittest.TestCase):
         import tempfile
         tmp = tempfile.TemporaryDirectory()
         try:
-            persistence = JsonlPersistence(tmp.name)
+            persistence = JsonlPersistence(tmp.name, compression="none")
             img_line = ('{"type":"user/message","seq":1,"data":{"content":'
                         '[{"type":"image","attachment":{"attachmentId":"img-1",'
                         '"mediaType":"image/png","bytes":4,"width":2,"height":2}}]}}')
@@ -264,7 +264,7 @@ class TestMediaEntries(unittest.TestCase):
         import tempfile
         tmp = tempfile.TemporaryDirectory()
         try:
-            persistence = JsonlPersistence(tmp.name)
+            persistence = JsonlPersistence(tmp.name, compression="none")
             img_line = ('{"type":"user/message","seq":1,"data":{"content":'
                         '[{"type":"image","attachment":{"attachmentId":"img-1",'
                         '"mediaType":"image/png"}}]}}')
@@ -300,7 +300,7 @@ class TestServerRoute(unittest.TestCase):
         import tempfile
         self.tmp = tempfile.TemporaryDirectory()
         ctx = Context(name="test-export-route")
-        self.persistence = JsonlPersistence(self.tmp.name)
+        self.persistence = JsonlPersistence(self.tmp.name, compression="none")
         ctx.provide("sessionPersistence", self.persistence)
         self.api = WebApi(ctx, FakeLlmAdapter())
         self.hub = StreamHub(ctx, self.api)

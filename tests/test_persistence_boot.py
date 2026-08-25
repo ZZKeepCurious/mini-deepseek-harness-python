@@ -44,8 +44,9 @@ class TestJsonl(unittest.TestCase):
             self.assertEqual([e["seq"] for e in loaded], [0, 1])
 
     def test_header_written_once_with_version(self):
+        # 载体级断言走明文后端（zstd 载体的帧级行为见 test_persistence_zstd）
         with tempfile.TemporaryDirectory() as tmp:
-            p = JsonlPersistence(Path(tmp))
+            p = JsonlPersistence(Path(tmp), compression="none")
             p.append("s1", {"type": "turn/start", "seq": 0, "time": 1, "data": {"turn": 1}})
             p.flush()
             lines = p.path_of("s1").read_text(encoding="utf-8").splitlines()
@@ -57,7 +58,7 @@ class TestJsonl(unittest.TestCase):
 
     def test_version_mismatch_fail_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
-            p = JsonlPersistence(Path(tmp))
+            p = JsonlPersistence(Path(tmp), compression="none")
             p.append("s1", {"type": "turn/start", "seq": 0, "time": 1, "data": {"turn": 1}})
             p.flush()
             path = p.path_of("s1")
@@ -69,7 +70,7 @@ class TestJsonl(unittest.TestCase):
 
     def test_torn_tail_truncated(self):
         with tempfile.TemporaryDirectory() as tmp:
-            p = JsonlPersistence(Path(tmp))
+            p = JsonlPersistence(Path(tmp), compression="none")
             p.append("s1", {"type": "turn/start", "seq": 0, "time": 1, "data": {"turn": 1}})
             p.flush()
             path = p.path_of("s1")
