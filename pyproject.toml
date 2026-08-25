@@ -35,4 +35,4 @@ web = ["fastapi>=0.110", "uvicorn>=0.29"]
 include = ["miniharness*"]
 
 [tool.setuptools.dynamic]
-version = { attr = "miniharness.__version__" }
+version = { attr = "miniharness.core.version.__version__" }
