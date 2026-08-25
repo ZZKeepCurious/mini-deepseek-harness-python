@@ -324,6 +324,12 @@ class SkillRegistry:
         def dispose() -> None:
             if layer.providers.get(name) is not None:
                 del layer.providers[name]
+                # 调用 provider 自身的 dispose（如 watcher 清理）
+                if hasattr(raw, "dispose"):
+                    try:
+                        raw.dispose()
+                    except Exception:
+                        logger.debug("provider %s dispose failed", name, exc_info=True)
                 self.invalidate_cache()
 
         self.invalidate_cache()

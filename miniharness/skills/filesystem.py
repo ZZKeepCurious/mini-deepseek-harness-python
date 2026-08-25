@@ -21,14 +21,13 @@ discoverRoot / parseSkillFile / parseInvocationPolicy）。
     （collect 端按 provider 失败处理，cacheable=False）
 
 mini 简化（有意保留，须在文档标注）：
-  * 同步 os 读取（上游 async ctx.fs / node:fs/promises）；无 chokidar/watchFile
-    文件监听与 fs/observed 宿主变更桥——变更可见性靠每次 collect 的 revision
-    栅栏 + 手动 invalidate
+  * 同步 os 读取（上游 async ctx.fs / node:fs/promises）
   * frontmatter YAML：pyyaml 可选依赖（与 boot/composition 同款）；无 pyyaml
     时用内置极简 YAML 子集解析器（仅标量/引号/嵌套 mapping/块 scalar 列表；
     不支持的语法抛错 → 文件被忽略）
   * 无 skipSystem 之外的系统目录过滤启发（上游 nodeEntryKind 的 symlink
     跟随保留，目录条目归类到 'other' 时静默跳过）
+  * 无 fs/observed 事件桥（mini 工具不产出 fs/observed 事件）
 """
 from __future__ import annotations
 
@@ -48,6 +47,7 @@ from .registry import (
     BUNDLED_SKILL_RANK,
     is_skill_name,
 )
+from .watcher import SkillWatchManager
 
 __all__ = [
     "FileSystemSkillProvider",
@@ -366,8 +366,13 @@ class FileSystemSkillProvider:
     """同步文件系统 provider：项目/自定义/用户/bundled 根 → 候选。
 
     配置键（对齐上游 Config）：providerName / includeDefaultRoots / dshHome /
-    agentsHome / customSkillDirs / bundledSkillDir。watch 相关配置不在 mini
-    复现范围（同步实现无监听）。
+    agentsHome / customSkillDirs / bundledSkillDir / watch / watchUsePolling /
+    watchStabilityThresholdMs / watchPollIntervalMs / watchMaxProjects /
+    watchFollowSymlinks。
+
+    watch 配置控制文件监听行为（对齐上游 SkillWatchManager）：
+      watch=True（默认）时自动开启 watchdog 监听 skill 根目录；
+      文件变更去抖后触发 invalidate_cache()。
     """
 
     def __init__(self, control: dict, config: dict | None = None):
@@ -386,12 +391,18 @@ class FileSystemSkillProvider:
             bundled = os.environ.get("DSH_BUNDLED_SKILL_DIR")
         self.bundled_skill_dir = Path(bundled).resolve() if bundled else None
         self._control = control
+        self._watch_config = {k: v for k, v in config.items() if k.startswith("watch")}
+        self._watcher: SkillWatchManager | None = None
 
     # ---------- 发现（provider 接口：list / get） ----------
 
     def list(self, options: dict | None = None) -> list[dict]:
         options = options or {}
         roots = self._roots(options.get("cwd"))
+        # lazy-init watcher 并同步 root 列表
+        self._ensure_watcher()
+        if self._watcher is not None:
+            self._watcher.update_roots(roots)
         candidates: list[dict] = []
         for root in roots:
             candidates.extend(self._discover_root(root))
@@ -426,6 +437,26 @@ class FileSystemSkillProvider:
 
     def invalidate(self) -> None:
         self._control["invalidate"]()
+
+    def _ensure_watcher(self) -> None:
+        """lazy-init watcher（首次 list() 时创建；watch=False 时不创建）。"""
+        if self._watcher is not None:
+            return
+        if not self._watch_config.get("watch", True):
+            return
+        try:
+            self._watcher = SkillWatchManager(
+                invalidate_callback=self.invalidate,
+                config=self._watch_config,
+            )
+        except Exception:
+            logger.debug("skill watcher init failed, falling back to no-watch", exc_info=True)
+
+    def dispose(self) -> None:
+        """停止 watcher（对齐上游 SkillWatchManager.dispose）。"""
+        if self._watcher is not None:
+            self._watcher.dispose()
+            self._watcher = None
 
     # ---------- 内部 ----------
 
