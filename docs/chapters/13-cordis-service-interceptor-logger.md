@@ -180,17 +180,22 @@ class Greeter(Service):
     def _check(self):                       # 可用性谓词：config 缺 name 时不提供
         return True
     def _invoke(self, who="world"):
-        cfg = self._resolve_config()
+        cfg = self._resolve_config()        # 缺省 ctx = self.ctx（构造上下文）
         prefix = cfg.get("prefix", "hi")
         return f"{prefix} {who}"
 
 root = Context()
-ctx_a = root.intercept("greeter", {"prefix": "hello"})
-assert root.get("greeter")("x") == "hi x"        # 默认 prefix
-assert ctx_a.get("greeter")("x") == "hello x"    # 子上下文 intercept 覆盖
+Greeter(root)      # 根作用域：prefix 默认 hi
+# 子作用域要"各有自己的实现与配置"，必须先 isolate 出独立标签：
+# service 注册表是"标签 → 实现"（provide 同标签二次登记 = fail loud），
+# 光 intercept 不会换标签，会与根撞车抛 RuntimeError。
+child = root.intercept("greeter", {"prefix": "hello"}).isolate("greeter")
+Greeter(child)     # 构造 ctx = child → 读 intercept → prefix hello（第 3 章"每个 agent 一套"就是这个）
+assert root.get("greeter")("x") == "hi x"        # 根作用域默认 prefix
+assert child.get("greeter")("x") == "hello x"    # 子作用域 intercept 覆盖
 ```
 
-`ctx_a` 下的 `greeter` 调用读到 `prefix=hello`，根下读到 `hi`——同一服务、不同作用域、不同配置，不靠任何全局变量。
+`child` 下的 `greeter` 调用读到 `prefix=hello`，根下读到 `hi`——同一服务、不同标签/作用域、不同配置，不靠任何全局变量。注意两点（容易踩坑）：**bare Service 只有被构造进某 ctx 才会 `provide` 登记**（`Service.__init__` 调 `ctx.provide(name, self)`，`scope.py:966-975`），不构造直接 `get` 是 `None`；且 `_find_impl` 按**隔离标签**读全局表（`scope.py:1220-1222`），`provide` 对同一标签二次登记 = **fail loud 抛 `RuntimeError`**（`scope.py:1288-1291`）——所以"每个作用域各自不同配置"不能只靠 `intercept`，必须先 `isolate` 换标签、再给该标签构造一个实例（第 3 章的 per-agent 工具隔离、continuation 子代理正是这套）。这也是步骤 4 里 `ctx.logger` 需要 `_LoggerView` 以**访问方** ctx 解析的原因：日志门面场景里多个子作用域共享同一 `logger` 标签，只能让 `_resolve_config` 跟随访问方而非构造方。
 
 ## 13.4 验收：硬性规定
 

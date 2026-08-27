@@ -70,6 +70,19 @@ bin.ts → args 解析（--profile/--patch/--dump-config，task 为位置参数�
   → watchUserPatches：用户 patch 热更新（仅开发 profile）
 ```
 
+**启动链路逐节点走读**（对应上图每行）：
+
+1. **bin.ts**：进程入口，只负责把命令行交给下一位，不掺业务。
+2. **args 解析**：`--profile`（选 preset）、`--patch`（追加补丁）、`--dump-config`（只读导出组合，boot-free）；`task` 位置参数透传（headless 的明文任务）。
+3. **profile-boot 层**：承接已解析参数，进入 profile 装配域。
+4. **loadProfile**：定位 `profile.yml`——内置 bundle 根（`packages/bundle/...`）与 home 用户根（`~/.config/...`）**双锚点**，决定用哪个预设组合。
+5. **composeEntries**：把 bundle 栈（基础 preset）与用户 patch 层**层叠**成"header 行 + 增量行"的组合条目，未真正实例化插件。
+6. **boot()**：loader 结算组合树——实际加载插件、`include` 展开、依赖驱动激活；到这里组合才变成活的运行时。
+7. **应用提供方（startup）**：把 surface 服务挂上——web 开端口 / headless 跑单任务，开始对外服务。
+8. **watchUserPatches**：仅开发 profile 开启，用户 patch 变更经 HMR 热更新重挂，不重启进程。
+
+四种入口共用同一条启动链路，区别只在第 7 步挂的 surface 服务不同——这是"同一事件溯源内核的多个宿主"在启动层的落地。
+
 | 入口 | 形态 | 协议/载体 | 说明 |
 |---|---|---|---|
 | web surface | 浏览器 GUI | HTTP + SSE（`host/apiproxy`）+ JSON-RPC 会话协议（`core/session-jsonrpc`） | 完整产品体验：Trajectory、审批、命令、配置等 |
@@ -78,7 +91,7 @@ bin.ts → args 解析（--profile/--patch/--dump-config，task 为位置参数�
 | SDK 协议 | 官方 SDK | `packages/sdk/protocol` | Python/TS 官方客户端，全会话操控 |
 | hooks 桥接 | Claude Code / Codex hooks | `packages/hooks` | 把 harness 作为这些 IDE agent 的后端工具执行器 |
 
-<p class="mermaid-note">注：三协议入口的会话协议信封与事件序列一致（envelope/编号/消息模型），这是 mini 复现"JSON-RPC 最小子集"（ROADMAP 阶段 12）的契约依据。</p>
+<p class="mermaid-note">注：三协议入口的会话协议信封与事件序列一致（envelope/编号/消息模型），这是 mini 复现"JSON-RPC 最小子集"（见手册 07 章 §7.6「JSON-RPC 信封子集」）的契约依据。</p>
 
 ### 2.3 源码证据
 
@@ -122,6 +135,16 @@ Trajectory 是 **web 专属**的"Agent 的 DevTools"：一个按 turn 组织的�
       （trajectory-contract.ts:60-68）
   → 渲染 + 虚拟化（只挂载可见行窗口 + overscan）
 ```
+
+**数据流逐节点走读**（对应上图每行）：
+
+1. **会话日志**：唯一数据源，Trajectory 只读它，不维护独立数据。
+2. **session.history RPC**：按 `beforeSeq` 向前分页拉取日志切片，页边界取 **append-origin 消息边界**（保证折叠窗口内消息完整，不劈裂一条消息）。
+3. **ConversationNodeAssembler 折叠**（conversation-assembler.ts:133-150）：把原始事件折叠成可检查记录。折叠窗口 = 当前滚动区间的节点；每个 target（user / assistant / tool / steering…）用**独立 definition**（`match/update/finalNode` 纯函数）物化成自己的记录形状。
+4. **TrajectorySnapshot**（trajectory-contract.ts:60-68）：折叠的成品——由 `eventNodes`（节点表）、`eventLocations`（节点↔事件序号映射）、`requests`、`callSchemas`、`partial`（崩溃未闭合尾部标记）、`runningCalls`（在飞工具调用）六块组成。
+5. **渲染 + 虚拟化**：只挂载可见行窗口（阈值 100 行）+ overscan 12，长会话翻页加载，避免一次性渲染整条日志。
+
+关键点：第 3 步的折叠是**纯函数无副作用**，这决定了 Trajectory 本质是"日志投影"而非"状态机"。
 
 - **折叠引擎是纯函数**：每个折叠定义由 `match/update/finalNode` 构成（trajectory-*-definition.ts），无副作用、可重入——这是"日志投影"而非"状态机"的本质；
 - **保留边界**：设计笔记明确拒绝"把日志拍平成裸记录流"——Turn/Step/Request 边界保留因果结构（.agents/notes/implemented/feature/2026-07-27-trajectory-inspection-ledger.md:44）；
@@ -356,7 +379,7 @@ mini 已实现 plan 全链路（状态机 + 审查 UI，`miniharness/plan/`，�
 - **审查 UI**（review.py + projection.py）：`exit_plan_mode` 工具（跨模式保持注册、要求 `# ` 标题的非空 markdown、批准 → 排队 silent 退出在下一个被接受的 in-turn pre-step 提交、Keep planning 是带反馈的失败调用、取消则提示等待）；`/plan` 命令四态文案逐字对齐（index.ts:274-301）；userQuestions 审查通道（ctx 服务 `userQuestions`，`.ask(question, agent)` 回调）；plan 投影单元（session-projection 的 `plan` 键，纯双事件折叠：`command/run`(name='plan') 记录已落盘选择、`plan/mode` 清空 pending）。
 - **命令契约**（`miniharness/commands/`）：`command/run` + `command/done` 按 commandId 配对（log-only 非 surface），命令进入 handler 前先落 run（durable before dispatch）；未命中已注册命令的斜杠行是普通文本；handler 抛错结算为 `kind:'error'`。`command/run|done` 已入 KNOWN_TYPES。
 
-mini 简化（教学范围，须在文档中标注）：无 canonical value（review 工具直接返回模型可见文本，即上游 output.render 文案）；无 presentCall/presentResult（无 UI 渲染层）；审查为同步回调（上游 async interaction.ask + signal）；userQuestions 无完整 async 对象形状（mini 收敛为 `.ask` 回调契约）。`system-prompt` 已实现 assemble waterfall + contexts/tools/variables 提供器 + `{{variable}}` 严格插值；保留简化：scope 层叠未复现（单全局层）、assembly.tools 提供器结果不直接成为请求工具列表（请求工具来自 ToolRegistry）；运行时上下文快照经 loop 侧投影注入对话消息流（`core/agent_loop/runtime_context.py`，上游 RuntimeContextProjection 同款）。`install_plan_mode` 要求 ctx 已提供 systemPrompt 服务（缺失抛 KeyError，fail loud）；装配序：`install_system_prompt` → `install_plan_mode` →（可选）`install_plan_review`。
+mini 简化（教学范围，须在文档中标注）：canonical value + `Tool.render` 已按上游契约分离（`plan/review.py:163-164` 返回 canonical `{"approved": true}`，`_render_approved` 经 `render=` 承担模型可见文案，`present_call`/`present_result` 提供 UI 卡片——`plan/review.py:188-200`，对应上游 index.ts:319/382-392）；审查为同步回调（上游 async interaction.ask + signal）；userQuestions 无完整 async 对象形状（mini 收敛为 `.ask` 回调契约）。`system-prompt` 已实现 assemble waterfall + contexts/tools/variables 提供器 + `{{variable}}` 严格插值；保留简化：scope 层叠未复现（单全局层）、assembly.tools 提供器结果不直接成为请求工具列表（请求工具来自 ToolRegistry）；运行时上下文快照经 loop 侧投影注入对话消息流（`core/agent_loop/runtime_context.py`，上游 RuntimeContextProjection 同款）。`install_plan_mode` 要求 ctx 已提供 systemPrompt 服务（缺失抛 KeyError，fail loud）；装配序：`install_system_prompt` → `install_plan_mode` →（可选）`install_plan_review`。
 
 ### 8.6 mini 实现：goal 域（`miniharness/goal/`，议题 8 收官）
 
@@ -427,7 +450,7 @@ mini 简化（教学范围，须在文档中标注）：无 agent registry 与 a
 
 mini 已实现 token 计量与压缩最小版（`llm/token_meter.py` + `compaction/`，装配在 demo/headless/ACP/SDK 入口）：TokenMeter 增量 fold + usage 折入锚（estimateHeader 按 system/tools 启发式定价且 config 不计价）；BasicCompactionEngine 的 pre-step 压力检查（阈值取 adapter.contextWindow，缺省返回 None 而非抛 TargetPressureConfigError）与 request-error overflow 减容（仅 surface.replaceGeneration 前进才 retry，上限 maxOverflowRetries，成功/回合结束边界惰性复位）；事务 compaction/start→前缀重放摘要→user/message 检查点（surfaceOp replace + sourceEventSeqs）→compaction/end，任何失败恰好补一次带 error 的 compaction/end。简化标注：摘要前缀重放无 KV cache 语义、崩溃孤儿锁检出即 busy 拒绝（对齐上游 assertCompactionInactive，上游同样无自动恢复）。toolResultPruner 可选阶段（`compaction/tool_result_pruner.py`）与 `_log_result` 经 `ctx.logger` 路由已对齐上游（见 P0-2 / P0-3）。
 
-mini 已实现后台作业（`jobs/`，进程内注册表 + 三工具 + 完成 notice，装配在 demo/headless/session_cmds/ACP/SDK 入口）：`LocalJobRegistry` 提供 `ctx.jobs` 服务（start/list/get/read/kill/wait、onJobDone/onJobsChanged、attachController），id 为 `<kind>-N`，owned 作业按会话 id 栅栏、unowned 对任何调用方开放，结算 first-wins 且 waiters/kill/终态 read 置 reported 抑制 notice，`maxConcurrentJobsPerOwner` 默认 10（按精确 owner / unowned 桶计 running+stopping），owner 销毁时 cancel 在飞作业 + 限时排干 + 删除（teardown cancel 抛错 force-fail 只改记录）。模型侧 `job_output`（默认非阻塞读流式增量 / wait 有界、响应以 `[status: ...]` 结尾）、`job_list`（`<id> [<kind>] <status> — <label>`）、`job_kill`（requested / already-finished）；完成 notice 按 `completionDelivery` wakeup（idle owner 开 turn，预算 maxConsecutiveWakes=3，user 输入认领恢复）或 quiet（一律 inject），输出与 notice 按 outputLimitBytes 做 UTF-8 字节封顶。与上游一致：**无 `job/*` 会话事件**、不新增事件类型。简化标注：无 scope 链与 agent registry（controller/监听器全局层）、teardown 排干为限时轮询、无 canonical value + native renderer 分离（execute 直接返回模型可见文本）；`run_in_background` 触发入口已经模型侧 `subagent` 工具复现（见下）。
+mini 已实现后台作业（`jobs/`，进程内注册表 + 三工具 + 完成 notice，装配在 demo/headless/session_cmds/ACP/SDK 入口）：`LocalJobRegistry` 提供 `ctx.jobs` 服务（start/list/get/read/kill/wait、onJobDone/onJobsChanged、attachController），id 为 `<kind>-N`，owned 作业按会话 id 栅栏、unowned 对任何调用方开放，结算 first-wins 且 waiters/kill/终态 read 置 reported 抑制 notice，`maxConcurrentJobsPerOwner` 默认 10（按精确 owner / unowned 桶计 running+stopping），owner 销毁时 cancel 在飞作业 + 限时排干 + 删除（teardown cancel 抛错 force-fail 只改记录）。模型侧 `job_output`（默认非阻塞读流式增量 / wait 有界、响应以 `[status: ...]` 结尾）、`job_list`（`<id> [<kind>] <status> — <label>`）、`job_kill`（requested / already-finished）；完成 notice 按 `completionDelivery` wakeup（idle owner 开 turn，预算 maxConsecutiveWakes=3，user 输入认领恢复）或 quiet（一律 inject），输出与 notice 按 outputLimitBytes 做 UTF-8 字节封顶。与上游一致：**无 `job/*` 会话事件**、不新增事件类型。简化标注：**无 agent registry**（controller/监听器已按 scope 分层：`registry.py` `_layers = ScopedLayers(...)` + `chain_layers(scope_of(owner))`，对齐上游 P1-4a 作用域化分层，2026-08-22 闭合）；**teardown 排干为事件驱动**——逐任务等待 `settled` 事件（`registry.py:431-436`，对齐上游 `await Promise.all(settled)`，非限时轮询）；**canonical value + native renderer 分离已闭合**（`jobs/tools.py` execute 返回结构化结果、`render=` 承担模型可见文本，对齐上游 output.render）；`run_in_background` 触发入口已经模型侧 `subagent` 工具复现（见下）。
 
 mini 已实现可继续子代理全链路（`seams/subagent/`：descriptor + continuation + 委托工具 `subagent` + 控制工具三件套 + report 工具，装配在 demo/headless/session_cmds 入口）：durable 子会话（header meta + 描述符事件先落盘）+ 冷恢复（inspect → authorizeLineage → fold descriptor → 重建组合）+ 双路径执行（父有 driver → 投递即返回 message id、Activation 跨回合驻留、watchSettlement 结算；无 driver → 同步 pump 门面）；生命周期事件 `subagent/start`/`subagent/end`（runId 配对、SubagentRunInfo/RunEndInfo payload、逐监听器收容派发、经委托父 scope 载体的 scoped dispatch——打标监听器按载波键或其祖先接纳、未打标全局接纳，无标号父退化祖先链派发）；命名 provider 注册表（`register_provider` 登记按模型重建适配器的入口，disposer 注销即发布 `subagent/provider-removed` 边且幂等；解析时注册表优先、回落缺省工厂）；DRAINING 准入截止（manager 级 `drain()` 与 scoped `drain_descendants(parents)`：精确在世根过滤、closingScopes 成员=根+后代世系、child-first 强制结算、聚合错误;`assert_admitting` 接入 start/send 准入边界，拒绝措辞逐字对齐）；终局折叠 `foldConsumedWork` + `epochStopReason`（stepped/claimed 记账、droppedUnrun→aborted）；sendWaking/admitWaking 所有权记账（accepted 窗口、waiting/settled 判定顺序）；interrupt 授权矩阵（user/ancestor authority、stale 调用方防探针、缺席目标接受性 no-op）；嵌套续跑（exec.agent 为授权与所有权主体，孙代结算通知投 durable 直属父，`list_descendants` 沿 parentSession 链 BFS）；finishDisposal 顺序（cancel top-down → flushFinalState best-effort → capture → 拆除 → notifySettlement → releaseOwnership → end 边）。模型侧 `subagent` 工具对齐 tool-subagent 契约（文案/canonical+render/路由逐字，`run_in_background` 触发入口接入 jobs producer）。简化标注：invariant 运行时校验不适用（上游 per-provider invariant 分包架构）、同步模式结算投递走非唤醒 next-step。
 
@@ -524,4 +547,4 @@ XML 转义（escapeText/escapeAttr，index.ts:217-234），资源指引按 provi
 - `tool_skill.py` —— 消费端：pre-step 目录注入（首次非空且 `skill` 工具可见 → durable user 消息）、digest 判变（成员/描述/可见性变化 → 完整替换目录）、空目录退役 tombstone、incomplete 不发、工具可见性参与 digest（身份比较用本插件注册的定义）、`skill` 工具（错误三态逐字）、`/名字` 手势（skill-invocation source、去重保序、未知/user 禁用名保持普通文本）；手势 listener 先注册、catalog 后注册（waterfall 顺序保证目录在前、手势离答案最近）。
 - 装配：`install_skills(ctx)`（幂等；创建注册表 + 挂 filesystem provider + 两个 pre-step listener），`register_skill_tools(reg, registry)` 把 `skill` 工具注册进现有 ToolRegistry；demo/headless/ACP/SDK 均已接线，standard preset 的 tools 列表保留 `"skills"` 与实现对齐。
 
-**简化标注**：无 chokidar watch（每次 pre-step 同步全量扫描，无热失效与正文/目录分离缓存）；无 `ctx.fs` 服务适配（直接 os 读取）；lookup cwd 读 `session.meta['cwd']`（对齐上游 `session.header.cwd`）；execute 直接返回渲染文本（无 canonical value + native renderer 分离）；badge 不内置（bundled source 语义保留在 registry，rank 600 由 bundle 根承担）。工具错误前缀已统一 `Error: `（对齐上游 toolErrorResult）。目录注入为每个会话增加 durable 消息——与 `skill` 工具的可见性联动（digest 含工具可见性）已对齐，不存在"目录与工具不一致"的偏差。
+**简化标注**：**watch 已闭合**——`FileSystemSkillProvider` 默认开启 watchdog 文件监听（`skills/watcher.py` `SkillWatchManager`，事件过滤/去抖 → 失效回调 + 失效条目精确失效，`filesystem.py:373-459`，`watch=False` 可关）；**badge 为 opt-in bundled provider**——`skills/badge.py` 实现内置 `dsh-badge`，需经 `install_badge_skill(ctx)` 显式装配，`install_skills(ctx)` 不自动装（`skills/__init__.py:62-87`）；无 `ctx.fs` 服务适配（直接 os 读取）；lookup cwd 读 `session.meta['cwd']`（对齐上游 `session.header.cwd`）；execute 直接返回渲染文本（无 canonical value + native renderer 分离，`skills/tool_skill.py:23`）。工具错误前缀已统一 `Error: `（对齐上游 toolErrorResult）。目录注入为每个会话增加 durable 消息——与 `skill` 工具的可见性联动（digest 含工具可见性）已对齐，不存在"目录与工具不一致"的偏差。

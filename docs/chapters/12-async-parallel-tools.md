@@ -16,13 +16,22 @@
 
 ### 执行模式（`execution_mode`）
 
-上游 `packages/core/tools/src/index.ts:1271-1281`：
+上游 `packages/core/tools/src/index.ts:1276-1285`：
 
 ```ts
-if (!tool?.isConcurrencySafe) return { kind: 'exclusive' }
-const concurrencySafe: unknown = tool.isConcurrencySafe(exec.arguments)
-return concurrencySafe === true ? { kind: 'parallel' } : { kind: 'exclusive' }
+executionMode(exec: ToolExecutionInput): ToolExecutionMode {
+  const tool = this.resolveExecution(exec.name, exec.agent, exec.parent !== undefined)
+  if (!tool?.isConcurrencySafe) return { kind: 'exclusive' }
+  try {
+    const concurrencySafe: unknown = tool.isConcurrencySafe(exec.arguments)
+    return concurrencySafe === true ? { kind: 'parallel' } : { kind: 'exclusive' }
+  } catch {
+    return { kind: 'exclusive' }
+  }
+}
 ```
+
+（关键在 `try/catch`，位于 `index.ts:1282-1284`：分类器抛错同样 fail 到 exclusive。）
 
 - `isConcurrencySafe` 是**函数**（按参数判定，比如"读模式可并行、写模式必须独占"）；
 - 未声明 / `false` / **抛错** / **返回非布尔** → `exclusive`（fail 到独占，绝不冒险并行）；
@@ -54,8 +63,8 @@ async def _maybe_await(value):
 注意是**循环**而不是单次 `await`：中间件 `return nxt(p)` 会直接返回下一层的 coroutine（不展开），同步中间件包 async 中间件时可能叠两层。单层解包会在"async 中间件 return nxt()"时拿到未 await 的 coroutine 泄漏出去（第 12 章测试 `test_async_middleware_can_await_before_delegating` 钉住的就是它）。
 
 ```python
-async def awaterfall(self, event, payload=None):
-    listeners = self._listeners_for(event)
+async def awaterfall(self, event, payload=None, *, this_arg=None):
+    listeners = self._hooks_for(event, this_arg)
     idx = 0
     async def step(cur):
         nonlocal idx
@@ -67,6 +76,8 @@ async def awaterfall(self, event, payload=None):
         return await _maybe_await(result)
     return await step(payload)
 ```
+
+`this_arg` 为载波时走根扁平 hook 表 + 载波过滤（全局监听器无条件、打标监听器按载波键或键祖先 admit）；`None` 时回退祖先链 `_listeners_for`——**载波路由语义见第 14 章**（`scope.py:1411-1424` 的 `_hooks_for`、`1463-1478` 的 `awaterfall`）。
 
 短路语义与同步 `waterfall` 完全一致：不调 `next()` 就停在当前中间件。`aparallel` 用 `asyncio.gather` 真并发，结果按注册序。
 
@@ -112,10 +123,15 @@ bool 兼容保留（旧写法 `is_concurrency_safe=True` 仍工作）；callable
 ```python
 task = asyncio.create_task(_execute_async(tool, frozen_args, exec_))
 try:
-    raw, error = await asyncio.wait_for(asyncio.shield(task), tool.timeout_ms / 1000)
+    raw = await asyncio.wait_for(asyncio.shield(task), tool.timeout_ms / 1000)
+    error = None
 except asyncio.TimeoutError:
     exec_.signal.set()
-    raw, error = await task   # 排干：工具观察到 signal 后自行中止
+    try:
+        raw = await task      # 排干：工具观察到 signal 后自行中止
+        error = None
+    except Exception as e:
+        raw, error = None, e
     if error is None:
         error = TimeoutError(f"timeout after {tool.timeout_ms}ms")
 ```
@@ -126,9 +142,9 @@ wait_for 经 `shield` 包裹保证超时不取消底层任务——置位 signal
 
 调度器与上游 `tool-calls.ts` 逐条对照：
 
-| 上游（tool-calls.ts） | mini（scheduler.py） |
+| 上游（tool-calls.ts） | mini（`core/agent_loop/tool_calls.py`） |
 |---|---|
-| `executeToolCalls` 外层循环：分类 → 组 | `schedule_tool_calls`：`execution_mode(first)` → `group = planned[next_:] or [first]` |
+| `executeToolCalls` 外层循环：分类 → 组 | `schedule_tool_calls`：`execution_mode(first)` → `group = planned[next_:] if mode == "parallel" else [first]` |
 | `runGroup` | `_run_group` |
 | `appendToolCall` 先落盘返回 seq | `append_tool_call`（同） |
 | `commitReady` 只推进连续槽位 | `commit_ready`（同） |
@@ -172,4 +188,4 @@ LLM 流式已原生异步（httpx 传输）：`adapter.stream` 是真 async 迭�
 - [ ] 解释"pre-execute 有序、body 重叠"与 `pipeline_policy_async` / `pipeline_async_body` 拆段的关系；
 - [ ] 用 `max_parallel=2` 跑 4 个并行工具，观察 `fill_pool` 的补池节奏；
 - [ ] 构造一次中途取消：哪些结果真实、哪些合成，顺序如何；
-- [ ] 说出 mini 相对上游的简化（schemastery 为教学子集；重试等待以多信号竞速 `asyncio.Event` 熔合近似上游 `AbortSignal.any`；`asyncio.subprocess` 尚未接入工具执行）。
+- [ ] 说出 mini 相对上游的简化：**schemastery 已全量移植**（`core/schema.py` 头注"全量移植，对齐 902 行单文件引擎"，17 类 resolver + builder + 序列化/i18n/simplify 齐全，见第 15 章；载体差异在 callback 字符串求值不做，只收 callable）；重试等待以多信号竞速 `asyncio.Event` 熔合近似上游 `AbortSignal.any`；`asyncio.subprocess` 尚未接入工具执行。

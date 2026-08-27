@@ -26,7 +26,7 @@
 </div>
 
 !!! info "当前状态"
-    **当前状态**：developer preview（`0.1.0-rc.7`），MIT 协议。演进策略是"地基优先，不做兼容垫片"：后端拒绝旧磁盘格式；SQLite 使用单调 `SCHEMA_VERSION`；会话格式版本保持 `SESSION_FORMAT_VERSION`。学习时不必顾虑历史包袱——你看到的就是当前唯一事实。
+    **当前状态**：developer preview（`0.1.1-rc.2`），MIT 协议。演进策略是"地基优先，不做兼容垫片"：后端拒绝旧磁盘格式；SQLite 使用单调 `SCHEMA_VERSION`；会话格式版本保持 `SESSION_FORMAT_VERSION`。学习时不必顾虑历史包袱——你看到的就是当前唯一事实。（报告初稿写于 `0.1.0-rc.7`，行文中的行号/版式可能滞后于 `0.1.1-rc.2`，涉及量化处已按当前基线校正。）
 
 ## 2. 分层架构
 
@@ -36,7 +36,7 @@
 |---|---|---|---|
 | **应用层** | `apps/cli`、`apps/web` | CLI bin（`dsh`）与 Web GUI | CLI 源码经 `node --import tsx/esm` 启动；bin 是"瘦自执行组合" |
 | **组合层** | `packages/bundle`、`preset`、`examples` | profile / bundle / preset 三种组合原语 | bundle = 可分发补丁层；preset = 会话级 agent 组合；覆盖所有运行形态 |
-| **能力层** | `packages/<group>/<pkg>` | 49 个包组、219 个包级 package.json（workspace glob `packages/*/*`），全部能力扩展口 | 每包遵循 Service Definition / Provider / Consumer 三段式 |
+| **能力层** | `packages/<group>/<pkg>` | 50 个包组、227 个包级 package.json（workspace glob `packages/*/*`），全部能力扩展口 | 每包遵循 Service Definition / Provider / Consumer 三段式 |
 | **框架层** | `vendor/` | vendored Cordis + 生态（cosmokit、schemastery、loader、include、hmr 等） | 全部改名 `@deepseek-ai/*`；18 项本地修改有详单与测试 |
 | **外部 SDK** | `python/`、`packages/sdk` | Python SDK 与 TypeScript JSON-RPC SDK，跨进程驱动运行时 | 协议：stdio 换行分隔 JSON-RPC；Python 侧有官方 `deepseek_harness` 包 |
 
@@ -53,7 +53,7 @@ flowchart TD
     B2["bundle 可分发补丁层"]
     B3["preset 会话级 agent 组合"]
   end
-  subgraph L3["能力层 · 49 包组 / 219 包 · 全部为能力扩展口"]
+  subgraph L3["能力层 · 50 包组 / 227 包 · 全部为能力扩展口"]
     C1["core：session / tools / agent / agent-loop"]
     C2["llm 适配 · shell · fs · sandbox"]
     C3["subagents · web · skills · persistence"]
@@ -75,6 +75,23 @@ flowchart TD
 ```
 
 <p class="mermaid-note">注：分层为本报告的学习归纳视角；上游架构文档（docs/architecture.md）以"核心包表 + 事件 + 能力扩展口 + 扩展点"组织，并无五层说法。图 1~15 均为此归纳视角下的示意。注意：能力层向上提供"扩展口"，组合层用 profile / bundle / patch 挑选具体 Provider，因此"换一个 Provider 就换掉整个产品"。所有图表需联网加载 Mermaid 渲染。</p>
+
+**图 1 逐节点走读**（每个节点一句话，说明「谁 / 职责 / 连向谁」）：
+
+- **A1 `dsh` CLI bin**：应用层入口，是"瘦自执行组合"——本体不含任何业务逻辑，只负责 `node --import tsx/esm` 加载并组合一组插件，然后启动运行时。
+- **A2 Web GUI 宿主**：应用层的第二个形态，承载浏览器前端，同样只是一层薄宿主，把能力组合交给组合层。
+- **B1 profile 运行形态**：组合层原语，声明"以什么形态跑"（交互式 CLI / 服务器等）。
+- **B2 bundle 可分发补丁层**：可打包分发的一层补丁，叠加在能力层之上改变具体 Provider 选择。
+- **B3 preset 会话级 agent 组合**：面向单个会话的 agent 组合，把主循环、工具、权限排布成一套 preset。
+- **C1 core：session / tools / agent / agent-loop**：能力层核心——事件溯源会话、工具注册表、agent 接口、主循环实现。
+- **C2 llm 适配 · shell · fs · sandbox**：LLM 提供方适配与执行世界（子进程、文件系统、沙箱）的能力扩展口。
+- **C3 subagents · web · skills · persistence**：子代理、web 传输、技能、持久化等更高层能力口。
+- **D1 `@deepseek-ai/cordis` 插件框架**：vendored 的框架层核心，自带 18 项本地加固，所有插件都运行在它之上。
+- **D2 cosmokit · schemastery · loader · include · hmr**：框架层的配套生态（配置、类型、加载器、include 展开、热重载）。
+- **E1 `python/ deepseek_harness`**：外部 Python SDK，通过 stdio JSON-RPC 子进程驱动 `dsh` CLI。
+- **E2 `packages/sdk` TS JSON-RPC**：外部 TypeScript SDK，同样的跨进程驱动方式。
+
+分层流向：`A1/A2 → L2`（应用层从组合层选形态）→ `L2 → L3`（组合层决定能力层装哪些 Provider）→ `L3 → L4`（全部能力跑在 vendored Cordis 框架上）；`E1/E2 -.驱动.-> A1`（外部 SDK 通过 stdio JSON-RPC 子进程拉起 CLI）。
 
 !!! note "核心分层约束（最重要的一条架构纪律）"
     **扩展插件只依赖 Service Definition，绝不依赖具体 Provider。** 例如 UI、hook、工具插件只依赖 `dsh-agent`（接口），从不依赖 `dsh-agent-loop`（实现），所以主循环可整体替换。这是"换一个 Provider 就把整个产品换掉"的根本原因——文件系统/子进程/终端/LSP 共享一个执行世界，把 FS 与子进程 Provider 指向远程沙箱，Bash、PTY、LSP 全部随之迁移。

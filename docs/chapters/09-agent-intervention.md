@@ -157,6 +157,6 @@ decide 顺序与上游一致（`src/index.ts:304-344`）：
 - [ ] 手动写一个"工具回调里 cancel"的用例，观察 turn/end reason；
 - [ ] 说出 `'never'` 为什么必须由服务自身在派发前决定（而不是监听器形状的拦截器）；
 - [ ] 解释审计对为什么必须 turn-enclosed（崩溃尾部语义）；
-- [ ] 说出 mini 相对上游的简化（同步无并发、无 ABORTED_BEFORE_DISPATCH 补对、无 scopeTarget 按 agent 过滤）与语义对齐（aborted 闭合、边界生效、fail-closed 审批）。
+- [ ] 说出 mini 相对上游的简化：**教学模型按"单循环同步"推演**（§9.2 明确标注：真实实现为常驻单事件循环 + 双队列 `inbox.py` + `_parked` 等待重入，见 §9.1 注），但**未派发 tool call 的 `ABORTED_BEFORE_DISPATCH` 错误结果补对**、**`scope_target` 按 agent 过滤派发**均已对齐（`core/agent_loop/tool_calls.py:33-34`、`core/agent_loop/agent.py:46,131`）；真正保留的简化是"常驻单循环 + `_parked` 重入""无 agent registry / 无 reserved attempt"（§3.8），以及语义对齐（aborted 闭合、边界生效、fail-closed 审批）。
 
 > 下一章：轨迹投影引擎——把事件日志折叠成人类可读的回合台账（Trajectory）。

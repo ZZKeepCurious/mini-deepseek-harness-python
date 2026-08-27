@@ -32,7 +32,7 @@ realm 规则的直接后果（`apps/cli/config/agent-presets/standard/agent.cord
 
 ### 8.2.2 loader：从 YAML 到插件树
 
-`vendor/cordis` 的 loader（`vendor/cordis/loader` 与 `vendor/include`）做的事可以压缩成三条：
+loader 的 include 展开（上游由 `@deepseek-ai/cordis-plugin-include` 实现，`packages/boot/app-boot/src/index.ts:16` 安装 `mountRootInclude`；`vendor/cordis` 本体在 `src/` 下只有 context/events/fiber/index/loader 相关源码，无 `loader` 独立目录）做的核心事可压缩成三条：
 
 1. **include 展开**：组合里 `include: 'file.yml'` 的行先被替换成目标文件的内容（递归），这是"一个 preset 引用共享片段"的机制；
 2. **插件加载**：每条 entry 的 `plugin` 字段导入真实模块，取回 `inject`/`apply` 元数据（`provides` 已废除——服务在 apply 期动态登记）；
@@ -75,6 +75,7 @@ class Preset:
     tools: list[str] = field(default_factory=list)
     persona: PersonaConfig = field(default_factory=PersonaConfig)
     provides: list[str] = field(default_factory=list)   # 进程级服务声明（默认空）
+    broken: str | None = None   # 发现期健康标记：缺 preset.json / 清单损坏 → 挂载期拒绝
 ```
 
 ### 8.3.2 roster：目录列表即名单
@@ -83,15 +84,31 @@ class Preset:
 class PresetRoster:
     def _scan(self) -> dict[str, Preset]:
         presets: dict[str, Preset] = {}
-        for child in sorted(self.root.iterdir()):
-            if not child.is_dir():
+        try:
+            children = sorted(self.root.iterdir())
+        except FileNotFoundError:
+            return presets            # 根缺失 → 空册（上游 ENOENT → []）
+        for child in children:
+            if not child.is_dir() or not PRESET_ID.match(child.name):
+                continue              # 只认合法 preset id 的目录
+            manifest = child / "preset.json"
+            if not manifest.is_file():
+                # 缺清单 → 占位 broken 行：目录仍占用 id，须删除目录或补齐文件
+                presets[child.name] = Preset(
+                    id=child.name, name=child.name, description="", order=0,
+                    broken="the composition file preset.json is missing — "
+                           "the directory still occupies the id; "
+                           "delete it or restore the file")
                 continue
-            if not (child / "preset.json").is_file():
+            try:
+                p = load_preset(child)
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                # 清单损坏 → 同样是 broken 占位行（上游 compositionProblem → broken）
+                presets[child.name] = Preset(
+                    id=child.name, name=child.name, description="", order=0,
+                    broken=f"the composition is unloadable: {error}")
                 continue
-            p = load_preset(child)
-            if p.id in presets:
-                raise RuntimeError(f"roster 发现重复 preset id: {p.id}")
-            presets[p.id] = p
+            presets[p.id] = p          # 同名 id 直接覆盖（无 fail-loud，载体差异，见 §8.4 注）
         return presets
 ```
 
@@ -136,7 +153,7 @@ loop = AgentLoop(session, adapter, view, ctx,
 
 ## 8.4 硬性规定（被测试钉住）
 
-1. **roster = 目录列表**：发现 = 扫描目录，新增 preset 不碰代码；重复 id fail loud。
+1. **roster = 目录列表**：发现 = 扫描目录，新增 preset 不碰代码。注（载体差异）：同名 id 在 `_scan` 里被**静默覆盖**（无 fail-loud，`presets.py:148`）；占位 broken 行的 `broken` 字段使该 preset 在**挂载期**被拒（`Preset.mount` 先检查 `self.broken` 再挂载）。
 2. **挂载只开视图**：host 注册表不变，agent 作用域只看到 preset 声明的工具。
 3. **host 缺工具 fail loud**：preset 声明了 host 没有的工具 → `RuntimeError`。
 4. **进程级冲突拒绝挂载**：`provides` 命中 host 已有服务 → `RuntimeError`，而不是覆盖。

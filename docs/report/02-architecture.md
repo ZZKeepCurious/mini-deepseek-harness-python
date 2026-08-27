@@ -143,8 +143,8 @@ flowchart LR
 | 面 | 包组（包数） | 职责 |
 |---|---|---|
 | **Web GUI 宿主端** | `packages/host`（8） | 共享 API 网关 `ctx.apiProxy`（apiproxy）+ HTTP 路由载体 `ctx.webServer`（webserver）+ SPA 静态托管 + 目录选择扩展口 `ctx.directoryPicker` + 插件清单远程接口。配套 `docs/subsystems/web-server.md`、workspace.md |
-| **Web GUI 浏览器端** | `packages/client`（39） | 浏览器 shell（web）、对象层（runtime：ConnectionController→SessionManager→Session，React-free）、**slot 组合系统**（`ctx.slots.register`，声明式 UI 扩展点）、connection（浏览器↔宿主 RPC/SSE）、30+ 个 `ui-*` 功能插件（会话、工具调用树、子 agent、goal、job、权限、计划、模型选择等）。纪律：组件只见四份 props 派生数据，业务数据永远在对象层，UI 从不写 session 日志 |
-| **远程 BFF / RPC** | `packages/api`（2）、`packages/typert`（4） | typert 从 Host 类型生成调用描述与 Client Remote 投影；gateway 实现 `ctx.typertGateway` 一元 RPC；remotes 拥有 Agent/Session 查找 BFF 策略。方向：remotes → gateway → connection → webserver。配套 `docs/subsystems/typert.md`、api-gateway.md |
+| **Web GUI 浏览器端** | `packages/client`（40） | 浏览器 shell（web）、对象层（runtime：ConnectionController→SessionManager→Session，React-free）、**slot 组合系统**（`ctx.slots.register`，声明式 UI 扩展点）、connection（浏览器↔宿主 RPC/SSE）、30+ 个 `ui-*` 功能插件（会话、工具调用树、子 agent、goal、job、权限、计划、模型选择等）。纪律：组件只见四份 props 派生数据，业务数据永远在对象层，UI 从不写 session 日志 |
+| **远程 BFF / RPC** | `packages/api`（2）、`packages/typert`（4） | typert 从 Host 类型生成调用描述与 Client Remote 投影；gateway 实现 `ctx.typertGateway` 一元 RPC；remotes 拥有 Agent/Session 查找 BFF 策略。方向：remotes → gateway → connection → webserver。配套 `docs/subsystems/typert.md`、`docs/api-gateway.md` |
 | **跨进程 SDK** | `packages/sdk`（3） | JSON-RPC 协议栈：protocol（wire 协议定义）、client（TS 客户端）、server（stdio JSON-RPC 服务器插件）。Python 侧 `python/sdk` 是同协议的另一实现 |
 | **ACP / Hooks** | `packages/acp`（1）、`packages/hooks`（3） | acp = 仅自动化用途的 Agent Client Protocol 服务器；hooks = Claude Code / Codex hook 桥接（SessionStart、PreToolUse、PostToolUse、Stop）+ 共享 wire 协议库 |
 | **会话数据面** | `packages/session`（13）、`packages/session-query`（4） | 持久化扩展口 + JSONL/SQLite 后端 + 投影扩展口 + 标题 + 上报 + session-query（逻辑语料、lineage 血缘、事件关系、语义过滤、SQLite FTS 全文检索）。配套 docs/subsystems/persistence.md、session-projection.md、session-query.md |
@@ -184,6 +184,18 @@ flowchart LR
 ```
 
 <p class="mermaid-note">"注册 = 可逆副作用"是热重载与故障清理能可靠工作的根基：任何贡献都能被 disposer 精确撤销。</p>
+
+**图 5 逐节点走读（插件完整生命周期）**：
+
+1. **register(插件)**：注册一个函数插件或 Service 插件，声明 `name` / `inject` / `Config` / `apply(ctx)`。
+2. **inject 服务就绪?**：检查插件 `inject` 声明的服务是否已在该上下文出现——这是依赖图的仲裁点。
+3. **否 → 挂起等待**：服务未就绪时 Cordis 挂起插件，等服务被其它插件提供后再回来检查（等待边 `WAIT → INJ` 回环）；加载顺序因此由依赖关系决定，而非手工 boot 排序。
+4. **是 → apply(ctx)**：服务齐备后执行插件体，插件在此安装它的一切贡献。
+5. **安装可逆副作用**：贡献经 `ctx.effect` / `ctx.on` / `ctx.waterfall` / `ctx.provide` 安装——每条副作用都登记了逆操作。
+6. **返回 disposer**：`register` 返回一个可调用对象，作为撤销该插件全部副作用的句柄。
+7. **卸载 / HMR 热重载**：调用 disposer 或触发热重载，进入卸载路径。
+8. **按注册逆序回滚**：副作用按栈序（后装先卸）逆序撤销，保证不留残余注册。
+9. **热重载 → 重新 apply**：HMR 场景下回滚完成后立刻对新版本插件重新执行第 4 步，实现免重启换插件。
 
 ### 4.2 事件溯源会话日志（整个框架的地基）
 
@@ -251,7 +263,7 @@ flowchart LR
 
 常规 TS 项目的扩展靠"给接口留可选字段"；dsh 把类型系统本身做成扩展机制，三件套：
 
-1. **`…Map → derived-union` 模式**：接口按判别标签键控，`keyof` 派生联合类型，插件用声明合并扩展。六个规范 map：`ContentBlockMap`、`MessageSourceMap`、`FinishReasonMap`、`TurnTriggerMap`、`TurnEndReasonMap`、`SessionEventMap`。合并可扩展的联合在 `switch` 后落到文档化 default——联合随时可能被插件追加新键，穷尽性的 `assertNever` 断言在这里不成立。
+1. **`…Map → derived-union` 模式**：接口按判别标签键控，`keyof` 派生联合类型，插件用声明合并扩展。五个规范 map：`ContentBlockMap`、`MessageSourceMap`、`FinishReasonMap`、`TurnEndReasonMap`、`SessionEventMap`（前两者在 `llm/llm/src/types.ts`，后两者在 `core/session/src/types.ts:155,236`）。合并可扩展的联合在 `switch` 后落到文档化 default——联合随时可能被插件追加新键，穷尽性的 `assertNever` 断言在这里不成立。注意：turn/start 的 `trigger` **不是**规范 map，而是内联判别对象（`{kind:'message', source:{kind:'user'}}`），只在单个 turn 内静态使用，不参与插件声明合并。
 2. **品牌化 ID（`Branded<B>`）**：跨包 ID 结构上是 string、类型上不可互换（`SessionId` ≠ `CallId`）。纯类型包 `util/brand` 零运行时依赖。
 3. **严格类型纪律**：`strict` + `noImplicitAny`；跨边界强制运行时校验（parser、wire、worker、持久化），同进程类型边界信任 TS 不重复校验。
 
@@ -269,7 +281,7 @@ flowchart LR
   EXT --> MAP
 ```
 
-<p class="mermaid-note">六个规范 map 同构复用此模式：ContentBlockMap / MessageSourceMap / FinishReasonMap / TurnTriggerMap / TurnEndReasonMap / SessionEventMap。</p>
+<p class="mermaid-note">五个规范 map 同构复用此模式：ContentBlockMap / MessageSourceMap / FinishReasonMap / TurnEndReasonMap / SessionEventMap。turn/start 的 trigger 为内联判别对象，非合并 map。</p>
 
 ### 4.5 作用域化注册（per-agent 能力隔离）
 
@@ -297,6 +309,17 @@ flowchart TD
 ```
 
 <p class="mermaid-note">工具目录 / 配置目录 / 持久化日志目录 / 模块图 / Cordis API 参考均由生成器产出，作用域原语（`core/scope`）本身是零依赖纯库。</p>
+
+**图 9 逐节点走读（作用域化注册与可见性解析）**：
+
+- **ROOT 全局 ctx（全局层注册）**：能力层的"全局层"，注册对所有 agent 作用域都可见的全局服务（如全局工具、持久化背板）。
+- **A / B agent 作用域 ctx**：每个 agent 拥有独立 ctx，`createScope` 派生；作用域内注册只对自身（含后代）可见。
+- **SUB agent A 的子作用域**：A 之下可再派生子作用域（如子代理），继承 A 的可见性。
+- **VIS 工具可见性解析**：解析一个 agent 实际能看到哪些工具 = **自身注册 + 祖先作用域链 + 全局层** 三者的并集（`ROOT/A/SUB → VIS` 三条边）。这是 dsh 与"全进程共享一张工具表"的常规做法的本质区别。
+- **REST ToolRestriction（allow / deny 继承过滤）**：可见性算出的候选集还要过一层 allow/deny 过滤，且该限制沿作用域链**继承**（父作用域的 deny，子作用域同样被约束）。
+- **ROLL dispose：注册回滚**：作用域卸载时回滚其全部注册，之后拒绝再注册（`B -.卸载→ ROLL`）——配合"注册 = 可逆副作用"保证隔离可精确撤销。
+
+> **mini 对照**：`miniharness/core/scope.py` —— 作用域原语（`createScope/scopeOf/scopeTarget/intercept`）与可见性解析；`miniharness/core/agent_loop/agent.py:46,131` 用 `scope_target` 给 agent 事件派发绑定作用域载体；工具注册表的"全局层 + 祖先链 + 自身"解析实现在 `miniharness/core/tools.py`。
 
 ### 4.6 生成器驱动 + 门禁文化
 

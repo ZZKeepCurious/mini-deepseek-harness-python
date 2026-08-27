@@ -7,7 +7,7 @@
 !!! warning "早期简化形态"
     本章代码为**教学简化形态**，与当前实现存在以下差异（学习时以当前实现为准，见 00-setup §0.5 简化表）：
 
-    - **JSONL 片段**：实现每文件 header 行 + 事件行，`SESSION_FORMAT_VERSION = 0` 不符即拒读（fail-closed，`ignorable` 豁免）；torn 尾部截断修复在 `commitRepair` 中截断 torn tail + 追加 closers + fsync（`core/session/persistence.py` `commit_repair`）。
+    - **JSONL 片段**：实现每文件 header 行 + 事件行，`SESSION_FORMAT_VERSION = 0` 不符即拒读（fail-closed，`ignorable` 豁免）；torn 尾部的**截断发生在读路径**——`read_prepared` / `_load_checked` 识别 torn 后即调 `_truncate_to` 落盘截断（`core/session/persistence.py:846,874`），随后 `commit_repair` 只**追加** recovered 事件 + closers 并 fsync（`core/session/persistence.py:965`，对齐上游 commitRepair）。
     - **`repair_and_replay`**：本章为逐条 `append` 重放；实现为 seed 回放——从 `session/end-seed` 标记重放，且修复合成的 closers 经 `commit_repair` 持久化落盘（`core/session/persistence.py`，基类接口 + JSONL 后端实现）。
     - **`turn/end` reason**：本章差异表写 `reason = "interrupted"` 字符串；实现为对象 `{kind:'interrupted'}`（配合 `repair_interrupted_turn` 合成 closers，见第 1 章横幅）。
     - **崩溃演示**：本章 §5.2"kill 进程"实为手动构造未闭合回合来模拟崩溃尾部，非真实 kill（`tests/test_persistence_boot.py` 可复核）。
@@ -52,6 +52,24 @@ flowchart LR
 4. **崩溃恢复只合成，不截断**：`turn/end { reason: interrupted }` 保持括号平衡。
 
 为什么是"扩展口"而不是直接写在 Session 里？因为存储策略（文件、数据库、未来可能的对象存储）不该和会话语义耦合。第 6 章会看到同样的思路在沙箱、凭据、子 agent 上重复出现。
+
+**逐节点走读**（对应上图两条链）：
+
+写路径（上排 `S → EVT → P → Q → J/QL → F → NEXT`）：
+
+1. `Session 内存日志` append 一条新事件，同步触发 `session/event` 广播（发布/订阅，Session 自己不碰存储）。
+2. 持久化插件 `P` 监听该广播，先把事件**复制**进自己的内部写入队列 `Q`——绝不直接修改 Session。
+3. `Q` 异步成批写入后端：JSONL 后端 `J`（每会话一个文件按 seq 追加）或 SQLite 后端 `QL`（多会话一库、`SCHEMA_VERSION` 单调）。
+4. `F`（flush 并行栅栏）是"等待点"：认领下一个普通 turn 前，`flush` 等待所有已入队事件真正落盘——这是崩溃恢复的落点前提。
+5. 落盘完成才 `NEXT` 进入下一 turn。
+
+读路径（下排 `LOAD → INT`）：
+
+6. `load()`：读取日志，**未知事件类型（未带 `ignorable`）整体拒绝**（fail-closed）——宁可不打开，不能静默丢事件改变解读。
+7. `INT` 崩溃恢复：发现未闭合回合时只**合成** `turn/end {kind:'interrupted'}`，保持括号平衡，绝不截断已写事件。
+8. （torn 尾部）：若读到残帧/残行，读路径先截断 torn tail，`commit_repair` 再把恢复事件 + closers 追加落盘——见本节横幅差异表。
+
+两条链相加：写入永远平衡、读取永远 fail-closed、恢复永远只合成不截断。
 
 ## 5.3 代码 step-by-step（persistence.py）
 

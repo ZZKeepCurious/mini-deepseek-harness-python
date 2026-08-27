@@ -176,15 +176,15 @@ mini 的 `parse_message` 对四个 type 全部校验（未知 type、非字符�
 | `session.create` | 会话 id 缺省 `session-<uuid4>`；`workspaceId` → workspace-not-found；重复 id + 同 cwd 幂等返回、异 cwd → session-conflict |
 | `session.prompt` | mode ∈ {queue, steer}；time zone 校验（非法 → invalid-time-zone）；`/` 开头单文本块 → 命令注册表；image 输入经模型模态校验后 ATTACHMENT_UNAVAILABLE 拒绝（无附件服务）|
 | `session.history` | 只读分页窗口（seq 偏移），不 resume |
-| `session.cancel` | 取消 + 清 inbox + turn 以 aborted 闭合 |
+| `session.cancel` | 取消活跃回合（turn 以 aborted 闭合）+ `keep_inbox=True` **保留** inbox（`found[1].cancel("user", keep_inbox=True)`，`_parked` 驻留）；取消后按 FIFO 恢复（下次唤醒 send 恢复）|
 | `session.models` | provider/model 快照 |
 
 ### 7.5.3 事件流：mux / host（`web/streams.py`）
 
 `StreamHub(ctx, api)` 挂到 `ctx` 事件总线，把会话事件与宿主状态变成两类订阅流：
 
-- **mux**（`/api/events.mux`）：每流一队列，先放会话基线（已附着的每个会话逐条 `session/event`，**每帧独立 rpcId**——对齐上游 `frame(payload)`：`{rpcId: randomUUID(), payload}`，纯推送帧每帧铸新），之后实时追加；宿主事件（session-added/removed）也只进 mux。可应答帧（approval/requested）例外：rpcId = pending 稳定 id，重连重放复用（§7.5.5）。
-- **host**（`/api/events.host`）：纯实时，无基线。
+- **mux**（`/api/events.mux`）：每流一队列，先放会话基线（已附着的每个会话逐条 `session/event`，**每帧独立 rpcId**——对齐上游 `frame(payload)`：`{rpcId: randomUUID(), payload}`，纯推送帧每帧铸新），之后实时追加。可应答帧（approval/requested）例外：rpcId = pending 稳定 id，重连重放复用（§7.5.5）。**host/* 帧不进 mux**——它们只走下面的 host 流（对齐上游 `events.ts` 的 `MuxFrame` 联合不含 host/* 帧，`host()` 是独立 HostFrame 流）。
+- **host**（`/api/events.host`）：纯实时，无基线；`host/session-added`、`host/session-removed`、`host/session-status`、`agent-error` 只路由到 `self._host`（`web/streams.py` docstring + L233-269）。
 - **session/queue 快照**：`agent/inbox/spliced` 广播点观察到的是 **pre-splice** inbox（`Inbox._mutate` 先落日志后改内存、emit 同步），所以快照把 splice 的 `start/removedCount/inserted` **重投影**到 pre-splice 列表上（对齐 api-proxy.ts:1300-1323 `queueItems`）；placement 三态：next-turn→`queued`、next-step 且 `source.kind=='user'`→`steering`、其余→`context`；空快照不发。这是 web 表层里最难的契约点。
 - **session/jobs**：jobs 注册表变更时对 mux 发全量快照。
 

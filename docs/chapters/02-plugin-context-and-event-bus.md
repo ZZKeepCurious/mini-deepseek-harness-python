@@ -46,6 +46,15 @@ flowchart LR
 
 选哪种模式取决于"这个事件要不要否决权"：通知用 `emit`，审批/决策用 `waterfall`，横切用 `parallel`，有前后依赖的变换用 `serial`。本章教学主体是同步近似：`parallel` 用列表推导模拟；实现另提供 `aemit`/`awaterfall`/`aparallel`/`aserial` 异步变体（第 4 章的 `agent/pre-step`、`agent/request-error` 已走 async 变体），真实 Cordis 是异步的，但短路语义不变。
 
+**逐分支走读**（对应上图四条链）：
+
+- `emit`：`emit(event)` → 监听器按注册序同步观察，`emit` 不等待任何监听器返回值，立即返回 `None`。适合"通知"，如 `session/event`。
+- `waterfall`：这是唯一有"否决权"的分支。`waterfall(event)` 把处理权沿链传递：先唤 m1，m1 **调用 `next()`** 才把控制权交给 m2；若 m1 **不调 `next()` 就直接 return**，则链条在此短路，`waterfall` 立即把 m1 的返回值当作最终决策向上返回。这就是"决策点插件"（如 `tools/pre-execute`）只关心"我要不要拦下"的原因——不调 `next` 即拦截。
+- `parallel`：`parallel(event)` 并发唤醒所有监听器并等待全部完成，再收集结果。适合"横切动作必须全部生效"。
+- `serial`：`serial(event)` 严格按注册序逐个执行可带返回值的监听器，适合"前序结果影响后续"的变换。
+
+短路语义（图里 `w2 -->|"不调 next → 短路"| w4` 这条边）是本章最需要记住的：它把"权限决策"从"线性广播"中区分出来，第 3 章的 `tools/pre-execute` 就靠它实现 deny。
+
 ## 2.3 代码 step-by-step
 
 ### 步骤 1：Context 骨架 —— 服务仓库 + 作用域链

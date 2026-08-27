@@ -61,6 +61,24 @@ sequenceDiagram
 2. **step = 一次模型请求 + 它调用的工具**。工具结果回灌后，同一 turn 内自动再问一次模型（`_continue`）。所以"一次对话回合"可能包含多次模型请求，这是 agent 循环和普通聊天 API 的本质区别。
 3. **模型可见 ⟺ 已记录**（第 1 章那句话在这里落地）：`user/message` 在 pre-step 通过后才 append，模型永远看不到没进日志的输入。
 
+**逐箭头走读**（对应上图从上到下，编号 1 起、step 每 turn 内重置为 1）：
+
+1. `U->>A: followup(content)` —— 用户把一段输入投进 inbox（followup 队列，归下一 turn）。
+2. `A->>S: turn/start [durable]` —— Agent 认领输入前先开 turn，`turn/start` 立即落日志（durable，即使后面什么都不做也留下括号记录）。
+3. `D->>D: claim 输入` —— 从 inbox 的 followup 队列取走用户输入。
+4. `D->>D: pre-step (waterfall)` —— 在派发前过 pre-step 决策瀑布（干预面/权限的扩展点）。
+5. **alt 拒绝**：pre-step 返回 `reject` → 直接 `D->>S: turn/end {kind:'blocked'}`，**不落 `step/start`**——这就是"零 step turn"：被拒绝的尝试也留痕。
+6. **else 进入**：pre-step 放行后才 `D->>S: step/start → user/message [durable]`（step 从 1 开始计数）。
+7. `D->>L: request → stream` —— 向 LLM 扩展口发起流式请求（此步传入的是已持久化的消息投影）。
+8. `L-->>D: StreamChunk*` —— 模型逐块回流（text-delta / reasoning-delta / tool-call-delta / finish）。
+9. `D->>S: assistant/message [durable]` —— 收齐后把完整 assistant 消息落日志。
+10. `D->>T: tool/call → 管线 → tool/result [durable]` —— 若含工具调用：`tool/call` 先落日志，再走第 3 章管线，`tool/result` 落日志。
+11. `D->>S: step/end` —— 本 step 闭合，reason 为 `{kind:'stop'|'tool-calls'|'max-tokens'|...}`。
+12. **alt 还有工具请求**：若本 step 产出工具调用，`D->>D` 同 turn 内进入下一步（step 递增），把结果回灌给模型继续问（`_continue`）。
+13. **else 无未偿之责**：无未匹配工具调用 → `D->>S: turn/end [durable]` 闭合整个回合。
+
+注意：`step/end`、`turn/end` 都落在 finally 中（失败也必落日志），这与第 1 章"括号平衡"基座一脉相承。
+
 ## 4.3 代码 step-by-step（llm.py）
 
 ### 步骤 1：StreamChunk 统一协议
@@ -450,7 +468,7 @@ loop 前调用 `apply_retry_planner(ctx)`（幂等，可重复调用）。
 **策略解析**（`llm/retry_policy.py`，对齐 retry-policy.ts）：
 
 - 两种模式：`normal`（`maxRetries` + `retryableCodes` 白名单）/ `always`（无限重试）
-- 默认：`maxRetries 2`、`initialDelayMs 500`、`maxDelayMs 10000`、`jitterRatio 0.1`、
+- 默认：`maxRetries 5`、`initialDelayMs 500`、`maxDelayMs 10000`、`jitterRatio 0.1`、
   可重试码 `[EMPTY_RESPONSE, RATE_LIMIT, SERVER, TIMEOUT, TRANSPORT]`
 - 严格校验：未知键拒绝、backoff 正有限且 `initial ≤ max`、jitter ∈ [0,1]、
   `maxRetries` 非负整数、codes 非空无重复；解析结果冻结，provider 注册时捕获
@@ -496,6 +514,20 @@ loop 前调用 `apply_retry_planner(ctx)`（幂等，可重复调用）。
 `replaceGeneration` 前进（检查点真实落盘）才返回 `{kind:'retry'}`，计数上限
 `maxOverflowRetries`，成功响应/回合结束边界复位。既无压缩也无接管 → 终局
 `turn/end` reason 为 `{kind:'error'}`。
+
+与压缩**互补**的还有一个可选、不送模型的 tool-result 裁剪服务：
+`install_tool_result_pruner(ctx)`（`miniharness/compaction/tool_result_pruner.py`，对齐
+上游 `compaction-tool-result-pruner`）。它只是把 `ToolResultPruner` 注册为
+`ctx.toolResultPruner` 服务；**真正触发它的地方是压缩引擎**（`miniharness/compaction/
+engine.py:139-167`）——无论压力触发（step 边界）还是 `context-overflow` 触发，引擎都会在
+做 token 摘要压缩**之前**先调用 `prune.prune_session`，按预算（默认
+`{thresholdChars 8192, headChars 4096, tailChars 1024}`，按 Unicode 码点计价）对当前
+surface 上每个超预算的 `tool/result` 节点做"保留 head + 固定标记 + 保留 tail"的原地替换
+（`PRUNE_MARKER = "[... tool result middle pruned ...]"`），重新测量后若已降到阈值以下
+就无需再走模型摘要。每次替换紧邻一个 **log-only** 的 `compaction/prune` 影子计价事件
+（经 tokenMeter 计价被遮蔽节点，供纯消费者无需逐节点状态即可扣减）+ 一个带 replace
+surfaceOp + sourceEventSeqs 的 `tool/result` 替换事件。装配顺序在
+`apply_retry_planner(ctx)` → `install_compaction(ctx)` 之后（幂等），demo 装配链已覆盖。
 
 验证：`python -m unittest tests.test_retry -v`（策略解析、退避边界、
 Retry-After 解析、全部 recover 分支、lifetime 信号与竞速等待、插件 teardown
