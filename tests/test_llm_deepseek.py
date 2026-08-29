@@ -98,6 +98,36 @@ class SseParsingTest(unittest.TestCase):
         with self.assertRaises(StreamAborted):
             asyncio.run(scenario())
 
+    def test_usage_maps_total_tokens_and_cache(self):
+        # 上游 mapUsage（translate.ts）：totalTokens = prompt+completion（权威
+        # 聚合），cacheRead 取 prompt_tokens_details.cached_tokens，reasoning 取
+        # completion_tokens_details.reasoning_tokens。
+        usage = {
+            'prompt_tokens': 100, 'completion_tokens': 50, 'total_tokens': 150,
+            'prompt_cache_hit_tokens': 30,
+            'prompt_tokens_details': {'cached_tokens': 30},
+            'completion_tokens_details': {'reasoning_tokens': 20},
+        }
+        line = 'data: ' + json.dumps({'usage': usage}) + '\n'
+        out = _run([_chunk(), '\n', line, '\n', DONE, ''])
+        usage_chunk = next(c for c in out if c['type'] == 'usage')
+        self.assertEqual(usage_chunk['usage'], {
+            'inputTokens': 70, 'outputTokens': 50, 'cacheReadTokens': 30,
+            'reasoningTokens': 20, 'totalTokens': 150,
+        })
+
+    def test_usage_total_tokens_omitted_when_inconsistent(self):
+        # total_tokens 与 prompt+completion 不一致 → totalTokens 省略（可缺省）。
+        usage = {
+            'prompt_tokens': 100, 'completion_tokens': 50, 'total_tokens': 999,
+        }
+        line = 'data: ' + json.dumps({'usage': usage}) + '\n'
+        out = _run([_chunk(), '\n', line, '\n', DONE, ''])
+        usage_chunk = next(c for c in out if c['type'] == 'usage')
+        self.assertNotIn('totalTokens', usage_chunk['usage'])
+        self.assertEqual(usage_chunk['usage']['inputTokens'], 100)
+        self.assertEqual(usage_chunk['usage']['outputTokens'], 50)
+
 
 def _stream(handler):
     adapter = DeepSeekAdapter(api_key='sk-test', transport=httpx.MockTransport(handler))

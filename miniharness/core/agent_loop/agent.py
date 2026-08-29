@@ -84,6 +84,23 @@ def canonical_header(config: dict, *, system: str = "", tools: list | None = Non
     return header
 
 
+def _replayed_next_turn(session) -> int:
+    """会话日志重放续号的下一回合号（对齐 invariant.ts `nextTurn`）。
+
+    初始 1；每条 turn/end 之后 +1；尾部存在未闭合 turn/start 时停在当前号
+    （暂停/中断后由 closers 先闭合，正常不会出现）。
+    """
+    next_turn = 1
+    open_turn = None
+    for event in session.events:
+        if event["type"] == "turn/start":
+            open_turn = event["data"]["turn"]
+        elif event["type"] == "turn/end" and open_turn is not None:
+            next_turn = open_turn + 1
+            open_turn = None
+    return open_turn if open_turn is not None else next_turn
+
+
 class _AbortProxy:
     """AbortSignal 的 asyncio 替身：aborted/event 反映宿主 loop 的取消标记。
 
@@ -166,7 +183,10 @@ class AgentLoop:
         self._turn_open = False
         self._continue = False
         self._cancelled = False
-        self._turn = 0     # 当前已打开的 turn 编号（1 起）
+        # turn/step 编号从 1 起（session/invariant.ts `nextTurn: 1`）；若会话
+        # 日志已有回合（resume 冷重建 loop），按 invariant 语义重放续号：
+        # turn/end 闭一秒之后 nextTurn +1，尾部未闭合回合则停在当前号。
+        self._turn = _replayed_next_turn(self.session) - 1
         self._step = 0     # 当前已打开的 step 编号（1 起，每 turn 重置）
         self._turn_end: dict | None = None
         self._step_signal: ToolExec | None = None   # 阶段 7：当前 step 的共享取消信号
@@ -179,6 +199,9 @@ class AgentLoop:
         self._abort_proxy = _AbortProxy(self)
         self._header_baseline: dict | None = None   # request/header 频次基线（上游 requestHeaderLogged）
         self._context_baseline: dict | None = None  # request/context 频次基线（provider/model 变化时落）
+        # A5：最近一次 request/header 落打印时的 surface 位置替换代数
+        # （上游 agent.ts requestSurfaceGeneration，undefined 起步）
+        self._request_surface_generation: int | None = None
         # 上游 agent/inbox/claimed 扩展点的 mini 简化：每 owner 钩子列表，
         # 在 user 输入被认领进 step 时触发（job 的 wake 预算据此恢复）
         self._inbox_claimed_hooks: list[Callable[["AgentLoop"], None]] = []
@@ -682,8 +705,15 @@ class AgentLoop:
 
         self._step += 1
         self._continue = False
+        # A5：本 step 认领的消息里含 goal round 续跑（source.kind=='goal'）即视为
+        # 显式新消息系列（对齐上游 goal-round-driver 在续跑 decision 上置
+        # startsRequestSeries:true→ agent.ts buildRequest 传参）。
+        starts_request_series = any(
+            isinstance(m, dict) and (m.get("source") or {}).get("kind") == "goal"
+            for m in claimed
+        )
         try:
-            tool_calls = await self._stream_step_async(messages)
+            tool_calls = await self._stream_step_async(messages, starts_request_series)
             concluded = await self._execute_tools_async(tool_calls)
             self._continue = bool(tool_calls)
         finally:
@@ -694,7 +724,8 @@ class AgentLoop:
             return {"kind": "completed"}
         return {"kind": "completed"} if concluded else None
 
-    async def _stream_step_async(self, messages: list) -> list[dict]:
+    async def _stream_step_async(self, messages: list,
+                                 starts_request_series: bool = False) -> list[dict]:
         """落日志 + LLM 流式（async 迭代器）。返回模型产出的 tool-call 块
         列表（模型序）。
 
@@ -702,6 +733,14 @@ class AgentLoop:
         waterfall（上游 agent-loop 同语义扩展点）；{kind:'retry'} → 同 step
         内重新发起模型请求（同一 messages，历史不因失败 attempt 改变；
         request/header 只落一次——上游仅在 header 变化时追加、attempt/重试不重复落）
+
+        A5（上游 agent.ts:496-517 buildRequest）：request/header 信封除
+        initial/resume/change 外新增 reason 'series' 与可选 startsSeries:true
+        （RequestHeaderReason，session/types.ts:205-213）。startsSeries 由
+        starts_request_series（goal round 等判定层系列边界信号）或最近一次
+        header 落打印后 surface 发生位置替换（session.replace_generation 前进）
+        触发，对齐上游 `startsSeries = startsRequestSeries ||
+        (requestSurfaceGeneration !== surfaceGeneration)`。
         """
         self.session.append("step/start", {"turn": self._turn, "step": self._step})
         for message in messages:
@@ -709,8 +748,8 @@ class AgentLoop:
 
         # 请求信封入日志（模型可见 ⟺ 已记录；对齐上游 buildRequest：
         # agent/request waterfall 决议 config → canonicalHeader → 首落
-        # initial/resume，之后仅 header 变化落 change；request/context 在
-        # provider/model 变化时追加；attempt/重试不重复落）
+        # initial/resume，之后仅 header 变化落 change、仅系列边界落 series；
+        # request/context 在 provider/model 变化时追加；attempt/重试不重复落）
         config = self._request_config(self._turn, self._step)
         header = canonical_header(
             config,
@@ -718,16 +757,24 @@ class AgentLoop:
             tools=self._tool_definitions(),
             adapter_defaults=self._adapter_defaults(),
         )
+        starts_series = (starts_request_series
+                         or self._request_surface_generation != self.session.replace_generation)
         if self._header_baseline is None:
             resume = any(e["type"] == "request/header" for e in self.session.events)
             self.session.append("request/header", {
                 "header": header, "reason": "resume" if resume else "initial",
             })
         elif header != self._header_baseline:
+            data = {"header": header, "reason": "change"}
+            if starts_series:
+                data["startsSeries"] = True
+            self.session.append("request/header", data)
+        elif starts_series:
             self.session.append("request/header", {
-                "header": header, "reason": "change",
+                "header": header, "reason": "series",
             })
         self._header_baseline = header
+        self._request_surface_generation = self.session.replace_generation
         context = {"provider": config.get("provider"), "model": config.get("model")}
         if context != self._context_baseline:
             self.session.append("request/context", context)

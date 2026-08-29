@@ -178,12 +178,15 @@ class TestRecovery(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 load_events_checked(p.load("s1"))
 
-    def test_unknown_event_with_ignorable_ok(self):
+    def test_unknown_event_rejected_even_if_ignorable(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = JsonlPersistence(Path(tmp))
-            p.append("s1", {"type": "future/event", "seq": 0, "time": 1, "data": {}, "ignorable": True})
+            # 上游无 ignorable 概念：即便带 ignorable 标记，未知类型仍整体拒绝
+            p.append("s1", {"type": "future/event", "seq": 0, "time": 1,
+                            "data": {}, "ignorable": True})
             p.flush()
-            self.assertEqual(len(load_events_checked(p.load("s1"))), 1)
+            with self.assertRaises(RuntimeError):
+                load_events_checked(p.load("s1"))
 
     def test_resume_conversation_after_restart(self):
         with tempfile.TemporaryDirectory() as tmp:

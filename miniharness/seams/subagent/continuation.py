@@ -259,7 +259,9 @@ def subagent_diagnostic(events) -> str | None:
 
     mini 无进程外 provider，诊断从持久化事件派生：记账 turn/end
     reason.kind=='error' 时取 failure 摘要（code: message），经共享结果边界
-    限长；completed / aborted / refusal 等其余终局无诊断。"""
+    限长；其余终局（含 aborted）本身无诊断。注意若 epoch 先有 error turn
+    再以 aborted 结束，stop='aborted' 仍可能携带此处派生出的诊断——结算层
+    _job_outcome 据此把该 aborted 判为 failed（run-settlement 同规则）。"""
     end = fold_consumed_work(events)["end"]
     reason = end.get("data", {}).get("reason") if end is not None else None
     if not isinstance(reason, dict) or reason.get("kind") != "error":
@@ -283,10 +285,42 @@ def settlement_summary(stop: str, child_id: str) -> str:
     return f"Background subagent {child_id} {phrase}"
 
 
-def _default_adapter_factory(provider: str, model: str) -> LlmAdapter:
+def _default_adapter_factory(provider: str, model: str,
+                             reasoning_effort: str | None = None) -> LlmAdapter:
     if provider == "fake":
-        return FakeLlmAdapter()
+        return FakeLlmAdapter(reasoning_effort=reasoning_effort)
     raise SubagentError(f"provider {provider!r} 不可用（mini 仅内建 fake）", "UNAVAILABLE")
+
+
+def _resolve_child_route(parent: AgentLoop, requested: dict | None) -> dict:
+    """解析子代理路由：父适配器当前值打底，requested 覆写；route 变更而未带
+    effort → 清除父 effort。
+
+    对齐上游 resolveChildAgentOptions（child-agent.ts:98-119）：父的
+    provider/model/reasoningEffort 继承到子；requested 是模型选择合并后的
+    AgentOptions；routeChanged（provider 或 model 有任一变更）且 requested
+    未声明 reasoningEffort → 丢弃继承的 effort，让所选模型用自身默认档。
+    descriptor 只记录 provider/model/effort（maxTokens/subagentDepth 属
+    单次激活预算或持久化 header，不入描述符，descriptor.ts 模块头同断）。
+    """
+    parent_options: dict[str, object] = {}
+    adapter = getattr(parent, "adapter", None)
+    if adapter is not None:
+        provider = getattr(adapter, "provider", None)
+        model = getattr(adapter, "model", None)
+        effort = getattr(adapter, "reasoning_effort", None)
+        if provider is not None:
+            parent_options["provider"] = provider
+        if model is not None:
+            parent_options["model"] = model
+        if effort is not None:
+            parent_options["reasoningEffort"] = effort
+    resolved = {**parent_options, **(requested or {})}
+    route_changed = (resolved.get("provider") != parent_options.get("provider")
+                     or resolved.get("model") != parent_options.get("model"))
+    if route_changed and (requested or {}).get("reasoningEffort") is None:
+        resolved.pop("reasoningEffort", None)
+    return resolved
 
 class SubagentContinuationManager:
     """可继续子代理管理器：创建 / 续跑 / 中断 / 结算投递 / 枚举。
@@ -294,8 +328,8 @@ class SubagentContinuationManager:
     @param parent - 父 AgentLoop（子代理的宿主与投递目标）。
     @param persistence - 会话持久化后端（declare / inspect / list_headers）。
     @param max_depth - 委托深度上限（上游 subagent-max-depth 默认 8）。
-    @param adapter_factory - 冷恢复时按 (provider, model) 重建适配器；
-        缺省仅支持 'fake'（复用父适配器当 provider 一致时）。
+    @param adapter_factory - 冷恢复时按 (provider, model, reasoning_effort)
+        重建适配器；缺省仅支持 'fake'（复用父适配器当 provider 一致时）。
     @param report_delivery - report 工具的部署级投递配置（上游
         Config.reportDelivery，默认 'next-step'；'quiet' → 非唤醒注入）。
     """
@@ -305,7 +339,7 @@ class SubagentContinuationManager:
         parent: AgentLoop,
         persistence: SessionPersistence,
         max_depth: int = 8,
-        adapter_factory: Callable[[str, str], LlmAdapter] | None = None,
+        adapter_factory: Callable[[str, str, str | None], LlmAdapter] | None = None,
         report_delivery: str = "next-step",
     ):
         if report_delivery not in REPORT_DELIVERIES:
@@ -545,6 +579,7 @@ class SubagentContinuationManager:
         prompt: str | dict | None = None,
         parent: AgentLoop | None = None,
         child_id: str | None = None,
+        agent_options: dict | None = None,
     ):
         """创建可继续子会话（durable before dispatch）。
 
@@ -558,6 +593,10 @@ class SubagentContinuationManager:
         @param child_id - 预留会话 id（上游 ContinuableStartSpec.childId，
             rc.2 新增；缺省随机生成）。无论预留或随机都做可用性断言：
             活体注册表 / 激活表 / 持久化 header 任一命中 → DUPLICATE_CHILD。
+        @param agent_options - 模型选择的解析后子选项（{provider, model,
+            reasoningEffort?}，对齐上游 request.agentOptions → resolveChildAgentOptions
+            的合并结果）。缺省继承父适配器当前路由。route 变更而未带 effort →
+            清除父 effort（子模型用自身的默认档位）。
         """
         parent = parent or self.parent
         self.assert_admitting(parent)
@@ -583,14 +622,21 @@ class SubagentContinuationManager:
         if seed:
             meta["seedLength"] = len(seed)
         # 描述符对齐上游 descriptor.ts schema：{version, mode, provider, label?,
-        # agentProvider?, agentModel?, persona?, toolFilter?}（无 kind 字段）
+        # agentProvider?, agentModel?, agentReasoningEffort?, persona?, toolFilter?}
+        # （无 kind 字段）。agentProvider/agentModel/agentReasoningEffort 取解析后
+        # 子路由（上游 resolveChildAgentOptions 合并 + resume 的 descriptor 一致）。
+        resolved = _resolve_child_route(parent, agent_options)
         descriptor: dict[str, Any] = {
             "mode": "continuable",
             "provider": CONTINUATION_PROVIDER,
             "label": label or "",
-            "agentProvider": getattr(parent.adapter, "provider", None),
-            "agentModel": getattr(parent.adapter, "model", None),
         }
+        if resolved.get("provider") is not None:
+            descriptor["agentProvider"] = resolved["provider"]
+        if resolved.get("model") is not None:
+            descriptor["agentModel"] = resolved["model"]
+        if resolved.get("reasoningEffort") is not None:
+            descriptor["agentReasoningEffort"] = resolved["reasoningEffort"]
         if persona:
             descriptor["persona"] = persona
         if tool_filter:
@@ -1159,19 +1205,34 @@ class SubagentContinuationManager:
 
         return dispose
 
-    def _resolve_adapter(self, descriptor: dict) -> LlmAdapter:
-        """按描述符重建子适配器（上游按 agentProvider/agentModel 重建 provider）。
+    def resolve_route(self, provider: str | None, model: str | None,
+                      reasoning_effort: str | None = None) -> LlmAdapter:
+        """按 (provider, model, reasoning_effort) 解析一条子路由为已构造适配器。
 
         命名注册表优先（register_provider 面）；未命中回退 adapter_factory。
         总是新建而非复用父适配器：子代理的模型实例彼此独立（共享父适配器
-        会串调用计数等状态）。provider/model 缺省继承父。
+        会串调用计数等状态）。provider/model 缺省继承父。模型选择预检
+        （per-call provider/model/reasoning_effort）在创建子前经此解析——
+        等价上游 preflightChildLlmRoute 的 resolveCallConfig 时机。
         """
-        provider = descriptor.get("agentProvider") or getattr(self.parent.adapter, "provider", None)
-        model = descriptor.get("agentModel") or getattr(self.parent.adapter, "model", None)
+        provider = provider or getattr(self.parent.adapter, "provider", None)
+        model = model or getattr(self.parent.adapter, "model", None)
         entry = self._providers.get(provider)
         if entry is not None:
             return entry(model)
-        return self._adapter_factory(provider, model)
+        return self._adapter_factory(provider, model, reasoning_effort)
+
+    def _resolve_adapter(self, descriptor: dict) -> LlmAdapter:
+        """按描述符重建子适配器（上游按 agentProvider/agentModel 重建 provider）。
+
+        冷恢复把描述符的 agentReasoningEffort 一并喂给适配器（上游
+        continuation.ts 冷恢复重建 agentOptions 含 reasoningEffort）。
+        """
+        return self.resolve_route(
+            descriptor.get("agentProvider"),
+            descriptor.get("agentModel"),
+            descriptor.get("agentReasoningEffort"),
+        )
 
     def _delegation_context(self, parent: AgentLoop, child_id: str) -> str:
         return (

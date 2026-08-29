@@ -7,7 +7,14 @@ from miniharness.core.scope import Context
 from miniharness.llm import BlockAssembler, FakeLlmAdapter, LlmAdapter, LlmFailure, StreamChunk
 from miniharness.llm.protocol import StreamAborted, _aiter_raced
 from miniharness.core.agent_loop.agent import AgentLoop
-from miniharness.core.session import Session, derive_messages, thaw, turn_balance
+from miniharness.core.session import (
+    Session,
+    create_message,
+    derive_messages,
+    text_block,
+    thaw,
+    turn_balance,
+)
 from miniharness.core.tools import Tool, ToolRegistry
 
 
@@ -280,6 +287,57 @@ class TestRequestEnvelope(unittest.TestCase):
             [e["type"] for e in session.events].count("request/header"), 1
         )
 
+    def test_surface_replacement_begins_distinct_series(self):
+        # A5（上游 agent.ts:502-515）：header 未变但 surface 发生过位置替换 →
+        # request/header reason='series'（显式新消息系列边界）。
+        session, loop, _ = _make_env()
+        loop.followup("第一句")
+        a_msg = next(e for e in reversed(session.events) if e["type"] == "assistant/message")
+        session.append(
+            "assistant/message",
+            {"message": create_message("assistant", [text_block("压缩摘要")])},
+            surfaceOp={"op": "replace", "start": a_msg["seq"], "end": a_msg["seq"]},
+            sourceEventSeqs=[a_msg["seq"]],
+        )
+        loop.followup("第二句")
+        headers = [e for e in session.events if e["type"] == "request/header"]
+        self.assertEqual(headers[0]["data"]["reason"], "initial")
+        self.assertEqual(headers[1]["data"]["reason"], "series")
+        self.assertNotIn("startsSeries", headers[1]["data"])
+
+    def test_surface_replacement_sets_starts_series_on_change(self):
+        # A5（上游 agent.ts:508-513）：header 变化 + surface 已替换 →
+        # reason='change' 且携带 startsSeries:true。
+        session, loop, adapter = _make_env()
+        loop.followup("第一句")
+        adapter.model = "other"   # 改变请求 header（provider/model 含 model）
+        a_msg = next(e for e in reversed(session.events) if e["type"] == "assistant/message")
+        session.append(
+            "assistant/message",
+            {"message": create_message("assistant", [text_block("压缩摘要")])},
+            surfaceOp={"op": "replace", "start": a_msg["seq"], "end": a_msg["seq"]},
+            sourceEventSeqs=[a_msg["seq"]],
+        )
+        loop.followup("第二句")
+        headers = [e for e in session.events if e["type"] == "request/header"]
+        self.assertEqual(headers[1]["data"]["reason"], "change")
+        self.assertTrue(headers[1]["data"].get("startsSeries") is True)
+
+    def test_goal_round_starts_request_series(self):
+        # A5（上游 goal-round-driver → agent.ts startsRequestSeries 传参）：
+        # 后续 step 认领消息含 goal round 源头 → 即使 header 未变也落
+        # reason='series'（显式新系列）。首请求仍走 initial。
+        session, loop, _ = _make_env()
+        loop.followup("你好")
+        goal_msg = create_message(
+            "user",
+            [text_block("[目标轮次] 继续")],
+            {"kind": "goal", "goalId": "g1", "revision": 1, "round": 1},
+        )
+        loop.followup(goal_msg)
+        headers = [e for e in session.events if e["type"] == "request/header"]
+        self.assertEqual(headers[0]["data"]["reason"], "initial")
+        self.assertEqual(headers[1]["data"]["reason"], "series")
     def test_agent_request_waterfall_overrides_model(self):
         session, loop, _ = _make_env()
 

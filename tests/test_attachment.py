@@ -18,7 +18,6 @@ from miniharness.attachment import (
     ATTACHMENT_NOT_FOUND,
     ATTACHMENT_PROJECTION_UNSUPPORTED,
     IMAGE_DIMENSION_TOO_LARGE,
-    IMAGE_TOO_LARGE,
     IMAGE_TOO_MANY_PIXELS,
     IMAGES_TOO_LARGE,
     IMAGE_TYPE_MISMATCH,
@@ -37,10 +36,8 @@ from miniharness.attachment import (
 )
 from miniharness.attachment.image import detect_image, probe_image
 from miniharness.attachment.normalization import NormalizationPolicy
-from miniharness.attachment.request_image import (
-    request_image_dimensions,
-    request_image_variant_id,
-)
+from miniharness.attachment.projection import request_image_dimensions
+from miniharness.attachment.request_image import request_image_variant_id
 from miniharness.attachment.types import ImageAttachmentLimits
 
 # 1x1 PNG（base64，Pillow 可完整解码的有效光栅）
@@ -131,6 +128,8 @@ class TestNormalization(unittest.TestCase):
         self.assertEqual((ref.width, ref.height), (4, 4))
 
     def test_oversized_long_edge_is_normalized_with_original_dimensions(self):
+        # alpha.1：规制改为总像素预算（maxPixels）→ 长边封顶（maxDimension）。
+        # 64×32 在缺省总像素预算内，故按 maxDimension=8 封顶 → (8,4)。
         policy = NormalizationPolicy(maxDimension=8, maxBytes=1_000_000)
         store = LocalAttachmentStore(root=self._tmp, normalization_policy=policy)
         data = _png_bytes(64, 32)
@@ -143,20 +142,20 @@ class TestNormalization(unittest.TestCase):
         stored = store.read_image(ref)
         detected = detect_image(stored.data)
         self.assertEqual(detected.media_type, ref.mediaType)
-        # 规范化字节上限成立（独立安全上限）
-        tight = LocalAttachmentStore(
-            root=self._tmp,
-            normalization_policy=NormalizationPolicy(maxDimension=2048, maxBytes=200),
-        )
-        small = tight.save_image(_save(tight, data=_png_bytes(16, 16)))
-        self.assertLessEqual(small.bytes, 200)
 
-    def test_unencodable_within_cap_raises_image_too_large(self):
+    def test_unreachable_byte_target_keeps_smallest_ladder_output(self):
+        # alpha.1：规范化把 maxBytes 当作编码字节目标，每个阶梯质量都超限时
+        # 保留最小阶梯输出（不再抛 IMAGE_TOO_LARGE）。
         policy = NormalizationPolicy(maxDimension=2048, maxBytes=8)
         store = LocalAttachmentStore(root=self._tmp, normalization_policy=policy)
-        with self.assertRaises(AttachmentError) as cm:
-            store.save_image(_save(store, data=_png_bytes(16, 16)))
-        self.assertEqual(cm.exception.code, IMAGE_TOO_LARGE)
+        ref = store.save_image(_save(store, data=_png_bytes(16, 16)))
+        self.assertGreater(ref.bytes, 8)
+        # 产物仍是合法规范化图片（8-bit sRGB、无元数据、尺寸不变或缩小）
+        stored = store.read_image(ref)
+        detected = detect_image(stored.data)
+        self.assertEqual(detected.media_type, ref.mediaType)
+        self.assertFalse(detected.carries_metadata)
+        self.assertLessEqual((ref.width, ref.height), (16, 16))
 
     def test_metadata_carrier_is_reencoded_without_original_dimensions_leak(self):
         from PIL import PngImagePlugin
@@ -282,16 +281,61 @@ class TestRequestImage(unittest.TestCase):
             request_image_dimensions(4, 4, 2), (1, 1)
         )
 
-    def test_impossible_byte_budget_raises_model_request_wording(self):
-        with self.assertRaises(AttachmentError) as cm:
-            self.store.read_image_request(
-                self.ref, ImageRequestPolicy(maxPixels=10_000, maxBytes=2)
-            )
-        self.assertEqual(cm.exception.code, IMAGE_TOO_LARGE)
-        self.assertEqual(
-            str(cm.exception),
-            "Image cannot be encoded within the model-request byte budget.",
+    def test_unreachable_byte_target_keeps_smallest_ladder_output(self):
+        # alpha.1：请求图把 maxBytes 当编码字节目标，每个阶梯质量都超限时
+        # 保留最小阶梯输出（不再抛 IMAGE_TOO_LARGE）。
+        version = self.store.read_image_request(
+            self.ref, ImageRequestPolicy(maxPixels=10_000, maxBytes=2)
         )
+        self.assertGreater(version.bytes, 2)
+        self.assertEqual(version.width, self.ref.width)
+        self.assertEqual(version.height, self.ref.height)
+
+    def test_opaque_route_is_jpeg_and_alpha_route_is_webp(self):
+        # alpha.1：编码阶梯按 alpha 分流——不透明走 JPEG，带 alpha 走 WebP。
+        opaque = self.store.read_image_request(
+            self.ref, ImageRequestPolicy(maxPixels=4, maxBytes=1_000_000)
+        )
+        self.assertEqual(opaque.mediaType, "image/jpeg")
+        # 带半透明 alpha 的 4×4 PNG 强制缩放 → WebP 阶梯且保留 alpha
+        alpha_im = Image.new("RGBA", (4, 4))
+        a_pixels = alpha_im.load()
+        for x in range(4):
+            for y in range(4):
+                a_pixels[x, y] = ((x * 8) % 256, (y * 8) % 256, 128, (x + y) % 180)
+        alpha_buffer = io.BytesIO()
+        alpha_im.save(alpha_buffer, format="PNG")
+        alpha_ref = self.store.save_image(_save(self.store, data=alpha_buffer.getvalue()))
+        alpha_version = self.store.read_image_request(
+            alpha_ref, ImageRequestPolicy(maxPixels=2, maxBytes=1_000_000)
+        )
+        self.assertEqual(alpha_version.mediaType, "image/webp")
+        self.assertTrue(alpha_version.hasAlpha)
+
+    def test_transform_version_is_v5_and_codes_for_ladder_are_stable(self):
+        # alpha.1：变换版本 request-image-v4 → v5；阶梯与编码参数是 caches/上传
+        # 索引键的一部分，任何变化都必须同时改版本号。
+        from miniharness.attachment.encoding import (
+            IMAGE_ENCODING_QUALITIES,
+            WEBP_ENCODING_EFFORT,
+        )
+        from miniharness.attachment.request_image import REQUEST_IMAGE_TRANSFORM_VERSION
+        self.assertEqual(REQUEST_IMAGE_TRANSFORM_VERSION, "request-image-v5")
+        self.assertEqual(IMAGE_ENCODING_QUALITIES, (85, 75, 60))
+        self.assertEqual(WEBP_ENCODING_EFFORT, 0)
+
+    def test_invalid_cached_variant_is_regenerated(self):
+        # alpha.1：读取缓存时按规范复验（uchar/srgb/尺寸不超投影/alpha 兼容），
+        # 任何不符当作未命中重新生成（不按字节超限判失效）。
+        policy = ImageRequestPolicy(maxPixels=4, maxBytes=1_000_000)
+        first = self.store.read_image_request(self.ref, policy)
+        hash_hex = str(first.variantId)[len("sha256:"):]
+        path = os.path.join(self._tmp, "request-images", hash_hex[:2], hash_hex)
+        with open(path, "wb") as fh:
+            fh.write(b"not-a-real-image")
+        second = self.store.read_image_request(self.ref, policy)
+        self.assertEqual(second.data, first.data)
+        self.assertEqual(second.variantId, first.variantId)
 
     def test_request_image_dimensions_algorithm(self):
         self.assertEqual(request_image_dimensions(10, 10, 1000), (10, 10))  # 不放大
@@ -300,6 +344,19 @@ class TestRequestImage(unittest.TestCase):
         self.assertEqual(h, w // 2)  # 纵横保持
         lw, lh = request_image_dimensions(2, 100, 100)
         self.assertLessEqual(lw * lh, 100)
+
+    def test_request_image_dimensions_matches_upstream_spec(self):
+        # alpha.1 新增纯投影几何（seam 包 request-projection.ts）上游 spec 定值
+        self.assertEqual(request_image_dimensions(4096, 4096, 640_000), (800, 800))
+        self.assertEqual(request_image_dimensions(4096, 2048, 640_000), (1130, 565))
+        self.assertEqual(request_image_dimensions(3840, 2160, 640_000), (1066, 600))
+        self.assertEqual(request_image_dimensions(320, 240, 640_000), (320, 240))
+        self.assertEqual(request_image_dimensions(2160, 3840, 640_000), (600, 1066))
+        # 竖版取整跨过预算时继续内收
+        self.assertEqual(request_image_dimensions(2, 4, 5), (1, 2))
+        for width, height in [(4096, 4096), (4096, 2048), (3840, 2160), (2160, 3840)]:
+            pw, ph = request_image_dimensions(width, height, 640_000)
+            self.assertLessEqual(pw * ph, 640_000)
 
 
 class TestLocalAttachmentStore(unittest.TestCase):

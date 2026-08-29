@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from .json import is_json_safe
+from .seq_ranges import decode_seq_ranges
 from .surface import assert_provenance, surface_op_of
 from .types import KNOWN_TYPES
 
@@ -31,23 +32,20 @@ def validate_event(type_, data, surfaceOp, sourceEventSeqs) -> dict:
     op = surface_op_of(type_, surfaceOp)
     if sourceEventSeqs is not None:
         # 非 surface 事件禁止携带 sourceEventSeqs（surface_op_of 已拦 surfaceOp，
-        # 这里对称拦 sourceEventSeqs——上游 surfaceOpOf 一并处理两字段）
+        # 这里对称拦 sourceEventSeqs——上游 surfaceOpOf 一并处理两字段）。
+        # sourceEventSeqs 可携带存储态区间编码（上游 seq-ranges.ts encodeSeqRanges），
+        # 此处先 decode 展开为内存态严格递增列表再存储；decode 即完成形状校验
+        # （非负安全整数 / [start,end] 对 / end>=start / 越界，fail-closed）。
         if op is None:
             raise ValueError(f"非 surface 事件 {type_} 不允许携带 sourceEventSeqs")
-        if not isinstance(sourceEventSeqs, (list, tuple)) or not all(
-            isinstance(s, int) and not isinstance(s, bool) and s >= 0
-            for s in sourceEventSeqs
-        ):
-            raise ValueError(f"sourceEventSeqs 必须是非负整数序列: {sourceEventSeqs!r}")
-        if len(sourceEventSeqs) == 0 and type_ != "assistant/message":
+        decoded = decode_seq_ranges(sourceEventSeqs)
+        if len(decoded) == 0 and type_ != "assistant/message":
             raise ValueError("sourceEventSeqs must not be empty except on assistant/message")
-        if len(set(sourceEventSeqs)) != len(sourceEventSeqs):
-            raise ValueError("sourceEventSeqs must not contain duplicates")
     payload: dict = {"type": type_, "data": data if data is not None else {}}
     if op is not None:
         payload["surfaceOp"] = surfaceOp
         if sourceEventSeqs is not None:
-            payload["sourceEventSeqs"] = list(sourceEventSeqs)
+            payload["sourceEventSeqs"] = list(decoded)
     elif surfaceOp is not None:
         raise ValueError(f"非 surface 事件 {type_} 不允许携带 surfaceOp")
     if not is_json_safe(payload):

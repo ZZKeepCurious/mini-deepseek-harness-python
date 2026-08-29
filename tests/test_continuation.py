@@ -120,35 +120,67 @@ class TestDescriptor(unittest.TestCase):
         self.assertIsNone(parse_subagent_descriptor({}))
         self.assertIsNone(parse_subagent_descriptor(
             {"version": 1, "mode": "continuable", "provider": "p", "label": "x"}))
+        # 未知键之外的一切，先查版本（descriptor.ts:210 同序）：
+        # 版本不匹配 → 不进入字段校验而直接 None
         self.assertIsNone(parse_subagent_descriptor(
-            {"version": 2, "mode": "continuable", "provider": 42, "label": "x"}))
+            {"version": 2, "mode": "continuable", "provider": "p", "label": "x"}))
         self.assertIsNone(parse_subagent_descriptor(
-            {"version": 2, "mode": "background", "provider": "p", "label": "x"}))
+            {"version": SUBAGENT_DESCRIPTOR_VERSION,
+             "mode": "continuable", "provider": 42, "label": "x"}))
         self.assertIsNone(parse_subagent_descriptor(
-            {"version": 2, "mode": "continuable", "provider": "p"}))  # continuable 缺 label
+            {"version": SUBAGENT_DESCRIPTOR_VERSION,
+             "mode": "background", "provider": "p", "label": "x"}))
         self.assertIsNone(parse_subagent_descriptor(
-            {"version": 2, "mode": "continuable", "provider": "p", "label": "x",
+            {"version": SUBAGENT_DESCRIPTOR_VERSION,
+             "mode": "continuable", "provider": "p"}))  # continuable 缺 label
+        self.assertIsNone(parse_subagent_descriptor(
+            {"version": SUBAGENT_DESCRIPTOR_VERSION, "mode": "continuable",
+             "provider": "p", "label": "x",
              "toolFilter": "not-a-list"}))
         self.assertIsNone(parse_subagent_descriptor(
-            {"version": 2, "mode": "continuable", "provider": "p", "label": "x",
+            {"version": SUBAGENT_DESCRIPTOR_VERSION, "mode": "continuable",
+             "provider": "p", "label": "x",
              "toolFilter": {"allow": "not-a-list"}}))
         self.assertIsNone(parse_subagent_descriptor(
-            {"version": 2, "mode": "continuable", "provider": "p", "label": "x",
+            {"version": SUBAGENT_DESCRIPTOR_VERSION, "mode": "continuable",
+             "provider": "p", "label": "x",
              "bogusField": 1}))  # 未知字段拒绝（上游 assertKnownKeys）
         self.assertIsNone(parse_subagent_descriptor("junk"))
         self.assertIsNone(parse_subagent_descriptor(None))
 
     def test_one_shot_descriptor_parses_but_not_continuable(self):
-        payload = {"version": 2, "mode": "one-shot", "provider": "p", "label": "once"}
+        payload = {"version": SUBAGENT_DESCRIPTOR_VERSION,
+                   "mode": "one-shot", "provider": "p", "label": "once"}
         self.assertEqual(parse_subagent_descriptor(payload), payload)
         self.assertIsNone(parse_subagent_descriptor(
-            {"version": 2, "mode": "one-shot", "provider": "p", "persona": "x"}))  # one-shot 无 persona
+            {"version": SUBAGENT_DESCRIPTOR_VERSION,
+             "mode": "one-shot", "provider": "p", "persona": "x"}))  # one-shot 无 persona
 
     def test_tool_filter_shape(self):
         payload = self._payload(toolFilter={"allow": ["bash"], "deny": ["fs_write"]})
         self.assertEqual(parse_subagent_descriptor(
             snapshot_subagent_descriptor(payload)).get("toolFilter"),
             {"allow": ["bash"], "deny": ["fs_write"]})
+
+    def test_agent_reasoning_effort_roundtrip(self):
+        # v3 增量：可选 branded string（descriptor.ts:213-222 同款）；
+        # 未提供 → 键整体缺席；非字符串 → 拒绝
+        descriptor = self._payload(agentProvider="deepseek-official",
+                                   agentModel="deepseek-chat",
+                                   agentReasoningEffort="high")
+        snapshot = snapshot_subagent_descriptor(descriptor)
+        parsed = parse_subagent_descriptor(snapshot)
+        self.assertEqual(parsed["version"], SUBAGENT_DESCRIPTOR_VERSION)
+        self.assertEqual(parsed["agentProvider"], "deepseek-official")
+        self.assertEqual(parsed["agentModel"], "deepseek-chat")
+        self.assertEqual(parsed["agentReasoningEffort"], "high")
+        bare = parse_subagent_descriptor(snapshot_subagent_descriptor(self._payload()))
+        self.assertNotIn("agentProvider", bare)
+        self.assertNotIn("agentModel", bare)
+        self.assertNotIn("agentReasoningEffort", bare)
+        self.assertIsNone(parse_subagent_descriptor(
+            {"version": SUBAGENT_DESCRIPTOR_VERSION, "mode": "continuable",
+             "provider": "p", "label": "x", "agentReasoningEffort": 13}))
 
     def test_fold_first_authoritative(self):
         # 首条权威；之后重复的同型事件被无视（上游 find 首条，非损坏）
@@ -321,8 +353,8 @@ class TestContinuationManager(unittest.TestCase):
 
     def test_cold_resume_rebuilds_adapter_via_factory(self):
         factory_calls = []
-        def factory(provider, model):
-            factory_calls.append((provider, model))
+        def factory(provider, model, reasoning_effort=None):
+            factory_calls.append((provider, model, reasoning_effort))
             return FakeLlmAdapter(final_text="重建后的子代理")
         mgr = self._manager(adapter_factory=factory)
         cid = mgr.start_continuable(label="研")
@@ -330,7 +362,7 @@ class TestContinuationManager(unittest.TestCase):
         # 新管理器 + 同一持久化 → 冷恢复；adapter 经 factory 重建
         mgr2 = SubagentContinuationManager(self.parent, self.persistence, adapter_factory=factory)
         mgr2.send_message(cid, "第二问")
-        self.assertTrue(any(p == "fake" for p, _ in factory_calls))
+        self.assertTrue(any(p == "fake" for p, _, _ in factory_calls))
         events = self.persistence.inspect(cid)["events"]
         user_msgs = [e["data"]["content"][0]["text"] for e in events
                      if e["type"] == "user/message"]
@@ -380,7 +412,7 @@ class TestContinuationManager(unittest.TestCase):
                 raise LlmFailure("RATE_LIMIT", "429 Too Many Requests")
                 yield  # pragma: no cover - 使函数成为 async 生成器（首个 __anext__ 即抛）
 
-        mgr = self._manager(adapter_factory=lambda p, m: BoomAdapter())
+        mgr = self._manager(adapter_factory=lambda p, m, r=None: BoomAdapter())
         cid = mgr.start_continuable(label="研")
         mgr.send_message(cid, "hi")   # 子失败不冒泡
         settled = next(e for e in self.parent.session.events
@@ -403,7 +435,7 @@ class TestContinuationManager(unittest.TestCase):
         # 注入子工具：子注册表复制父全局工具；这里注册到父 → 复制进子
         self.reg.register(cancel_tool)
         child_adapter = FakeLlmAdapter(tool_call={"name": "cancel_self", "arguments": {}})
-        mgr = self._manager(adapter_factory=lambda p, m: child_adapter)
+        mgr = self._manager(adapter_factory=lambda p, m, r=None: child_adapter)
         mgr.send_message(cid, "hi")
         settled = next(e for e in self.parent.session.events
                        if e["type"] == "user/message"
@@ -655,7 +687,7 @@ class TestAsyncContinuation(unittest.TestCase):
             self.parent.start_driver()
             child_adapter = FakeLlmAdapter(tool_call={"name": "cancel_self", "arguments": {}})
             mgr = SubagentContinuationManager(
-                self.parent, self.persistence, adapter_factory=lambda p, m: child_adapter)
+                self.parent, self.persistence, adapter_factory=lambda p, m, r=None: child_adapter)
             cid = mgr.start_continuable(label="研")
             self.reg.register(Tool(
                 name="cancel_self", description="d",
@@ -711,7 +743,7 @@ class TestAsyncContinuation(unittest.TestCase):
                                    execute=hold))
             mgr = SubagentContinuationManager(
                 self.parent, self.persistence,
-                adapter_factory=lambda p, m: FakeLlmAdapter(tool_call={"name": "hold", "arguments": {}}))
+                adapter_factory=lambda p, m, r=None: FakeLlmAdapter(tool_call={"name": "hold", "arguments": {}}))
             self.parent.start_driver()
             cid1 = mgr.start_continuable(label="甲")
             cid2 = mgr.start_continuable(label="乙")
@@ -754,7 +786,7 @@ class TestAsyncContinuation(unittest.TestCase):
         async def scenario():
             self.parent.start_driver()
             mgr = SubagentContinuationManager(
-                self.parent, self.persistence, adapter_factory=lambda p, m: BoomAdapter())
+                self.parent, self.persistence, adapter_factory=lambda p, m, r=None: BoomAdapter())
             cid = mgr.start_continuable(label="研")
             mgr.send_message(cid, "hi")
             await _wait_until(lambda: len(_settlement_notices(self.parent.session)) == 1)

@@ -276,9 +276,9 @@ python -m unittest tests.test_session -v
 
 ## 1.6 回到 dsh：真实源码对照
 
-现在打开 `deepseek-harness/packages/core/session/src` 对照。建议的读法：先看 `SessionEventMap`（对应本章的 `KNOWN_TYPES`，但它是 TypeScript 接口，靠声明合并扩展），再看 `append()` 的校验（真实实现还有 event 版本和 `ignorable` 标记，那个标记到 05 章讲持久化时才用得上），最后看 `deriveMessages()`（真实实现按"surface 节点"序列投影，语义和我们一致，但组织方式更正式）。
+现在打开 `deepseek-harness/packages/core/session/src` 对照。建议的读法：先看 `SessionEventMap`（对应本章的 `KNOWN_TYPES`，但它是 TypeScript 接口，靠声明合并扩展），再看 `append()` 的校验（真实实现还有 event 版本字段），最后看 `deriveMessages()`（真实实现按"surface 节点"序列投影，语义和我们一致，但组织方式更正式）。
 
-不用全读，读 50 行就够。目标不是读完，而是体会到一件事：**约定一样，实现更严格**。简化版抓住了设计精髓，真实版在细节上更严密——比如 `ignorable`、事件版本这类简化版没碰的东西，都是为真实世界的运维场景准备的。
+不用全读，读 50 行就够。目标不是读完，而是体会到一件事：**约定一样，实现更严格**。简化版抓住了设计精髓，真实版在细节上更严密——比如事件版本这类简化版没碰的东西，都是为真实世界的运维场景准备的。
 
 ## 1.7 收尾
 

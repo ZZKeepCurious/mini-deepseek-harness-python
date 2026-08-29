@@ -44,8 +44,9 @@ miniharness/
 ├── attachment/             # packages/attachment（attachment + attachment-local）
 │   ├── types.py            # ImageAttachmentRef（含 originalDimensions）/ SaveImageAttachment / ImageAttachmentLimits / ImageRequestPolicy / RequestImageAttachment
 │   ├── error.py            # AttachmentError + 15 错误码 + is_image_admission_error
-│   ├── encoding.py         # encodeFirstWithinLimit 惰性编码候选执行
-│   ├── normalization.py    # provider 无关规范化管线（直通/低彩色分流/缩边循环）
+│   ├── encoding.py         # 共享质量阶梯 [85,75,60] + encodeFirstWithinLimit 惰性候选执行
+│   ├── normalization.py    # provider 无关规范化管线（直通/总像素预算+长边封顶/按 alpha 分流编码）
+│   ├── projection.py       # requestImageDimensions 纯请求投影几何（alpha.1 抽到 seam 包）
 │   ├── request_image.py    # variantId 确定身份的请求图缓存版本
 │   ├── admission.py        # canonical base64 wire 受理入口
 │   └── store.py            # LocalAttachmentStore（规范化字节 sha256 内容寻址 + 完整性复验）
@@ -85,9 +86,10 @@ miniharness/
 │   ├── main.py            # launcher 选项（profile / patch / dump）
 │   ├── headless.py        # 一次性任务入口
 │   ├── default_tools.py   # headless 默认工具集（教学扩展）
-│   └── session_cmds.py    # 会话 list / resume / delete（教学扩展）
+│   ├── session_cmds.py    # 会话 list / resume / delete（教学扩展）
+│   └── preset_cmds.py     # presets list / show / select / delete（教学扩展，web Remote 等价本地入口）
 ├── preset/                # packages/preset + apps/cli/config/agent-presets
-│   └── presets.py         # （数据目录 preset/{minimal,standard} 随迁）
+│   ├── presets.py         # shipped root / 分层 roster / 投影 / 锁 / cordis 翻译（数据目录 preset/{minimal,standard} 随迁）
 ├── extensions/            # packages/extensions
 │   └── dynamic.py         # 动态插件生命周期
 ├── interaction/           # packages/interaction
@@ -146,7 +148,7 @@ miniharness/
 | `core/dsh_scope.py` | `packages/core/scope/src/index.ts` + `store.ts` | dsh-scope 协议本尊（纯库，L0）：ScopeKey 弱引用身份键、scopeParents 图（bind/link/rebind + 环检测）、`scope_parent_of`/`scope_chain_of`（nearest-first）、`scope_target`/`_ScopeCarrier`/`is_scope_carrier`/`carrier_key_of`、`scope_of`（parent 链）、NamedEntries/AnonymousEntries/ScopedLayers 对齐 store.ts；`Context.create_scope` 返回 Scope 包装（delegation 包装，`__slots__` 无 `__dict__`） |
 | `core/hmr.py` | `vendor/hmr/src/index.ts` | Cordis HMR 服务：`Hmr(Service)` provide="hmr"；`register_config(filename, refresh)`——findWatchRoot walk-up 根定位（realpath+depth+缺盘拒绝）、重复注册拒绝、初扫已存在目标即刷（chokidar ignoreInitial=false 语义：缺文件无初扫）、disposer 注销+关 watcher+join 在飞刷新；`refresh_config(key)` 单飞+dirty 合并循环、失败 logger.warn + `hmr/config-update-failed` 并行事件外泄不毒化循环；销毁期注册归一 `CordisError(INACTIVE_EFFECT)`。载体 watchdog（上游 chokidar）；Node ESM 模块图热重载（ModuleLoader/externals/accepted）不适用 Python 载体；Windows 短路径两侧 normcase+realpath 归一 |
 | `core/tools.py` | `packages/core/tools` | 作用域化注册表（ScopedLayers/NamedEntries 存储：注册即 effect 归目标 fiber、拆解自动注销；resolve/names 缺省视角 = 注册表 root 的 scope 键，显式 scope 沿键父链最近者胜 + 全局层兜底）+ 守卫执行管线（pre/execute/post waterfall + schema 校验 + 超时） |
-| `core/agent_loop/agent.py` | `packages/core/agent-loop/src/agent.ts` | 单一 async 泵（`_pump_async`/`_run_step_async`）+ `followup`/`steer` 同步门面（经常驻单事件循环驱动，见下行 resident_loop）+ 协作式取消（`_cancel_event` 每轮新建 + `call_soon_threadsafe` 跨线程置位——对应上游 agent.ts:325 每 phase 新建 AbortController）；agent/pre-step 决策经 `awaterfall`；publish/dispose 生命周期（enter+announce+agent/session-start / cancel(disposed)+scope.dispose+detach，会话店成员资格归 loop）+ agent/* 事件载波派发（scopeTarget(agent, loop scope 键)，兄弟作用域隔离） |
+| `core/agent_loop/agent.py` | `packages/core/agent-loop/src/agent.ts` | 单一 async 泵（`_pump_async`/`_run_step_async`）+ `followup`/`steer` 同步门面（经常驻单事件循环驱动，见下行 resident_loop）+ 协作式取消（`_cancel_event` 每轮新建 + `call_soon_threadsafe` 跨线程置位——对应上游 agent.ts:325 每 phase 新建 AbortController）；agent/pre-step 决策经 `awaterfall`；publish/dispose 生命周期（enter+announce+agent/session-start / cancel(disposed)+scope.dispose+detach，会话店成员资格归 loop）+ agent/* 事件载波派发（scopeTarget(agent, loop scope 键)，兄弟作用域隔离）+ turn/step 编号 1 起经 `_replayed_next_turn` 从会话日志续号（对齐 invariant.ts `nextTurn`：turn/end 闭合后 +1、尾部未闭合停在当前号；resume 冷重建 loop 不重置回合号） |
 | `core/agent_loop/resident_loop.py` | （无独立文件：Node 进程固有单事件循环） | 教学扩展：进程级懒加载单例循环（守护线程 run_forever）；`run_on_resident` 阻塞提交协程、异常冒泡、主线程 Ctrl+C 协作取消在途泵；同步门面由此驱动后跨调用共享同一循环，与上游形态一致 |
 | `core/agent_loop/tool_calls.py` | `packages/core/agent-loop/src/tool-calls.ts` | |
 | `core/agent_loop/inbox.py` | `packages/core/agent-loop/src/inbox.ts` | 双队列（followup→next-turn / steer→next-step）+ `agent/inbox/spliced` 持久化 |
@@ -155,7 +157,7 @@ miniharness/
 | `llm/protocol.py` | `packages/llm/llm/src/` | `stream(messages, tools, signal)` async 契约 + `StreamAborted` + `_aiter_raced`（异步迭代与 abort 事件竞速，asyncio 原生载体） |
 | `llm/deepseek.py` | `packages/llm/llm-deepseek/src/` | httpx 异步传输（原生 asyncio，abort 置位即关闭连接、真取消）+ per-read idle 300s watchdog（对齐上游 fetch）+ SSE spec-strict 解析 |
 | `llm/fake.py` | 无 | 教学扩展 |
-| `attachment/`（types + error + image + encoding + normalization + request_image + admission + store） | `packages/attachment/attachment`（seam + types + error + admission）+ `packages/attachment/attachment-local`（store + image + encoding + normalization + request-image） | sharp→Pillow（权威全量解码/EXIF 定向/重编码）；规范化管线与 variantId 请求图缓存对齐 rc.2；CompressionLimiter 并发闸与 SharedRequest 单飞登记架构不适用（同步载体天然串行）；显式 root（上游 DSH_HOME/attachments/v1）；见 verified-diffs §3.9 |
+| `attachment/`（types + error + image + encoding + normalization + projection + request_image + admission + store） | `packages/attachment/attachment`（seam + types + error + admission + request-projection）+ `packages/attachment/attachment-local`（store + image + encoding + normalization + request-image） | sharp→Pillow（权威全量解码/EXIF 定向/重编码）；规范化管线（总像素预算 + 长边封顶 + 共享质量阶梯按 alpha 分流）与 variantId 请求图缓存（request-image-v5）对齐 alpha.1；CompressionLimiter 并发闸与 SharedRequest 单飞登记架构不适用（同步载体天然串行）；显式 root（上游 DSH_HOME/attachments/v1）；见 verified-diffs §3.9 |
 | `llm/retry_policy.py` | `packages/llm/llm/src/retry-policy.ts` | |
 | `llm/retry.py` | `packages/llm/llm-retry/src/` | async 恢复决策（派发前熔合信号检查 + always 派发后复查中止胜过决策）+ 事件驱动多信号竞速可取消等待（等价 `AbortSignal.any`；裸测试替身信号回退轮询）+ 插件 effect teardown（注销监听器 + lifetime.abort + 排干在途恢复） |
 | `llm/token_meter.py` | `packages/llm/token-meter/src/` | |
@@ -172,7 +174,8 @@ miniharness/
 | `cli/headless.py` | `packages/bundle/headless` + `apps/cli` | |
 | `cli/default_tools.py` | 无 | 教学扩展（上游是工具插件注册） |
 | `cli/session_cmds.py` | 无 | 教学扩展（上游会话管理在 web 表层） |
-| `preset/presets.py` | `packages/preset` + `apps/cli/config/agent-presets` | 数据目录 `preset/{minimal,standard}` |
+| `cli/preset_cmds.py` | 无 | 教学扩展（上游 preset 管理是 web 表层 Remote：list/read/deletePreset/selectPreset）——`miniharness presets` 子命令，投影/锁/删除语义对齐，不落 `agent-preset/selected` |
+| `preset/presets.py` | `packages/preset` + `apps/cli/config/agent-presets` | shipped root(system) + 多根 first-root-wins roster、project_preset/project_session_agent_preset 投影、PresetLockedError、PresetNotWritableError、mount 作用域审计；YAML 翻译（agent.cordis.yml → Preset）；数据目录 `preset/{minimal,standard}` |
 | `extensions/dynamic.py` | `packages/extensions/*` | |
 | `interaction/approval.py` | `packages/interaction/user-approval` | |
 | `client/trajectory.py` | `packages/client/ui-trajectory` | |
@@ -185,7 +188,7 @@ miniharness/
 | `web/frontend.py` | `packages/host/frontend-static` | 静态服务契约：遍历 403 / SPA 回退 200 / MIME 按扩展 / 未知扩展 octet-stream；index taps 恒 identity（无 boot-manifest） |
 | `web/static/`（index.html + app.js + style.css） | `packages/bundle/web-app` + `packages/client` | vanilla SPA（无构建步）：会话列表/创建、Trajectory 折叠、审批面板（/api/respond）、命令/配置、队列/作业面板；React monorepo 复现标注教学简化 |
 | `web/launcher.py` | `packages/host/webserver`（Config：host 两值 + port 0）| host/port 读 MINIHARNESS_WEB_HOST/PORT（上游组合配置节，简化标注） |
-| `protocol/acp.py` | `packages/acp/acp` | |
+| `protocol/acp.py` | `packages/acp/acp` | 自动化专用 JSON-RPC 服务：initialize（`sessionCapabilities:{close,list,resume}`）、会话生命周期 new/resume/list/close（校验序逐字、keyset 分页 `page.at(-1)` 游标、selectionFor 恢复已提交路由）、模型选择标准配置 `set()`（model/reasoning_effort 逐字文案、切 model 复位 reasoning；目录经可选 `adapter.models_catalog`/`resolve_model_info()['reasoning']` 教学扩展承载）、prompt 同步完整回合（snapshot+pin、turnless/max-tokens/error 结算逐字）+ 更新流投影（agent_message_chunk 带 messageId、agent_thought_chunk、tool_call/_update completed/failed、projected_seq 增量）+ 富媒体受理 + 一次性审批桥；简化标注见模块 docstring（close 内存归档、usage_update 不发射、单帧 updates 列表、选择施加为信封级——实际流经单一 adapter 实例） |
 | `protocol/sdk.py` | `packages/sdk/protocol` + `sdk/server` | messageId 为真实消息 id（与 inbox 回执一致，官方 SDK 依赖）；互操作测试 `tests/test_upstream_sdk_interop.py`（需 pydantic + 上游 SDK 源码，缺则 skip） |
 | `protocol/hooks.py` | `packages/hooks/hook-protocol` + `hooks-claude-code` | 默认 runner 对齐 runner.ts：stdin JSON payload + trailing newline、cwd、CLAUDE_PROJECT_DIR env、缺省 600000ms 超时；保留"异步 + signal"同步近似（subprocess） |
 | `seams/sandbox_local.py` | `packages/sandbox/sandbox-local` + `sandbox-windows-acl` | landlock 后端经 `seams/landlock_run.py` ctypes 自限制执行器真执行（CLI 契约对齐 `native/landlock-run/docs/cli-contract.md`：--ro/--rw/--/--probe、exit 125、报告行逐字）；Windows ACL 写限制由 `seams/sandbox_windows_acl/` 物化（见下行） |

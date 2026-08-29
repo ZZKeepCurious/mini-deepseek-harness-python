@@ -9,6 +9,7 @@ from __future__ import annotations
 from types import MappingProxyType
 from typing import Any
 
+from .seq_ranges import decode_seq_ranges
 from .types import SURFACE_TYPES
 
 __all__ = [
@@ -65,6 +66,10 @@ def assert_provenance(type_: str, source_event_seqs: Any, seq: int,
 
     数组非空（assistant/message 除外）、元素非负安全整数、无重复、全部早于
     事件 seq；replace 操作必须覆盖全部被遮蔽 surface 节点。
+
+    输入可能是存储态区间编码（上游 seq-ranges.ts），先 decode 展开为内存态
+    列表（对齐上游 persistence 读路径 expandProvenanceFromStorage 后再
+    assert 的语义）；decode 完成形状校验（非负 / [start,end] / end>=start）。
     """
     if source_event_seqs is None:
         if shadowed_seqs:
@@ -73,20 +78,12 @@ def assert_provenance(type_: str, source_event_seqs: Any, seq: int,
                 f"missing {', '.join(str(s) for s in shadowed_seqs)}"
             )
         return
-    raw = source_event_seqs
-    if isinstance(raw, (list, tuple)):
-        sources = list(raw)
-    else:
-        raise ValueError(f"sourceEventSeqs on event at seq {seq} must be an array when present")
+    sources = decode_seq_ranges(source_event_seqs)
     if len(sources) == 0 and type_ != "assistant/message":
         raise ValueError("sourceEventSeqs must not be empty except on assistant/message")
     seen: set[int] = set()
     non_earlier = None
     for source in sources:
-        if not _is_event_seq(source):
-            raise ValueError(
-                f'session event "{type_}" sourceEventSeqs must densely contain non-negative safe integers'
-            )
         if source in seen:
             raise ValueError("sourceEventSeqs must not contain duplicates")
         seen.add(source)

@@ -7,10 +7,15 @@ StreamChunk 字段与上游协议对齐（packages/llm/llm/src/types.ts）：
   * block-start     { index, blockType }         # blockType: text | reasoning | tool-call | ...
   * text-delta      { index, text }
   * reasoning-delta { index, text }
-  * tool-call-delta { index, id, name?, argumentsDelta }   # argumentsDelta 为增量分片
-  * block-end       { index, block }              # block 为组装好的 ContentBlock
-  * usage           { usage }                     # 必须在 finish 之前
-  * finish          { reason }                    # reason 为 {kind: ...} 对象
+   * tool-call-delta { index, id, name?, argumentsDelta }   # argumentsDelta 为增量分片
+   * block-end       { index, block }              # block 为组装好的 ContentBlock
+   * usage           { usage }                     # 必须在 finish 之前
+   * finish          { reason }                    # reason 为 {kind: ...} 对象
+
+TokenUsage（usage 载荷）字段对齐上游 llm/src/types.ts:127-149：
+  inputTokens / outputTokens（必填，disjoint 计数）+ 可选 cacheReadTokens /
+  cacheWriteTokens / reasoningTokens / totalTokens（精确整调用总数，仅当
+  供应商聚合 prompt/output 计数有效且自洽时提供，否则省略）。
 
 协议硬性规定：
   1. 每个 ContentBlock 一对 block-start / block-end；block-end 携带完整块

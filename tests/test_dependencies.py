@@ -20,6 +20,8 @@ L3 应用  = cli/*、protocol/*、seams/*、preset、extensions、interaction、
     package.json dependencies）——拓扑一致，非分层倒挂；
   - cli→seams / cli→shell 有显式例外：run_headless 组装沙箱栈与 bash
     执行器（同 cli→web 先例，上游 bundle/headless 同样依赖这三包）；
+  - cli→preset 有显式例外（单方向）：presets 子命令组装分层 roster 并做
+    投影/锁定/删除（上游 preset 管理在 web 表层，同 cli→web 先例）；
   - 顶层 __all__ 收敛至 28（白名单 + FakeLlmAdapter，§6）。
 
 上游对照：无（这是 mini 自身的架构纪律，见 docs/architecture.md §3）。
@@ -147,6 +149,11 @@ class ImportDirectionTest(unittest.TestCase):
                 if src_unit == "cli" and dst_unit == "web":
                     # §5 显式例外（单方向）：launcher 组装 web profile——cli 把
                     # ctx/adapter/tools 交给 web 层运行时；web 层不得反向 import cli
+                    continue
+                if src_unit == "cli" and dst_unit == "preset":
+                    # §5 显式例外（单方向）：presets 子命令组装分层 roster 并做
+                    # 投影/锁定/删除（上游 preset 管理在 web 表层 Remote，mini
+                    # 以子命令提供——同 cli→web 先例）；preset 层不得反向 import cli
                     continue
                 if src_unit == "cli" and dst_unit == "seams":
                     # §5 显式例外（单方向）：run_headless 组装沙箱栈——cli 构造

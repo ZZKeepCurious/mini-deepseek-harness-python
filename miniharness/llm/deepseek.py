@@ -224,21 +224,41 @@ def _map_finish_reason(reason: str | None) -> dict:
 
 
 def _map_usage(usage: dict) -> dict:
-    """上游 mapUsage（translate.ts 同构）：TokenUsage 子集。
+    """上游 mapUsage（llm-deepseek/src/translate.ts 同构）：TokenUsage 子集。
 
     inputTokens = prompt_tokens - cacheReadTokens；cacheReadTokens 来自
-    prompt_cache_hit_tokens；reasoningTokens 来自
-    completion_tokens_details.reasoning_tokens。
+    prompt_tokens_details.cached_tokens（OpenAI 拼写）兜底 prompt_cache_hit_tokens；
+    reasoningTokens 来自 completion_tokens_details.reasoning_tokens。
+    totalTokens = prompt_tokens + completion_tokens（权威聚合总数），仅在
+    prompt/completion 计数均有效且与 wire total_tokens 一致时提供（否则省略
+    —— TokenUsage.totalTokens 可缺省，见 llm/src/types.ts:138-145）。
     """
-    cache_read = usage.get("prompt_cache_hit_tokens")
-    input_tokens = int(usage.get("prompt_tokens") or 0) - int(cache_read or 0)
+    details = usage.get("prompt_tokens_details") or {}
+    cache_read = details.get("cached_tokens")
+    if cache_read is None:
+        cache_read = usage.get("prompt_cache_hit_tokens")
+    prompt_tokens = usage.get("prompt_tokens") or 0
+    completion_tokens = usage.get("completion_tokens") or 0
+    input_tokens = int(prompt_tokens) - int(cache_read or 0)
     mapped = {"inputTokens": input_tokens,
-              "outputTokens": int(usage.get("completion_tokens") or 0)}
+              "outputTokens": int(completion_tokens)}
+    combined = int(prompt_tokens) + int(completion_tokens)
+    wire_total = usage.get("total_tokens")
+    has_exact_total = (
+        isinstance(prompt_tokens, int) and not isinstance(prompt_tokens, bool)
+        and prompt_tokens >= 0
+        and isinstance(completion_tokens, int) and not isinstance(completion_tokens, bool)
+        and completion_tokens >= 0
+        and combined >= 0
+        and (wire_total is None or wire_total == combined)
+    )
+    if has_exact_total:
+        mapped["totalTokens"] = combined
     if cache_read:
         mapped["cacheReadTokens"] = int(cache_read)
-    details = usage.get("completion_tokens_details") or {}
-    if details.get("reasoning_tokens"):
-        mapped["reasoningTokens"] = int(details["reasoning_tokens"])
+    comp_details = usage.get("completion_tokens_details") or {}
+    if comp_details.get("reasoning_tokens"):
+        mapped["reasoningTokens"] = int(comp_details["reasoning_tokens"])
     return mapped
 
 

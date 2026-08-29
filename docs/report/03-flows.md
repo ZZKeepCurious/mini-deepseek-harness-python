@@ -90,7 +90,7 @@ flowchart TD
   DEN["denied&lt;br/&gt;工具体被跳过"]
   G["注册的单调守卫&lt;br/&gt;只能减权 · 乱序无法撤销"]
   EX["tools/execute waterfall&lt;br/&gt;超时 / 重试 / 度量（around-dispatch）"]
-  BODY["工具 execute() 体&lt;br/&gt;自有事件：todo/write · fs/observed · tool/code-dispatch"]
+  BODY["工具 execute() 体&lt;br/&gt;自有事件：todo/write · fs/observed · tool/ptc-dispatch"]
   POST["tools/post-execute waterfall&lt;br/&gt;accept / replace / block(+feedback)"]
   NORM["注册表外层规范化&lt;br/&gt;snapshot 异常 → isError"]
   FIN["finalizeContent&lt;br/&gt;最后一个内容只读硬性规定"]
@@ -129,7 +129,7 @@ flowchart TD
 2. **PRE `pre-execute` waterfall**（hooks / 权限 / 沙箱）：`allow` → 前进；`deny` → 直接 **DEN**；`ask` → **ASK**（`ctx.approval` 一次性询问；absent / unanswerable → 当 deny）。
 3. **ASK** 结果：`allowed-once` → 前进；拒绝 / 取消 → **DEN**（工具体被跳过，回合不中断）。
 4. **G 注册的单调守卫**：只能减权、乱序无法撤销；`allow` → 前进，`deny` → **DEN**。
-5. **EX `execute` waterfall**（超时 / 重试 / 度量，around-dispatch）→ **BODY 工具本体**（自有事件：todo/write、fs/observed、tool/code-dispatch）。
+5. **EX `execute` waterfall**（超时 / 重试 / 度量，around-dispatch）→ **BODY 工具本体**（自有事件：todo/write、fs/observed、tool/ptc-dispatch）。
 6. **POST `post-execute` waterfall**：`accept` / `replace` / `block(+feedback)`。
 7. **NORM 注册表外层规范化**：任何 snapshot 阶段异常统一转 `isError`。
 8. **FIN `finalizeContent`**：最后一个内容只读（硬性规定），不可再被后置编辑。
@@ -143,7 +143,7 @@ flowchart TD
 
 - **扩展口**：`ctx.sessionPersistence` 抽象（locate / create / append / 逻辑 load/inspect / 物理后缀读）+ 两个可互换后端：**JSONL**（每会话一个文件，支持 packed chunk 行）与 **SQLite**（多会话一库，单调 `SCHEMA_VERSION`）。
 - **flush 检查点**：`session/event` 是同步通知，持久化插件先复制事件再异步成批写入；`session/flush` 是等待的并行栅栏，用于认领下一个普通 turn 前的排序与错误观察点。
-- **格式拒绝，不迁移**：版本落后 = "升级 harness"；版本超前 = "使用更新的 harness 打开"。未知事件类型若未带 `ignorable: true` 则整体拒绝加载（防止静默丢事件改变后续解读）。
+- **格式拒绝，不迁移**：版本落后 = "升级 harness"；版本超前 = "使用更新的 harness 打开"。未知事件类型整体拒绝加载（防止静默丢事件改变后续解读，无 `ignorable` 豁免）。
 - **崩溃恢复**：关闭孤儿 turn（合成 `interrupted`），只作用于冷会话；活会话 `load` 等待权威内存快照持久化。
 
 <p class="fig-cap">图 13：会话持久化——双后端、flush 栅栏与崩溃恢复</p>
@@ -170,7 +170,7 @@ flowchart LR
 ```
 
 !!! example "示例走查（进程崩溃）"
-    `turn/start` 已落库但 `turn/end` 未及写入时进程被杀 → 重启后 JSONL/SQLite 后端的 `load()` 发现括号不平衡 → 不截断日志，而是追加合成 `turn/end { reason: "interrupted" }` → 会话回到可继续状态。若日志里混入未知事件类型（未带 `ignorable: true`），则整体拒绝加载——宁可不打开，也不能静默丢事件改变后续解读。
+    `turn/start` 已落库但 `turn/end` 未及写入时进程被杀 → 重启后 JSONL/SQLite 后端的 `load()` 发现括号不平衡 → 不截断日志，而是追加合成 `turn/end { reason: "interrupted" }` → 会话回到可继续状态。若日志里混入未知事件类型，则整体拒绝加载——宁可不打开，也不能静默丢事件改变后续解读。
 
 ### 5.4 LLM 流式适配扩展口
 

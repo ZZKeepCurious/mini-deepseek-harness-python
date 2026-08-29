@@ -69,20 +69,26 @@ __all__ = [
     "DEFAULT_IMAGE_LIMITS",
     "DEFAULT_NORMALIZED_IMAGE_MAX_BYTES",
     "DEFAULT_NORMALIZED_IMAGE_MAX_DIMENSION",
+    "DEFAULT_NORMALIZED_IMAGE_MAX_PIXELS",
     "AttachmentStore",
     "LocalAttachmentStore",
     "StoredImageAttachment",
     "commit_prepared_image_file",
+    "normalized_image_path",
     "prepare_image_file",
     "read_image_file",
     "save_image_file",
     "validate_image_file",
 ]
 
-#: 持久规范化的缺省长边目标（大源被收编而非拒绝，受理即界定后续每个模型
-#: 请求的载荷，上游 DEFAULT_NORMALIZED_IMAGE_MAX_DIMENSION）
-DEFAULT_NORMALIZED_IMAGE_MAX_DIMENSION = 2048
-#: 单张持久规范化图片的独立安全字节上限（上游 DEFAULT_NORMALIZED_IMAGE_MAX_BYTES）
+#: 持久规范化图片的总像素预算（大源被收编而非拒绝；极端纵横比保住短边分辨率，
+#: 上游 DEFAULT_NORMALIZED_IMAGE_MAX_PIXELS，alpha.1 新增）
+DEFAULT_NORMALIZED_IMAGE_MAX_PIXELS = 2048 * 2048
+#: 持久规范化图片的长边封顶（总像素预算之后应用，上游
+#: DEFAULT_NORMALIZED_IMAGE_MAX_DIMENSION，alpha.1 由 2048 极长边规则改为 8192 封顶）
+DEFAULT_NORMALIZED_IMAGE_MAX_DIMENSION = 8192
+#: 单张持久规范化图片的编码字节目标（上游 DEFAULT_NORMALIZED_IMAGE_MAX_BYTES；
+#: 阶梯每个质量都超限时保留最小阶梯输出，不再是独立拒绝上限）
 DEFAULT_NORMALIZED_IMAGE_MAX_BYTES = 4 * 1024 * 1024
 
 DEFAULT_IMAGE_LIMITS = ImageAttachmentLimits()
@@ -90,7 +96,10 @@ DEFAULT_IMAGE_LIMITS = ImageAttachmentLimits()
 _ID_PREFIX = "sha256:"
 
 
-def _object_path(root: str, sha256: str) -> str:
+def normalized_image_path(root: str, ref: ImageAttachmentRef) -> str:
+    """一个规范化附件在宿主文件系统下的绝对不可变对象路径（上游
+    normalizedImagePath；alpha.1 新增，把宿主位置与模型访问路径分离）。"""
+    sha256 = _ensure_reference(ref)
     return os.path.join(root, "objects", sha256[:2], sha256)
 
 
@@ -232,7 +241,7 @@ def commit_prepared_image_file(
     _ensure_durable_directory(bucket, home)
     _ensure_durable_directory(staging, home)
     temporary = os.path.join(staging, uuid.uuid4().hex)
-    target = _object_path(root, sha256)
+    target = normalized_image_path(root, ref)
     handle_fd: int | None = None
     try:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -286,7 +295,7 @@ def save_image_file(
 def read_image_file(root: str, ref: ImageAttachmentRef) -> StoredImageAttachment:
     """按引用读取并验证一个内容寻址图片（上游 readImageFile）。"""
     sha256 = _ensure_reference(ref)
-    path = _object_path(root, sha256)
+    path = normalized_image_path(root, ref)
     try:
         with open(path, "rb") as fh:
             data = fh.read()
@@ -387,7 +396,7 @@ class LocalAttachmentStore(AttachmentStore):
     @param root: 存储根目录（显式传入；上游为 DSH_HOME/attachments/v1）。
     @param limits: 部署图片策略，缺省为 DEFAULT_IMAGE_LIMITS。
     @param normalization_policy: provider 无关规范化策略
-        （上游缺省 maxDimension=2048 / maxBytes=4MiB）。
+        （上游缺省 maxPixels=2048² / maxDimension=8192 / maxBytes=4MiB）。
     @param image_compression_concurrency: 实例并发上限配置位（1..8，越界
         fail loud 措辞逐字；同步载体下执行天然串行，见模块 docstring）。
     """
@@ -401,6 +410,7 @@ class LocalAttachmentStore(AttachmentStore):
     ):
         self.image_limits = limits or DEFAULT_IMAGE_LIMITS
         self.normalization_policy = normalization_policy or NormalizationPolicy(
+            maxPixels=DEFAULT_NORMALIZED_IMAGE_MAX_PIXELS,
             maxDimension=DEFAULT_NORMALIZED_IMAGE_MAX_DIMENSION,
             maxBytes=DEFAULT_NORMALIZED_IMAGE_MAX_BYTES,
         )

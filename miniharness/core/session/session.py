@@ -58,6 +58,18 @@ class Session:
         """
         return self._replace_count
 
+    def request_header(self) -> dict | None:
+        """最近一次 request/header 的 header 对象（上游 session.ts requestHeader()）。
+
+        尚无 header 返回 None（上游返回 undefined）；其 reason 可为
+        initial/resume/change/series，可选带 startsSeries:true
+        （RequestHeaderReason，session/types.ts:205-213）。
+        """
+        for event in reversed(self._events):
+            if event["type"] == "request/header":
+                return event["data"].get("header")
+        return None
+
     def surface_nodes(self) -> list[dict]:
         """当前 surface 节点（含 seq，模型可见顺序）。
 

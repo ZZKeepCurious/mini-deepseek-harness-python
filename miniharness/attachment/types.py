@@ -1,6 +1,7 @@
 """attachment 领域：不可变二进制附件（图片）的类型与常量。
 
-对应 dsh 真实源码：packages/attachment/attachment/src/types.ts（rc.2 已核实）。
+对应 dsh 真实源码：packages/attachment/attachment/src/types.ts（rc.2 已核实，
+alpha.1 仅改 ImageRequestPolicy.maxBytes 语义）。
 
 与上游一致：
   * ImageAttachmentRef：{attachmentId, mediaType, bytes, width, height,
@@ -13,9 +14,11 @@
   * SaveImageAttachment：{data, mediaType, name?}；
   * StoredImageAttachment：{ref, data}；
   * ImageRequestPolicy：{maxPixels, maxBytes}——按精确模型路由解析的请求图
-    策略；RequestImageAttachment：{variantId, attachment, data, mediaType,
-    bytes, width, height, depth:'uchar', space:'srgb', hasAlpha}——缓存键
-    variantId 覆盖 attachment id + policy + 固定编码器参数。
+    策略；alpha.1 起 maxBytes 是编码字节目标（阶梯每个质量都超限时保留最小
+    阶梯输出，不再是独立拒绝上限）；RequestImageAttachment：{variantId,
+    attachment, data, mediaType, bytes, width, height, depth:'uchar',
+    space:'srgb', hasAlpha}——缓存键 variantId 覆盖 attachment id + policy +
+    固定编码器参数。
 
 载体简化：上游以 TS 类型 + z(schemastery) 模式承载，mini 用 dataclass +
 校验函数承载。语义一致。
@@ -159,7 +162,7 @@ class StoredImageAttachment:
 
 @dataclass(frozen=True)
 class ImageRequestPolicy:
-    """按精确模型路由选择的请求图策略：纵横保持投影后的总像素 + 编码字节上限。"""
+    """按精确模型路由选择的请求图策略：纵横保持投影后的总像素 + 编码字节目标。"""
 
     maxPixels: int
     maxBytes: int

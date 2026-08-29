@@ -171,7 +171,7 @@ class TestSubagentLifecycleEvents(unittest.TestCase):
         self.assertEqual(mgr_state["kind"], "idle")
 
     def test_end_omits_last_assistant_message_when_none(self):
-        mgr = self._manager(adapter_factory=lambda p, m: _SilentAdapter())
+        mgr = self._manager(adapter_factory=lambda p, m, r=None: _SilentAdapter())
         cid = mgr.start_continuable(label="研")
         mgr.send_message(cid, "查资料")
         self.assertEqual(self.ends[-1]["stopReason"], "completed")
@@ -183,7 +183,7 @@ class TestSubagentLifecycleEvents(unittest.TestCase):
                 raise LlmFailure("RATE_LIMIT", "429")
                 yield  # pragma: no cover
 
-        mgr = self._manager(adapter_factory=lambda p, m: BoomAdapter())
+        mgr = self._manager(adapter_factory=lambda p, m, r=None: BoomAdapter())
         cid = mgr.start_continuable(label="研")
         mgr.send_message(cid, "查资料")   # 子失败不冒泡
         self.assertEqual(self.ends[-1]["stopReason"], "error")
@@ -272,7 +272,7 @@ class TestInterruptAuthority(unittest.TestCase):
     def test_user_authority_interrupt_causes_user_abort(self):
         child_adapter = FakeLlmAdapter(tool_call={"name": "client_cancel", "arguments": {}})
         mgr = SubagentContinuationManager(
-            self.parent, self.persistence, adapter_factory=lambda p, m: child_adapter)
+            self.parent, self.persistence, adapter_factory=lambda p, m, r=None: child_adapter)
         cid = mgr.start_continuable(label="研")
         # 子回合内自中断（模拟客户端 user 权限经工具下达）；工具闭包必须绑
         # 定持有激活的同一 manager 实例
@@ -290,7 +290,7 @@ class TestInterruptAuthority(unittest.TestCase):
     def test_ancestor_authority_interrupt_causes_parent_abort(self):
         child_adapter = FakeLlmAdapter(tool_call={"name": "cancel_self", "arguments": {}})
         mgr = SubagentContinuationManager(
-            self.parent, self.persistence, adapter_factory=lambda p, m: child_adapter)
+            self.parent, self.persistence, adapter_factory=lambda p, m, r=None: child_adapter)
         cid = mgr.start_continuable(label="研")
         self.reg.register(Tool(
             name="cancel_self", description="d",
@@ -343,7 +343,7 @@ class TestNestedOwnership(unittest.TestCase):
         # 孙代对 spawn_gc 的调用被工具守卫短路为叶节点）
         shared = FakeLlmAdapter(tool_call={"name": "spawn_gc", "arguments": {}})
         mgr = SubagentContinuationManager(
-            parent, persistence, adapter_factory=lambda p, m: shared)
+            parent, persistence, adapter_factory=lambda p, m, r=None: shared)
         cid = mgr.start_continuable(label="子")
 
         async def spawn_gc(args, exec_):

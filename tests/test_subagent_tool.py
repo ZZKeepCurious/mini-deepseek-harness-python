@@ -9,6 +9,8 @@
     job 按 stopReason 结算；jobs 缺失逐字报错
   * continuable 常驻提示节注册（systemPrompt 服务；one-shot 不注册）
   * kill → interrupt 子代理 → 子回合 aborted → job killed
+  * 模型选择（rs.1 增量，model-selection.ts + list-models.ts）：schema 参数三
+    形态、逐字错误、策略路由拦截、preflight 时机、list_subagent_models 编目
 
 运行：python -m unittest tests.test_subagent_tool -v
 """
@@ -49,7 +51,8 @@ def _parent_loop(session_id="parent", adapter=None):
 
 
 def _manager(parent, persistence, **kwargs):
-    kwargs.setdefault("adapter_factory", lambda p, m: FakeLlmAdapter(final_text="子响应"))
+    kwargs.setdefault("adapter_factory",
+                      lambda p, m, e=None: FakeLlmAdapter(final_text="子响应"))
     return SubagentContinuationManager(parent, persistence, **kwargs)
 
 
@@ -199,6 +202,165 @@ class TestSchemaAndRouting(unittest.TestCase):
                          "subagent tool requires a calling agent (exec.agent was undefined)")
 
 
+class TestModelSelection(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.persistence = JsonlPersistence(self.tmp.name)
+        self.parent, self.ctx, self.reg = _parent_loop()
+
+    def _tool(self, **config):
+        mgr = SubagentContinuationManager(self.parent, self.persistence)
+        return install_subagent_delegation_tool(self.ctx, self.reg, mgr, config or None)
+
+    def test_model_selection_schema_verbatim(self):
+        # enabled：provider/model/reasoning_effort 三参数 + choiceDescription 后缀
+        # （index.ts:376-412；route 无默认值走 inherit-parent 分支）
+        tool = self._tool(model_selection=True,
+                          model_routes=[{"provider": "fake", "model": "chat-a"}])
+        self.assertEqual(
+            tool.description,
+            delegation_tool._DESCRIPTION + delegation_tool._SUFFIX_ONE_SHOT
+            + delegation_tool._CHOICE_DESCRIPTION)
+        props = tool.parameters["properties"]
+        self.assertEqual(props["provider"]["type"], "string")
+        self.assertEqual(props["model"]["type"], "string")
+        self.assertEqual(props["reasoning_effort"]["type"], "string")
+        self.assertEqual(props["provider"]["description"],
+                         delegation_tool._PARAM_DESC_PROVIDER)
+        self.assertEqual(props["model"]["description"],
+                         delegation_tool._PARAM_DESC_MODEL)
+        self.assertEqual(props["reasoning_effort"]["description"],
+                         delegation_tool._PARAM_DESC_REASONING_EFFORT)
+
+    def test_model_selection_disabled_rejects_verbatim(self):
+        tool = self._tool()
+        with self.assertRaises(RuntimeError) as cm:
+            _execute(tool, {"description": "研", "prompt": "x",
+                            "provider": "fake"}, self.parent)
+        self.assertEqual(str(cm.exception),
+                         "child model selection is disabled for this tool instance")
+
+    def test_model_selection_requires_routes_and_validates(self):
+        with self.assertRaises(RuntimeError) as cm:
+            self._tool(model_selection=True, model_routes=[])
+        self.assertEqual(
+            str(cm.exception),
+            "enabled subagent model selection requires at least one allowed model")
+        merger = delegation_tool
+        self.assertEqual(merger._validate_model_routes(
+            [{"provider": "p", "model": "m"}]),
+            [{"provider": "p", "model": "m"}])
+        with self.assertRaises(RuntimeError) as cm:
+            merger._validate_model_routes("nope")
+        self.assertEqual(str(cm.exception),
+                         "subagent model selection requires an array of routes")
+        for bad in ([{"provider": "p"}], [{"model": "m"}],
+                    [{"provider": "", "model": "m"}], [{"provider": "p", "model": ""}],
+                    [{"provider": 7, "model": "m"}]):
+            with self.assertRaises(RuntimeError) as cm:
+                merger._validate_model_routes(bad)
+            self.assertEqual(
+                str(cm.exception),
+                "subagent model selection requires non-empty provider and model ids")
+        with self.assertRaises(RuntimeError) as cm:
+            merger._validate_model_routes(
+                [{"provider": "p", "model": "m"}, {"provider": "p", "model": "m"}])
+        self.assertEqual(str(cm.exception),
+                         'subagent model selection repeats route "p/m"')
+
+    def test_model_selection_route_not_allowed_verbatim(self):
+        tool = self._tool(model_selection=True,
+                          model_routes=[{"provider": "fake", "model": "chat-a"}])
+        with self.assertRaises(RuntimeError) as cm:
+            _execute(tool, {"description": "研", "prompt": "x",
+                            "provider": "fake", "model": "nope"}, self.parent)
+        self.assertEqual(
+            str(cm.exception),
+            'child LLM route "fake/nope" is not allowed for this Session')
+
+    def test_model_selection_preflight_unresolvable_route(self):
+        # 策略允许但 provider 未注册 → preflight 在子创建前抛 UNAVAILABLE
+        tool = self._tool(model_selection=True,
+                          model_routes=[{"provider": "nope", "model": "x"}])
+        with self.assertRaises(SubagentError) as cm:
+            _execute(tool, {"description": "研", "prompt": "x",
+                            "provider": "nope", "model": "x"}, self.parent)
+        self.assertEqual(cm.exception.code, "UNAVAILABLE")
+
+    def test_model_selection_threads_route_to_descriptor(self):
+        # 选择结果进 child descriptor（agentProvider/agentModel/agentReasoningEffort）
+        tool = self._tool(model_selection=True,
+                          model_routes=[{"provider": "fake", "model": "chat-a"}])
+        value = _execute(tool, {"description": "研", "prompt": "x",
+                                "provider": "fake", "model": "chat-a",
+                                "reasoning_effort": "low"}, self.parent)
+        self.assertEqual(value["kind"], "foreground")
+        descriptor = fold_subagent_descriptor(
+            self.persistence.inspect(value["runId"])["events"])
+        self.assertEqual(descriptor["agentProvider"], "fake")
+        self.assertEqual(descriptor["agentModel"], "chat-a")
+        self.assertEqual(descriptor["agentReasoningEffort"], "low")
+
+    def test_requested_agent_options_merge_semantics(self):
+        # 换路由未带 effort → 丢弃配置里路由属地的 effort（所选模型用默认档）
+        requested = delegation_tool._requested_agent_options(
+            self.parent,
+            {"provider": "fake", "model": "chat-a", "reasoningEffort": "high"},
+            {"provider": "fake", "model": "chat-b"}, enabled=True)
+        self.assertEqual(requested, {"provider": "fake", "model": "chat-b"})
+        # 纯 effort 覆盖保留配置路由
+        kept = delegation_tool._requested_agent_options(
+            self.parent,
+            {"provider": "fake", "model": "chat-a", "reasoningEffort": "high"},
+            {"reasoning_effort": "low"}, enabled=True)
+        self.assertEqual(kept, {"provider": "fake", "model": "chat-a",
+                                "reasoningEffort": "low"})
+        # 空串按非空校验拒绝
+        with self.assertRaises(RuntimeError) as cm:
+            delegation_tool._requested_agent_options(
+                self.parent, None, {"provider": ""}, enabled=True)
+        self.assertEqual(str(cm.exception), "child LLM `provider` must be non-empty")
+        with self.assertRaises(RuntimeError) as cm:
+            delegation_tool._requested_agent_options(
+                self.parent, None, {"provider": "fake"}, enabled=True)
+        self.assertEqual(
+            str(cm.exception),
+            "child LLM `provider` and `model` must be supplied together")
+
+    def test_list_subagent_models_policy_catalog(self):
+        # 策略 routes 即 mini 编目（无上游 llm catalog 的教学简化）：
+        # 无参列出 registered providers，provider 列出模型，精确路由查 efforts
+        self._tool(
+            model_selection=True,
+            model_routes=[{"provider": "fake", "model": "chat-a"},
+                          {"provider": "fake", "model": "chat-b"}],
+        )
+        listing = self.reg.resolve("list_subagent_models")
+        self.assertIsNotNone(listing)
+        out = _execute(listing, {}, self.parent)
+        self.assertEqual(out, "fake — fake")
+        out = _execute(listing, {"provider": "fake"}, self.parent)
+        self.assertIn("fake/chat-a — chat-a", out)
+        self.assertIn("fake/chat-b — chat-b", out)
+        out = _execute(listing, {"provider": "fake", "model": "chat-a"}, self.parent)
+        self.assertEqual(
+            out, "fake/chat-a — chat-a\nReasoning efforts:\n(no advertised reasoning efforts)")
+        with self.assertRaises(RuntimeError) as cm:
+            _execute(listing, {"model": "chat-a"}, self.parent)
+        self.assertEqual(str(cm.exception), "`model` requires `provider`")
+        with self.assertRaises(RuntimeError) as cm:
+            _execute(listing, {"provider": "other"}, self.parent)
+        self.assertEqual(
+            str(cm.exception),
+            'LLM provider "other" is not allowed for this Session')
+        with self.assertRaises(RuntimeError) as cm:
+            _execute(listing, {"provider": "fake", "model": "other"}, self.parent)
+        self.assertEqual(
+            str(cm.exception),
+            'child LLM route "fake/other" is not allowed for this Session')
+
+
 class TestForegroundDelegation(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -320,7 +482,7 @@ class TestBackgroundDelegation(unittest.TestCase):
         self.assertEqual(snap["kind"], "subagent")
 
     def test_failed_background_job_detail_carries_diagnostic(self):
-        # rc.2 run-settlement failureDetail：失败 outcome 的 detail 附 "; diagnostic: ..."
+        # run-settlement failureDetail：失败 outcome 的 detail 附 "; diagnostic: ..."
         class BoomChild(FakeLlmAdapter):
             async def stream(self, messages, tools, signal=None):
                 raise LlmFailure("RATE_LIMIT", "429 Too Many Requests")
@@ -330,7 +492,7 @@ class TestBackgroundDelegation(unittest.TestCase):
             {"description": "炸", "prompt": "去失败", "run_in_background": True}))
         install_jobs(ctx)
         mgr = SubagentContinuationManager(
-            parent, self.persistence, adapter_factory=lambda p, m: BoomChild())
+            parent, self.persistence, adapter_factory=lambda p, m, e=None: BoomChild())
         install_subagent_delegation_tool(ctx, reg, mgr)
         parent.run("委派任务")
         _wait_until(lambda: any(s["status"] == "failed"
@@ -339,21 +501,29 @@ class TestBackgroundDelegation(unittest.TestCase):
                     if s["status"] == "failed")
         self.assertEqual(
             snap["detail"],
-            "subagent run failed; diagnostic: RATE_LIMIT: 429 Too Many Requests")
+            "error; diagnostic: RATE_LIMIT: 429 Too Many Requests")
 
     def test_job_outcome_diagnostic_wording(self):
-        # 纯函数面：aborted → killed 不带诊断；失败 detail 拼接诊断
+        # 纯函数面（run-settlement 对齐）：completed 携带 output 文本；
+        # 无诊断 aborted → killed；有诊断与其余 reason → failed 原始词拼接诊断
+        self.assertEqual(delegation_tool._job_outcome("completed", None, "终文本"),
+                         {"status": "completed", "output": "终文本"})
+        self.assertEqual(delegation_tool._job_outcome("aborted", None),
+                         {"status": "killed"})
+        self.assertEqual(delegation_tool._job_outcome("aborted", "unexpected signal"),
+                         {"status": "failed",
+                          "detail": "aborted; diagnostic: unexpected signal"})
         self.assertEqual(delegation_tool._job_outcome("error", None),
-                         {"status": "failed", "detail": "subagent run failed"})
+                         {"status": "failed", "detail": "error"})
         self.assertEqual(
             delegation_tool._job_outcome("error", "RATE_LIMIT: 429"),
             {"status": "failed",
-             "detail": "subagent run failed; diagnostic: RATE_LIMIT: 429"})
+             "detail": "error; diagnostic: RATE_LIMIT: 429"})
         self.assertEqual(
             delegation_tool._job_outcome("max-tokens", "上下文超限"),
             {"status": "failed",
              "detail":
-                 "subagent run hit its token limit before finishing; diagnostic: 上下文超限"})
+                 "max-tokens; diagnostic: 上下文超限"})
 
     def test_missing_jobs_service_verbatim_error(self):
         # ctx 无 jobs 服务 → 逐字报错（index.ts 同款补救指引）
@@ -402,7 +572,7 @@ class TestKillCancelsChildJob(unittest.TestCase):
         self.child_adapter = _GatedChild()
         self.mgr = SubagentContinuationManager(
             self.parent, self.persistence,
-            adapter_factory=lambda p, m: self.child_adapter)
+            adapter_factory=lambda p, m, e=None: self.child_adapter)
         self.child_adapter.is_cancelled = lambda: any(
             a.get("interrupted") for a in self.mgr._activations.values())
         install_subagent_delegation_tool(self.ctx, self.reg, self.mgr,

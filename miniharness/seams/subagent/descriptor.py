@@ -4,11 +4,15 @@
 
   * 描述符是会话内 model-hidden、log-only 非 surface 事件，由建立 provider
     在子会话初始回合内追加恰好一条。
-  * SUBAGENT_DESCRIPTOR_VERSION = 2；载荷 schema：
+  * SUBAGENT_DESCRIPTOR_VERSION = 3（rc.2 → alpha.1 增量：新增
+    agentReasoningEffort，见 dsh-v0.1.2-alpha.1 diff）；载荷 schema：
       - 必填 {version, mode: 'one-shot'|'continuable', provider}
       - continuable 必填 label（one-shot 可选）
-      - 可选 agentProvider / agentModel / persona（字符串）
+      - 可选 agentProvider / agentModel / agentReasoningEffort / persona（字符串）
       - 可选 toolFilter: {allow?: string[], deny?: string[]}（至少声明一项）
+    agentReasoningEffort 是开放式品牌字符串（上游 ReasoningEffortId，descriptor.ts
+    经 optionalString 取值后直接品牌化，无封闭枚举校验；deepseek 适配器的档位
+    校验属于 provider 属地的 wire 层，不在此处）。
     字段集封闭：未知字段拒绝（上游 assertKnownKeys throws；mini fail-closed → None）。
   * foldSubagentDescriptor 用 find() 取**第一条**权威——建立 provider 恰好
     追加一条，之后同型事件不能改写已声明的组合（重复事件被无视，非损坏）。
@@ -34,7 +38,7 @@ __all__ = [
     "snapshot_subagent_descriptor",
 ]
 
-SUBAGENT_DESCRIPTOR_VERSION = 2
+SUBAGENT_DESCRIPTOR_VERSION = 3
 
 # mini 续跑通道的建立 provider 名（上游为 ctx.subagents 的 provider 名，
 # 如 fork-in-process / acp / dsh-sdk；mini continuation 是进程内通道）
@@ -42,7 +46,9 @@ CONTINUATION_PROVIDER = "in-process"
 
 _BASE_KEYS = frozenset({"version", "mode", "provider", "label"})
 _ONE_SHOT_KEYS = _BASE_KEYS
-_CONTINUABLE_KEYS = _BASE_KEYS | {"agentProvider", "agentModel", "persona", "toolFilter"}
+_CONTINUABLE_KEYS = _BASE_KEYS | {
+    "agentProvider", "agentModel", "agentReasoningEffort", "persona", "toolFilter",
+}
 _TOOL_FILTER_KEYS = frozenset({"allow", "deny"})
 
 
@@ -95,7 +101,7 @@ def parse_subagent_descriptor(payload: Any) -> dict | None:
         label = payload.get("label")
         if label is not None and not isinstance(label, str):
             return None
-    for key in ("agentProvider", "agentModel", "persona"):
+    for key in ("agentProvider", "agentModel", "agentReasoningEffort", "persona"):
         value = payload.get(key)
         if value is not None and not isinstance(value, str):
             return None

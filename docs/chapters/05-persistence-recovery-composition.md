@@ -7,7 +7,7 @@
 !!! warning "早期简化形态"
     本章代码为**教学简化形态**，与当前实现存在以下差异（学习时以当前实现为准，见 00-setup §0.5 简化表）：
 
-    - **JSONL 片段**：实现每文件 header 行 + 事件行，`SESSION_FORMAT_VERSION = 0` 不符即拒读（fail-closed，`ignorable` 豁免）；torn 尾部的**截断发生在读路径**——`read_prepared` / `_load_checked` 识别 torn 后即调 `_truncate_to` 落盘截断（`core/session/persistence.py:846,874`），随后 `commit_repair` 只**追加** recovered 事件 + closers 并 fsync（`core/session/persistence.py:965`，对齐上游 commitRepair）。
+    - **JSONL 片段**：实现每文件 header 行 + 事件行，`SESSION_FORMAT_VERSION = 0` 不符即拒读（fail-closed）；torn 尾部的**截断发生在读路径**——`read_prepared` / `_load_checked` 识别 torn 后即调 `_truncate_to` 落盘截断（`core/session/persistence.py:846,874`），随后 `commit_repair` 只**追加** recovered 事件 + closers 并 fsync（`core/session/persistence.py:965`，对齐上游 commitRepair）。
     - **`repair_and_replay`**：本章为逐条 `append` 重放；实现为 seed 回放——从 `session/end-seed` 标记重放，且修复合成的 closers 经 `commit_repair` 持久化落盘（`core/session/persistence.py`，基类接口 + JSONL 后端实现）。
     - **`turn/end` reason**：本章差异表写 `reason = "interrupted"` 字符串；实现为对象 `{kind:'interrupted'}`（配合 `repair_interrupted_turn` 合成 closers，见第 1 章横幅）。
     - **崩溃演示**：本章 §5.2"kill 进程"实为手动构造未闭合回合来模拟崩溃尾部，非真实 kill（`tests/test_persistence_boot.py` 可复核）。
@@ -48,7 +48,7 @@ flowchart LR
 
 1. **append 先复制事件、异步成批写入**；`flush` 是"等待的栅栏"——认领下一个普通 turn 之前，所有事件必须落盘。
 2. **格式拒绝，不迁移**：版本落后 = 升级 harness；版本超前 = 用更新的 harness 打开。
-3. **fail-closed**：未知事件类型（未带 `ignorable`）整体拒绝加载——宁可不打开，不能静默丢事件改变解读。
+3. **fail-closed**：未知事件类型整体拒绝加载——宁可不打开，不能静默丢事件改变解读。
 4. **崩溃恢复只合成，不截断**：`turn/end { reason: interrupted }` 保持括号平衡。
 
 为什么是"扩展口"而不是直接写在 Session 里？因为存储策略（文件、数据库、未来可能的对象存储）不该和会话语义耦合。第 6 章会看到同样的思路在沙箱、凭据、子 agent 上重复出现。
@@ -65,7 +65,7 @@ flowchart LR
 
 读路径（下排 `LOAD → INT`）：
 
-6. `load()`：读取日志，**未知事件类型（未带 `ignorable`）整体拒绝**（fail-closed）——宁可不打开，不能静默丢事件改变解读。
+6. `load()`：读取日志，**未知事件类型整体拒绝**（fail-closed）——宁可不打开，不能静默丢事件改变解读。
 7. `INT` 崩溃恢复：发现未闭合回合时只**合成** `turn/end {kind:'interrupted'}`，保持括号平衡，绝不截断已写事件。
 8. （torn 尾部）：若读到残帧/残行，读路径先截断 torn tail，`commit_repair` 再把恢复事件 + closers 追加落盘——见本节横幅差异表。
 
@@ -163,9 +163,9 @@ class SqlitePersistence(SessionPersistence):
 
 ```python
 def load_events_checked(raw_events):
-    """fail-closed：未知事件类型（未带 ignorable）整体拒绝加载。"""
+    """fail-closed：未知事件类型（无 ignorable 豁免）整体拒绝加载。"""
     for ev in raw_events:
-        if ev.get("type") not in KNOWN_TYPES and not ev.get("ignorable"):
+        if ev.get("type") not in KNOWN_TYPES:
             raise RuntimeError(f"未知事件类型 {ev.get('type')!r}，拒绝加载")
     return raw_events
 
@@ -178,7 +178,7 @@ def repair_and_replay(persistence, session_id, session):
     return session
 ```
 
-`load_events_checked` 的 fail-closed 值得展开：磁盘上有一条未知类型的事件，说明它来自更新版本的 harness（或有人手改了文件）。两条路：跳过它继续加载（省事，但解读被悄悄改变：事件序列断了一个环节），或者整体拒绝（严格，但保证解读不变）。dsh 选后者，唯一例外是事件带 `ignorable: true` 标记——那是上游明确声明"可以忽略"的。
+`load_events_checked` 的 fail-closed 值得展开：磁盘上有一条未知类型的事件，说明它来自更新版本的 harness（或有人手改了文件）。两条路：跳过它继续加载（省事，但解读被悄悄改变：事件序列断了一个环节），或者整体拒绝（严格，但保证解读不变）。dsh 选后者：未知类型一律拒绝，无 `ignorable` 豁免——上游协议里没有这个豁免，mini 与之对齐。
 
 `repair_and_replay` 就是第 1 章 `repair_interrupted_turn` 的消费方：load → 校验 → 补括号 → 重新 append 进内存 Session。回放 = 重新派生，`derive_messages` 自动重建历史，第 1 章的"回放 = 重新派生"在这里落地。
 
@@ -270,7 +270,7 @@ python -m unittest tests.test_persistence_boot -v
 1. `flush` 之前 `load` 看不到数据（栅栏语义）
 2. 双后端可互换：同一扩展口接口，同样的 seq 单调性
 3. SQLite 版本不符 → 拒绝加载
-4. 未知事件类型 → fail-closed；带 `ignorable: true` → 放行
+4. 未知事件类型 → fail-closed（无 `ignorable` 豁免）
 5. 崩溃后 `turn_balance == 0` 且最后事件是 `turn/end reason=interrupted`
 6. 补丁算法纯函数：replace 整段替换 / insert 追加 / 目标缺失报错
 7. boot 结束所有条目已激活，否则报错

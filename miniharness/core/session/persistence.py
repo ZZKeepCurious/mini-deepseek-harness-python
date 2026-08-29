@@ -17,7 +17,7 @@ packages/core/session/src/chunk-rows.ts、session-persistence-jsonl/src/{format,
   5. torn 尾部：明文残行忽略并截断修复；zstd 残帧先前缀恢复完整记录、
      再把恢复事件连同 closers 经 commit_repair 持久化（截断点 = 残帧起点，
      对齐上游 commitRepair(truncateTo, recoveredEvents, closers)）
-  6. load 时未知事件类型（未带 ignorable）整体拒绝 —— fail-closed
+   6. load 时未知事件类型整体拒绝 —— fail-closed
   7. 目录布局：root/<--projectKey(cwd)-->/<encodeSegment(id)>/session.jsonl[.zstd]；
      cwd 缺省退化到 _no-cwd 项目目录；项目目录下的散置 *.jsonl 制品
      （遗留平铺布局）响亮拒绝
@@ -46,6 +46,7 @@ from . import (
 )
 from .chunk_rows import decode_storage_record, pack_chunk_runs
 from .json import now_ms
+from .seq_ranges import decode_seq_ranges, encode_seq_ranges
 from .zstd_frames import (
     compress_zstd_frame,
     decode_frames,
@@ -65,6 +66,28 @@ _JSONL_COMPRESSIONS = ("zstd", "none")
 # 会把载荷里的每个 0x0A 翻译成 \r\n，静默破坏帧字节与校验和。所有二进制
 # fd 一律显式 O_BINARY（POSIX 上该标志不存在，取 0 即可）。
 _O_BINARY = getattr(os, "O_BINARY", 0)
+
+
+def _encode_storage_event(value: dict) -> dict:
+    """焊一到一行写入边界的区间编码：sourceEventSeqs 折成存储态（上游 format.ts
+    encodeProvenanceForStorage）。无该字段的记录原样直通。"""
+    if "sourceEventSeqs" not in value:
+        return value
+    out = dict(value)
+    out["sourceEventSeqs"] = encode_seq_ranges(value["sourceEventSeqs"])
+    return out
+
+
+def _decode_storage_event(value: dict) -> dict:
+    """焊一到一行读出边界的区间解码：存储态 sourceEventSeqs 展开回内存态
+    （上游 format.ts expandProvenanceFromStorage，maxEntries = 所属事件 seq）。
+    无该字段的记录原样直通；展开即形状校验（[start,end] 对 / end>=start /
+    越界，fail-closed）。"""
+    if "sourceEventSeqs" not in value:
+        return value
+    out = dict(value)
+    out["sourceEventSeqs"] = decode_seq_ranges(value["sourceEventSeqs"], value.get("seq", 2**53 - 1))
+    return out
 
 
 class SessionFormatUnsupportedError(RuntimeError):
@@ -346,7 +369,10 @@ class SessionLogScanner:
     def _consume_event_line(self, line: bytes, end_byte: int) -> None:
         self.event_line += 1
         try:
-            decoded = decode_storage_record(json.loads(line.decode("utf-8")))
+            decoded = [
+                _decode_storage_event(event)
+                for event in decode_storage_record(json.loads(line.decode("utf-8")))
+            ]
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
             if self.issue is None:
                 self.issue = ValueError(
@@ -563,8 +589,15 @@ class JsonlPersistence(SessionPersistence):
         self._sync_dir(final_path.parent)
 
     def _encode_lines(self, records: list[dict]) -> str:
-        """存储记录序列化为 JSONL 文本（无尾换行由调用方补）。"""
-        return "".join(json.dumps(thaw(record), ensure_ascii=False) + "\n" for record in records)
+        """存储记录序列化为 JSONL 文本（无尾换行由调用方补）。
+
+        sourceEventSeqs 在写边界经 encode_seq_ranges 折成存储态区间
+        （上游 eventLines → encodeProvenanceForStorage；读侧 expand 还原）。
+        """
+        return "".join(
+            json.dumps(_encode_storage_event(thaw(record)), ensure_ascii=False) + "\n"
+            for record in records
+        )
 
     def _encode_event_batch(self, events: list[dict]) -> bytes | str:
         """一个耐久批次按配置编码：zstd 帧（打包行在序列化前完成）或明文。"""
@@ -1024,7 +1057,8 @@ class SqlitePersistence(SessionPersistence):
                 "SELECT COALESCE(MAX(seq), -1) FROM events WHERE session_id=?", (sid,)
             ).fetchone()[0]
             rows = [
-                (sid, base + 1 + i, ev["type"], json.dumps(thaw(ev), ensure_ascii=False))
+                (sid, base + 1 + i, ev["type"],
+                 json.dumps(_encode_storage_event(thaw(ev)), ensure_ascii=False))
                 for i, ev in enumerate(events)
             ]
             self._conn.executemany("INSERT INTO events VALUES (?, ?, ?, ?)", rows)
@@ -1035,7 +1069,7 @@ class SqlitePersistence(SessionPersistence):
         rows = self._conn.execute(
             "SELECT data FROM events WHERE session_id=? ORDER BY seq", (session_id,)
         ).fetchall()
-        return [json.loads(r[0]) for r in rows]
+        return [_decode_storage_event(json.loads(r[0])) for r in rows]
 
     def inspect(self, session_id, cwd: str | None = None):
         row = self._conn.execute(
@@ -1065,7 +1099,8 @@ class SqlitePersistence(SessionPersistence):
         if not repaired:
             return
         rows = [
-            (session_id, ev["seq"], ev["type"], json.dumps(thaw(ev), ensure_ascii=False))
+            (session_id, ev["seq"], ev["type"],
+             json.dumps(_encode_storage_event(thaw(ev)), ensure_ascii=False))
             for ev in repaired
         ]
         self._conn.executemany(
@@ -1085,9 +1120,9 @@ class SqlitePersistence(SessionPersistence):
 # ---------- 加载与恢复 ----------
 
 def load_events_checked(raw_events: list[dict]) -> list[dict]:
-    """fail-closed：未知事件类型（未带 ignorable）整体拒绝加载。"""
+    """fail-closed：未知事件类型整体拒绝加载（上游无 ignorable 概念）。"""
     for ev in raw_events:
-        if ev.get("type") not in KNOWN_TYPES and not ev.get("ignorable"):
+        if ev.get("type") not in KNOWN_TYPES:
             raise RuntimeError(
                 f"未知事件类型 {ev.get('type')!r}，拒绝加载（防止静默丢事件改变解读）"
             )

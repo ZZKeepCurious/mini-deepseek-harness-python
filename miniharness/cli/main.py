@@ -20,6 +20,8 @@ mini 扩展/简化（须标注）：
   - web profile 的 host/port 读 MINIHARNESS_WEB_HOST / MINIHARNESS_WEB_PORT
     （缺省 127.0.0.1 / 0，OS 分配），见 web/launcher.py
   - sessions 子命令为 mini 教学扩展（上游会话管理在 web 表层）
+  - presets 子命令为 mini 教学扩展（上游 preset 管理是 web 表层 Remote 服务）：
+    名单/投影/选择/删除，投影与 PresetLockedError 语义对齐，见 cli/preset_cmds.py
 
 用法：
   miniharness --profile headless "run the tests"        # 一次性任务，对齐上游
@@ -27,6 +29,7 @@ mini 扩展/简化（须标注）：
   miniharness --dump-config                             # 打印最终组合（只读）
   miniharness --patch patch.yml --profile headless "t"  # 组合验证 + 任务
   miniharness sessions / sessions resume <id> [task] / sessions delete <id>
+  miniharness presets [list | show [id] | select <id> [session] | delete <id>]
   miniharness                                           # 端到端演示（教学入口）
 """
 from __future__ import annotations
@@ -48,6 +51,7 @@ USAGE = (
     "  miniharness --dump-default-config        print only the built-in default composition\n"
     "  miniharness --patch <path> --profile headless \"task\"\n"
     "  miniharness sessions [list | resume <id> [task...] | delete <id>]\n"
+    "  miniharness presets [list | show [id] | select <id> [session] | delete <id>]\n"
     "  miniharness                             end-to-end demo (fake model, no API key)\n"
 )
 
@@ -158,6 +162,11 @@ def _main(args: list[str]) -> None:
         from .session_cmds import sessions_main
 
         sessions_main(args[1:])
+        return
+    if args and args[0] == "presets":
+        from .preset_cmds import presets_main
+
+        presets_main(args[1:])
         return
     parsed = _parse_launcher(args)
     if parsed.get("help"):
