@@ -1,23 +1,22 @@
-"""web 表面：四象限 RPC 信封（对齐 `packages/host/apiproxy/src/api/rpc.ts`）。
+"""web 表面：两信封 RPC（对齐 `packages/client/connection/src/rpc-schema.ts` + rpc.ts）。
 
-契约（已核实，逐条对应上游）：
-  * 四种消息组成判别联合，判别字段 = `type`：
-      client-request  客户端发起（wire 载体：POST /api/<method> body）
+契约（已核实，逐条对应上游 alpha.1）：
+  * 判别联合只有两型，判别字段 = `type`：
+      client-request  客户端发起（wire 载体：POST /api/<endpoint> body）
       server-response 对 client-request 的响应（wire 载体：该 POST 的响应体）
-      server-request  服务端发起（wire 载体：下游事件流帧；可应答的交互
-                      （approval/question）rpcId 稳定且重连重放复用）
-      client-response 对 server-request 的响应（wire 载体：POST /api/respond body）
+    `server-request` / `client-response`（apiproxy 四象限）在新契约中不存在：
+    下游事件走 Gateway WebSocket mux（`web/stream_protocol.py`），服务端发起的
+    可应答交互走 `$events` 远程事件流 + `$events/result` unary。
   * RpcId：发起方签发、响应回显，从不重铸（响应 rpcId 必与请求一致）。
-  * RpcResult = {ok:true, value} | {ok:false, error:RpcError}：业务方法绝不抛
-    业务错误——一律经 result.ok 表达。
-  * RpcError = {code, message, details}，code 是 39 码闭集（RpcErrorDetailsMap
-    键集）；details 按 code 判别（internal 显式 {}）。
+  * RpcResult = {ok:true, value?} | {ok:false, error:RpcError}：成功分支的 value
+    可选（业务返回 undefined 时整体省略该字段，`rpc-server.ts` 只回显既有字段）；
+    业务方法绝不抛业务错误——一律经 result.ok 表达。
+  * RpcError = {code, message, details}，code 是 session 域闭集（SessionErrorDetailsMap
+    键集，`packages/api/session-controller/src/types.ts`）；details 恒为对象。
   * transport_error：把载体层异常折进 RpcResult 错误分支，兜底码 'internal'
     （每个载体消费者用同一套折叠）。
-  * RpcReceipt = {accepted:true} | {accepted:false, reason:'not-pending'|'bad-response'}
-    ——POST /api/respond 的响应体，属载体层（不是 RpcMessage）。
 
-纯契约层：零第三方依赖、零 HTTP。判定标准：消息能否在四种判别之间无损往返。
+纯契约层：零第三方依赖、零 HTTP。判定标准：消息能否在两型判别之间无损往返。
 """
 from __future__ import annotations
 
@@ -34,14 +33,11 @@ __all__ = [
     "rpc_result_error",
     "client_request",
     "server_response",
-    "server_request",
-    "client_response",
     "parse_message",
-    "rpc_receipt_accepted",
-    "rpc_receipt_rejected",
 ]
 
-# RpcErrorDetailsMap 的键集（上游 39 码闭集；details 按 code 判别）
+# SessionErrorDetailsMap 的键集（session-controller types.ts:178-215，21 码闭集）。
+# 上游 `.details` 按 code 判别；mini 无 subagent 目录等域时这些码仍可作兜底拒绝。
 RPC_ERROR_CODES = frozenset({
     "bad-request",
     "cancelled",
@@ -51,15 +47,6 @@ RPC_ERROR_CODES = frozenset({
     "invalid-time-zone",
     "workspace-attach-failed",
     "workspace-not-found",
-    "workspace-invalid-path",
-    "workspace-name-conflict",
-    "workspace-move-invalid",
-    "directory-unreadable",
-    "directory-exists",
-    "directory-create-failed",
-    "directory-picker-unavailable",
-    "agent-preset-read-only",
-    "agent-preset-locked",
     "agent-preset-conflict",
     "agent-preset-not-found",
     "agent-preset-invalid",
@@ -67,24 +54,18 @@ RPC_ERROR_CODES = frozenset({
     "attachment-error",
     "queue-item-not-found",
     "steer-unavailable",
-    "command-error",
-    "unknown-command",
-    "settings-rejected",
-    "settings-conflict",
-    "credential-rejected",
-    "model-discovery-failed",
     "title-invalid",
     "fork-unavailable",
-    "subagent-parent-unavailable",
     "subagent-not-found",
     "subagent-catalog-diagnostic",
-    "subagent-not-resumable",
     "subagent-unauthorized",
-    "subagent-delivery-unavailable",
     "internal",
 })
 
-_TYPE_TAGS = frozenset({"client-request", "server-response", "server-request", "client-response"})
+_TYPE_TAGS = frozenset({"client-request", "server-response"})
+
+# RpcResult 成功分支缺省哨兵：业务无值（上游 undefined）时省略 value 字段
+_ABSENT = object()
 
 
 class EnvelopeError(ValueError):
@@ -97,14 +78,14 @@ def rpc_id() -> str:
 
 
 def rpc_error(code: str, message: str, details: dict | None = None) -> dict:
-    """构造 RpcError 分支：code 必须在 39 码闭集内（越界 fail loud，契约错误）。"""
+    """构造 RpcError 分支：code 必须在域闭集内（越界 fail loud，契约错误）。"""
     if code not in RPC_ERROR_CODES:
         raise EnvelopeError(f"unknown rpc error code {code!r}")
     return {"code": code, "message": message, "details": details or {}}
 
 
 def transport_error(error: Any) -> dict:
-    """把载体层异常折进 RpcResult 错误分支（上游 transportError）：兜底 'internal'。
+    """把载体层异常折进 RpcResult 错误分支（上游 rpcFailure 兜底 'internal'）。
 
     返回的是 RpcResult（{ok:false, error}），不是裸 RpcError——每个载体消费者
     用同一套折叠把抛出的值统一成 result 形态。
@@ -112,18 +93,18 @@ def transport_error(error: Any) -> dict:
     return rpc_result_error(rpc_error("internal", str(error), {}))
 
 
-def rpc_result_ok(value: Any) -> dict:
-    """RpcResult 成功分支：{ok: true, value}。"""
-    return {"ok": True, "value": value}
+def rpc_result_ok(value: Any = _ABSENT) -> dict:
+    """RpcResult 成功分支：{ok:true, value?}。value 缺省时省略（对齐 undefined）。"""
+    return {"ok": True, "value": value} if value is not _ABSENT else {"ok": True}
 
 
 def rpc_result_error(error: dict) -> dict:
-    """RpcResult 失败分支：{ok: false, error: RpcError}。"""
+    """RpcResult 失败分支：{ok:false, error: RpcError}。"""
     return {"ok": False, "error": error}
 
 
 def client_request(rpc_id_: str, method: str, payload: Any) -> dict:
-    """client-request 帧（wire 载体：POST /api/<method> body）。"""
+    """client-request 帧（wire 载体：POST /api/<endpoint> body）。"""
     return {"type": "client-request", "rpcId": rpc_id_, "method": method, "payload": payload}
 
 
@@ -132,21 +113,12 @@ def server_response(rpc_id_: str, result: dict) -> dict:
     return {"type": "server-response", "rpcId": rpc_id_, "result": result}
 
 
-def server_request(rpc_id_: str, method: str, payload: Any) -> dict:
-    """server-request 帧（wire 载体：下游事件流帧）。可应答帧 rpcId 稳定复用。"""
-    return {"type": "server-request", "rpcId": rpc_id_, "method": method, "payload": payload}
-
-
-def client_response(rpc_id_: str, result: dict) -> dict:
-    """client-response 帧（wire 载体：POST /api/respond body）。rpcId 回显。"""
-    return {"type": "client-response", "rpcId": rpc_id_, "result": result}
-
-
 def parse_message(obj: Any) -> dict:
     """校验一个 RpcMessage 的 wire 全形并原样返回；不合法抛 EnvelopeError。
 
-    严格校验：必须是 dict、type 在四者内、判别字段存在；client-request 要求
-    method 是字符串。payload/result 值域留给上层（domain 方法按各自 schema 再查）。
+    对齐 rpc-schema.ts 对 type/rpcId/method/result 的逐字段校验；未知附加键
+    schemastery 对象 schema 默认忽略，这里同样不拒绝。payload/result.value
+    值域留给上层（domain 方法按各自 args 再查）。
     """
     if not isinstance(obj, dict):
         raise EnvelopeError("rpc message must be a JSON object")
@@ -161,30 +133,22 @@ def parse_message(obj: Any) -> dict:
             raise EnvelopeError("client-request must carry a string method")
         if "payload" not in obj:
             raise EnvelopeError("client-request must carry a payload")
-    elif type_ == "server-request":
-        method = obj.get("method")
-        if not isinstance(method, str):
-            raise EnvelopeError("server-request must carry a string method")
-        if "payload" not in obj:
-            raise EnvelopeError("server-request must carry a payload")
-    elif type_ in ("server-response", "client-response"):
-        if "result" not in obj or not isinstance(obj["result"], dict):
-            raise EnvelopeError(f"{type_} must carry a result object")
-        result = obj["result"]
-        if "ok" not in result:
-            raise EnvelopeError(f"{type_} result must carry an ok flag")
-        if result["ok"] is not True and not (result["ok"] is False and isinstance(result.get("error"), dict)):
-            raise EnvelopeError(f"{type_} result has an invalid ok/error shape")
+    else:
+        result = obj.get("result")
+        if not isinstance(result, dict):
+            raise EnvelopeError("server-response must carry a result object")
+        if "ok" not in result or result["ok"] is not True and result["ok"] is not False:
+            raise EnvelopeError("server-response result must carry a boolean ok")
+        if result["ok"]:
+            pass  # value 可选且值域任意（rpcResultSchema 成功分支 value: z.unknown().optional()）
+        else:
+            error = result.get("error")
+            if not isinstance(error, dict):
+                raise EnvelopeError("server-response error result must carry an error object")
+            if not isinstance(error.get("code"), str):
+                raise EnvelopeError("rpc error must carry a string code")
+            if not isinstance(error.get("message"), str):
+                raise EnvelopeError("rpc error must carry a string message")
+            if not isinstance(error.get("details"), dict):
+                raise EnvelopeError("rpc error must carry an object details")
     return obj
-
-
-def rpc_receipt_accepted() -> dict:
-    """POST /api/respond 的载体层回执：{accepted: true}。"""
-    return {"accepted": True}
-
-
-def rpc_receipt_rejected(reason: str) -> dict:
-    """回执拒绝：{accepted: false, reason: 'not-pending'|'bad-response'}。"""
-    if reason not in ("not-pending", "bad-response"):
-        raise EnvelopeError(f"unknown receipt rejection reason {reason!r}")
-    return {"accepted": False, "reason": reason}

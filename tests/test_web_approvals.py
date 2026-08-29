@@ -53,7 +53,7 @@ class ApprovalBridgeTest(unittest.TestCase):
 
     async def _prompt(self, sid):
         response = self.api.dispatch("session.prompt", "rp", {
-            "sessionId": sid, "mode": "queue",
+            "sessionId": sid, "mode": "queue", "requestId": "req-" + sid,
             "content": [{"type": "text", "text": "hi"}],
         })
         self.assertTrue(response["result"]["ok"])

@@ -1,19 +1,15 @@
-"""web 表面测试：四象限 RPC 信封（对齐 `packages/host/apiproxy/src/api/rpc.ts`）。"""
+"""web 表面测试：两信封 RPC（对齐 `packages/client/connection/src/rpc-schema.ts` + rpc.ts）。"""
 import unittest
 
 from miniharness.web.envelope import (
     RPC_ERROR_CODES,
     EnvelopeError,
     client_request,
-    client_response,
     parse_message,
     rpc_id,
     rpc_error,
-    rpc_receipt_accepted,
-    rpc_receipt_rejected,
     rpc_result_error,
     rpc_result_ok,
-    server_request,
     server_response,
     transport_error,
 )
@@ -28,21 +24,30 @@ class TestRpcId(unittest.TestCase):
 
     def test_response_echoes_request_id(self):
         rid = rpc_id()
-        req = client_request(rid, "session.list", {})
-        resp = server_response(req["rpcId"], rpc_result_ok([]))
+        req = client_request(rid, "session.list", {"args": {}})
+        resp = server_response(req["rpcId"], rpc_result_ok({"items": []}))
         self.assertEqual(resp["rpcId"], rid)
 
 
 class TestErrorCodeSet(unittest.TestCase):
-    def test_closed_set_size_matches_upstream(self):
-        # RpcErrorDetailsMap 键集共 39 个
-        self.assertEqual(len(RPC_ERROR_CODES), 39)
+    def test_closed_set_matches_session_error_details_map(self):
+        # SessionErrorDetailsMap 键集（session-controller types.ts:178-215）21 码
+        self.assertEqual(len(RPC_ERROR_CODES), 21)
 
     def test_known_codes_present(self):
         for code in ("bad-request", "session-not-found", "model-unavailable",
-                     "agent-busy", "attachment-error", "command-error",
-                     "unknown-command", "internal", "cancelled"):
+                     "session-conflict", "invalid-time-zone", "workspace-not-found",
+                     "agent-preset-conflict", "agent-busy",
+                     "attachment-error", "queue-item-not-found", "steer-unavailable",
+                     "title-invalid", "fork-unavailable", "subagent-not-found",
+                     "subagent-unauthorized", "internal", "cancelled"):
             self.assertIn(code, RPC_ERROR_CODES)
+
+    def test_apiproxy_only_codes_retired(self):
+        # 旧 apiproxy 域码已随 apiproxy 删除退出闭集
+        for code in ("command-error", "unknown-command", "directory-exists",
+                     "workspace-invalid-path", "model-discovery-failed"):
+            self.assertNotIn(code, RPC_ERROR_CODES)
 
     def test_out_of_set_code_fails_loud(self):
         with self.assertRaises(EnvelopeError):
@@ -65,8 +70,12 @@ class TestTransportError(unittest.TestCase):
 
 
 class TestResult(unittest.TestCase):
-    def test_ok_branch(self):
+    def test_ok_branch_with_value(self):
         self.assertEqual(rpc_result_ok({"a": 1}), {"ok": True, "value": {"a": 1}})
+
+    def test_ok_branch_omits_absent_value(self):
+        # 上游结果 undefined 时整体省略 value（JSON 无 undefined）
+        self.assertEqual(rpc_result_ok(), {"ok": True})
 
     def test_error_branch(self):
         result = rpc_result_error(rpc_error("session-not-found", "missing", {"sessionId": "s1"}))
@@ -75,21 +84,20 @@ class TestResult(unittest.TestCase):
 
 
 class TestMessages(unittest.TestCase):
-    def test_four_members_discriminated_by_type(self):
+    def test_two_members_discriminated_by_type(self):
         msgs = [
-            client_request("a", "session.list", {}),
-            server_response("b", rpc_result_ok(None)),
-            server_request("c", "approval/requested", {}),
-            client_response("d", rpc_result_ok(None)),
+            client_request("a", "session.list", {"args": {}}),
+            server_response("b", rpc_result_ok({"accepted": True})),
         ]
         self.assertEqual({m["type"] for m in msgs},
-                         {"client-request", "server-response", "server-request", "client-response"})
+                         {"client-request", "server-response"})
 
-    def test_roundtrip_all_four(self):
-        for m in (client_request("a", "session.list", {}),
-                  server_response("b", rpc_result_ok([])),
-                  server_request("c", "approval/requested", {"id": 1}),
-                  client_response("d", rpc_result_error(rpc_error("cancelled", "x", {})))):
+    def test_roundtrip_both(self):
+        for m in (client_request("a", "session.list", {"args": {}}),
+                  client_request("a", "session.prompt", {"args": {"sessionId": "s"}}),
+                  server_response("b", rpc_result_ok({"accepted": True})),
+                  server_response("b", rpc_result_ok()),
+                  server_response("b", rpc_result_error(rpc_error("cancelled", "x", {})))):
             self.assertEqual(parse_message(m), m)
 
     def test_invalid_shapes_rejected(self):
@@ -99,28 +107,24 @@ class TestMessages(unittest.TestCase):
             "text",
             {},
             {"type": "nope", "rpcId": "x"},
+            {"type": "server-request", "rpcId": "x", "method": "m", "payload": {}},
             {"type": "client-request", "rpcId": "x", "method": 5, "payload": {}},
             {"type": "client-request", "rpcId": "x", "method": "m"},
             {"type": "server-response", "rpcId": "x", "result": {}},
             {"type": "server-response", "rpcId": "x", "result": {"ok": False}},
+            {"type": "server-response", "rpcId": "x",
+             "result": {"ok": False, "error": {"code": 5, "message": "x", "details": {}}}},
+            {"type": "server-response", "rpcId": "x",
+             "result": {"ok": False, "error": {"code": "x", "message": "x", "details": []}}},
         ):
             with self.assertRaises(EnvelopeError):
                 parse_message(bad)
 
-
-class TestReceipt(unittest.TestCase):
-    def test_accepted(self):
-        self.assertEqual(rpc_receipt_accepted(), {"accepted": True})
-
-    def test_rejected_reasons(self):
-        self.assertEqual(rpc_receipt_rejected("not-pending"),
-                         {"accepted": False, "reason": "not-pending"})
-        self.assertEqual(rpc_receipt_rejected("bad-response"),
-                         {"accepted": False, "reason": "bad-response"})
-
-    def test_unknown_reason_fails_loud(self):
-        with self.assertRaises(EnvelopeError):
-            rpc_receipt_rejected("other")
+    def test_extra_keys_accepted(self):
+        # schemastery 对象 schema 忽略未知附加键
+        msg = client_request("a", "session.list", {"args": {}})
+        msg["extra"] = 1
+        self.assertEqual(parse_message(msg), msg)
 
 
 if __name__ == "__main__":

@@ -27,9 +27,18 @@ import asyncio
 import uuid
 from typing import Any
 
-from .envelope import rpc_receipt_accepted, rpc_receipt_rejected, rpc_id
+from .envelope import rpc_id
 
 __all__ = ["ApprovalBridge", "PendingApproval"]
+
+
+def _receipt_accepted() -> dict:
+    """载体层 RpcReceipt 成功形态（旧桥局部构造，stage ④ 换 $events 后退役）。"""
+    return {"accepted": True}
+
+
+def _receipt_rejected(reason: str) -> dict:
+    return {"accepted": False, "reason": reason}
 
 #: POST /api/respond 接受的 outcome 词汇表（上游 ApprovalOutcome 子集：
 #: 浏览器可投出 allowed-once / rejected；cancelled/unavailable 归服务端）
@@ -109,12 +118,12 @@ class ApprovalBridge:
         """处理一条 client-response，返回载体层 RpcReceipt。"""
         pending = self._lookup(message)
         if pending is None:
-            return rpc_receipt_rejected("not-pending")
+            return _receipt_rejected("not-pending")
         value = self._answer_value(pending, message)
         if value is None:
-            return rpc_receipt_rejected("bad-response")
+            return _receipt_rejected("bad-response")
         self._resolve(pending, value["outcome"])
-        return rpc_receipt_accepted()
+        return _receipt_accepted()
 
     def _lookup(self, message: dict) -> PendingApproval | None:
         rpc_id_ = message.get("rpcId")
