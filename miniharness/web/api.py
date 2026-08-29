@@ -113,7 +113,6 @@ class WebApi:
         self.store = ctx.get("sessions")
         if self.store is None:
             self.store = SessionStore(ctx)
-            ctx.provide("sessions", self.store)
         self._agents: dict[str, AgentLoop] = {}
         # 审批桥：tools/ask 问询 → mux 帧 → POST /api/respond（hub 构造时挂入）
         from .approvals import ApprovalBridge

@@ -16,9 +16,7 @@ from miniharness.core.tools import ToolRegistry
 
 
 def _store_on(ctx: Context) -> SessionStore:
-    store = SessionStore(ctx)
-    ctx.provide("sessions", store)
-    return store
+    return SessionStore(ctx)   # 构造即经 Service 基类自动注册 ctx.sessions
 
 
 def _user_message(text: str = "hi") -> dict:

@@ -12,9 +12,13 @@
   * fork 五种错误码：SESSION_NOT_FOUND / SESSION_NOT_LIVE / SESSION_ALREADY_EXISTS /
     INVALID_BOUNDARY / OPEN_TURN；boundary 缺省 = 源最后事件 seq（空会话 → 空 seed）
 
-mini 简化（有意保留，须在文档标注）：
-  * create 已对齐上游 generator effect（enter 先 yield、announce 抛错自动回滚，
-    2026-08-20）；仍无 typert lookup 注册（mini 无 typert）
+实现待载与上游一致（2026-08-29，§3.2 结构对齐）：SessionStore extends Service
+（对齐 index.ts:790 `class SessionStore extends Service`），构造即经
+ctx.provide("sessions", self) 自动注册，随拥有 fiber 自动注销——store 挂的
+ctx 就是上游 store.ctx（组合上下文），不另行自建 fiber（上游亦无）。
+
+mini 已知简化（有意保留，须在文档标注）：
+  * 仍无 typert lookup 注册（mini 无 typert）
   * flush 为同步并行近似（上游 Promise.allSettled 后抛第一个失败；mini 首个异常直接上抛）
   * session/event payload 为 {"session","event"} 单对象（上游 (session, event) 双参）；
     created / disposed / flush payload 为 {"session": s}
@@ -38,7 +42,7 @@ from typing import Any
 
 from .session.session import Session
 from .dsh_scope import scope_of, scope_target
-from .scope import Context
+from .scope import Context, Service
 
 __all__ = [
     "SESSION_NOT_FOUND",
@@ -66,8 +70,11 @@ class SessionForkError(Exception):
         self.code = code
 
 
-class SessionStore:
+class SessionStore(Service):
     """内存会话仓库（ctx.sessions）：create/prepare/enter/announce 生命周期 + fork。
+
+    构造即注册：super().__init__(ctx, "sessions") 经 ctx.provide 登记，随拥有
+    fiber 自动注销（对齐上游 `extends Service` + `super(ctx, 'sessions')`）。
 
     每一条目保存会话本体 + 发布状态（announced/announcing/appending/detachRequested）。
     enter 注入 append 发布钩子（session/event）；detach 移除钩子并退店；已公告的条目
@@ -75,7 +82,7 @@ class SessionStore:
     """
 
     def __init__(self, ctx: Context):
-        self.ctx = ctx
+        super().__init__(ctx, "sessions")
         self._store: dict[str, dict] = {}
         self._counter = 0
 
@@ -337,12 +344,12 @@ class SessionStore:
 
 
 def install_sessions(ctx: Context) -> SessionStore:
-    """幂等装配：创建 ctx.sessions 服务。首个调用生效；已存在时收养并直接返回。"""
+    """幂等装配：创建 ctx.sessions 服务。构造即自动注册（Service 基类经
+    ctx.provide 登记）；首个调用生效；已存在时收养并直接返回。"""
     if getattr(ctx, "_miniharness_sessions_installed", False):
         return ctx.get("sessions")
     store = ctx.get("sessions")
     if store is None:
         store = SessionStore(ctx)
-        ctx.provide("sessions", store)
     ctx._miniharness_sessions_installed = True
     return store

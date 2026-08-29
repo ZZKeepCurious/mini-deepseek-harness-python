@@ -311,8 +311,22 @@ class TestInstall(unittest.TestCase):
     def test_install_adopts_existing(self):
         ctx = Context(name="store-test")
         mine = SessionStore(ctx)
-        ctx.provide("sessions", mine)
         self.assertIs(install_sessions(ctx), mine)
+
+    def test_constructor_auto_registers_service(self):
+        ctx = Context(name="store-test")
+        store = SessionStore(ctx)
+        self.assertIs(ctx.get("sessions"), store)
+
+    def test_service_removed_with_owning_fiber(self):
+        root = Context(name="store-test")
+        scope = root.create_scope("agent:1")
+        mine = SessionStore(scope)
+        self.assertIs(scope.get("sessions"), mine)
+        self.assertIs(root.get("sessions"), mine)
+        scope.dispose()
+        self.assertIsNone(root.get("sessions"))
+        self.assertIsNone(scope.get("sessions"))
 
 
 if __name__ == "__main__":
