@@ -14,7 +14,14 @@ from miniharness.seams.credentials_local import (
     CredentialWriteLocked,
     LocalCredentialProvider,
     _assert_owner_only,
+    credential_key,
+    credential_key_id,
+    credential_key_scope,
+    credential_ref,
+    is_credential_key_segment,
+    is_credential_ref_name,
     parse_credentials_document,
+    parse_credential_key,
     parse_dotenv,
     render_flat_layout_migration,
     resolve_dsh_home,
@@ -430,7 +437,7 @@ class TestLocalCredentialProvider(unittest.TestCase):
         self.assertEqual(reloaded.resolve("api_key"), ("sk-1", "file"))
 
     def test_external_records_preserved_through_ref_writes(self):
-        # mini 无记录写方：外部写入的合法记录在 refs 写路径中原样保留
+        # 外部写入的合法记录在 refs 写路径中原样保留（写 refs 时 records 不丢）
         self._provider.set("api_key", "sk-1")
         with open(self._filename, "w", encoding="utf-8") as handle:
             json.dump({"version": 1, "refs": {"api_key": "sk-1"},
@@ -487,7 +494,7 @@ class TestCredentialWriterLock(unittest.TestCase):
         holder = FileLock(self._lock_path)
         holder.acquire()
         try:
-            with mock.patch.object(credentials_local, "LOCK_TIMEOUT_SECONDS", 0.2):
+            with mock.patch.object(credentials_local, "DOCUMENT_LOCK_WAIT_SECONDS", 0.2):
                 with self.assertRaises(CredentialWriteLocked) as caught:
                     provider.set("api_key", "sk-1")
             self.assertIn("atomic-write: timed out waiting for the writer lock at",
@@ -505,6 +512,181 @@ class TestCredentialWriterLock(unittest.TestCase):
         pa.set("c", "3")
         reloaded = self._provider()
         self.assertEqual(reloaded.values, {"a": "1", "b": "2", "c": "3"})
+
+
+class TestCredentialRecords(unittest.TestCase):
+    """P2-20 服务侧记录 API：键语法 + 记录五件套（上游 credentials-local
+    index.ts modifyRecord/deleteRecord/readRecord/describeRecord/listRecords）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._dsh_home = os.path.join(self._tmp.name, "dsh")
+        self._project = os.path.join(self._tmp.name, "proj")
+        os.makedirs(self._project, exist_ok=True)
+        self._filename = os.path.join(self._dsh_home, ".credentials.json")
+        self._saved_env = dict(os.environ)
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self._saved_env)
+        self._tmp.cleanup()
+
+    def _provider(self):
+        return LocalCredentialProvider(filename=self._filename, dsh_home=self._dsh_home,
+                                       project_dir=os.path.join(self._tmp.name, "proj"))
+
+    def test_credential_key_grammar(self):
+        # 品牌/解析：合法两段往返；段非法与非两段都 TypeError 逐字对齐上游
+        key = "llm-pi-ai/openai-codex"
+        self.assertEqual(credential_key("llm-pi-ai", "openai-codex"), key)
+        self.assertEqual(parse_credential_key(key), key)
+        self.assertEqual(credential_key_scope(key), "llm-pi-ai")
+        self.assertEqual(credential_key_id(key), "openai-codex")
+        with self.assertRaisesRegex(TypeError, r'credential key "x/y/z" must be "<scope>/<id>"'):
+            parse_credential_key("x/y/z")
+        with self.assertRaisesRegex(TypeError, r'^credential key segment "OpenAI" must match'):
+            credential_key("OpenAI", "codex")
+        self.assertTrue(is_credential_key_segment("llm-pi-ai"))
+        self.assertFalse(is_credential_key_segment("OpenAI"))
+
+    def test_credential_ref_grammar(self):
+        # 引用名走 POSIX 标识符（REF_PATTERN）
+        self.assertTrue(is_credential_ref_name("AWS_PROFILE"))
+        self.assertFalse(is_credential_ref_name("not a name"))
+        self.assertEqual(credential_ref("PROVIDER"), "PROVIDER")
+        with self.assertRaisesRegex(TypeError, r'^credential ref "not a name" must match'):
+            credential_ref("not a name")
+
+    def test_read_record_roundtrip_and_persistence(self):
+        provider = self._provider()
+        provider.modify_record("my-plugin/cache", lambda _: {"kind": "grant",
+                                                            "payload": {"nested": [1, True, None]}})
+        provider.modify_record("openai/route-a", lambda _: {
+            "kind": "api-key", "key": "sk-x", "env": {"AWS_PROFILE": "prod"}})
+        # 读：原样返回存储 dict
+        self.assertEqual(provider.read_record("my-plugin/cache"),
+                         {"kind": "grant", "payload": {"nested": [1, True, None]}})
+        self.assertEqual(provider.read_record("openai/route-a"),
+                         {"kind": "api-key", "key": "sk-x", "env": {"AWS_PROFILE": "prod"}})
+        self.assertIsNone(provider.read_record("never/seen"))
+        # 持久化：重新加载文档后仍在（写 refs 也不丢 records）
+        reloaded = self._provider()
+        self.assertEqual(reloaded.read_record("my-plugin/cache"),
+                         {"kind": "grant", "payload": {"nested": [1, True, None]}})
+        reloaded.set("api_key", "sk-1")
+        again = self._provider()
+        self.assertEqual(again.read_record("openai/route-a"),
+                         {"kind": "api-key", "key": "sk-x", "env": {"AWS_PROFILE": "prod"}})
+        # records 只读视图
+        self.assertEqual(reloaded.records["openai/route-a"],
+                         {"kind": "api-key", "key": "sk-x", "env": {"AWS_PROFILE": "prod"}})
+
+    def test_describe_record_presence_semantics(self):
+        provider = self._provider()
+        # 未存 = configured False；writable 恒真（记录没有更高分层）
+        self.assertEqual(provider.describe_record("never/seen"),
+                         {"configured": False, "writable": True})
+        provider.modify_record("my-plugin/cache", lambda _: {"kind": "grant", "payload": 1})
+        self.assertEqual(provider.describe_record("my-plugin/cache"),
+                         {"configured": True, "kind": "grant", "writable": True})
+        provider.modify_record("openai/route-a", lambda _: {
+            "kind": "api-key", "key": "sk-x", "env": {}})
+        self.assertEqual(provider.describe_record("openai/route-a"),
+                         {"configured": True, "kind": "api-key", "writable": True})
+
+    def test_list_records_enumerates_keys_and_kinds_only(self):
+        provider = self._provider()
+        self.assertEqual(provider.list_records(), [])
+        provider.modify_record("openai/route-a", lambda _: {
+            "kind": "api-key", "key": "sk-x", "env": {}})
+        provider.modify_record("my-plugin/cache", lambda _: {"kind": "grant", "payload": 1})
+        self.assertEqual(provider.list_records(),
+                         [{"key": "openai/route-a", "kind": "api-key"},
+                          {"key": "my-plugin/cache", "kind": "grant"}])
+
+    def test_modify_record_decline_returns_current_without_writing(self):
+        provider = self._provider()
+        # 未存记录上的拒绝：不产生记录、返回 None
+        self.assertIsNone(provider.modify_record("a/b", lambda _: None))
+        self.assertEqual(provider.list_records(), [])
+        provider.modify_record("a/b", lambda _: {"kind": "grant", "payload": 1})
+        # 已存记录上的拒绝：返回当前、磁盘不写
+        current = provider.modify_record("a/b", lambda _: None)
+        self.assertEqual(current, {"kind": "grant", "payload": 1})
+        reloaded = self._provider()
+        self.assertEqual(reloaded.read_record("a/b"), {"kind": "grant", "payload": 1})
+
+    def test_modify_record_updates_existing_with_mutate_snapshot(self):
+        provider = self._provider()
+        provider.modify_record("a/b", lambda _: {"kind": "grant", "payload": 1})
+        updated = provider.modify_record("a/b", lambda _: {"kind": "grant", "payload": 2})
+        self.assertEqual(updated, {"kind": "grant", "payload": 2})
+        self.assertEqual(provider.read_record("a/b"), {"kind": "grant", "payload": 2})
+        self.assertEqual(self._provider().read_record("a/b"), {"kind": "grant", "payload": 2})
+
+    def test_modify_record_refuses_unstorable_records(self):
+        provider = self._provider()
+        bad_mutations = [
+            # 未知 kind
+            (lambda _: {"kind": "mystery"}, TypeError),
+            # grant payload 不可 JSON 化（循环引用）
+            (lambda _: {"kind": "grant", "payload": fixture_cyclic()}, (TypeError, ValueError)),
+            # api-key 空 key
+            (lambda _: {"kind": "api-key", "key": ""}, TypeError),
+            # api-key env 名非法
+            (lambda _: {"kind": "api-key", "env": {"not a name": "v"}}, TypeError),
+            # api-key env 值空
+            (lambda _: {"kind": "api-key", "key": "sk", "env": {"PROVIDER": ""}}, TypeError),
+        ]
+        for mutate, exc in bad_mutations:
+            with self.assertRaises(exc):
+                provider.modify_record("a/b", mutate)
+        # 全部拒绝后什么都没写
+        self.assertEqual(provider.list_records(), [])
+        self.assertEqual(self._provider().list_records(), [])
+
+    def test_modify_record_invalid_kind_payload_never_written(self):
+        # 与 .refuses 视角互补：拒绝发生在锁内 reconcile 之外，磁盘仍完好
+        provider = self._provider()
+        provider.modify_record("a/b", lambda _: {"kind": "grant", "payload": 1})
+        payload = fixture_cyclic()
+        with self.assertRaises(Exception):
+            provider.modify_record("a/b", lambda _: {"kind": "grant", "payload": payload})
+        self.assertEqual(self._provider().read_record("a/b"), {"kind": "grant", "payload": 1})
+
+    def test_modify_record_reconciles_external_edits_under_lock(self):
+        # 另一个 provider 落盘后，本 provider 的 mutate 看到的是磁盘现状（reconcile）
+        pa, pb = self._provider(), self._provider()
+        pb.modify_record("a/b", lambda _: {"kind": "grant", "payload": 1})
+        seen = []
+        pa.modify_record("c/d", lambda current: (seen.append(dict(current) if current else None),
+                                                 {"kind": "grant", "payload": 2})[1])
+        # mutate(current) 收到磁盘折叠后的 None？不——c/d 并不存在；验证刷新后再写
+        self.assertEqual(pa.read_record("c/d"), {"kind": "grant", "payload": 2})
+        self.assertEqual(pa.read_record("a/b"), {"kind": "grant", "payload": 1})
+
+    def test_delete_record(self):
+        provider = self._provider()
+        provider.modify_record("a/b", lambda _: {"kind": "grant", "payload": 1})
+        provider.delete_record("a/b")
+        self.assertIsNone(provider.read_record("a/b"))
+        self.assertEqual(self._provider().list_records(), [])
+        # 删除不存在的记录是 no-op
+        provider.delete_record("never/seen")
+        self.assertEqual(provider.list_records(), [])
+
+    def test_record_write_requires_valid_key(self):
+        provider = self._provider()
+        for method in ("read_record", "describe_record", "modify_record", "delete_record"):
+            with self.assertRaisesRegex(TypeError, r'credential key "x/y/z" must be "<scope>/<id>"'):
+                getattr(provider, method)("x/y/z", lambda _: None) if method == "modify_record" \
+                    else getattr(provider, method)("x/y/z")
+
+
+def fixture_cyclic():
+    value = {}
+    value["self"] = value
+    return value
 
 
 # ==================== 3) 子 agent 远程三通道 ====================
