@@ -214,6 +214,16 @@ miniharness/
 | L3 应用与入口 | `cli/*`、`protocol/*`、`seams/*`、`preset`、`extensions`、`interaction`、`client`、`web`、`shell` | L0 ~ L2 |
 | 教学层 | `demo.py`、`example_plugins.py` | 任意层，但不得被业务模块依赖 |
 
+**三层组织边界**（2026-08-29 产品化定位；代码与结构上清晰分离、解耦）：
+
+| 边界 | 内容 | 耦合面 |
+|---|---|---|
+| core 核心能力 | `miniharness/core/` 等（L0~L2 纯领域逻辑） | 不感知 web/CLI 传输载体 |
+| 后端 web 服务 | `miniharness/web/` + `protocol/` 等（L3 传输层） | 消费 core 能力；对外发布 HTTP/SSE wire 契约（信封/帧/错误语义） |
+| 前端工程 | 独立工程形态（当前 `web/static/` vanilla SPA 为教学参照；产品化前端另立工程） | 只依赖后端发布的 wire 契约，禁止 import/hack Python 内部 |
+
+前端唯一的耦合面是 `web/` 层发布的 wire 契约，不是 Python 内部 API——这保证前端可独立选用现代化技术栈（如 React）而无需改造内核。
+
 规则：
 
 1. L_n 只依赖 L_{&lt;n}，禁止依赖同层或上层。六条显式例外：
