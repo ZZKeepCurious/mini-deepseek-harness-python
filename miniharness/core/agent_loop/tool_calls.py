@@ -26,6 +26,7 @@ from ..tools import (
     ToolExec,
     ToolResult,
     execution_mode,
+    finalize_tool_result,
     pipeline_async_body,
     pipeline_policy_async,
 )
@@ -172,16 +173,20 @@ async def _run_group(
         except Exception as e:
             slots[index] = ToolResult(ok=False, is_error=True, error=f"参数无法物化: {e}")
             return
+        # fuseToolSignals 隔离：每工具独立熔合信号，超时只中断本工具；
+        # exec 身份（name/arguments/agent）在政策段前回填——拒绝结果同样
+        # 走 finalize_content 收口（对齐上游 prepare + finishScheduledExecution）
+        exec_ = ToolExec(signal=FusedSignal(signal.signal), agent=agent)
+        exec_.name = call["name"]
+        exec_.arguments = frozen
         try:
             rejected = await pipeline_policy_async(ctx, tool, frozen)
         except BaseException as e:
             scheduler_failure = e
             return
         if rejected is not None:
-            slots[index] = rejected
+            slots[index] = finalize_tool_result(tool, exec_, rejected)
             return
-        # fuseToolSignals 隔离：每工具独立熔合信号，超时只中断本工具
-        exec_ = ToolExec(signal=FusedSignal(signal.signal), agent=agent)
         task = asyncio.create_task(body_fn(ctx, tool, frozen, exec_))
         in_flight[index] = task
 

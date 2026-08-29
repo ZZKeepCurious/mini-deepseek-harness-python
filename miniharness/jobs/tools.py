@@ -10,10 +10,12 @@
   * producer 提供 outputLimitBytes 时，输出读与 notice 都按完整 UTF-8 结果
     字节封顶（含 status 元数据），多字节字符不劈裂
   * canonical value + output.render 分离（execute 返回结构化数据，render 生成
-    模型可见 content blocks）——字节封顶由 producer 端环形缓冲与 notice 装配
-    承担（job 记录 outputLimitBytes），工具层不做二次截断；上游默认
-    （未配置 policy 可见输出上限时）行为一致（finalizeContent/visibleOutputLimit
-    层 mini 未建，载体差异登记）
+    模型可见 content blocks）；工具层 finalizeContent 兜底二次截断：
+    job_output/job_kill 结算前按 outputLimitBytes 收口模型可见内容（保状态行，
+    对齐 tool-jobs finalizeTaskContent）。载体差异（登记录入 verified-diffs）：
+    上游经 outputLimits WeakMap（tools/pre-execute prepend 缓存）取上限，mini
+    直接每次现查即上游回退路径 `outputLimits.get(exec) ?? visibleOutputLimit(...)`
+    的等价——无 policy 时行为一致
 
 owner 无 agent/inbox/claimed 会话事件：经 AgentLoop.on_inbox_claimed
 钩子列表近似（payload 语义对齐，见 AGENTS.md 简化清单）
@@ -22,7 +24,8 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Callable
 
 from ..core.tools import Tool
 
@@ -144,6 +147,70 @@ def fit_with_suffix(content: str, suffix: str, max_bytes: int | None, omitted: s
     if fixed_bytes >= max_bytes:
         return _fit_tail(fixed, max_bytes)
     return _fit_tail(content, max_bytes - fixed_bytes) + fixed
+
+
+# ---------- Model-facing final cap (对齐 upstream finalizeTaskContent) ----------
+
+def _raw_single_text(content: Any) -> str | None:
+    """规整的单 text 块 → 文本；其余形状 None（对齐 rawSingleText）。"""
+    if isinstance(content, (list, tuple)) and len(content) == 1:
+        block = content[0]
+        if isinstance(block, (dict, MappingProxyType)) and block.get("type") == "text":
+            text = block.get("text")
+            return text if isinstance(text, str) else None
+    return None
+
+
+def _bound_single_text(content: Any, max_bytes: int) -> list[dict] | None:
+    """单 text 块整体封顶（对齐 boundSingleText）。"""
+    text = _raw_single_text(content)
+    if text is None:
+        return None
+    return [{"type": "text", "text": fit_with_suffix(text, "", max_bytes, "\n[result truncated]")}]
+
+
+def visible_output_limit(jobs: Any, exec_: Any) -> int | None:
+    """job_output / job_kill 的模型可见输出上限（对齐 visibleOutputLimit）。"""
+    name = getattr(exec_, "name", None)
+    if name not in ("job_output", "job_kill"):
+        return None
+    args = getattr(exec_, "arguments", None)
+    job_id = args.get("job_id") if isinstance(args, (dict, MappingProxyType)) else None
+    if not isinstance(job_id, str) or job_id == "":
+        return None
+    for snapshot in jobs.list(getattr(exec_, "agent", None)):
+        if snapshot.get("id") == job_id:
+            return snapshot.get("outputLimitBytes")
+    return None
+
+
+def finalize_job_task_content(jobs: Any) -> Callable[[Any, dict], list | None]:
+    """job_output / job_kill 的 finalizeContent（对齐 tool-jobs finalizeTaskContent）。
+
+    上游在结算时取 `outputLimits.get(exec) ?? visibleOutputLimit(ctx, exec)`；
+    mini 无 WeakMap/pre-execute 捕获，回落为每次现查（等价回退路径），
+    语义与上游默认（无 policy）一致。按调用方 agent 分辨率。
+    """
+
+    def _hook(exec_: Any, result: dict) -> list | None:
+        max_bytes = visible_output_limit(jobs, exec_)
+        if max_bytes is None:
+            return None
+        if (getattr(exec_, "name", None) == "job_output" and not result["is_error"]
+                and isinstance(result["value"], (dict, MappingProxyType))):
+            value = result["value"]
+            body = value.get("text")
+            body = body if isinstance(body, str) and body else "(no new output)"
+            content = body[:-1] if body.endswith("\n") else body
+            job = value.get("job")
+            if isinstance(job, (dict, MappingProxyType)):
+                suffix = "\n" + status_line(dict(job))
+                if _raw_single_text(result["content"]) == content + suffix:
+                    return [{"type": "text",
+                             "text": fit_with_suffix(content, suffix, max_bytes, "\n[output truncated]")}]
+        return _bound_single_text(result["content"], max_bytes)
+
+    return _hook
 
 
 def fit_completion_notice(snapshot: dict) -> str:
@@ -280,6 +347,7 @@ def job_output_tool(jobs, wait_default: int, wait_cap: int) -> Tool:
         },
         render=render,
         execute=execute,
+        finalize_content=finalize_job_task_content(jobs),
     )
 
 
@@ -357,6 +425,7 @@ def job_kill_tool(jobs) -> Tool:
         },
         render=render,
         execute=execute,
+        finalize_content=finalize_job_task_content(jobs),
     )
 
 

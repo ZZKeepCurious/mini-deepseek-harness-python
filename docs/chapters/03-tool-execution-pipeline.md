@@ -250,7 +250,7 @@ python -m unittest tests.test_tools -v
 
 - `tools/pre-execute` / `execute` / `post-execute` 三个 waterfall 的真实事件约定，字段名与我们一致
 - 注册表外层规范化的真实位置（snapshot 异常 → isError）
-- `finalizeContent`：最后一个内容只读硬性规定（简化版没有实现，值得知道它存在）
+- `finalizeContent`：最后一个内容只读硬性规定——`Tool.finalize_content` 钩子于结算时收口模型可见内容（`core/tools.py` `finalize_tool_result`），成功与错误结果都执行；job_output/job_kill 用它按 `outputLimitBytes` 做可见输出二次封顶（见第 12 章 jobs，`jobs/tools.py` `finalize_job_task_content`）
 
 一个语义差异需要明说：上游 `tools/post-execute` 是"无损物化前的 content 替换钩子"——返回 `undefined` 即保留原内容，返回其他值替换 content。简化版把它做成 accept/block 门（拒绝时返回 `{action: "block", feedback}`，与当前实现 `core/tools.py:354` 一致；block 的 `feedback` 是 `ContentBlock[]` 文本块）。方向不同，但落点相同：模型最终只能看到规范化的结果。
 

@@ -14,7 +14,7 @@ import asyncio
 import inspect
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any, Callable
 
@@ -79,9 +79,14 @@ class ToolExec:
 
     agent 由 AgentLoop/scheduler 在派发时填入（上游 ToolExecution.agent），
     供作业等按调用者会话栅栏的工具使用；缺省 None = 无 agent 调用方。
+    name / arguments 也由管线在冻结参数后回填（上游 ToolExecution 含
+    name/arguments/agent/signal），供 finalize_content 钩子与按调用方权限
+    解析的工具使用。
     """
     signal: threading.Event = field(default_factory=threading.Event)
     agent: Any = None
+    name: str | None = None
+    arguments: Any = None
 
 
 class FusedSignal:
@@ -132,6 +137,7 @@ class Tool:
     present_call: Callable | None = None                # UI 挂起卡片（纯函数）
     present_result: Callable | None = None              # UI 完成卡片（纯函数）
     render: Callable[[Any], Any] | None = None          # canonical 值 → 模型可见 content（上游 output.render）
+    finalize_content: Callable[[ToolExec, dict], Any] | None = None  # 结算前内容收口（上游 finalizeContent）
 
 
 @dataclass(frozen=True)
@@ -151,6 +157,7 @@ class ToolResult:
     _aborted: bool = field(default=False, repr=False, compare=False)
     error_info: dict | None = field(default=None, repr=False, compare=False)
     concludes_turn: bool = field(default=False, repr=False, compare=False)
+    value: Any = field(default=None, repr=False, compare=False)  # canonical 值（finalize_content 只读用）
 
 
 # ---------- 作用域化注册表 ----------
@@ -364,20 +371,68 @@ def _feedback_text(feedback: Any) -> str:
     return str(feedback)
 
 
+def _single_text_content(content: Any) -> str | None:
+    """规整的单 text 块 → 文本；其余形状返回 None。"""
+    if isinstance(content, (list, tuple)) and len(content) == 1:
+        block = content[0]
+        if isinstance(block, (dict, MappingProxyType)) and block.get("type") == "text":
+            text = block.get("text")
+            return text if isinstance(text, str) else None
+    return None
+
+
+def finalize_tool_result(tool: Tool, exec_: ToolExec, result: ToolResult) -> ToolResult:
+    """结算时应用 finalize_content（对齐上游 finishScheduledExecution →
+    applyFinalContent，tools/src/index.ts:1608-1653）。
+
+    finalizeContent(exec, result) -> ContentBlock[] | undefined：最终内容
+    收口（只读硬性规定），返回 undefined 表示保持当前内容。对成功与**所有**
+    错误结果都执行：错误的模型可见内容 = error 文本的单 text 块，回灌时
+    折叠回 error 字段；钩子抛错 → 规范化为 Error 工具错误。
+    """
+    hook = tool.finalize_content
+    if hook is None:
+        return result
+    if result.is_error:
+        error_text = result.error if isinstance(result.error, str) else ""
+        view_content: Any = [{"type": "text", "text": error_text}]
+    else:
+        view_content = result.content
+    try:
+        replacement = hook(exec_, {
+            "content": view_content,
+            "value": result.value,
+            "is_error": result.is_error,
+        })
+    except Exception as e:
+        return replace(result, ok=False, is_error=True, error=f"Error: {e}",
+                       content=None, value=None)
+    if replacement is None:
+        return result
+    if result.is_error:
+        text = _single_text_content(replacement)
+        if text is None:
+            return result
+        return replace(result, error=text)
+    return replace(result, content=deep_freeze(replacement))
+
+
 def run_pipeline(ctx: Context, tool: Tool, args: dict, exec_: ToolExec | None = None) -> ToolResult:
     """pre-execute → 守卫 → execute → post-execute → 规范化 → 冻结结果。"""
     exec_ = exec_ or ToolExec()
 
-    # 1. 参数一次性无损物化 + 深度冻结
+    # 1. 参数一次性无损物化 + 深度冻结；回填 exec 身份（上游 ToolExecution）
     try:
         frozen_args = deep_freeze(dict(args))
     except Exception as e:
         return ToolResult(ok=False, is_error=True, error=f"参数无法物化: {e}")
+    exec_.name = tool.name
+    exec_.arguments = frozen_args
 
-    # 2-4. 政策段
+    # 2-4. 政策段（拒绝结果同样走 finalize_content 收口）
     rejected = pipeline_policy(ctx, tool, frozen_args)
     if rejected is not None:
-        return rejected
+        return finalize_tool_result(tool, exec_, rejected)
 
     # 5-6. 执行体段
     raw, error = pipeline_body(ctx, tool, frozen_args, exec_)
@@ -387,17 +442,18 @@ def run_pipeline(ctx: Context, tool: Tool, args: dict, exec_: ToolExec | None = 
     # 错误文本统一 `Error: ${message}`，不带 Python 类型名前缀
     if error is not None:
         e = error
-        return ToolResult(ok=False, is_error=True, error=f"Error: {e}")
-    if isinstance(raw, ToolResult):
-        return raw
-    if isinstance(raw, dict) and raw.get("isError"):
-        return ToolResult(ok=False, content=raw.get("content"), is_error=True, error=raw.get("error"))
-    if not is_json_safe(raw):
-        return ToolResult(ok=False, is_error=True, error="工具返回了不可 JSON 序列化的值")
-
-    # 8. 冻结的权威结果：render 将 canonical 值转为模型可见 content（上游 output.render）
-    rendered = tool.render(raw) if tool.render is not None else raw
-    return ToolResult(ok=True, content=deep_freeze(rendered))
+        result = ToolResult(ok=False, is_error=True, error=f"Error: {e}")
+    elif isinstance(raw, ToolResult):
+        result = raw
+    elif isinstance(raw, dict) and raw.get("isError"):
+        result = ToolResult(ok=False, content=raw.get("content"), is_error=True, error=raw.get("error"))
+    elif not is_json_safe(raw):
+        result = ToolResult(ok=False, is_error=True, error="工具返回了不可 JSON 序列化的值")
+    else:
+        # 8. 冻结的权威结果：render 将 canonical 值转为模型可见 content（上游 output.render）
+        rendered = tool.render(raw) if tool.render is not None else raw
+        result = ToolResult(ok=True, content=deep_freeze(rendered), value=raw)
+    return finalize_tool_result(tool, exec_, result)
 
 
 async def _execute_async(tool: Tool, frozen_args: Any, exec_: ToolExec) -> Any:
@@ -417,6 +473,8 @@ async def pipeline_async_body(
     wait_for 经 shield 包裹保证超时不取消底层任务（coroutine 可继续排干）。
     """
     exec_ = exec_ or ToolExec()
+    exec_.name = tool.name
+    exec_.arguments = frozen_args
 
     if tool.timeout_ms:
         task = asyncio.create_task(_execute_async(tool, frozen_args, exec_))
@@ -447,15 +505,17 @@ async def pipeline_async_body(
 
     if error is not None:
         e = error
-        return ToolResult(ok=False, is_error=True, error=f"Error: {e}")
-    if isinstance(raw, ToolResult):
-        return raw
-    if isinstance(raw, dict) and raw.get("isError"):
-        return ToolResult(ok=False, content=raw.get("content"), is_error=True, error=raw.get("error"))
-    if not is_json_safe(raw):
-        return ToolResult(ok=False, is_error=True, error="工具返回了不可 JSON 序列化的值")
-    rendered = tool.render(raw) if tool.render is not None else raw
-    return ToolResult(ok=True, content=deep_freeze(rendered))
+        result = ToolResult(ok=False, is_error=True, error=f"Error: {e}")
+    elif isinstance(raw, ToolResult):
+        result = raw
+    elif isinstance(raw, dict) and raw.get("isError"):
+        result = ToolResult(ok=False, content=raw.get("content"), is_error=True, error=raw.get("error"))
+    elif not is_json_safe(raw):
+        result = ToolResult(ok=False, is_error=True, error="工具返回了不可 JSON 序列化的值")
+    else:
+        rendered = tool.render(raw) if tool.render is not None else raw
+        result = ToolResult(ok=True, content=deep_freeze(rendered), value=raw)
+    return finalize_tool_result(tool, exec_, result)
 
 
 async def run_pipeline_async(
@@ -470,8 +530,10 @@ async def run_pipeline_async(
         frozen_args = deep_freeze(dict(args))
     except Exception as e:
         return ToolResult(ok=False, is_error=True, error=f"参数无法物化: {e}")
+    exec_.name = tool.name
+    exec_.arguments = frozen_args
 
     rejected = await pipeline_policy_async(ctx, tool, frozen_args)
     if rejected is not None:
-        return rejected
+        return finalize_tool_result(tool, exec_, rejected)
     return await pipeline_async_body(ctx, tool, frozen_args, exec_)

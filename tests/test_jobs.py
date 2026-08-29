@@ -12,7 +12,7 @@ import unittest
 from miniharness.core.agent_loop.agent import AgentLoop
 from miniharness.core.scope import Context
 from miniharness.core.session import Session
-from miniharness.core.tools import ToolRegistry
+from miniharness.core.tools import ToolExec, ToolRegistry, run_pipeline_async
 from miniharness.jobs import (
     DEFAULT_MAX_CONCURRENT_JOBS_PER_OWNER,
     JobDoneBox,
@@ -687,6 +687,132 @@ class JobsToolsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             register_job_tools(ToolRegistry(Context(name="t3")), self.registry,
                                {"maxConsecutiveWakes": 0})
+
+    # ---------- finalizeContent 次要截断（对齐 tool-jobs.spec.ts:210-320） ----------
+
+    def _pipeline(self, name, args):
+        """全程管线（政策段 + finalize_content 收口）作为模型可见结果返回。"""
+        return asyncio.run(run_pipeline_async(
+            self.ctx, self.tools.resolve(name), args, ToolExec(agent=self.owner)))
+
+    def _block_text(self, content):
+        """content blocks（冻结 tuple/MappingProxyType 或普通 dict）→ 单文本。"""
+        if isinstance(content, (tuple, list)) and len(content) == 1:
+            text = content[0].get("text") if hasattr(content[0], "get") else None
+            return text if isinstance(text, str) else None
+        return None
+
+    def test_finalize_producer_limit_bounds_body_and_status(self):
+        # 对齐 tool-jobs.spec.ts:210-220：完整 body+status 按 outputLimitBytes 封顶，
+        # 触发保状态行的 [output truncated] 分支
+        box = JobDoneBox()
+        self.registry.start({"kind": "bash", "label": "sleep", "owner": self.owner,
+                             "outputLimitBytes": 48,
+                             "run": lambda: {"done": box, "cancel": lambda r: None,
+                                             "read_output": lambda: "界" * 100}})
+        result = self._pipeline("job_output", {"job_id": "bash-1"})
+        self.assertTrue(result.ok)
+        text = self._block_text(result.content)
+        self.assertIsNotNone(text)
+        self.assertLessEqual(len(text.encode("utf-8")), 48)
+        self.assertIn("[output truncated]", text)
+        self.assertIn("[status: running]", text)
+
+    def test_finalize_producer_limit_preserves_empty_and_newline_terminated(self):
+        # 对齐 tool-jobs.spec.ts:222-234：空输出与换行结尾在限内原样保留
+        box = JobDoneBox()
+        chunks = ["", "line\n"]
+
+        def read_output():
+            return chunks.pop(0) if chunks else ""
+
+        self.registry.start({"kind": "bash", "label": "sleep", "owner": self.owner,
+                             "outputLimitBytes": 64,
+                             "run": lambda: {"done": box, "cancel": lambda r: None,
+                                             "read_output": read_output}})
+        r1 = self._pipeline("job_output", {"job_id": "bash-1"})
+        self.assertEqual(self._block_text(r1.content), "(no new output)\n[status: running]")
+        r2 = self._pipeline("job_output", {"job_id": "bash-1"})
+        self.assertEqual(self._block_text(r2.content), "line\n[status: running]")
+
+    def test_finalize_read_failure_bounded(self):
+        # 对齐 tool-jobs.spec.ts:253-264：规范化读失败按上限封顶 [result truncated]
+        box = JobDoneBox()
+
+        def read_output():
+            raise RuntimeError("read failed: " * 100)
+
+        self.registry.start({"kind": "bash", "label": "sleep", "owner": self.owner,
+                             "outputLimitBytes": 64,
+                             "run": lambda: {"done": box, "cancel": lambda r: None,
+                                             "read_output": read_output}})
+        result = self._pipeline("job_output", {"job_id": "bash-1"})
+        self.assertTrue(result.is_error)
+        self.assertLessEqual(len(result.error.encode("utf-8")), 64)
+        self.assertIn("[result truncated]", result.error)
+
+    def test_finalize_deny_flow_through_pipeline(self):
+        # 对齐 tool-jobs.spec.ts:300-303：pre-execute deny 结果同样过 finalize 收口
+        # （mini 无 deny reason 载体，短文本在限内不改写；不崩溃即契约成立）
+        self.ctx.on("tools/pre-execute",
+                    lambda p, nxt: {"kind": "deny"} if p["tool"] == "job_output" else nxt(p))
+        box = JobDoneBox()
+        self.registry.start({"kind": "bash", "label": "sleep", "owner": self.owner,
+                             "outputLimitBytes": 64,
+                             "run": lambda: {"done": box, "cancel": lambda r: None,
+                                             "read_output": lambda: ""}})
+        denied = self._pipeline("job_output", {"job_id": "bash-1"})
+        self.assertTrue(denied.is_error)
+        self.assertEqual(denied.error, "denied by tools/pre-execute")
+
+    def test_finalize_wired_on_job_controls_only(self):
+        self.assertIsNotNone(self.tools.resolve("job_output").finalize_content)
+        self.assertIsNotNone(self.tools.resolve("job_kill").finalize_content)
+        self.assertIsNone(self.tools.resolve("job_list").finalize_content)
+
+    def test_finalize_bounds_long_error_text(self):
+        # 对齐 tool-jobs.spec.ts:310-319 失败统一封顶：错误文本（如 deny reason）超限截断
+        box = JobDoneBox()
+        self.registry.start({"kind": "bash", "label": "sleep", "owner": self.owner,
+                             "outputLimitBytes": 64,
+                             "run": lambda: {"done": box, "cancel": lambda r: None,
+                                             "read_output": lambda: ""}})
+        hook = self.tools.resolve("job_output").finalize_content
+        exec_ = ToolExec(agent=self.owner, name="job_output", arguments={"job_id": "bash-1"})
+        bounded = hook(exec_, {"content": [{"type": "text", "text": "denied: " + "d" * 1000}],
+                               "value": None, "is_error": True})
+        self.assertLessEqual(len(bounded[0]["text"].encode("utf-8")), 64)
+        self.assertIn("[result truncated]", bounded[0]["text"])
+
+    def test_finalize_policy_replaced_content_bounded_without_status(self):
+        # 对齐 tool-jobs.spec.ts:236-251：内容被 post-policy 替换后不恢复 canonical
+        # 渲染，整体封顶且不带状态行（mini 无 accept-replace 载体，直接契约测钩子）
+        box = JobDoneBox()
+        self.registry.start({"kind": "bash", "label": "sleep", "owner": self.owner,
+                             "outputLimitBytes": 64,
+                             "run": lambda: {"done": box, "cancel": lambda r: None,
+                                             "read_output": lambda: "canonical output"}})
+        hook = self.tools.resolve("job_output").finalize_content
+        exec_ = ToolExec(agent=self.owner, name="job_output", arguments={"job_id": "bash-1"})
+        replaced = hook(exec_, {"content": [{"type": "text", "text": "p" * 1000}],
+                                "value": {"text": "canonical output",
+                                          "job": {"id": "bash-1", "kind": "bash",
+                                                  "label": "sleep", "status": "running"}},
+                                "is_error": False})
+        text = replaced[0]["text"]
+        self.assertLessEqual(len(text.encode("utf-8")), 64)
+        self.assertIn("[result truncated]", text)
+        self.assertNotIn("[status: running]", text)
+
+    def test_finalize_without_limit_unchanged(self):
+        # 无 outputLimitBytes → 钩子不干预，管线原样透传
+        box = JobDoneBox()
+        self.registry.start({"kind": "bash", "label": "sleep", "owner": self.owner,
+                             "run": lambda: {"done": box, "cancel": lambda r: None,
+                                             "read_output": lambda: "hello"}})
+        result = self._pipeline("job_output", {"job_id": "bash-1"})
+        self.assertTrue(result.ok)
+        self.assertEqual(self._block_text(result.content), "hello\n[status: running]")
 
 
 class RealLoopIntegrationTest(unittest.TestCase):

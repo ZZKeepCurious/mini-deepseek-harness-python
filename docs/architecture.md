@@ -59,7 +59,7 @@ miniharness/
 ├── jobs/                  # packages/jobs（seam + jobs-local + tool-jobs）
 │   ├── types.py           # 终态 / 常量 / JobDoneBox（done 的 Promise 替身）
 │   ├── registry.py        # LocalJobRegistry（ctx.jobs 服务 + owner 栅栏 + 结算/上限/teardown）
-│   └── tools.py           # job_output / job_list / job_kill + 完成 notice 投递 + 字节封顶
+│   └── tools.py           # job_output / job_list / job_kill + 完成 notice 投递 + 可见输出封顶（finalizeContent）
 ├── plan/                  # packages/plan/plan-mode（状态机 + 审查 UI + 投影）
 │   ├── config.py          # plan-mode 规格解析（section 校验，fail loud）
 │   ├── mode.py            # PlanModeController（log-only plan/mode + plan:policy 节 + pre-step 提交）
@@ -162,7 +162,7 @@ miniharness/
 | `llm/retry.py` | `packages/llm/llm-retry/src/` | async 恢复决策（派发前熔合信号检查 + always 派发后复查中止胜过决策）+ 事件驱动多信号竞速可取消等待（等价 `AbortSignal.any`；裸测试替身信号回退轮询）+ 插件 effect teardown（注销监听器 + lifetime.abort + 排干在途恢复） |
 | `llm/token_meter.py` | `packages/llm/token-meter/src/` | |
 | `compaction/`（config + region + summarizer + engine + tool_result_pruner） | `packages/compaction/compaction-basic/src/` + `compaction-tool-result-pruner/src/`（config / region / summarizer / index.ts） | 前缀重放无 KV cache 语义；toolResultPruner 可选阶段已对齐（`compaction/tool_result_pruner.py`，上游注入 `ctx.toolResultPruner`，mini 经 `ctx.get('toolResultPruner')` 取用） |
-| `jobs/`（types + registry + tools） | `packages/jobs/`（seam + jobs-local + tool-jobs） | `run_in_background` 触发入口未复现；无 scope 链/agent registry；execute 直接返回渲染文本（简化标注见模块 docstring） |
+| `jobs/`（types + registry + tools） | `packages/jobs/`（seam + jobs-local + tool-jobs） | controller/监听器按 scope 分层（P1-4a）；canonical value + render 分离；finalizeContent 可见输出二次封顶（job_output/job_kill）；无 agent registry；`run_in_background` 触发入口经模型侧 `subagent` 工具复现（简化标注见模块 docstring） |
 | `plan/`（config + mode + review + projection） | `packages/plan/plan-mode/src/` | 状态机 + plan:policy 节 + 审查 UI（exit_plan_mode / /plan / userQuestions）+ plan 投影；无 canonical value / presentCall（简化标注见模块 docstring） |
 | `commands/` | `packages/interaction/commands/src/` | 命令注册/派发 + `command/run|done` 配对 + commands/change 通知 + normalizeResult fail-loud；handler 签名 `(agent, raw)` 为教学扩展（简化标注见模块 docstring） |
 | `goal/`（domain + service + prompt + driver + tools + commands） | `packages/goal/`（goal + goal-round-driver + tool-goal + command-goal） | 无 agent registry / Typert remote；driver 模式事件驱动续跑（同步门面保留 `continue_rounds`）；权威判定近似（简化标注见模块 docstring） |
