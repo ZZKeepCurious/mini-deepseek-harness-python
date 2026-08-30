@@ -193,5 +193,116 @@ class TestDispatchErrorHandling(GatewayStreamsTest):
         self.assertIn("clientId", ready)
 
 
+class TestReconnectResilience(GatewayStreamsTest):
+    """重连健壮性（wire 无 since；重开流重投全量 + 客户端去重 = gap-free）。
+
+    对齐上游 README「reconnection reopens the `$events` stream」/「return a
+    complete opening snapshot followed by deltas」：follow/control 重开即重投
+    snapshot/baseline，`$events` 新代次只接 ready + 未来帧（单向不重放、挂起
+    waterfall 保留 eventId 随代次重投）。
+    """
+
+    def _append(self, loop, i: int) -> None:
+        loop.session.append("user/message",
+                            {"message": create_message("user", [text_block(f"x{i}")],
+                                                       {"kind": "user"}), "time": i + 1},
+                            surfaceOp="append")
+
+    def _open(self, sid):
+        return self.gateway.open_stream("session.follow", {
+            "args": {"address": {"kind": "session", "sessionId": sid}}})
+
+    def test_follow_reconnect_snapshot_gap_free(self):
+        async def go():
+            sid = self._create(session_id="session-r")
+            loop = self.api._agents[sid]
+            gen1 = self._open(sid)
+            snap1 = await gen1.__anext__()
+            c0 = snap1["cursor"]
+            self._append(loop, 0)
+            self._append(loop, 1)
+            evs1 = []
+            for _ in range(2):
+                evs1.append(await gen1.__anext__())
+            await gen1.aclose()
+            self._append(loop, 2)
+            self._append(loop, 3)
+            gen2 = self._open(sid)
+            snap2 = await gen2.__anext__()
+            await gen2.aclose()
+            return c0, evs1, snap2
+
+        c0, evs1, snap2 = _run(go())
+        first_gen = {f["event"]["seq"] for f in evs1}
+        second_gen = {e["seq"] for e in snap2["records"]}
+        total = c0 + 4
+        self.assertEqual(snap2["cursor"], total)
+        # 事件 seq 为 0 基（seq == 追加前日志长度）；快照 cursor = 条数 = 下一条 seq
+        merged = first_gen | second_gen
+        self.assertEqual(merged, set(range(0, total)))
+        self.assertEqual(len(merged), total)
+        self.assertTrue(second_gen.issuperset(first_gen))
+
+    def test_control_reconnect_refreshes_baseline(self):
+        async def go():
+            sid = self._create(session_id="session-rc")
+            gen1 = self.gateway.open_stream("session.control", {"args": {}})
+            baseline1 = await gen1.__anext__()
+            await gen1.aclose()
+            gen2 = self.gateway.open_stream("session.control", {"args": {}})
+            baseline2 = await gen2.__anext__()
+            await gen2.aclose()
+            return baseline1, baseline2, sid
+
+        b1, b2, sid = _run(go())
+        for baseline in (b1, b2):
+            self.assertEqual(baseline["type"], "baseline")
+            self.assertIn(sid, baseline["value"]["queues"])
+
+    def test_events_reconnect_no_emit_replay(self):
+        async def go():
+            gen1 = self.gateway.open_stream("$events", {"args": {}})
+            ready1 = await gen1.__anext__()
+            self.gateway.events.broadcast("api-session/added",
+                                          {"sessionId": "s1", "running": False})
+            f1 = await gen1.__anext__()
+            self.assertEqual(f1["type"], "emit")
+            await gen1.aclose()
+            gen2 = self.gateway.open_stream("$events", {"args": {}})
+            ready2 = await gen2.__anext__()
+            self.gateway.events.broadcast("api-session/status", "s1", True)
+            f2 = await gen2.__anext__()
+            await gen2.aclose()
+            return ready1, f1, ready2, f2
+
+        ready1, f1, ready2, f2 = _run(go())
+        self.assertNotEqual(ready1["clientId"], ready2["clientId"])
+        self.assertEqual(f2["event"], "api-session/status")
+        self.assertEqual(f2["args"], ["s1", True])
+
+    def test_events_reconnect_delivers_pending_waterfall(self):
+        async def go():
+            sid = self._create(session_id="session-pw")
+            pending = asyncio.create_task(
+                self.gateway.events.invoke("approval/request", sid,
+                                           {"prompt": "proceed?"}))
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            gen = self.gateway.open_stream("$events", {"args": {}})
+            ready = await gen.__anext__()
+            wf = await gen.__anext__()
+            self.assertEqual(wf["type"], "waterfall")
+            self.assertEqual(wf["event"], "approval/request")
+            self.assertEqual(wf["agentId"], sid)
+            self.gateway.events.receive_result(
+                {"clientId": ready["clientId"], "eventId": wf["eventId"],
+                 "outcome": {"kind": "result", "value": "ok"}})
+            settled = await asyncio.wait_for(pending, 5)
+            await gen.aclose()
+            return settled
+
+        self.assertEqual(_run(go()), ("result", "ok"))
+
+
 if __name__ == "__main__":
     unittest.main()

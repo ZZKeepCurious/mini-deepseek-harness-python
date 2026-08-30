@@ -15,11 +15,15 @@
 `ctx` 的 jobs 注册表）。跨进程耦合面只有本类发布给 mux 的 wire 契约（endpoint
 名 + 帧形状）；同包内部直接引用 WebApi（对齐上游同进程组装）。
 
-mini 简化（须同步 verified-diffs §3.4）：follow 的 records 用会话日志事件流
-`Session.events` 投影，无 page/projection 域的 message 对齐游标；`_attach` 冷
-会话自动 resume 后取日志尾部快照，再以 `_poll_new_event`（轮询 + 空闲 sleep）实时
-补 event 帧，无 since 恢复游标（重开流重拉）；jobs 来自 ctx 的 on_jobs_changed
-回调，owner 恒为 AgentLoop；心跳 Ping 省略（Starlette WS 无 Ping API）。
+mini 简化 / 已核实（须同步 verified-diffs §3.4)：follow 的 records 用会话日志
+事件流 `Session.events` 投影，无 page/projection 域的 message 对齐游标；
+`_attach` 冷会话自动 resume 后取日志尾部快照，再以 `_poll_new_events`（短轮询 +
+空闲 sleep，一次捞出全部新事件，seq 严格递增）实时补 event 帧。**已核实：alpha.1
+wire 无 since 字段**（客户端连回 = 重开流重新投递完整 snapshot/baseline，README
+明言单向通知重连不重放）——mini 同款，重连健壮性由「重开全量 + 客户端按 seq 去重」
+（webui TrajectoryBuffer）保证，无游标也无需再造。jobs 来自 ctx 的 on_jobs_changed
+回调，owner 恒为 AgentLoop；心跳 Ping 由 launcher 的 transport 级 ping 闭合
+（`web/launcher.py` uvicorn_options，不在此层）。
 """
 from __future__ import annotations
 
@@ -70,7 +74,6 @@ class GatewayStreams:
         self._control_queues: dict[asyncio.Queue, None] = {}
         self._attached = False
         self._disposers: list[Any] = []
-        self._follow_waiters: list[_FollowWaiter] = []
 
     # ---------- mux 分发入口 ----------
 
@@ -132,11 +135,12 @@ class GatewayStreams:
                "records": records, "hasMore": has_more, "projections": {}}
         subscribed = seq
         while True:
-            event = await _poll_new_event(self.api, session_id, subscribed, signal)
-            if event is None:
+            events = await _poll_new_events(self.api, session_id, subscribed, signal)
+            if events is None:
                 return
-            subscribed = event["seq"]
-            yield {"type": "event", "event": event}
+            for event in events:
+                subscribed = event["seq"]
+                yield {"type": "event", "event": event}
 
     @staticmethod
     def _header(session) -> dict:
@@ -277,8 +281,28 @@ class GatewayStreams:
         self.approvals.dispose()
 
 
-class _FollowWaiter:
-    """未实现（保留占位以明确简化）：follow 用 `_poll_new_event` 轮询。"""
+async def _poll_new_events(api: Any, session_id: str, from_seq: int, signal=None):
+    """短轮询一次捞出 `from_seq` 起的新事件（seq 非降，批量为空则 sleep）。
+
+    对齐 history.follow 的 gap-free 逐帧语义；mini 用短轮询替代事件通知
+    （会话日志在进程内 append 即现成可读）。事件 seq 为 0 基（`seq == 追加前
+    日志长度`，对齐上游 EventLog），snapshot `cursor` = 日志条数 = 下一条应达
+    seq；因此过滤用 `>= from_seq`，保证快照后第一条活体事件不漏判（旧 `>` 会
+    永久吞掉该条）。一次返回全部新事件避免逐条重扫：调用方顺序 yield，seq 保证
+    严格递增。心跳/取消信号与轮询间隔由调用方控制。
+    """
+    loop_ = api._agents.get(session_id)
+    if loop_ is None:
+        return None
+    session = loop_.session
+    while True:
+        fresh = [event for event in list(session.events)
+                 if event.get("seq", 0) >= from_seq]
+        if fresh:
+            return fresh
+        if signal is not None and getattr(signal, "cancelled", lambda: False)():
+            return None
+        await asyncio.sleep(FOLLOW_POLL_INTERVAL)
 
 
 async def _poll_new_event(api: Any, session_id: str, from_seq: int, signal=None):

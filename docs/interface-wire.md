@@ -38,7 +38,9 @@
 - `1003`：收到二进制帧（协议错误）。
 - `1008`：文本非 JSON / 帧形状非法 / 重复 `open` 同一 `streamId`。
 - `1011`：某流 `error` 帧自身发送失败。
-- 心跳：上游 30s 协议 Ping，mini 省缺（Starlette WS 无 Ping API，登记简化）。
+- 心跳：每条连接每 30s 一次 transport 级协议 Ping（`web/launcher.py` uvicorn
+  `ws_ping_interval=30`，`ws_ping_timeout=None` 不强制 Pong）——只保活中间代理、
+  不杀僵死连接，对齐上游 `stream-server.ts` heartbeat（对齐交付，见 §4.4）。
 
 ## 2. 信封层（`web/envelope.py`）
 
@@ -135,11 +137,17 @@ internal
  "projections": {}}
 ```
 
-  事件信封统一形态 `{type, seq, time, data}`（seq 从 1 起、`seq == log.length`）。`maxMessages`
-  溢出时只取尾段并置 `hasMore=true`。
-- 续帧：`{"type":"event", "event": <事件信封>}`，`event.seq` 严格递增；按 seq 去重拼接。
+  事件信封统一形态 `{type, seq, time, data}`（`seq` 0 基严格递增：`seq == 追加前
+  日志长度`，对齐上游 EventLog `seq: this.log.length` 后 push；首事件 seq=0）。
+  `maxMessages` 溢出时只取尾段并置 `hasMore=true`；`cursor` = 日志条数 = 下一条
+  活体帧应达 `seq`。
+- 续帧：`{"type":"event", "event": <事件信封>}`，首条活体帧 `event.seq == snapshot.cursor`，
+  其后 `event.seq` 严格递增；客户端按 seq 去重拼接（webui `TrajectoryBuffer`）。
 - 错误：`arguments-invalid` / `session-not-found`（未知会话）。
-- 简化：无 `since` 恢复游标——重开流重拉全量（登记简化）。
+- 已核实（对齐交付，见 §4.4）：上游 wire **无 `since` 字段**——`follow`/`control` 每次
+  (重)连 = 重开流重投完整 `snapshot`/`baseline`，客户端按 seq 去重即 gap-free；mini 同款，
+  重连健壮性不欠账。follow 活体帧的 mini 载体 = ≤50ms 短轮询批量提取（进程内日志现成可读，
+  帧形状/顺序与上游一致）。
 
 ### 4.2 `session.control`（宿主级 live control）
 
@@ -199,6 +207,22 @@ outcome 三型：
 该客户端让位、全部客户端耗尽 → `'next'`；`rejected` → `'rejected'`；**已结算/被取代的 eventId
 幂等 no-op**；注册表 `dispose()` 时全量 pending 折 `'cancelled'`。
 
+### 4.4 重连语义与心跳（三流统一约定）
+
+对齐上游 README：「reconnection reopens the `$events` stream；one-way notifications
+are **not** replayed after reconnect」「always return a complete opening snapshot followed
+by deltas」。
+
+- **`session.follow` / `session.control`**：每次 open（含重连）重投完整 `snapshot` / `baseline`
+  快照帧，随后续帧增量推进——客户端要做的只是「重开即重启，按 seq / 替换帧语义收敛」，无需
+  游标参数（wire 无 `since`）。
+- **`$events`**：新代次先 `ready`（新 `clientId`）；对旧代次已转发过的单向 emit **不重放**
+  （无 since 恢复游标，非缺口）；**挂起的 waterfall 保留 `eventId` 跨代次重投**（新客户端
+  open 即收到，首个 `$events/result` 结算，幂等 no-op）。
+- **心跳**：transport 级（不归 `web/mux.py`，前端无感）：每连接每 30s 一次协议 Ping，
+  `ws_ping_timeout=None` 不强制 Pong、不杀僵死连接（对齐上游 `stream-server.ts`——只保活、
+  不要求 timely Pong）；由 uvicorn `websockets` 实现透传（`web/launcher.py` `uvicorn_options`）。
+
 ## 6. 审批桥（`tools/ask` ↔ `approval/request` waterfall，`web/approvals.py`）
 
 接线（教学简化）：工具管线 `tools/ask` 闸门 → 落审计事件 `approval/asked` → 以
@@ -241,7 +265,7 @@ outcome 归一（`APPROVAL_OUTCOMES = {allowed-once, rejected, cancelled, unavai
 2. 载体层 404/415/400/500 只在信封/HTTP 层面，不代表业务状态。
 3. 流内错误 = `error` 帧（单流隔离），不关 WS；`close` 码只留给协议/形状/危险级错误。
 4. 审批 fail-closed：非 APPROVAL_OUTCOMES 合法值一律 `unavailable`，绝不误放行。
-5. 事件 `seq` 严格递增、`seq == log.length`；未知事件类型 fail-closed 拒绝，不做静默吞图。
+5. 事件 `seq` 严格递增、0 基（`seq == 追加前日志长度`）；未知事件类型 fail-closed 拒绝，不做静默吞图。
 
 ## 10. 与前端实现的映射
 
