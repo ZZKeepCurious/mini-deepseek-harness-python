@@ -105,7 +105,7 @@ headless 一次性任务入口（`miniharness/cli/headless.py` + `cli/main.py`�
 
 协议入口最小子集：JSON-RPC 信封（`miniharness/protocol/sdk.py`，07 章 §7.6）、ACP（`miniharness/protocol/acp.py`，07 章 §7.7）、hooks 桥（`miniharness/protocol/hooks.py`，07 章 §7.8）。
 
-web 传输层（`miniharness/web/`，07 章 §7.5）：四象限 RPC 信封（`envelope.py`，39 码错误集）、WebApi unary 会话服务（`api.py`）、mux/host SSE 事件流 + session/queue splice 重投影（`streams.py`，每帧独立 rpcId）、审批桥（`approvals.py`：tools/ask 问询 → approval/requested|resolved mux 帧 + `POST /api/respond` RpcReceipt + 重连重放 + dispose 结算）、静态服务契约（`frontend.py`，对齐 frontend-static）、会话导出下载（`downloads.py`：`GET /api/session.export`）、FastAPI 载体与 SSE 传输（`server.py`，对齐 handler.ts 状态码链 + /api/respond + SPA fallback）、vanilla SPA 浏览器前端（`web/static/`：会话列表/创建、Trajectory 折叠、审批面板、命令/配置、队列/作业面板）、`--profile web` 启动器（`launcher.py` + `cli/main.py`）。后端 wire 已全对齐（上游客户端指向 mini 后端可工作）；React monorepo 复现标注教学简化。
+web 传输层（`miniharness/web/`，07 章 §7.5）：两信封 RPC（`client-request`/`server-response`，`server.py` 严格 `{args}` 解包）、WebApi unary 会话服务（`api.py`：list/search/create/selectModel/modelCatalog/…/page unary）、Remote 流 wire（`stream_protocol.py`，单条 `/api/remote.mux` WebSocket 承载 open/cancel/item/end/error 帧 + `$events/result` unary 结算）、`$events` 注册表（`events.py`：ready 首帧 + api-session/* 转发 + waterfall）、`session.follow`/`session.control` 流（`streams.py`，follow=snapshot{header,cursor,records,hasMore,projections}+逐帧、control=baseline{queues,jobs,projections}+替换帧）、审批桥（`approvals.py`：async tools/ask 闸门 ↔ `$events` waterfall 经 result 结算 + `approval/asked|decided` 审计）、会话导出下载（`downloads.py`：`GET /api/session.export`，root + 子代理后代 + 被引用媒体 zip，200/400/404/501/500 状态码链，错误走私有信封外壳）、FastAPI 载体（`server.py`，对齐 gateway `stream-server.ts`/`handler.ts` 状态码链 + frontend-static 契约）、vanilla SPA 浏览器前端（`web/static/`：会话列表/创建、Trajectory 折叠、审批面板、命令/配置、队列/作业面板）、`--profile web` 启动器（`launcher.py` + `cli/main.py`）。契约层已全量对齐 alpha.1 真实契约（上游 React 客户端指向 mini 后端可工作）；React monorepo 复现标注教学简化。
 
 异步化与并行工具执行（`miniharness/core/agent_loop/tool_calls.py` + core/scope async 变体 + `execution_mode` 分类器，手册 12 章）——屏障/滚动池/模型序提交/取消排干与上游 `agent-loop/src/tool-calls.ts` 逐条对齐。
 
@@ -127,7 +127,7 @@ Trajectory 是 **web 专属**的"Agent 的 DevTools"：一个按 turn 组织的�
 ```text
 数据流：
 会话日志（唯一数据源）
-  → session.history RPC（beforeSeq 向前分页，按 append-origin 消息边界切页）
+  → session.page RPC（throughSeq/beforeSeq/maxMessages 游标向前分页，按 append-origin 消息边界切页）
   → ConversationNodeAssembler 折叠（conversation-assembler.ts:133-150）
       · 折叠窗口 = 当前滚动区间的节点
       · 每个 target（user/assistant/tool/steering…）用独立 definition 物化
@@ -139,7 +139,7 @@ Trajectory 是 **web 专属**的"Agent 的 DevTools"：一个按 turn 组织的�
 **数据流逐节点走读**（对应上图每行）：
 
 1. **会话日志**：唯一数据源，Trajectory 只读它，不维护独立数据。
-2. **session.history RPC**：按 `beforeSeq` 向前分页拉取日志切片，页边界取 **append-origin 消息边界**（保证折叠窗口内消息完整，不劈裂一条消息）。
+2. **session.page RPC**：按 `throughSeq`/`beforeSeq` 游标向前分页拉取日志切片，页边界取 **append-origin 消息边界**（保证折叠窗口内消息完整，不劈裂一条消息）。
 3. **ConversationNodeAssembler 折叠**（conversation-assembler.ts:133-150）：把原始事件折叠成可检查记录。折叠窗口 = 当前滚动区间的节点；每个 target（user / assistant / tool / steering…）用**独立 definition**（`match/update/finalNode` 纯函数）物化成自己的记录形状。
 4. **TrajectorySnapshot**（trajectory-contract.ts:60-68）：折叠的成品——由 `eventNodes`（节点表）、`eventLocations`（节点↔事件序号映射）、`requests`、`callSchemas`、`partial`（崩溃未闭合尾部标记）、`runningCalls`（在飞工具调用）六块组成。
 5. **渲染 + 虚拟化**：只挂载可见行窗口（阈值 100 行）+ overscan 12，长会话翻页加载，避免一次性渲染整条日志。
@@ -151,7 +151,7 @@ Trajectory 是 **web 专属**的"Agent 的 DevTools"：一个按 turn 组织的�
 - **Overview**：从同一折叠数据投影真实开始时间与耗时（TTFT 等），不是另一套采集；
 - **搜索**：浏览器内增量索引（trajectory-search-index.ts），随事件到达增量更新，不走 session-query；
 - **虚拟化**：只挂载可见行（阈值 100 行、overscan 12、DOM 上限 160，trajectory-virtualization.e2e.ts 钉住该契约）；
-- **分页**：依赖 `session.history` 的消息边界切页语义（议题 7），保证折叠窗口内消息完整。
+- **分页**：依赖 `session.page` 的消息边界切页语义（议题 7），保证折叠窗口内消息完整。
 
 ### 3.3 源码证据
 
@@ -240,7 +240,7 @@ tools/pre-execute 瀑布（core/tools）→ 返回 {kind:'ask'}（PreToolDecisio
 - **闭合四值**：`'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'`（`packages/interaction/user-approval/src/types.ts:29`），唯一放行是 allowed-once；
 - **两档策略**：`ApprovalPolicy = 'ask' | 'never'`（index.ts:94）；`never` 在进入 waterfall 分发**之前**确定性返回 rejected（index.ts:304-312）——因为 `prepend:true` 的监听器无法绕过 service 自身先裁决；有效策略 = 日志中最后一个 `approval/policy` 事件的纯 fold（index.ts:112-118），恢复无需 catch-up，`setApprovalPolicy()` 是唯一写路径；
 - **审计不进模型转录**：三个事件（asked/decided/policy）都 log-only、无 surfaceOp、无 role；模型只看到提问方消费者最终的工具结果。策略另经两条模型可见路径：system-prompt runtime-context 快照（`approval:policy`，order 115，index.ts:204-216）+ 策略切换时注入带 `source:{kind:'plugin'}` 的 user/message（index.ts:226-237）；
-- **四个 answerer 通道**：web 人工（api-proxy 把 approval/request 进 pending 注册表 → `approval/requested` mux 帧 → 浏览器 `POST /api/respond` → `approval/resolved` 广播，api-proxy.ts:1407-1488）；ACP 机器（只给 allow-once/reject-once，acp/src/index.ts:215-229）；hooks 桥（把 PreToolUse 的 ask 透传，hooks-claude-code/src/index.ts:238-244）；无内置 answerer（headless 组合 resolve unavailable 并 fail-closed）；
+- **四个 answerer 通道**：web 人工（`web/approvals.py` 挂 async `tools/ask` 闸门 → `approval/request` 经 `$events` 远程事件瀑布投递 → 浏览器 `$events/result` 回投结算，wire 契约对齐 `packages/api/remotes`，api-proxy.ts:1407-1488 旧路径已随 apiproxy 删除）；ACP 机器（只给 allow-once/reject-once，acp/src/index.ts:215-229）；hooks 桥（把 PreToolUse 的 ask 透传，hooks-claude-code/src/index.ts:238-244）；无内置 answerer（headless 组合 resolve unavailable 并 fail-closed）；
 - **权限旋钮在部署层**：`packages/bundle/base/cordis.patch.yml:188-205` 声明 approval 行（policy 由 `DSH_PERMISSION_MODE` 推导）+ `permission-presets` 三档表（read-only / workspace-write / danger-full-access，各自捆绑 sandbox 模式 + 审批策略，schema 在 `packages/interaction/permission-presets/src/index.ts:161-178`）。
 
 ### 5.3 源码证据
@@ -255,7 +255,7 @@ tools/pre-execute 瀑布（core/tools）→ 返回 {kind:'ask'}（PreToolDecisio
 
 ### 5.4 mini 对照
 
-mini 已复现审批层：`ask/never` 两档、'never' 在派发前由服务自身确定性拒绝、审计事件 `approval/asked|decided` turn-enclosed 且 log-only 非 surface、`approval/policy` 最后一条胜出纯 fold、无 answerer/抛错/非词汇表返回值归一化 'unavailable' fail closed、'allowed-once' 无跨调用豁免（手册 09 章）。**web 人工通道已复现**（`web/approvals.py`）：接在工具管线闸门 `tools/ask` 而非上游的 `approval/request`（教学简化），wire 契约一致——pending 稳定 rpcId、`approval/requested` mux 帧、浏览器 `POST /api/respond` 回显 rpcId 得 RpcReceipt、结算广播 `approval/resolved`、重连重放复用 rpcId、网关 dispose 全 pending 'cancelled'（手册 07 章 §7.5.5）。
+mini 已复现审批层：`ask/never` 两档、'never' 在派发前由服务自身确定性拒绝、审计事件 `approval/asked|decided` turn-enclosed 且 log-only 非 surface、`approval/policy` 最后一条胜出纯 fold、无 answerer/抛错/非词汇表返回值归一化 'unavailable' fail closed、'allowed-once' 无跨调用豁免（手册 09 章）。**web 人工通道已复现**（`web/approvals.py`）：接在工具管线闸门 `tools/ask` 而非上游的 `approval/request`（教学简化），wire 契约一致——`approval/request` 经 `$events` 远程事件瀑布投递、浏览器 `$events/result` 回投结算（result∈APPROVAL_OUTCOMES，非法值 fail-closed 'unavailable'）、网关 dispose 全 pending 'cancelled'（手册 07 章 §7.5.4）。
 
 ## 议题 6：运行时自我修改
 
@@ -302,26 +302,26 @@ sidebar 搜索 → ctx.sessions.search（runtime manager.ts:518-527）→ RPC se
   · snippet 240 codepoints，≤20 条 + hasMore（api/session-search.ts:2,5）
 
 打开窗口（读历史，不激活）：
-  ui-workspace open → ctx.sessions.open → RPC session.history（尾页 PAGE_MESSAGES=50）
-  → host：historySourceFor（attached 优先，否则持久化 inspect，api-proxy.ts:1533-1538）
-  → paginate：消息边界切页 → historyPage；客户端与 mux 实时帧按 seq 缝合；subscribedLastSeq>tailSeq 补拉（gap repair）
+  ui-workspace open → ctx.sessions.open → RPC session.page（尾页 PAGE_MESSAGES=50）
+  → host：historySourceFor（attached 优先，否则持久化 inspect，session-controller/src/index.ts，aliased host/history-source）
+  → paginate：消息边界切页 → session.page（throughSeq/beforeSeq/maxMessages，gateway 映射）；客户端与 mux 实时帧按 seq 缝合；subscribedLastSeq>tailSeq 补拉（gap repair）
   → loadOlder（beforeSeq=窗口首 seq）
 
 真正恢复（resume，激活运行）：
-  ensureSession：持久化记录存在 → ctx.agents.resume({resumeSessionId})（api-proxy.ts:1617-1662）
+  ensureSession：持久化记录存在 → ctx.agents.resume({resumeSessionId})（session-controller/src/index.ts ensureSession 等效）
   → agent-loop：persistence.prepare → setupAndPublish('resume')（agent-loop/src/index.ts:655-710）
   声明式路径：config agents[].resumeSessionId（与 sessionId 互斥，index.ts:270-373）
 ```
 
-- **分页语义**（api-proxy.ts:282-313）：`beforeSeq` 缺省=尾页；从尾部倒着数 maxMessages 个 **append-origin 消息**（user/assistant message 且 isAppendSurfaceEvent）；replacement 拷贝不占配额；同一消息的 chunk/tool 事件经 `sourceEventSeqs` 分组，**绝不在消息中段切页**；`compaction/summary` 与其 replacement 同页；
+- **分页语义**（session-controller/src/index.ts session.page，原 api-proxy.ts:282-313 已随 apiproxy 删除）：`beforeSeq` 缺省=尾页；从尾部倒着数 maxMessages 个 **append-origin 消息**（user/assistant message 且 isAppendSurfaceEvent）；replacement 拷贝不占配额；同一消息的 chunk/tool 事件经 `sourceEventSeqs` 分组，**绝不在消息中段切页**；`compaction/summary` 与其 replacement 同页；
 - **全文检索是 opt-in**：session-query 家族（服务定义 + SQLite FTS5 实现，`packages/session-query/`）索引六类事件（user/message、assistant/message、tool/call name+arguments、tool/result content+error、todo/write、turn/end reason）；结构性事件不产生文档（extraction.ts:13-42）；shipped bundle 默认 `openAt: never`（SQLite 永不打开，搜索抛 `SESSION_QUERY_SEARCH_DISABLED`），此时 sidebar 退化为本地子串匹配（bundle/base/cordis.patch.yml:109-121）；
-- **读历史从不 resume 或发布 Agent**（api/sessions.ts:279-280）——两条路径刻意分离；
+- **读历史从不 resume 或发布 Agent**（packages/api/session-controller/src/index.ts）——两条路径刻意分离；
 - **headless 无 --session**：startup.ts:31-56 只解析 task 位置参数；headless.spec.ts:90 的 resume 桩直接 reject 证明从不调用。
 
 ### 7.3 源码证据
 
-- `packages/host/apiproxy/src/api-proxy.ts:282-313, 1533-1538, 1617-1662, 2036-2165` —— 分页、historySourceFor、ensureSession、session.search
-- `packages/host/apiproxy/src/api/sessions.ts:236-283` —— search/history 契约（不 resume 的明示）
+- `packages/api/session-controller/src/index.ts`（session.page / session.search / session.fork / resume 契约；原 api-proxy.ts:282-313/1533-1538/1617-1662/2036-2165 已随 apiproxy 删除）—— 分页、historySourceFor、ensureSession、session.search
+- `packages/api/session-controller/src/types.ts` —— page 游标（throughSeq/beforeSeq/maxMessages）+ SessionErrorDetailsMap 错误闭集
 - `packages/session-query/session-query/src/extraction.ts:13-42` —— 索引文档投影六类事件
 - `packages/session-query/session-query-sqlite/README.md:19,40-42,55` —— FTS5、openAt 三态、进程内同步执行
 - `packages/core/agent-loop/src/index.ts:655-710` —— resume 的 prepare/setupAndPublish

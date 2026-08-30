@@ -119,10 +119,10 @@ web 的宿主侧可以拆成两半，mini 两半都已落地：
 
 | 半 | 上游 | 内容 | mini |
 |---|---|---|---|
-| HTTP 载体 + 事件流 | `packages/host/apiproxy` | 会话服务的 unary RPC 载体（`fetch/handler.ts`）+ mux/host SSE 事件流（`api-proxy.ts`）+ approval 通道（`api/approvals.ts`）+ SPA 静态载体（`frontend-static`） | `miniharness/web/`（§7.5，已复现） |
-| 浏览器前端 | `packages/client`（39 包）| React shell、对象层、Trajectory、审批面板等 | `web/static/` vanilla SPA（§7.5.5；React monorepo 复现标注教学简化） |
+| HTTP + WS 载体与契约 | `packages/client/connection` + `packages/api/gateway` + `packages/api/session-controller` + `packages/api/remotes` | 两信封 RPC + unary 会话服务（`/api/<endpoint>` POST `{args}`）+ WS `/api/remote.mux` 承载 Remote 流（open/cancel/item/end/error）+ `$events` 注册表 + follow/control + 审批 waterfall 桥 + `frontend-static` 静态载体 | `miniharness/web/`（§7.5，已复现） |
+| 浏览器前端 | `packages/client`（39 包）| React shell、对象层、Trajectory、审批面板等 | `web/static/` vanilla SPA（§7.5.4；React monorepo 复现标注教学简化） |
 
-web 的 HTTP/SSE 传输层 + 静态契约 + 浏览器 SPA 都在 §7.5 落地，`--profile web` 启动它并监听 `MINIHARNESS_WEB_HOST`/`MINIHARNESS_WEB_PORT`（缺省 `127.0.0.1` / `0`=OS 分配）。
+web 的 HTTP/WS 传输层 + 静态契约 + 浏览器 SPA 都在 §7.5 落地，`--profile web` 启动它并监听 `MINIHARNESS_WEB_HOST`/`MINIHARNESS_WEB_PORT`（缺省 `127.0.0.1` / `0`=OS 分配）。
 
 ## 7.4 三个协议入口
 
@@ -148,83 +148,73 @@ hooks 的价值在于迁移成本：已经写好 Claude Code 钩子（安全策�
 
 ## 7.5 复现：web 传输层（`miniharness/web/`）
 
-> 对应 dsh 真实源码：`packages/host/apiproxy/src/fetch/handler.ts`（HTTP 载体）+ `api-proxy.ts`（events.mux / events.host / approval 通道）+ `packages/host/frontend-static`（SPA 静态载体）+ `packages/host/webserver`（监听配置）。前端（`packages/bundle/web-app` + `packages/client`）以 vanilla SPA 简化复现（§7.5.5）。
+> 对应 dsh 真实源码：`packages/client/connection`（两信封 RPC + HTTP 载体）+ `packages/api/gateway`（`stream-protocol.ts` + `stream-server.ts`：WS `/api/remote.mux` + `$events` 注册表）+ `packages/api/session-controller`（辅助 Agent 入口，Typert Remote `session/*`）+ `packages/api/remotes`（Remote 事件瀑布 + `$events/result`）+ `packages/host/frontend-static`（SPA 静态载体）。前端（`packages/bundle/web-app` + `packages/client`）以 vanilla SPA 简化复现（§7.5.4）。契约已于 2026-08-30 全面重组到 alpha.1 真实契约（`packages/host/apiproxy` 已在 alpha.1 删除，见 `status/mini-harness/migration-log.md` 步骤 66-70）。
 >
-> 分层：`web/envelope.py`（§7.5.1）→ `web/api.py`（§7.5.2）→ `web/streams.py`（§7.5.3）→ `web/server.py` + `web/downloads.py` + `web/launcher.py`（§7.5.4）→ `web/approvals.py` + `web/frontend.py` + `web/static/`（§7.5.5）。
+> 分层：`web/stream_protocol.py`（§7.5.1）→ `web/api.py`（§7.5.2）→ `web/mux.py` + `web/events.py` + `web/streams.py`（§7.5.3）→ `web/server.py` + `web/downloads.py` + `web/launcher.py`（§7.5.4）→ `web/approvals.py` + `web/frontend.py` + `web/static/`（§7.5.4）。
 
-### 7.5.1 信封：四象限 RPC（`web/envelope.py`）
+### 7.5.1 信封：两信封 RPC + Remote 流 wire 语法（`web/stream_protocol.py`）
 
-浏览器↔宿主的通信是**双向两个协议**，上游用一张四象限表收拢（`rpc.ts`）：
+alpha.1 把通信收拢为**单一两信封协议**（对齐 `packages/client/connection`）：
 
 | 方向 | 形状 | 语义 |
 |---|---|---|
 | client → host | `client-request`（type/rpcId/method/payload）| 浏览器发起的调用 |
-| client → host | `client-response`（type/rpcId/result/error）| respond 通道的回答（`POST /api/respond` 载体，§7.5.5）|
-| host → client | `server-request`（type/rpcId/method/payload）| 主动推送（SSE 帧全走它）|
-| host → client | `server-response`（type/rpcId/result）| 调用的回执 |
+| host → client | `server-response`（type/rpcId/result/error）| 调用的回执 |
 
-mini 的 `parse_message` 对四个 type 全部校验（未知 type、非字符串 rpcId、缺 method 等 → `EnvelopeError`）；`rpc_result_ok/error`、`rpc_receipt_accepted/rejected`、`rpc_error`、`transport_error` 对齐上游构造器；`RPC_ERROR_CODES` 是 39 码封闭错误集（`rpc.ts` 同款），未知码在 `rpc_error` 里以 `unknown` 兜底。互操作锚点：`tests/test_web_envelope.py` 逐项断言 `server_request` 全形与四象限 JSON 形状。
+流式调用不再走 SSE 专属宿主流，而是 WebSocket `/api/remote.mux` 上的一套**Remote 流帧协议**（`stream_protocol.py`，对齐 `stream-protocol.ts`）：
+
+- 客户端 → 服务端：`open`（`{streamId, endpoint, payload, referrer?}`）、`cancel`（`{streamId, endpoint, payload, reason?}`）。
+- 服务端 → 客户端：`item`（`{streamId, item}`）、`error`（`{streamId, error:{code,message?}}`）、`end`（`{streamId, ok, error?}`）。
+- 网关内部端点 `$events`（宿主→客户端事件线）与 `$events/result`（客户端→宿主把事件传回宿主）——`open_stream("$events")` 一旦打开即返回 `ready`，宿主 `api-session/*` 事件线逐帧转发；`$events/result` 是 unary 结算帧（`parse_remote_event_result_payload`），供 waterfall 审批等异步通道回投结果。
+
+`server_request`/`server_response`/`rpc_result_ok/error` 等构造器对齐上游；错误投影链：`TypertRemoteFailure`/`TypertLookupFailure` 保留 `failure.cancelled`（`{code:'cancelled'}`）或 `{code:'internal'}`。互操作锚点：`tests/test_web_stream_protocol.py` 逐项断言 open/cancel/item/error/end 全形与 `$events/result` payload 判定（含**无损 JSON 判定**）。
 
 ### 7.5.2 会话服务：unary 方法（`web/api.py`）
 
-`WebApi(ctx, adapter, tools)` 是 mini 的 "api-proxy"：持有一个会话注册表（`_agents`：sessionId → AgentLoop），每个会话在 create 时挂一个常驻 AgentLoop（driver 模式）。路由表对齐上游 session 域方法：
+`WebApi(ctx, adapter, tools)` 持有会话注册表（`_agents`：sessionId → AgentLoop，create 时 attach 一个常驻 AgentLoop）。alpha.1 会话操作全为 **Typert Remote**（`packages/api/session-controller/src/index.ts`）：
 
 | 方法 | 语义 |
 |---|---|
-| `host.describe` | 版本 / cwd / provider / model / attachedSessions / canOpenPath |
-| `session.list` | 按 updatedAt 倒序 + blank / lastPromptAt 折叠投影 |
-| `session.create` | 会话 id 缺省 `session-<uuid4>`；`workspaceId` → workspace-not-found；重复 id + 同 cwd 幂等返回、异 cwd → session-conflict |
-| `session.prompt` | mode ∈ {queue, steer}；time zone 校验（非法 → invalid-time-zone）；`/` 开头单文本块 → 命令注册表；image 输入经模型模态校验后 ATTACHMENT_UNAVAILABLE 拒绝（无附件服务）|
-| `session.history` | 只读分页窗口（seq 偏移），不 resume |
-| `session.cancel` | 取消活跃回合（turn 以 aborted 闭合）+ `keep_inbox=True` **保留** inbox（`found[1].cancel("user", keep_inbox=True)`，`_parked` 驻留）；取消后按 FIFO 恢复（下次唤醒 send 恢复）|
-| `session.models` | provider/model 快照 |
+| `session.list` | 按 updatedAt 倒序 + blank / lastPromptAt 折叠投影（unary）|
+| `session.search` | 按关键字搜索（unary）|
+| `session.create` | 会话 id 缺省 `session-<uuid4>`；workspaceId → workspace-not-found；重复 id + 同 cwd 幂等返回、异 cwd → session-conflict；create 即 attach |
+| `session.selectModel` / `session.modelCatalog` / `session.canOpenWorkspacePath` / `session.openWorkspacePath` | 模型选择 / 目录打开（unary）|
+| `session.rename` / `session.fork` / `session.cancel` / `session.updateQueue` | 会话维护（unary；cancel 保留 inbox + FIFO 恢复，`_parked` 驻留）|
+| `session.prompt` | mode ∈ {queue, steer}；time zone 校验；`/` 开头单文本块 → 命令注册表；需 `requestId`（缺 → bad-request）|
+| `session.attachment` | 附件投递（unary）|
+| `session.page` | **取代已删除的 `session.history`**：throughSeq/beforeSeq/maxMessages 游标分页 |
+| `session.follow` / `session.control` | 流式（见 §7.5.3）|
 
-### 7.5.3 事件流：mux / host（`web/streams.py`）
+`api.dispatch` handlers 收**裸 args**（如 `{cwd:...}`）；`{args:{...}}` 包装与严格校验在 `web/server.py::_unwrap_args` 统一做（见 §7.5.4）。
 
-`StreamHub(ctx, api)` 挂到 `ctx` 事件总线，把会话事件与宿主状态变成两类订阅流：
+### 7.5.3 流式：mux 单路径 + `$events` 注册表 + follow/control（`web/mux.py` + `web/events.py` + `web/streams.py`）
 
-- **mux**（`/api/events.mux`）：每流一队列，先放会话基线（已附着的每个会话逐条 `session/event`，**每帧独立 rpcId**——对齐上游 `frame(payload)`：`{rpcId: randomUUID(), payload}`，纯推送帧每帧铸新），之后实时追加。可应答帧（approval/requested）例外：rpcId = pending 稳定 id，重连重放复用（§7.5.5）。**host/* 帧不进 mux**——它们只走下面的 host 流（对齐上游 `events.ts` 的 `MuxFrame` 联合不含 host/* 帧，`host()` 是独立 HostFrame 流）。
-- **host**（`/api/events.host`）：纯实时，无基线；`host/session-added`、`host/session-removed`、`host/session-status`、`agent-error` 只路由到 `self._host`（`web/streams.py` docstring + L233-269）。
-- **session/queue 快照**：`agent/inbox/spliced` 广播点观察到的是 **pre-splice** inbox（`Inbox._mutate` 先落日志后改内存、emit 同步），所以快照把 splice 的 `start/removedCount/inserted` **重投影**到 pre-splice 列表上（对齐 api-proxy.ts:1300-1323 `queueItems`）；placement 三态：next-turn→`queued`、next-step 且 `source.kind=='user'`→`steering`、其余→`context`；空快照不发。这是 web 表层里最难的契约点。
-- **session/jobs**：jobs 注册表变更时对 mux 发全量快照。
+- **`web/mux.py`（`RemoteStreamMuxConnection`）**：单条 `/api/remote.mux` WebSocket 承载**全部** Remote 流。客户端 `open` 帧带 endpoint，`run()` 循环泵帧、`_drive` 逐 open handler 协程、EOF 后发 `end` 结算、`cancel` 中断流。**不再有 `/api/events.mux` 与 `/api/events.host` 两条 SSE 线**——统一收敛到这一条 WS 路径。
+- **`web/events.py`（`EventStreamRegistry`）**：`$events` 注册表——`ready` 首帧 + `api-session/*` 事件线转发 + `$events/result` 结算对拍。**跨堆线程安全唤醒**：TestClient/uvicorn 把 app 跑在 portal 线程，主线程 `ctx.emit` 广播不能直接调 `asyncio.Event.set()`，`_ClientQueue._wake` 捕获运行 loop 用 `loop.call_soon_threadsafe(waiter)`（含 `loop.is_closed()` 守卫）。
+- **`web/streams.py`（`GatewayStreams`）**：`open_stream` 按 endpoint 分发：
+  - `$events`：open 即 `ready`，随后事件帧转发。
+  - `session.follow`：首帧 snapshot `{header, cursor, records, hasMore, projections}`，之后逐 event 帧（snapshot 后重投 cursor+1..end，对齐 `history.ts:92-149`）。lazy async 生成器错误时机——体部 `RemoteStreamError`（session-not-found/arguments-invalid）在首个 `await gen.__anext__()` 处抛、非调用时，测试须迭代驱动。
+  - `session.control`：首帧 baseline `{queues, jobs, projections}`，之后 queue/jobs/projection 替换帧（对齐 `control.ts:67-124`）。
+  - 未知 endpoint → 抛 `RemoteStreamError`。
 
-### 7.5.4 HTTP 传输：载体与 SSE（`web/server.py` + `web/launcher.py`）
+**session/queue 快照**：`agent/inbox/spliced` 广播点观察到的是 **pre-splice** inbox（`Inbox._mutate` 先落日志后改内存、emit 同步），快照把 splice 的 `start/removedCount/inserted` **重投影**到 pre-splice 列表上（对齐 api-proxy.ts:1300-1323 `queueItems`）；placement 三态：next-turn→`queued`、next-step 且 `source.kind=='user'`→`steering`、其余→`context`。
 
-`create_app(api, hub)` 是一个 FastAPI 应用，catch-all 路由 `/api/{path:path}` 镜像 `handler.ts` 的判定顺序：
+### 7.5.4 HTTP/WS 载体 + 审批桥 + 静态服务 + 浏览器前端（`web/server.py` + `web/downloads.py` + `web/launcher.py` + `web/approvals.py` + `web/frontend.py` + `web/static/`）
 
-1. `GET /api/events.mux|host` → SSE：`text/event-stream` + `cache-control:no-cache`；打开先写一行 `: connected` 注释（host 无基线，否则空闲时零字节）；每帧 `data: <server-request 全形>\n\n`（method = 帧 type，rpcId 取帧自带 id，payload 剔除 rpcId 字段）；流中途异常 → 单条 `stream/error` 帧（新 rpcId）后关闭。
-2. `GET /api/session.export?sessionId=<id>` → 会话导出下载（`web/downloads.py`）：归档 zip，`content-type: application/zip` + `Content-Disposition: attachment`；可选 `includeDescendants` 连子代理会话一并导出。
-3. 非 POST / 不在 `/api/` 下 → 404；`content-type` 非 `application/json` → 415（跨站写围栏）；body 非 JSON → 400。
-4. `POST /api/respond` → client-response 载体（§7.5.5）：信封不合法 → 200 `bad-response` 回执；否则按 pending 路由返回 RpcReceipt。
-5. 方法不在路由表 → 404；信封不合法 → 200 + bad-request（尽力 salvage rpcId，兜底哨兵 `invalid-request`；**上游对任何字符串 rpcId 都 salvage**）；`path` 与 `message.method` 不一致 → 200 + bad-request（`details.issues=[]`）。
-6. 派发崩溃 → 500 纯文本 `handler failure: ...`；业务错误恒 200 + `server-response`（`result.ok=false`）。
-7. 非 `/api/` 路径 → SPA 静态服务（§7.5.5）：GET/HEAD → frontend-static 契约，其余方法 405。
+`create_app(api, api.gateway)` 是一个 FastAPI 应用，路径判定镜像 `handler.ts` + `stream-server.ts`：
 
-`web/launcher.py` 把 `WebApi + StreamHub + create_app` 组装成可监听应用：`build_app(adapter, tools, ctx)` 纯装配（测试用），`run_web(...)` 阻塞监听。host/port 对齐 webserver 的 `Config`——host 只允许 `'127.0.0.1' | '0.0.0.0'`、port `0` 表示 OS 分配——但 mini 从 `MINIHARNESS_WEB_HOST/PORT` 环境变量读（上游是组合配置节，简化标注）。`cli/main.py` 的 `--profile web` 组装 ctx + `default_tools(ctx)` 后交给 launcher（cli→web 是 test_dependencies.py 的单方向显式例外）。
+1. `POST /api/<endpoint>` → unary RPC：payload 恰为 `{args}` 单层 plain object（**严格解包**，多余键/缺 `/` 前缀拒绝；非法集 `{}` / `{"args":{},"x":1}` / `{"args":None}` / `{"args":[]}` / `{"key":"val"}` / `{"args":""}` 都不放行）；`CHANNEL_PATTERN=/^\/[A-Za-z0-9._~-]+$/`、`ENDPOINT_SEGMENT_PATTERN=/^[A-Za-z0-9_$.-]+$/`；`content-type` 非 `application/json` → 415（跨站写围栏）；body 非 JSON → 400。派发崩溃 → 500 纯文本；业务错误恒 200 + `server-response`（`result.ok=false`）。`session.*` 的 `$events/result` 特判返回完整 `server-response` 信封（内层 `rpc_result_ok/error`，rpcId 取 body 或哨兵 `invalid-request`）。
+2. `WS /api/remote.mux` → `RemoteStreamMuxConnection`（§7.5.3）。
+3. `GET /api/session.export?sessionId=<id>` → 会话导出下载（`web/downloads.py`）：root + 子代理后代 + 被引用媒体打包 zip，200/400/404/501/500 状态码链，错误走私有信封外壳。
+4. 非 `/api/` 路径 → SPA 静态服务（`web/frontend.py`，frontend-static 契约）：只服务 `web/static/`；`..` 上跳 → 403；未命中 → `index.html` 200；MIME 按扩展名。
 
-**教学简化（须标注）**：无 CORS 头（上游同样无 CORS 头——安全机制 = 415 跨站写围栏，mini 已同款）；载荷 schema 校验在 `WebApi` 内做（上游先过 zod）；session 日志事件是 mappingproxy/tuple 冻结形态（`core/session/json.py` `deep_freeze`），序列化前经 `thaw` 还原——`thaw` 必须覆盖普通 list 分支，因为流层会把冻结 splice 的 `inserted` 重投影进新建的 items 数组（回归测试见 `tests/test_session.py`）。前端 SPA 是 vanilla 教学简化（无构建步、无 React、无 slot 组合系统），后端 wire 层已全对齐（§7.5.5）。
+`web/launcher.py` 把 `WebApi + GatewayStreams + create_app` 组装成可监听应用；host/port 读 `MINIHARNESS_WEB_HOST/PORT` env（上游是组合配置节，简化标注）。
 
-### 7.5.5 审批桥 + 静态服务 + 浏览器前端（`web/approvals.py` + `web/frontend.py` + `web/static/`）
+**审批桥（`web/approvals.py`，对齐 `packages/api/remotes` waterfall + `interaction/user-approval`）**：桥挂 async `tools/ask` 闸门（power check：`_arm_ask` 注册 `tools/pre-execute` 返回 `{"kind":"ask"}`）→ 落 `approval/asked` 审计 → `events.invoke('approval/request', {approval})` 以 `$events` waterfall 投递给所有客户端 → 首个 `$events/result` 经 `receive_result` 结算 → 落 `approval/decided` → 返回 bool 供管线放行/拒绝。outcome 映射：result∈APPROVAL_OUTCOMES（`allowed-once|rejected|cancelled|unavailable`，否则 unavailable **fail-closed**）/rejected→unavailable/next→await nxt()/cancelled→cancelled；dispose 全 pending 'cancelled'（不悬挂）。
 
-web 浏览器半把后端 wire 层对齐到"上游客户端指向 mini 后端也能工作"的程度，再加一个 vanilla SPA 消费它：
+**浏览器前端（`web/static/`）**：vanilla SPA（index.html + app.js + style.css，无构建步）：会话列表/新建（`session.list`/`session.create`）、Trajectory 折叠（选中会话 `session.follow` 拉 snapshot + 增量去重）、审批面板（`$events` waterfall → Allow once / Reject → `$events/result` 结算）、命令/配置（`/` 开头消息由命令注册表路由）、队列/作业面板（`session.control`/`session/jobs` 快照）。
 
-**审批桥（`web/approvals.py`）**：可应答交互通道（对齐 api-proxy.ts:1407-1488 + api/approvals.ts）。上游的 approval 入口是 `ctx.on('approval/request')`（宿主从会话日志倒扫最新未决 approval/asked 认领）；mini 的 `ApprovalService` 是独立教学面，桥直接接在**工具管线闸门** `tools/ask`（`core/tools.py` `pipeline_policy_async`，web 会话恒走 async 管线）——教学简化，但 wire 契约一致：
-
-- 工具被 `tools/pre-execute` 判为 `ask` 时，`ApprovalBridge` 的 answerer 铸一个 pending（稳定 rpcId + approvalId + future），先落盘审计对 `approval/asked`，再向 mux 广播 `approval/requested`（rpcId = pending 稳定 id），随后挂起 await。
-- 浏览器应答走 `POST /api/respond`（client-response 回显 rpcId）：`respond()` 按 rpcId 路由 pending，校验 `{sessionId, approvalId, outcome}`（outcome ∈ {'allowed-once','rejected'}；sessionId/approvalId 必须与 pending 逐字一致，不可偷换问询目标）→ RpcReceipt `{accepted:true}` | `{accepted:false, reason:'not-pending'|'bad-response'}`。
-- 结算后 answerer 落盘 `approval/decided`（审计对 turn-enclosed、log-only）并广播 `approval/resolved`（复用 pending rpcId），返回 `outcome == 'allowed-once'` 供管线放行/拒绝。
-- mux 重连基线补发仍挂起的 `approval/requested`（复用原 rpcId，对齐上游 mux-open 重放）；网关 dispose → 全部 pending 以 `'cancelled'` 结算（answerer fail-closed 为拒绝，不悬挂）。
-
-**静态服务（`web/frontend.py`）**：对齐 `frontend-static/src/index.ts` 的契约：只服务 `web/static/` 内文件；`..` 上跳推出根外 → 403；未命中文件 → 回退 `index.html` 200（SPA 客户端路由）；MIME 按扩展名（`.html/.js/.css` 带 charset，未知扩展 → octet-stream）；index taps 恒 identity（上游注入 boot-manifest，mini 无 bundle 清单）。
-
-**浏览器前端（`web/static/`）**：vanilla SPA（index.html + app.js + style.css，无构建步），同一事件循环消费上述后端：
-
-- 会话列表 / 新建（`session.list` / `session.create`，cwd 可填）；
-- Trajectory 折叠（选中会话先 `session.history` 拉基线，再 mux 流实时增量按 seq 去重追加；user/assistant 消息气泡、tool-call/result 卡片、turn 分隔、compaction/approval 备注）；
-- 审批面板（`approval/requested` → Allow once / Reject → `POST /api/respond`，`approval/resolved` 标记已决）；
-- 命令 / 配置（`host.describe` 头部信息；`/` 开头消息由服务端命令注册表路由）、队列 / 作业面板（mux 的 `session/queue` / `session/jobs` 全量快照）。
-
-教学简化（须标注）：非 React、无 slot 组合系统、无 Overview 时间线 / 虚拟化 / 搜索；workspace / projection / remote-event 域仍未复现。回归测试：`tests/test_web_approvals.py`（桥纯逻辑，stdlib-only）、`tests/test_web_frontend.py`（静态契约）、`tests/test_web_server.py`（/api/respond 载体 + 静态 HTTP + 审批端到端 + 会话导出下载，真实 uvicorn + httpx）。
+**教学简化（须标注）**：心跳 WebSocket Ping 省略（上游 30s Ping，Starlette WS 无 Ping API）；`$events`/`follow`/`control` 无 `since` 恢复游标（重连重拉全量，上游 mux 有 since）；载荷 schema 校验在 `WebApi` 内做（上游先过 zod）；session 日志事件是 mappingproxy/tuple 冻结形态（`core/session/json.py` `deep_freeze`），序列化前经 `thaw` 还原；前端 SPA 是 vanilla 教学简化（非 React、无 slot 组合、无 Overview 时间线/虚拟化/搜索），产品化前端按契约层另立独立 React 工程。回归测试：`tests/test_web_{stream_protocol,events,mux,streams,approvals,server,export,frontend}.py`（真实 uvicorn + httpx/websockets）。
 
 运行方式：
 

@@ -7,7 +7,7 @@
 
 核心约定已全部落地，能力清单见 README「已实现能力」表；每个模块与上游包的权威归属见 [docs/architecture.md](docs/architecture.md) 映射表。
 
-web 半（传输层 + 浏览器前端）的 wire 面已全对齐：approval 通道（`approval/requested|resolved` mux 帧 + `POST /api/respond`）、静态服务契约、会话日志导出 `GET /api/session.export`（zip 打包 root + 子代理后代 + 被引用媒体）。上游 React 客户端指向 mini 后端可工作；浏览器前端以 vanilla SPA（无构建步）落地，React monorepo 不复现，属教学简化。设计与决策记录在 `status/mini-harness/`。
+web 半（传输层 + 浏览器前端）的 wire 面已全对齐：两信封 RPC、Remote 流（单条 `/api/remote.mux` WebSocket 承载 `open/cancel/item/end/error` 帧 + `$events/result` unary 结算）、`$events` 注册表（api-session/* 转发 + `approval/request` waterfall 审批桥）、`session.follow`/`session.control` 流、静态服务契约、会话日志导出 `GET /api/session.export`（zip 打包 root + 子代理后代 + 被引用媒体）。上游 React 客户端指向 mini 后端可工作；浏览器前端以 vanilla SPA（无构建步）落地，React monorepo 不复现，属教学简化。设计与决策记录在 `status/mini-harness/`。
 
 ## 规划中
 
