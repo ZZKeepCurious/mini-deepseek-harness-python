@@ -267,7 +267,7 @@ mini 的同步近似：上游是字节流 + async，mini 是"行馈送 + 内存�
 
 ### 7.6.4 官方 Python SDK 互操作（`tests/test_upstream_sdk_interop.py`）
 
-用上游官方 `python/sdk` 的 `DeepSeekHarness` 客户端通过 `launch_args_override` 驱动 mini worker 子进程（`python -m miniharness.seams.subagent.worker sdk`），验证 wire 契约双向互通：
+用上游官方 `python/sdk` 的 `DeepSeekHarness` 客户端通过私有 `_launch_args` 关键字驱动 mini worker 子进程（`python -m miniharness.seams.subagent.worker sdk`），验证 wire 契约双向互通：
 
 - `Session.run` 全流程：`session/prompt` 响应 → 等 inbox 回执（`agent/inbox/spliced` inserted 含 messageId）→ 收集 `assistant/message` / `turn/end` → 等 `session.status == idle` → 结算 `final_response` / `finish_reason`；
 - `final_response` 取最后一条 assistant/message 的文本（返回"任务完成。"），`finish_reason` 归一为 `completed`；

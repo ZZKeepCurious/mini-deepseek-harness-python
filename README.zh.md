@@ -47,7 +47,7 @@
 | 可继续子代理（`start_continuable`/`send_message`（含初始 prompt）、durable 子会话 + 冷恢复、结算投递、异步事件驱动（A8：投递即返回 + watchSettlement + steer 批内合并 + 所有权记账 waiting/settled）、生命周期事件 `subagent/start`/`subagent/end`（runId 配对 + epochStopReason/foldConsumedWork 终局折叠 + 经委托父 scope 载体的 scoped dispatch）、命名 provider 注册表（`register_provider` → 注销发布 `subagent/provider-removed` 边）、DRAINING 准入截止（`drain`/`drain_descendants` + `assert_admitting`，拒绝措辞逐字）、interrupt 授权矩阵（user/ancestor authority + 缺席 no-op）、嵌套续跑（exec.agent 为授权主体，孙代结算通知投直属父）、模型侧委托工具 `subagent`（三段文案逐字、canonical value + `Tool.render`、`run_in_background` 路由）、`send_message`/`interrupt_agent`/`list_agents` 控制工具） | `packages/subagent`（subagent + subagent-in-process-driver + tool-subagent-control + tool-subagent-report） |
 | 预设 / Agent 干预 / 轨迹折叠 / 动态插件 / 审批 | `packages/preset` + `core/agent` + `interaction` |
 | 协议入口（ACP / JSON-RPC SDK / hooks 桥） | `acp` + `sdk` + `hooks` |
-| 官方 Python SDK 互操作（上游 `DeepSeekHarness` 经 `launch_args_override` 驱动 mini worker；`tests/test_upstream_sdk_interop.py`，缺 pydantic/上游源码自动 skip） | `python/sdk` |
+| 官方 Python SDK 互操作（上游 `DeepSeekHarness` 经 `_launch_args` 驱动 mini worker；`tests/test_upstream_sdk_interop.py`，缺 pydantic/上游源码自动 skip） | `python/sdk` |
 | 异步事件总线、真并行工具 + 屏障 | `core/agent-loop` |
 | CI（GitHub Actions、Python 3.10~3.13、integration 标签真实 API 测试） | — |
 

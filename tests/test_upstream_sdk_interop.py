@@ -1,7 +1,7 @@
 """上游官方 Python SDK 互操作测试（第 14 步主线）。
 
 用上游 `deepseek-harness/python/sdk` 的官方 SDK 客户端（`DeepSeekHarness` /
-`HarnessClient`）通过 `launch_args_override` 驱动 mini 的 stdio worker
+`HarnessClient`）通过 `_launch_args` 驱动 mini 的 stdio worker
 （`python -m miniharness.seams.subagent.worker sdk`），验证 mini 服务端与
 官方 SDK 客户端的 wire 契约完全互通。
 
@@ -53,8 +53,8 @@ class TestUpstreamSdkInterop(unittest.TestCase):
 
     def _harness(self) -> DeepSeekHarness:
         return DeepSeekHarness(
-            launch_args_override=(sys.executable, "-m",
-                                  "miniharness.seams.subagent.worker", "sdk"),
+            _launch_args=(sys.executable, "-m",
+                          "miniharness.seams.subagent.worker", "sdk"),
             cwd=str(MINI_ROOT),
             runtime_cwd=str(MINI_ROOT),
         )

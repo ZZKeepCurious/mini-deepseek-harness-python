@@ -50,7 +50,7 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 | Presets / agent intervention / trajectory / dynamic plugins / approval | `packages/preset` + `core/agent` + `interaction` |
 | Preset system (shipped `system` root + multi-root first-root-wins roster, `project_preset`/`project_session_agent_preset` projections, `PresetLockedError` on already-started sessions, shipped presets read-only to authoring, `agent.cordis.yml` → mini Preset translation; `miniharness presets list/show/select/delete` as a teaching-extension CLI for the upstream web Remote surface) | `packages/preset` (agent-presets) |
 | Protocol entries (ACP / JSON-RPC SDK / hooks bridge) | `acp` + `sdk` + `hooks` |
-| Official Python SDK interop (upstream `DeepSeekHarness` drives mini worker via `launch_args_override`; `tests/test_upstream_sdk_interop.py`, skips without pydantic/upstream sources) | `python/sdk` |
+| Official Python SDK interop (upstream `DeepSeekHarness` drives mini worker via `_launch_args`; `tests/test_upstream_sdk_interop.py`, skips without pydantic/upstream sources) | `python/sdk` |
 | Async event bus, true parallel tools + barrier | `core/agent-loop` |
 | CI (GitHub Actions, Python 3.10~3.13, integration-tagged real-API tests) | — |
 
