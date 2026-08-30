@@ -122,7 +122,7 @@ miniharness/
 │   ├── approvals.py       # 审批桥（async tools/ask 闸门 ↔ approval/request waterfall + $events/result）
 │   ├── downloads.py       # GET /api/session.export 会话日志导出（zip 打包 root + 后代 + 媒体）
 │   ├── frontend.py        # 静态服务契约（遍历 403 / SPA 回退 200 / MIME）
-│   ├── static/            # vanilla SPA 浏览器前端（index.html / app.js / style.css，无构建步）
+│   ├── static/            # vanilla SPA 教学参照前端（index.html / app.js / style.css，无构建步；消费旧 SSE wire，对新后端不工作——真实对接见仓库顶层 `webui/`）
 │   ├── server.py          # FastAPI 载体（unary {args} 解包 + $events/result 特判 + WS + 静态，stream-server.ts / handler.ts）
 │   └── launcher.py        # web profile 启动器（build_app / run_web）
 ├── demo.py                # 端到端演示（教学入口，python -m miniharness.demo）
@@ -191,8 +191,8 @@ miniharness/
 | `web/approvals.py` | `packages/interaction/user-approval` + `packages/api/remotes`（last-resort approval 转发）| 审批桥：async `tools/ask` 闸门 → `approval/request` waterfall（`$events`）+ `$events/result` 结算； outcome 映射 result∈APPROVAL_OUTCOMES（否则 unavailable fail-closed）/rejected→unavailable/next→nxt()/cancelled；审计对 approval/asked+decided；接线点在工具闸门（上游在 approval/request，教学简化） |
 | `web/server.py` | `packages/api/gateway/src/{stream-server,index}.ts`（fetch）+ `packages/host/apiproxy/src/fetch/handler.ts` | FastAPI 载体：unary POST `{args}` 严格解包（`/api/<endpoint>`）+ `$events/result` 特判；载体状态码 404/415/400，业务错误恒 200 + result.ok=false + server-response 信封；WS `/api/remote.mux`；`GET /api/session.export` 载体（query 校验→400、调 `build_session_export`）；SPA 静态 fallback；无 CORS（上游同款：安全机制 = 415 跨站写围栏） |
 | `web/downloads.py` | `packages/host/apiproxy/src/session-export.ts` + `api/downloads.ts` + `api/downloads.schema.ts` | 会话日志导出：parse_export_query（sessionId/includeDescendants）、SessionLogExportDeps、safe_session_id_segment、session_log_zip_filename、build_session_export（zip 条目序：根→后代 BFS+seen-set 去重→媒体、压缩等级缺省 6、私有错误安全壳）；测试 `tests/test_web_export.py` |
-| `web/frontend.py` | `packages/host/frontend-static` | 静态服务契约：遍历 403 / SPA 回退 200 / MIME 按扩展 / 未知扩展 octet-stream；index taps 恒 identity（无 boot-manifest） |
-| `web/static/`（index.html + app.js + style.css） | `packages/bundle/web-app` + `packages/client` | vanilla SPA（无构建步）：会话列表/创建、Trajectory 折叠、命令/配置、队列/作业面板；审批经 `$events` 远程事件流呈现（approval/request waterfall + `$events/result`）；React monorepo 复现标注教学简化 |
+| `web/frontend.py` | `packages/host/frontend-static` | 静态服务契约：遍历 403 / SPA 回退 200 / MIME 按扩展 / 未知扩展 octet-stream；index taps 恒 identity（无 boot-manifest）；`DIST_ROOT` 默认 `web/static/`，经 `MINIHARNESS_WEBUI_DIST` 可指向产品化前端构建产物（`webui/dist/`），契约不变 |
+| `web/static/`（index.html + app.js + style.css） | `packages/bundle/web-app` + `packages/client` | 教学参照 vanilla SPA（无构建步）：消费**旧 SSE wire**（`events.mux`/`respond`/`host.describe`），alpha.1 后端已删这些端点，故不对新后端工作，仅作历史/教学说明；产品化前端 = 仓库顶层 `webui/` 独立 React 工程（只依赖新 wire 契约，见 §3 三层边界） |
 | `web/launcher.py` | `packages/host/webserver`（Config：host 两值 + port 0）| host/port 读 MINIHARNESS_WEB_HOST/PORT（上游组合配置节，简化标注） |
 | `protocol/acp.py` | `packages/acp/acp` | 自动化专用 JSON-RPC 服务：initialize（`sessionCapabilities:{close,list,resume}`）、会话生命周期 new/resume/list/close（校验序逐字、keyset 分页 `page.at(-1)` 游标、selectionFor 恢复已提交路由）、模型选择标准配置 `set()`（model/reasoning_effort 逐字文案、切 model 复位 reasoning；目录经可选 `adapter.models_catalog`/`resolve_model_info()['reasoning']` 教学扩展承载）、prompt 同步完整回合（snapshot+pin、turnless/max-tokens/error 结算逐字）+ 更新流投影（agent_message_chunk 带 messageId、agent_thought_chunk、tool_call/_update completed/failed、projected_seq 增量）+ 富媒体受理 + 一次性审批桥；简化标注见模块 docstring（close 内存归档、usage_update 不发射、单帧 updates 列表、选择施加为信封级——实际流经单一 adapter 实例） |
 | `protocol/sdk.py` | `packages/sdk/protocol` + `sdk/server` | messageId 为真实消息 id（与 inbox 回执一致，官方 SDK 依赖）；互操作测试 `tests/test_upstream_sdk_interop.py`（需 pydantic + 上游 SDK 源码，缺则 skip） |
@@ -226,9 +226,11 @@ miniharness/
 |---|---|---|
 | core 核心能力 | `miniharness/core/` 等（L0~L2 纯领域逻辑） | 不感知 web/CLI 传输载体 |
 | 后端 web 服务 | `miniharness/web/` + `protocol/` 等（L3 传输层） | 消费 core 能力；对外发布 HTTP/SSE wire 契约（信封/帧/错误语义） |
-| 前端工程 | 独立工程形态（当前 `web/static/` vanilla SPA 为教学参照；产品化前端另立工程） | 只依赖后端发布的 wire 契约，禁止 import/hack Python 内部 |
+| 前端工程 | 独立工程形态：**`webui/`**（React+TS+Vite，2026-08-30 落地，产品化）走新 wire；`web/static/` vanilla SPA 降为教学参照（旧 wire，不实跑） | 只依赖后端发布的 wire 契约，禁止 import/hack Python 内部 |
 
 前端唯一的耦合面是 `web/` 层发布的 wire 契约，不是 Python 内部 API——这保证前端可独立选用现代化技术栈（如 React）而无需改造内核。
+
+**`webui/`**（仓库顶层独立工程，React+TS+Vite，2026-08-30 落地）：产品化浏览器前端，只消费 `web/` 发布的 alpha.1 wire 契约（两信封 RPC `/api/<endpoint>` + `/api/remote.mux` WS 帧 + `$events`/`$events/result` + `session.follow`/`control`），零 Python import。三层结构：`src/wire/`（契约客户端层，纯 TS 可单测）、`src/app/`（React 编排 hooks）、`src/ui/`（无状态展示组件）；测试用 vitest（mock fetch/WS）。开发期 Vite dev server 把 `/api` 与 `/api/remote.mux` 代理到本地 Python 后端；生产期 `vite build` 产出 `webui/dist/`，后端 `web/frontend.py` 经 `MINIHARNESS_WEBUI_DIST` 指向该产物即可承载（`serve_static` 契约不变）。覆盖范围对齐教学 SPA 功能面（会话列表/新建、Trajectory、审批瀑布、队列/作业），不整体移植上游 `packages/client` 40 模块。
 
 规则：
 

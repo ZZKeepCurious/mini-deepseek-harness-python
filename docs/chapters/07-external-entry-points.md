@@ -206,15 +206,17 @@ alpha.1 把通信收拢为**单一两信封协议**（对齐 `packages/client/co
 1. `POST /api/<endpoint>` → unary RPC：payload 恰为 `{args}` 单层 plain object（**严格解包**，多余键/缺 `/` 前缀拒绝；非法集 `{}` / `{"args":{},"x":1}` / `{"args":None}` / `{"args":[]}` / `{"key":"val"}` / `{"args":""}` 都不放行）；`CHANNEL_PATTERN=/^\/[A-Za-z0-9._~-]+$/`、`ENDPOINT_SEGMENT_PATTERN=/^[A-Za-z0-9_$.-]+$/`；`content-type` 非 `application/json` → 415（跨站写围栏）；body 非 JSON → 400。派发崩溃 → 500 纯文本；业务错误恒 200 + `server-response`（`result.ok=false`）。`session.*` 的 `$events/result` 特判返回完整 `server-response` 信封（内层 `rpc_result_ok/error`，rpcId 取 body 或哨兵 `invalid-request`）。
 2. `WS /api/remote.mux` → `RemoteStreamMuxConnection`（§7.5.3）。
 3. `GET /api/session.export?sessionId=<id>` → 会话导出下载（`web/downloads.py`）：root + 子代理后代 + 被引用媒体打包 zip，200/400/404/501/500 状态码链，错误走私有信封外壳。
-4. 非 `/api/` 路径 → SPA 静态服务（`web/frontend.py`，frontend-static 契约）：只服务 `web/static/`；`..` 上跳 → 403；未命中 → `index.html` 200；MIME 按扩展名。
+4. 非 `/api/` 路径 → SPA 静态服务（`web/frontend.py`，frontend-static 契约）：只服务 dist 根内文件；`..` 上跳 → 403；未命中 → `index.html` 200；MIME 按扩展名。dist 根默认 `web/static/`（教学 vanilla，旧 wire 不对新后端工作），经 `MINIHARNESS_WEBUI_DIST` 可指向产品化前端构建产物（`webui/dist/`），契约不变。
 
 `web/launcher.py` 把 `WebApi + GatewayStreams + create_app` 组装成可监听应用；host/port 读 `MINIHARNESS_WEB_HOST/PORT` env（上游是组合配置节，简化标注）。
 
 **审批桥（`web/approvals.py`，对齐 `packages/api/remotes` waterfall + `interaction/user-approval`）**：桥挂 async `tools/ask` 闸门（power check：`_arm_ask` 注册 `tools/pre-execute` 返回 `{"kind":"ask"}`）→ 落 `approval/asked` 审计 → `events.invoke('approval/request', {approval})` 以 `$events` waterfall 投递给所有客户端 → 首个 `$events/result` 经 `receive_result` 结算 → 落 `approval/decided` → 返回 bool 供管线放行/拒绝。outcome 映射：result∈APPROVAL_OUTCOMES（`allowed-once|rejected|cancelled|unavailable`，否则 unavailable **fail-closed**）/rejected→unavailable/next→await nxt()/cancelled→cancelled；dispose 全 pending 'cancelled'（不悬挂）。
 
-**浏览器前端（`web/static/`）**：vanilla SPA（index.html + app.js + style.css，无构建步）：会话列表/新建（`session.list`/`session.create`）、Trajectory 折叠（选中会话 `session.follow` 拉 snapshot + 增量去重）、审批面板（`$events` waterfall → Allow once / Reject → `$events/result` 结算）、命令/配置（`/` 开头消息由命令注册表路由）、队列/作业面板（`session.control`/`session/jobs` 快照）。
+**浏览器前端**：两个形态，都只依赖本层 wire 契约。
+**产品化前端（`webui/`，仓库顶层独立 React+TS+Vite 工程，推荐）**：会话列表/新建（`session.list`/`session.create`）、Trajectory 折叠（选中会话 `session.follow` 拉 snapshot + 按 seq 去重增量）、审批面板（`$events` waterfall → Allow once / Reject → `$events/result` 结算，outcome∈APPROVAL_OUTCOMES 之外 fail-closed）、队列/作业面板（`session.control` baseline+替换帧）。开发期 Vite dev server 把 `/api` 与 `/api/remote.mux` 代理到本地 Python 后端（`vite.config.ts`）；生产期 `vite build` → `MINIHARNESS_WEBUI_DIST=webui/dist` 让后端静态服务承载。`src/wire/` 是纯 TS 契约客户端（无 UI 依赖，vitest 单测 mock fetch/WS），`src/app/` 是 React 编排，`src/ui/` 是无状态展示组件。
+**教学参照（`web/static/`）**：vanilla SPA（index.html + app.js + style.css，无构建步），消费的是 alpha.1 已删除的旧 SSE wire（`events.mux`/`respond`/`host.describe`），对新后端不工作——仅作历史/教学说明，不实跑。
 
-**教学简化（须标注）**：心跳 WebSocket Ping 省略（上游 30s Ping，Starlette WS 无 Ping API）；`$events`/`follow`/`control` 无 `since` 恢复游标（重连重拉全量，上游 mux 有 since）；载荷 schema 校验在 `WebApi` 内做（上游先过 zod）；session 日志事件是 mappingproxy/tuple 冻结形态（`core/session/json.py` `deep_freeze`），序列化前经 `thaw` 还原；前端 SPA 是 vanilla 教学简化（非 React、无 slot 组合、无 Overview 时间线/虚拟化/搜索），产品化前端按契约层另立独立 React 工程。回归测试：`tests/test_web_{stream_protocol,events,mux,streams,approvals,server,export,frontend}.py`（真实 uvicorn + httpx/websockets）。
+**教学简化（须标注）**：心跳 WebSocket Ping 省略（上游 30s Ping，Starlette WS 无 Ping API）；`$events`/`follow`/`control` 无 `since` 恢复游标（重连重拉全量，上游 mux 有 since）；载荷 schema 校验在 `WebApi` 内做（上游先过 zod）；session 日志事件是 mappingproxy/tuple 冻结形态（`core/session/json.py` `deep_freeze`），序列化前经 `thaw` 还原；前端产品化工程 `webui/` 走新 wire 但同样不移植上游 `packages/client` 40 个 UI 模块（无 slot 组合、无 Overview 时间线/虚拟化/搜索，同后端无 `since` 游标一致）；`web/static/` vanilla SPA 是旧 wire 教学参照（不实跑）。回归测试：`tests/test_web_{stream_protocol,events,mux,streams,approvals,server,export,frontend}.py`（真实 uvicorn + httpx/websockets）+ `webui/` 的 vitest wire 层单测（`pnpm test` / `pnpm typecheck` / `pnpm build`）。
 
 运行方式：
 

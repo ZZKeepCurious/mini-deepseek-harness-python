@@ -81,7 +81,7 @@ flowchart LR
 | （工程化） | `.github/workflows/ci.yml + tests/test_real_api.py` | 00 | — |
 | `packages/client/connection + packages/api/gateway + packages/api/session-controller + packages/api/remotes + host/frontend-static + host/webserver` | `web/`（envelope + stream_protocol + mux + events + streams + api + approvals + server + frontend + launcher） | 07 §7.5 | 04 议题 2 |
 | `packages/host/apiproxy/session-export.ts + api/downloads.*` | `web/downloads.py` | 07 §7.5 | — |
-| `packages/bundle/web-app` + `packages/client` | `web/static/`（vanilla SPA：会话/Trajectory/审批/命令/队列作业面板；React monorepo 复现标注教学简化） | 07 §7.5.5 | 04 议题 2 |
+| `packages/bundle/web-app` + `packages/client` | `webui/`（产品化 React+TS+Vite 独立工程，只依赖 wire 契约）+ `web/static/`（vanilla SPA 教学参照，旧 SSE wire 不对新后端工作） | 07 §7.5.4 | 04 议题 2 |
 | `packages/skill/（skill + skill-filesystem + tool-skill + skill-badge）` | `skills/`（registry + filesystem + tool_skill） | 13 | 04 议题 10 |
 | `vendor/schemastery/src/index.ts` | `core/schema.py` | 15 | — |
 | `packages/core/scope（dsh-scope 协议原语）` | `core/dsh_scope.py` | 14 | 02 §4.5 |

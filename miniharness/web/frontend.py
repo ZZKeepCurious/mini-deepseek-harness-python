@@ -20,8 +20,11 @@ import os
 
 __all__ = ["serve_static", "DIST_ROOT", "DIST_INDEX"]
 
-#: 前端静态根：web/static/（随包分发，无构建产物）
-DIST_ROOT = os.path.join(os.path.dirname(__file__), "static")
+#: 前端静态根：默认 web/static/（随包分发的教学 vanilla SPA，无构建产物）。
+#: 经 `MINIHARNESS_WEBUI_DIST` 可指向产品化前端构建产物目录（如 webui/dist/），
+#: 契约不变（serve_static 已是按 dist_root 参数化的纯函数）。
+DIST_ROOT = (os.environ.get("MINIHARNESS_WEBUI_DIST")
+             or os.path.join(os.path.dirname(__file__), "static"))
 DIST_INDEX = "index.html"
 
 #: frontend-static 的 MIME 表（index.ts 同款；'.html'/'.js' 带 charset）

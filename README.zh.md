@@ -39,7 +39,7 @@
 | system prompt 分节（有序节注册 + 渲染进每次请求） | `core/system-prompt` |
 | boot 与组合（YAML/JSON 补丁、`!!js` 环境变量插值、启动断言） | `packages/boot` |
 | headless 一次性任务入口（`--profile headless "task"`：stdout 最终文本、退出码按 turn/end reason） | `packages/bundle/headless` + `apps/cli` |
-| web 传输层 + 浏览器 SPA（`--profile web`：两信封 RPC（`client-request`/`server-response`）、WebApi unary 会话服务、Remote 流 wire（单条 `/api/remote.mux` WebSocket 承载 `open/cancel/item/end/error` 帧、`$events` 注册表（api-session/* 转发 + `approval/request` waterfall 经 `$events/result` 结算）、`session.follow`/`session.control` 流）、审批桥（async `tools/ask` ↔ `$events` waterfall）、FastAPI 载体对齐 gateway `stream-server.ts`/`handler.ts` 状态码链 + `$events/result` + frontend-static 契约、会话日志导出 `GET /api/session.export`（root + 子代理后代 + 被引用媒体打包 zip，200/400/404/501/500 状态码链，错误走私有信封外壳）、vanilla SPA（会话列表/创建、Trajectory 折叠、命令/配置、队列/作业面板）） | `packages/api/gateway` + `packages/api/session-controller` + `packages/api/remotes` + `host/frontend-static` + `host/webserver` |
+| web 传输层 + 浏览器前端（`--profile web`：两信封 RPC（`client-request`/`server-response`）、WebApi unary 会话服务、Remote 流 wire（单条 `/api/remote.mux` WebSocket 承载 `open/cancel/item/end/error` 帧、`$events` 注册表（api-session/* 转发 + `approval/request` waterfall 经 `$events/result` 结算）、`session.follow`/`session.control` 流）、审批桥（async `tools/ask` ↔ `$events` waterfall）、FastAPI 载体对齐 gateway `stream-server.ts`/`handler.ts` 状态码链 + `$events/result` + frontend-static 契约、会话日志导出 `GET /api/session.export`（root + 子代理后代 + 被引用媒体打包 zip，200/400/404/501/500 状态码链，错误走私有信封外壳）、产品化 `webui/` React 前端（仓库顶层独立工程，只依赖 wire 契约：会话列表/新建、Trajectory、审批瀑布、队列/作业面板，`vite build` 产物经 `MINIHARNESS_WEBUI_DIST` 由后端静态承载）、`web/static/` vanilla SPA 降为教学参照（旧 SSE wire，不对新后端工作）） | `packages/api/gateway` + `packages/api/session-controller` + `packages/api/remotes` + `host/frontend-static` + `host/webserver` |
 | 启动器选项（`--patch`、`--dump-config` / `--dump-default-config`、只读组合导出） | `apps/cli/src/args.ts` |
 | 会话管理服务（`ctx.sessions`：create/prepare/enter/announce 生命周期、fork 五错误码、flush 检查点、`session/created|disposed|event|flush` 四事件） | `packages/core/session`（SessionStore） |
 | 会话管理 CLI（`miniharness sessions` 列表/恢复/删除；mini 教学扩展） | web 表面（上游） |
@@ -51,7 +51,7 @@
 | 异步事件总线、真并行工具 + 屏障 | `core/agent-loop` |
 | CI（GitHub Actions、Python 3.10~3.13、integration 标签真实 API 测试） | — |
 
-上游浏览器前端（`packages/client`，React monorepo）不复现原样：wire 面已全对齐（上游客户端指向 mini 后端可工作），以 vanilla SPA（无构建步）作为消费者落地。
+上游浏览器前端（`packages/client`，React monorepo）不复现原样：wire 面已全对齐（上游客户端指向 mini 后端可工作）。落地两个消费者前端：产品化 `webui/`（仓库顶层独立 React+TS+Vite 工程，只依赖 wire 契约），以及 `web/static/` vanilla SPA 教学参照（旧 SSE wire，不对新 alpha.1 后端工作）。
 
 ## 快速开始
 
@@ -136,7 +136,7 @@ mini-deepseek-harness-python/
 │   ├── shell/               # ctx.shell bash 执行器族（本地直跑 + 沙箱包裹）
 │   ├── goal/  plan/  jobs/  skills/  commands/  attachment/
 │   ├── web/                 # apiproxy 子集：envelope / api / streams / approvals / server / downloads / frontend / launcher
-│   ├── web/static/          # vanilla SPA 浏览器前端（index.html / app.js / style.css）
+│   ├── web/static/          # vanilla SPA 教学参照（旧 SSE wire；产品化前端 = 仓库顶层 webui/）
 │   ├── preset/  extensions/  interaction/  client/
 │   ├── demo.py              # 端到端演示
 │   └── example_plugins.py   # boot 演示插件

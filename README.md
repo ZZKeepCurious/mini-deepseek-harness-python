@@ -41,7 +41,7 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 | System prompt sections (ordered section registration + rendering into each request) | `core/system-prompt` |
 | Boot & composition (YAML/JSON overlays, `!!js` env interpolation, startup assertions) | `packages/boot` |
 | Headless one-shot entry (`--profile headless "task"`: stdout final text, exit code by turn/end reason) | `packages/bundle/headless` + `apps/cli` |
-| Web transport layer + browser SPA (`--profile web`: two-envelope RPC (`client-request`/`server-response`), WebApi unary session service, Remote stream wire (`open`/`cancel`/`item`/`end`/`error` on a single `/api/remote.mux` WebSocket, `$events` registry with `api-session/*` forwarding + `approval/request` waterfall settled via `$events/result`, `session.follow`/`session.control` streams), approval bridge (`tools/ask` ↔ `$events` waterfall), FastAPI carrier mirroring gateway `stream-server.ts`/`handler.ts` status-code chain + `$events/result` + frontend-static contract, session-log export endpoint `GET /api/session.export` (zip of root + subagent descendants + referenced media, 200/400/404/501/500 status chain, private error shell), vanilla SPA (session list/create, Trajectory fold, command/config, queue/jobs panel)) | `packages/api/gateway` + `packages/api/session-controller` + `packages/api/remotes` + `host/frontend-static` + `host/webserver` |
+| Web transport layer + browser frontend (`--profile web`: two-envelope RPC (`client-request`/`server-response`), WebApi unary session service, Remote stream wire (`open`/`cancel`/`item`/`end`/`error` on a single `/api/remote.mux` WebSocket, `$events` registry with `api-session/*` forwarding + `approval/request` waterfall settled via `$events/result`, `session.follow`/`session.control` streams), approval bridge (`tools/ask` ↔ `$events` waterfall), FastAPI carrier mirroring gateway `stream-server.ts`/`handler.ts` status-code chain + `$events/result` + frontend-static contract, session-log export endpoint `GET /api/session.export` (zip of root + subagent descendants + referenced media, 200/400/404/501/500 status chain, private error shell), productized `webui/` React frontend (repo-top standalone project, wire-contract only; session list/create, Trajectory, approval waterfall, queue/jobs panel; served from `webui/dist` via `MINIHARNESS_WEBUI_DIST`); `web/static/` vanilla SPA kept as a teaching reference only (old SSE wire, does not work against the current backend)) | `packages/api/gateway` + `packages/api/session-controller` + `packages/api/remotes` + `host/frontend-static` + `host/webserver` |
 | Launcher options (`--patch`, `--dump-config` / `--dump-default-config`, read-only composition dump) | `apps/cli/src/args.ts` |
 | Session management CLI (`miniharness sessions` list/resume/delete; mini teaching extension) | web surface (upstream) |
 | Session store service (`ctx.sessions`: create/prepare/enter/announce lifecycle, fork with 5 error codes, flush checkpoint, `session/created|disposed|event|flush` events) | `packages/core/session` (SessionStore) |
@@ -54,7 +54,7 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 | Async event bus, true parallel tools + barrier | `core/agent-loop` |
 | CI (GitHub Actions, Python 3.10~3.13, integration-tagged real-API tests) | — |
 
-The upstream browser frontend (`packages/client`, React monorepo) is not reproduced verbatim: its wire surface is fully aligned (an upstream client pointed at the mini backend works) and a vanilla SPA (no build step) ships as the consumer.
+The upstream browser frontend (`packages/client`, React monorepo) is not reproduced verbatim: its wire surface is fully aligned (an upstream client pointed at the mini backend works). Two consumer fronts ship: the productized `webui/` (repo-top standalone React + TypeScript + Vite project, depends only on the wire contract), plus `web/static/` as a vanilla SPA teaching reference only (old SSE wire, does not work against the current alpha.1 backend).
 
 ## Getting started
 
@@ -139,7 +139,7 @@ mini-deepseek-harness-python/
 │   ├── shell/               # ctx.shell bash executor family (local + sandboxed)
 │   ├── goal/  plan/  jobs/  skills/  commands/  attachment/
 │   ├── web/                 # apiproxy subset: envelope / api / streams / approvals / server / downloads / frontend / launcher
-│   ├── web/static/          # vanilla SPA browser frontend (index.html / app.js / style.css)
+│   ├── web/static/          # vanilla SPA teaching reference (old SSE wire; product frontend = ../webui)
 │   ├── preset/  extensions/  interaction/  client/
 │   ├── demo.py              # end-to-end demo
 │   └── example_plugins.py   # boot demo plugins
