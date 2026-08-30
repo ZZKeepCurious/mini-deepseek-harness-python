@@ -19,7 +19,6 @@ from miniharness.web.downloads import (
 )
 from miniharness.web.api import WebApi
 from miniharness.web.server import create_app
-from miniharness.web.streams import StreamHub
 from miniharness.llm.fake import FakeLlmAdapter
 from fastapi.testclient import TestClient
 
@@ -303,8 +302,7 @@ class TestServerRoute(unittest.TestCase):
         self.persistence = JsonlPersistence(self.tmp.name, compression="none")
         ctx.provide("sessionPersistence", self.persistence)
         self.api = WebApi(ctx, FakeLlmAdapter())
-        self.hub = StreamHub(ctx, self.api)
-        self.app = create_app(self.api, self.hub)
+        self.app = create_app(self.api, self.api.gateway)
         self.client = TestClient(self.app)
 
     def tearDown(self):

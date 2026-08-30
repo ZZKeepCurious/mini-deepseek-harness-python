@@ -314,9 +314,11 @@ class WebApi:
         self._agents: dict[str, AgentLoop] = {}
         # selectModel 记录（advisory：单适配器部署回落恒单模型，不驱动路由）
         self._selections: dict[str, dict] = {}
-        # 审批桥：tools/ask 问询 → mux 帧 → POST /api/respond（stage ④ 换 $events 退役）
-        from .approvals import ApprovalBridge
-        self.approvals = ApprovalBridge(self)
+        # GatewayStreams：Remote 方法面（$events + follow/control + 审批桥）；
+        # create_app(api, api.gateway) 装配进 FastAPI。
+        from .streams import GatewayStreams
+        self.gateway = GatewayStreams(self)
+        self.approvals = self.gateway.approvals
 
     # ---------- 路由 ----------
 

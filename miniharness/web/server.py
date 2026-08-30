@@ -1,56 +1,62 @@
-"""web 传输层：FastAPI 应用（对齐 `packages/host/apiproxy/src/fetch/handler.ts`）。
+"""web 传输层：FastAPI 应用（对齐 `packages/api/gateway` + `packages/client/connection`）。
 
-载体契约（逐条对应上游，HTTP 状态只表达载体层）：
-  * `GET /api/events.mux` / `GET /api/events.host` → SSE：响应头
-    content-type=text/event-stream + cache-control=no-cache；打开即写一行
-    `: connected` 注释（host 流无基线，否则空闲时零字节）；每帧
-    `data: <server-request 全形>\n\n`（method = 帧 type，rpcId 取**帧自带**
-    的每帧独立 id——对齐上游 `frame(payload)`：`{rpcId: randomUUID(), payload}`，
-    纯推送帧每帧铸新、可应答交互帧复用 pending 稳定 id）。
-    流中途异常 → 单条 `stream/error` 帧（新 rpcId，服务端主动推送）后关闭。
-  * `POST /api/<method>`：body 为 client-request 全形。载体状态码 =
-    404（非 POST / 不在 /api/ 下 / 方法不在路由表）/ 415（content-type
-    非 application/json，跨站写围栏）/ 400（body 非 JSON）/ 500（实现崩溃，
-    纯文本 `handler failure: ...`）；业务错误恒 200 + server-response
-    （result.ok=false）。信封不合法 → 200 bad-request（尽力 salvage rpcId，
-    兜底 `invalid-request` 哨兵）；path 与 message.method 不一致 → 200
-    bad-request（details.issues=[]）。
-  * `POST /api/respond`：body 为 client-response 全形（对可应答 server-request
-    的应答），响应体是载体层 RpcReceipt {accepted:true} | {accepted:false,
-    reason:'not-pending'|'bad-response'}；信封不合法 → 200 bad-response 回执
-    （上游 handler.ts 同款）。仍受 POST 围栏约束（415/400 优先）。
+载体契约（逐条对应上游 alpha.1）：
+  * **unary RPC**：`POST /api/<endpoint>`，body 为 `client-request` 全形
+    `{type:'client-request', rpcId, method, payload}`，payload 恰为 `{args: {...}}`
+    单字段 plain object（对齐 gateway `remoteRequest` 严格校验：多余键/缺 args
+    拒绝）。响应 `server-response` `{type, rpcId, result}`。载体状态码 =
+    404（非 POST / 不在 /api/ 下 / 方法不在路由表）/ 415（content-type 非
+    application/json，跨站写围栏）/ 400（body 非 JSON）；业务错误恒 200 +
+    result.ok=false。信封不合法 → 200 bad-request；path 与 message.method 不一致
+    → 200 bad-request（details.issues=[]）。
+  * **`$events/result` unary**：endpoint 特判；payload 恰
+    `{args:{clientId,eventId,outcome}}`，词法经 `parse_remote_event_result_payload`
+    校验后交 `gateway.receive_result` 结算（对齐 gateway dispatchRpc 的
+    $events/result + receiveRemoteEventResult）。合法 → 200 `{ok:true}`；
+    非法/未知 clientId → 200 `{ok:false, error:{code,message,details}}`
+    （RpcResult 形态，rpcFailure 折叠）。
+  * **WS `/api/remote.mux`**：`package/api/gateway` 单一路径承载所有 Remote 流
+    （open/cancel/item/end/error 帧），由 `web/mux.py` 消费。二进制/非法/重复
+    open 的 close 码与错误帧语义见 mux docstring。
+  * **`GET /api/session.export`**：downloads 域数据导出（沿用 `web/downloads.py`，
+    无 CORS 头，跨站写围栏即安全机制）。
   * 非 `/api/` 的 GET/HEAD → 静态服务（SPA，`web/frontend.py`），其余方法 405。
 
- 教学简化（须在 AGENTS.md 标注）：
-  * `GET /api/session.export`（downloads 域）已实现（`web/downloads.py`）：
-    无 CORS 头（上游同样无 CORS 头，安全机制 = 415 跨站写围栏，mini 已同款）；
-    上游用 fflate 流式分块 + 响应背压，mini 用 stdlib zipfile 内存成档；媒体
-    条目仅在注入 attachments 服务时产出（mini 无持久化 attachment store，默认
-    省略，日志文本已 verbatim 含引用）。详见 `web/downloads.py` docstring。
-  * 载荷 schema 校验在 WebApi 内做（上游先过 zod schema，mini 的 dispatch
-    按各方法逐字段查并返回同款 bad-request）。
-  * session 日志事件是 mappingproxy/tuple 冻结形态（core/session/json.py
-    deep_freeze），序列化前经 thaw 还原为普通 JSON（上游 web 层拿的是活对象）。
+教学简化（须在 AGENTS.md 标注）：session 日志事件是 mappingproxy/tuple 冻结形态
+（core/session/json.py deep_freeze），序列化前经 thaw 还原；`$events` 为单帧
+载体（无 mux `since` 恢复游标，见 verified-diffs §3.4）；心跳 Ping 省略（WS
+docstring）。
 """
 from __future__ import annotations
 
 import json
 from typing import Any
 
-from fastapi import FastAPI, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import Response
 
 from ..core.session.json import thaw
 from .api import WebApi
 from .downloads import build_session_export, parse_export_query
-from .envelope import parse_message, rpc_id, rpc_receipt_rejected, server_request
+from .envelope import (
+    parse_message,
+    rpc_error,
+    rpc_result_error,
+    rpc_result_ok,
+)
 from .frontend import DIST_INDEX, DIST_ROOT, serve_static
-from .streams import StreamHub
+from .mux import RemoteStreamMuxConnection
+from .stream_protocol import (
+    REMOTE_STREAM_MUX_PATH,
+    StreamProtocolError,
+    parse_remote_event_result_payload,
+)
+from .streams import GatewayStreams, RemoteStreamError
 
 __all__ = ["create_app"]
 
-#: 信封无法读取 rpcId 时的回执哨兵（handler.ts INVALID_REQUEST_RPC_ID）
-INVALID_REQUEST_RPC_ID = "invalid-request"
+#: 信封无法读取 rpcId 时的回执哨兵（gateway INVALID_REQUEST_RPC_ID）
+INVALID_REQUEST_RPC_ID_VALUE = "invalid-request"
 
 
 def _dumps(value: Any) -> str:
@@ -59,42 +65,37 @@ def _dumps(value: Any) -> str:
 
 
 def _error_response(rpc_id_: str, code: str, message: str, details: dict) -> Response:
-    """200 载体 + 业务错误 server-response（上游 errorResponse）。"""
+    """200 载体 + 业务错误 server-response（gateway errorResponse 同款）。"""
     body = {
         "type": "server-response",
         "rpcId": rpc_id_,
-        "result": {"ok": False, "error": {"code": code, "message": message, "details": details}},
+        "result": {"ok": False, "error": {"code": code, "message": message,
+                                          "details": details}},
     }
     return Response(_dumps(body), status_code=200, media_type="application/json")
 
 
-def _sse_response(frames: Any) -> StreamingResponse:
-    """把一个帧流包成 SSE（上游 sseResponse）：注释开播 + data 帧 + 中途失败折 stream/error。
+def _unwrap_args(payload: Any, method: str) -> Any:
+    """严格 payload：恰 `{args: {...}}` 单字段（gateway remoteRequest 同款）。
 
-    每帧用帧自带的 rpcId（纯推送帧每帧独立、可应答帧稳定），payload 剔除 rpcId
-    字段（rpcId 只活在外层 envelope 上，对齐上游 frame(payload) 形状）。
+    返回 unwrapped args；不合法抛 RemoteStreamError（统一折 bad-request）。
     """
-    async def event_source():
-        yield ": connected\n\n"
-        try:
-            async for frame in frames:
-                payload = {key: value for key, value in frame.items() if key != "rpcId"}
-                envelope = server_request(frame["rpcId"], frame["type"], payload)
-                yield "data: " + _dumps(envelope) + "\n\n"
-        except Exception as error:  # noqa: BLE001 - 流中途失败折成单帧后关闭（上游同款）
-            failure = {"type": "stream/error",
-                       "error": {"code": "internal", "message": str(error), "details": {}}}
-            yield "data: " + _dumps(server_request(rpc_id(), "stream/error", failure)) + "\n\n"
-
-    return StreamingResponse(event_source(), media_type="text/event-stream",
-                             headers={"cache-control": "no-cache"})
+    if not isinstance(payload, dict) or set(payload) != {"args"}:
+        raise RemoteStreamError(
+            "bad-request",
+            f"typert gateway: {method}: requires exactly one plain-object args field")
+    if not isinstance(payload["args"], dict):
+        raise RemoteStreamError(
+            "bad-request",
+            f"typert gateway: {method}: payload args must be a plain object")
+    return payload["args"]
 
 
-def create_app(api: WebApi, hub: StreamHub) -> FastAPI:
-    """把 WebApi + StreamHub 装成 FastAPI 应用（供 launcher/uvicorn 挂载）。
+def create_app(api: WebApi, gateway: GatewayStreams) -> FastAPI:
+    """把 WebApi + GatewayStreams 装成 FastAPI 应用（供 launcher/uvicorn 挂载）。
 
-    @param api - web 会话服务（提交 B）。
-    @param hub - mux/host 事件流中心（提交 C）。
+    @param api - web 会话服务（unary 域处理）。
+    @param gateway - Remote 方法面（$events + follow/control + 审批桥）。
     @returns 可挂载的 FastAPI 实例。
     """
     app = FastAPI(title="mini-deepseek-harness web", docs_url=None, redoc_url=None,
@@ -106,14 +107,7 @@ def create_app(api: WebApi, hub: StreamHub) -> FastAPI:
         pathname = request.url.path
         method = request.method
 
-        # 无信封读通道：SSE 事件流（handler.ts 物理路由，先于 POST 围栏）
-        if method == "GET" and pathname == "/api/events.mux":
-            return _sse_response(hub.mux())
-        if method == "GET" and pathname == "/api/events.host":
-            return _sse_response(hub.host())
-
-        # 无信封下载通道：GET /api/session.export（handler.ts 物理路由，先于 POST 围栏）。
-        # 对照上游：查询校验失败 → 400；正文与状态码同上 downloads 域。
+        # 无信封下载通道：GET /api/session.export（物理路由，先于 POST 围栏）
         if method in ("GET", "HEAD") and pathname == "/api/session.export":
             session_id = request.query_params.get("sessionId")
             include_raw = request.query_params.get("includeDescendants")
@@ -144,19 +138,9 @@ def create_app(api: WebApi, hub: StreamHub) -> FastAPI:
 
         method_name = pathname[len("/api/"):]
 
-        # 可应答交互入口：POST /api/respond（approval 的 client-response 载体）
-        # 上游 handler.ts：schema 失败 → 200 bad-response 回执，不占业务 404。
-        if method_name == "respond":
-            try:
-                message = parse_message(body)
-            except Exception:  # noqa: BLE001 - 信封不合法
-                return Response(_dumps(rpc_receipt_rejected("bad-response")), status_code=200,
-                                media_type="application/json")
-            if message["type"] != "client-response":
-                return Response(_dumps(rpc_receipt_rejected("bad-response")), status_code=200,
-                                media_type="application/json")
-            return Response(_dumps(api.approvals.respond(message)), status_code=200,
-                            media_type="application/json")
+        # 可应答交互结算入口：POST /api/$events/result（gateway dispatchRpc 特判）
+        if method_name == "$events/result":
+            return _events_result_response(gateway, body)
 
         if method_name not in api.methods():
             return Response("not found", status_code=404)
@@ -166,7 +150,7 @@ def create_app(api: WebApi, hub: StreamHub) -> FastAPI:
             message = parse_message(body)
         except Exception as error:  # noqa: BLE001 - EnvelopeError
             raw_id = body.get("rpcId") if isinstance(body, dict) else None
-            rpc_id_ = raw_id if isinstance(raw_id, str) else INVALID_REQUEST_RPC_ID
+            rpc_id_ = raw_id if isinstance(raw_id, str) else INVALID_REQUEST_RPC_ID_VALUE
             return _error_response(rpc_id_, "bad-request", "invalid client-request message",
                                    {"issues": [{"path": [], "message": str(error)}]})
 
@@ -176,14 +160,33 @@ def create_app(api: WebApi, hub: StreamHub) -> FastAPI:
                                    f'method "{message["method"]}" does not match path "{method_name}"',
                                    {"issues": []})
 
+        # payload 严格 {args} 单字段 → unwrap 后派发（bad-request 折 RpcResult）
+        try:
+            args = _unwrap_args(message["payload"], method_name)
+        except RemoteStreamError as error:
+            return _error_response(message["rpcId"], error.code, error.message,
+                                   {"issues": []})
+
         # 业务派发：impl 不抛业务错误；到达这里仍抛 = 实现崩溃 → 500 载体层
         try:
-            response = api.dispatch(method_name, message["rpcId"], message["payload"])
+            response = api.dispatch(method_name, message["rpcId"], args)
         except Exception as error:  # noqa: BLE001 - 实现崩溃
             return Response(f"handler failure: {error}", status_code=500)
         if response is None:
             return Response("not found", status_code=404)
         return Response(_dumps(response), status_code=200, media_type="application/json")
+
+    @app.websocket(REMOTE_STREAM_MUX_PATH)
+    async def remote_mux(websocket: WebSocket) -> None:
+        """`/api/remote.mux` WebSocket：全部 Remote 流的单一路径载体。"""
+        await websocket.accept()
+        conn = RemoteStreamMuxConnection(gateway, websocket)
+        try:
+            await conn.run()
+        except WebSocketDisconnect:
+            pass
+        finally:
+            conn.dispose()
 
     # 非 /api/ 路径：SPA 静态服务（GET/HEAD → frontend-static 契约，其余方法 405）
     @app.api_route("/{path:path}", methods=["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH",
@@ -200,3 +203,35 @@ def create_app(api: WebApi, hub: StreamHub) -> FastAPI:
         return Response(body, status_code=status, headers=headers)
 
     return app
+
+
+def _events_result_response(gateway: GatewayStreams, body: Any) -> Response:
+    """`$events/result` unary：词法校验 + 结算，返回 server-response（失败折 RpcResult）。"""
+    def envelope(result: dict) -> Response:
+        rpc_id = body.get("rpcId") if isinstance(body, dict) and isinstance(
+            body.get("rpcId"), str) else INVALID_REQUEST_RPC_ID_VALUE
+        return Response(_dumps({"type": "server-response", "rpcId": rpc_id,
+                                "result": result}), status_code=200,
+                        media_type="application/json")
+
+    try:
+        payload = body if isinstance(body, dict) and "args" in body else None
+        if payload is None:
+            raise RemoteStreamError("bad-request",
+                                    "typert gateway: $events/result requires an args field")
+        result = parse_remote_event_result_payload(payload)
+    except StreamProtocolError as error:
+        return envelope(rpc_result_error(rpc_error(
+            "bad-request", str(error), {"issues": []})))
+    except Exception as error:  # noqa: BLE001
+        return envelope(rpc_result_error(rpc_error(
+            "internal", str(error), {})))
+    try:
+        gateway.receive_result(result)
+    except RemoteStreamError as error:
+        return envelope(rpc_result_error(rpc_error(
+            error.code, error.message, {})))
+    except Exception as error:  # noqa: BLE001
+        return envelope(rpc_result_error(rpc_error(
+            "internal", str(error), {})))
+    return envelope(rpc_result_ok())

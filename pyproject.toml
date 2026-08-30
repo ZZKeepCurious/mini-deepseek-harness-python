@@ -29,7 +29,7 @@ miniharness = "miniharness.cli:main"
 
 [project.optional-dependencies]
 yaml = ["pyyaml>=6"]
-web = ["fastapi>=0.110", "uvicorn>=0.29"]
+web = ["fastapi>=0.110", "uvicorn>=0.29", "websockets>=12"]
 
 [tool.setuptools.packages.find]
 include = ["miniharness*"]

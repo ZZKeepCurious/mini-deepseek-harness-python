@@ -1,4 +1,4 @@
-"""web 表面（L3 应用与入口）：两信封 RPC + 会话服务 + 逻辑流 + HTTP/WS 传输。
+"""web 表面（L3 应用与入口）：两信封 RPC + 会话服务 + Remote 流 + HTTP/WS 传输。
 
 对应上游 `packages/client/connection` + `packages/api/gateway` +
 `packages/api/session-controller` + `packages/host/webserver`
@@ -17,12 +17,12 @@ from .envelope import (
     transport_error,
 )
 from .api import WebApi, canonical_client_time_zone
-from .streams import StreamHub
+from .streams import GatewayStreams
 
 __all__ = [
     "RPC_ERROR_CODES",
     "EnvelopeError",
-    "StreamHub",
+    "GatewayStreams",
     "WebApi",
     "canonical_client_time_zone",
     "client_request",
