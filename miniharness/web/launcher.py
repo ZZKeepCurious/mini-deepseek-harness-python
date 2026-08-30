@@ -8,6 +8,11 @@ mini 教学简化（须在 AGENTS.md 标注）：host/port 从
 MINIHARNESS_WEB_HOST / MINIHARNESS_WEB_PORT 环境变量读（缺省
 '127.0.0.1' / '0'），而非上游组合配置节；本 profile 的持久化沿用
 WebApi 的默认内存 SessionStore（无 JSONL 落盘，与 headless 不同）。
+
+心跳：每条 WS 连接 30s 发一次 transport 级 Ping（`ws_ping_interval`
+=30），`ws_ping_timeout=None` 不强制 Pong——对齐 upstream
+`stream-server.ts` 的 heartbeat（只保活、不杀僵死连接）。由 uvicorn
+`websockets` 实现透传（autodetect：auto → websockets 库）。
 """
 from __future__ import annotations
 
@@ -22,9 +27,26 @@ from .streams import GatewayStreams
 if TYPE_CHECKING:  # 可选依赖：fastapi 缺失时 launcher 仍可导入（[web] extra）
     from fastapi import FastAPI
 
-__all__ = ["build_app", "run_web"]
+__all__ = ["build_app", "run_web", "uvicorn_options"]
 
 HOSTS = ("127.0.0.1", "0.0.0.0")
+
+#: transport 级心跳间隔（秒）。对齐 upstream stream-server.ts heartbeat：
+#: 定期发起 WS protocol ping 保活中间代理空闲超时；不验证 Pong（timeout=None）。
+WS_HEARTBEAT_INTERVAL = 30.0
+
+
+def uvicorn_options(heartbeat_interval: float | None = WS_HEARTBEAT_INTERVAL) -> dict:
+    """构造 `uvicorn.run` 的 WS 相关选项（可测的纯函数）。
+
+    @param heartbeat_interval - 心跳间隔；None 关闭（测试/禁用）。
+    @returns 传给 uvicorn 的 kwargs（`ws_ping_timeout=None`=只保活不强制 Pong）。
+    """
+    if heartbeat_interval is None:
+        return {}
+    if not isinstance(heartbeat_interval, (int, float)) or not heartbeat_interval > 0:
+        raise ValueError("ws heartbeat interval must be a positive number")
+    return {"ws_ping_interval": heartbeat_interval, "ws_ping_timeout": None}
 
 
 def _resolve_bind(host: str | None, port: int | None) -> tuple[str, int]:
@@ -55,4 +77,4 @@ def run_web(adapter: Any, tools: Any, ctx: Context | None = None,
 
     host, port = _resolve_bind(host, port)
     app = build_app(adapter, tools, ctx)
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    uvicorn.run(app, host=host, port=port, log_level="info", **uvicorn_options())
