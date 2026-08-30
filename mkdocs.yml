@@ -72,6 +72,7 @@ markdown_extensions:
 nav:
   - 首页: index.md
   - 架构与对齐: architecture.md
+  - 接口契约参考: interface-wire.md
   - 分析报告:
       - 报告首页（阅读地图）: report/index.md
       - 01 项目全景与分层架构: report/01-overview.md

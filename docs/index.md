@@ -20,6 +20,7 @@
 ## 架构与对齐（代码组织设计）
 
 - **[架构说明与上游对应](architecture.md)** —— `miniharness/` 代码自身的"建筑图纸"：目录组织（家族镜像原则）、模块 ↔ 上游映射表、依赖方向规则、公共 API 白名单/黑名单与教学扩展清单。
+- **[接口契约参考](interface-wire.md)** —— 前后端唯一耦合面的权威速查：web 传输层发布的全部 wire 契约（两信封 RPC、`/api/remote.mux` WS 帧、`$events`/`$events/result`、follow/control、审批瀑布、静态承载、会话导出）。产品化前端（`webui/`）只依赖本契约。
 
 ## 分析报告（主文档 · 体系化解读）
 
