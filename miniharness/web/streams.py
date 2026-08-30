@@ -1,84 +1,162 @@
-"""web 事件流：mux + host 两路下游帧（对齐 `packages/host/apiproxy/src/api/events.ts`）。
+"""web 远程方法面（GatewayStreams）：`$events` 装配 + session.follow/control 流。
 
-两路流都是 `server-request` 窄形帧，且**每帧携带独立 rpcId**（对齐上游
-`frame(payload)`：`{rpcId: RpcId(randomUUID()), payload}`，纯推送帧每帧铸新）。
-可应答交互帧（approval/requested）例外：rpcId = pending 稳定 id，重连重放复用
-（对齐 api-proxy.ts 注释）。
+对齐上游 `packages/api/gateway/src/` + `packages/api/session-controller/src/`：
+本类把 session-controller 进程侧能力折叠成一个可被 `web/mux.py` 按 endpoint
+打开/取消的路由表（Remote method exports 的 stream 子集）：
 
-帧集（events.ts 子集）：
-  mux  = session/subscribed + session/event + session/queue + session/jobs
-         + approval/requested + approval/resolved
-  host = host/session-added + host/session-removed + host/session-status
-         + host/agent-error
-未实现：question/*、session/projection、workspace/*、archived-sessions、
-host/remote-event（无对应注册表/需应答交互）。
+  * `session.follow`  —— 单个会话跟随流（history.follow）：开流即一个 `snapshot`
+    帧（header/cursor/records/hasMore/projections）后逐条 `event` 帧。
+  * `session.control` —— 宿主级 live control：首个 `baseline` 帧（queues/jobs/
+    projections）后按变更给 `queue` / `jobs` / `projection` 帧。
+  * `$events`         —— 远程事件流（`web/events.py` RemoteEventRegistry），承载
+    api-session/* 转发源 + 审批 waterfall（`web/approvals.py` bridge）。
 
-订阅语义（对齐上游）：
-  * mux 打开时：为每个已挂 agent 的会话发 `session/subscribed` {sessionId,
-    lastSeq=当前日志长度}，随后补该会话的 inbox 快照（session/queue，非空才发）
-    与作业快照（session/jobs，非空才发）；之后实时转发 session/event，并在每次
-    agent/inbox/spliced 后重发 session/queue 全量、每次 jobs 变更后重发
-    session/jobs 全量（全量快照 = 变更 / 重连收敛的单一权威信号）。
-  * session/queue 的 items 在 splice 广播点（`session.append` 同步 emit）由
-    splice 自身重投影得出（对齐 api-proxy.ts queueItems：observer 看到的
-    inbox 是 pre-splice 列表，把 splice 的 start/removedCount/inserted
-    toSpliced 上去即得 post-splice 快照）；placement 三态：next-turn 一律
-    'queued'，next-step 里 source.kind=='user' 为 'steering'，注入上下文
-    （approval 通知、任务完成等）为 'context'。空快照不发（上游 host 在
-    live 队列空时省略，客户端保留最后非空值）。
-  * host 流无基线：session/created → host/session-added（blank 恒 true，客户端
-    在首帧 running:true 上翻位，重连以 session.list 为准），agent/status 翻转
-    → host/session-status（maintenance 对事件公开为 idle），agent/error →
-    host/agent-error（取 failure.message）。
+进程侧数据来自 WebApi（`api._agents` 常驻 AgentLoop、`api.store` 的 Session、
+`ctx` 的 jobs 注册表）。跨进程耦合面只有本类发布给 mux 的 wire 契约（endpoint
+名 + 帧形状）；同包内部直接引用 WebApi（对齐上游同进程组装）。
 
-事件来源：SessionStore 以 store ctx 的 scope 为键载波派发
-session/created|disposed|event，AgentLoop 以自身 scope 键为键载波派发
-agent/status|error；两者的载波键链都上溯到根，未打标的根监听器全量接纳，
-故 hub 只需在根 ctx 注册监听。帧按目标集合（mux/host）分发到每个连接的队列。
-
-迭代 1 简化（须在 AGENTS.md 标注）：无 since 恢复游标（重连 = 重开流 +
-重拉 history）；session/jobs 来自 ctx.jobs 的 on_jobs_changed 回调（owner 恒为
-AgentLoop，unowned 作业不落到任何会话）；approval 帧来自 web 审批桥（见
-`web/approvals.py`），纯推送帧的 rpcId 由 hub 每次铸新。
+mini 简化（须同步 verified-diffs §3.4）：follow 的 records 用会话日志事件流
+`Session.events` 投影，无 page/projection 域的 message 对齐游标；`_attach` 冷
+会话自动 resume 后取日志尾部快照，再以 `_poll_new_event`（轮询 + 空闲 sleep）实时
+补 event 帧，无 since 恢复游标（重开流重拉）；jobs 来自 ctx 的 on_jobs_changed
+回调，owner 恒为 AgentLoop；心跳 Ping 省略（Starlette WS 无 Ping API）。
 """
 from __future__ import annotations
 
 import asyncio
 from typing import Any
 
-from .envelope import rpc_id
+from .events import RemoteEventRegistry
+from .stream_protocol import REMOTE_EVENT_STREAM_ENDPOINT
 
-__all__ = ["StreamHub"]
+__all__ = ["GatewayStreams", "RemoteStreamError"]
 
 QUEUE_CAPACITY = 1024
+FOLLOW_POLL_INTERVAL = 0.05
 
 
-def _mint(frame: dict) -> dict:
-    """给一帧补上独立 rpcId（上游 frame() 每帧 randomUUID()）。"""
-    frame["rpcId"] = rpc_id()
-    return frame
+class RemoteStreamError(RuntimeError):
+    """某 endpoint 打开/运转失败（上游 RemoteStreamError family 的 mini 折叠）。
 
-
-class StreamHub:
-    """mux/host 下游流中心：每连接一个队列，事件监听按帧类型分发。
-
-    `mux()` / `host()` 是 async 生成器，供传输层逐帧消费。监听器在根 ctx
-    懒注册（首个流打开时），dispose 逆序回滚。
+    @param code - RPC 码（stream-server 折进 error 帧 details）。
     """
 
-    def __init__(self, ctx, api: Any):
-        self.ctx = ctx
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def _as_plain(value: Any) -> Any:
+    from ..core.session.json import thaw
+    return thaw(value)
+
+
+class GatewayStreams:
+    """WebApi 之上组装好的 Remote 方法面（$events + session.follow/control）。
+
+    WebApi 构造时创建一次（`api.gateway`）；`web/mux.py` 的 WS open 按 endpoint
+    分发到 `open_stream`；`web/server.py` 的 `$events/result` unary 经
+    `receive_result` 消费；`dispose()` 级联清理转发源与审批桥。
+    """
+
+    def __init__(self, api: Any):
         self.api = api
-        self.approvals = api.approvals
-        self.approvals.hub = self
-        self._mux: dict[asyncio.Queue, None] = {}
-        self._host: dict[asyncio.Queue, None] = {}
+        self.ctx = api.ctx
+        self.events = RemoteEventRegistry(home=api.cwd)
+        self.events.setup_source(api)
+        from .approvals import RemoteApprovalBridge
+        self.approvals = RemoteApprovalBridge(self)
+        self._control_queues: dict[asyncio.Queue, None] = {}
         self._attached = False
         self._disposers: list[Any] = []
+        self._follow_waiters: list[_FollowWaiter] = []
 
-    # ---------- 生命周期 ----------
+    # ---------- mux 分发入口 ----------
 
-    def _attach(self) -> None:
+    def stream_kinds(self) -> dict[str, str]:
+        """endpoint → 打开/消费实现（上游 RemoteMethod exports 的 stream 子集）。"""
+        return {
+            REMOTE_EVENT_STREAM_ENDPOINT: "$events",
+            "session.follow": "follow",
+            "session.control": "control",
+        }
+
+    def open_stream(self, endpoint: str, payload: Any, signal=None):
+        """按 endpoint 打开一个流：返回 async 生成器（帧 value 序列）。
+
+        @param payload - open 帧的 payload（`{args: ...}`，各 endpoint 自校验）。
+        @param signal - 可选取消句柄（mux 关闭/客户端 cancel 时终止）。
+        @raises EventSourceFailure / RemoteStreamError。
+        """
+        kind = self.stream_kinds().get(endpoint)
+        if kind is None:
+            raise RemoteStreamError(
+                "internal",
+                f"typert gateway: {endpoint}: no active Remote method exports this endpoint")
+        if kind == "$events":
+            return self.events.open(payload, signal=signal)
+        if (not isinstance(payload, dict) or set(payload) != {"args"}
+                or not isinstance(payload["args"], dict)):
+            raise RemoteStreamError(
+                "arguments-invalid",
+                f"typert gateway: {endpoint}: requires exactly an args object")
+        if kind == "follow":
+            return self._follow(payload["args"], signal)
+        return self._control(signal)
+
+    # ---------- session.follow（历史跟随流） ----------
+
+    async def _follow(self, args: dict, signal=None):
+        address = args.get("address")
+        if (not isinstance(address, dict) or address.get("kind") != "session"
+                or not isinstance(address.get("sessionId"), str)
+                or not address["sessionId"]):
+            raise RemoteStreamError("arguments-invalid",
+                                    "session.follow requires a session address")
+        session_id = address["sessionId"]
+        session = self.api.store.get(session_id)
+        if session is None:
+            raise RemoteStreamError("session-not-found",
+                                    f'session "{session_id}" not found')
+        if self.api._agents.get(session_id) is None:
+            self.api._attach(session)
+        seq = session.seq
+        records = [self._record(e) for e in list(session.events)]
+        has_more = False
+        max_messages = args.get("maxMessages")
+        if isinstance(max_messages, int) and max_messages > 0 and len(records) > max_messages:
+            records = records[-max_messages:]
+            has_more = True
+        yield {"type": "snapshot", "header": self._header(session), "cursor": seq,
+               "records": records, "hasMore": has_more, "projections": {}}
+        subscribed = seq
+        while True:
+            event = await _poll_new_event(self.api, session_id, subscribed, signal)
+            if event is None:
+                return
+            subscribed = event["seq"]
+            yield {"type": "event", "event": event}
+
+    @staticmethod
+    def _header(session) -> dict:
+        meta = session.meta
+        header: dict[str, Any] = {"sessionId": session.session_id}
+        if meta.get("cwd") is not None:
+            header["cwd"] = meta["cwd"]
+        if meta.get("parentSession") is not None:
+            header["parentSessionId"] = meta["parentSession"]
+        if meta.get("origin") is not None:
+            header["origin"] = meta["origin"]
+        return header
+
+    @staticmethod
+    def _record(event: dict) -> dict:
+        return _as_plain(event)
+
+    # ---------- session.control（宿主级 live control） ----------
+
+    def _attach_control(self) -> None:
         if self._attached:
             return
         self._attached = True
@@ -93,177 +171,135 @@ class StreamHub:
         if jobs is not None and hasattr(jobs, "on_jobs_changed"):
             self._disposers.append(jobs.on_jobs_changed(self._on_jobs_changed))
 
-    def dispose(self) -> None:
-        for fn in reversed(self._disposers):
-            fn()
-        self._disposers.clear()
-        self._attached = False
-        self.approvals.dispose()
-
-    def _broadcast(self, target: dict, frame: dict) -> None:
-        for queue in list(target):
-            try:
-                queue.put_nowait(frame)
-            except asyncio.QueueFull:
-                # 慢消费者丢帧：帧流是幂等收敛的，重连重拉 history 即恢复
-                pass
-
-    def emit_mux(self, frame: dict) -> None:
-        """向所有 mux 连接广播一帧（rpcId 由调用方给出：可应答帧用稳定 id）。
-
-        供审批桥在 tools/ask 问询周期广播 approval/requested|resolved。
-        """
-        self._broadcast(self._mux, frame)
-
-    # ---------- 两路生成器 ----------
-
-    async def mux(self):
-        """mux 流：baseline（subscribed + 队列/作业快照）后实时转发。"""
-        self._attach()
+    async def _control(self, signal=None):
+        self._attach_control()
         queue: asyncio.Queue = asyncio.Queue(maxsize=QUEUE_CAPACITY)
-        self._mux[queue] = None
+        self._control_queues[queue] = None
         try:
-            for session_id in sorted(self.api._agents):
-                session = self.api.store.get(session_id)
-                if session is None:
-                    continue
-                queue.put_nowait(_mint({
-                    "type": "session/subscribed",
-                    "sessionId": session_id,
-                    "lastSeq": session.seq,
-                }))
-                self._queue_snapshot(queue, session_id)
-                self._jobs_snapshot(queue, session_id)
-            # 可应答交互重放：仍挂起的审批补发（复用原 rpcId，对齐上游 mux-open）
-            self.approvals.replay_mux(queue)
+            yield {"type": "baseline", "value": self._control_baseline()}
             while True:
                 frame = await queue.get()
                 yield frame
+                if signal is not None and getattr(signal, "cancelled", lambda: False)():
+                    return
         finally:
-            self._mux.pop(queue, None)
+            self._control_queues.pop(queue, None)
 
-    async def host(self):
-        """host 流：纯实时帧（无基线）。"""
-        self._attach()
-        queue: asyncio.Queue = asyncio.Queue(maxsize=QUEUE_CAPACITY)
-        self._host[queue] = None
-        try:
-            while True:
-                frame = await queue.get()
-                yield frame
-        finally:
-            self._host.pop(queue, None)
-
-    # ---------- mux 帧 ----------
+    def _control_baseline(self) -> dict:
+        queues: dict[str, list] = {}
+        jobs: dict[str, list] = {}
+        for session_id in sorted(self.api._agents):
+            queues[session_id] = self._queue_view(session_id)
+            jobs_view = self._jobs_view(session_id)
+            if jobs_view:
+                jobs[session_id] = jobs_view
+        return {"queues": queues, "jobs": jobs, "projections": {}}
 
     def _on_session_event(self, payload: dict) -> None:
         session = payload["session"]
         if session.session_id not in self.api._agents:
             return
         event = payload["event"]
-        self._broadcast(self._mux, _mint({
-            "type": "session/event", "sessionId": session.session_id, "event": event,
-        }))
         if event.get("type") == "agent/inbox/spliced":
-            self._queue_snapshot_into(session.session_id, event["data"])
-
-    def _queue_snapshot_into(self, session_id: str, splice: dict | None = None) -> None:
-        for queue in list(self._mux):
-            self._queue_snapshot(queue, session_id, splice)
-
-    def _queue_snapshot(self, queue: asyncio.Queue, session_id: str,
-                        splice: dict | None = None) -> None:
-        loop = self.api._agents.get(session_id)
-        if loop is None:
-            return
-        # 对齐 api-proxy.ts queueItems：splice 广播点在内存 mutation 之前，
-        # 观察到的是 pre-splice 列表，把 splice 重投影上去得到 post-splice 快照。
-        def project(target: str) -> list[dict]:
-            messages = loop.inbox.next_turn if target == "next-turn" else loop.inbox.next_step
-            if splice is not None and splice.get("target") == target:
-                start = splice.get("start", 0)
-                removed = splice.get("removedCount", 0)
-                before = messages[:start]
-                after = messages[start + removed:]
-                return before + list(splice.get("inserted", [])) + after
-            return messages
-
-        items = []
-        for message in project("next-turn"):
-            items.append({"id": message["id"], "placement": "queued", "message": message})
-        for message in project("next-step"):
-            placement = ("steering" if message.get("source", {}).get("kind") == "user"
-                         else "context")
-            items.append({"id": message["id"], "placement": placement, "message": message})
-        if not items:
-            return
-        queue.put_nowait(_mint({"type": "session/queue", "sessionId": session_id, "items": items}))
+            frame = {"type": "queue", "sessionId": session.session_id,
+                     "items": self._queue_view(session.session_id, event["data"])}
+            for queue in list(self._control_queues):
+                queue.put_nowait(frame)
 
     def _on_jobs_changed(self, owner: Any) -> None:
         session_id = getattr(owner, "id", None)
         if not session_id or session_id not in self.api._agents:
             return
-        jobs = self._jobs_registry()
-        if jobs is None:
-            return
-        snapshots = [self._job_view(job) for job in jobs.list(owner)]
-        frame = _mint({"type": "session/jobs", "sessionId": session_id, "jobs": snapshots})
-        for queue in list(self._mux):
+        frame = {"type": "jobs", "sessionId": session_id,
+                 "jobs": self._jobs_view(session_id)}
+        for queue in list(self._control_queues):
             queue.put_nowait(frame)
 
-    def _jobs_snapshot(self, queue: asyncio.Queue, session_id: str) -> None:
+    def _on_session_created(self, payload: dict) -> None:
+        pass  # control baseline 覆盖已挂会话；新会话经 list/baseline 收敛
+
+    def _on_session_disposed(self, payload: dict) -> None:
+        session_id = payload["session"].session_id
+        for queue in list(self._control_queues):
+            queue.put_nowait({"type": "queue", "sessionId": session_id, "items": []})
+
+    def _on_agent_status(self, payload: dict) -> None:
+        pass  # running 位由 api-session/status 承担（$events），control 不发重复
+
+    def _on_agent_error(self, payload: dict) -> None:
+        pass
+
+    def _queue_view(self, session_id: str, splice: dict | None = None) -> list[dict]:
         loop = self.api._agents.get(session_id)
-        jobs = self._jobs_registry()
-        if loop is None or jobs is None:
-            return
-        snapshots = [self._job_view(job) for job in jobs.list(loop)]
-        if not snapshots:
-            return
-        queue.put_nowait(_mint({"type": "session/jobs", "sessionId": session_id, "jobs": snapshots}))
+        if loop is None:
+            return []
+        items = []
+        for message in loop.inbox.next_turn:
+            items.append({"id": message["id"], "placement": "queued",
+                          "message": {"id": message["id"],
+                                      "content": message.get("content", [])}})
+        for message in loop.inbox.next_step:
+            placement = ("steering" if message.get("source", {}).get("kind") == "user"
+                         else "context")
+            items.append({"id": message["id"], "placement": placement,
+                          "message": {"id": message["id"],
+                                      "content": message.get("content", [])}})
+        return items
 
     def _jobs_registry(self):
         return self.ctx.get("jobs")
 
+    def _jobs_view(self, session_id: str) -> list[dict]:
+        loop = self.api._agents.get(session_id)
+        jobs = self._jobs_registry()
+        if loop is None or jobs is None:
+            return []
+        return [self._job_row(job) for job in jobs.list(loop)]
+
     @staticmethod
-    def _job_view(snapshot: dict) -> dict:
-        return {key: snapshot[key] for key in ("id", "kind", "label", "status", "startedAt")}
+    def _job_row(snapshot: dict) -> dict:
+        return {key: snapshot[key] for key in ("id", "kind", "label", "status",
+                                               "startedAt", "detail", "finishedAt")
+                if key in snapshot}
 
-    # ---------- host 帧 ----------
+    # ---------- 生命周期 ----------
 
-    def _on_session_created(self, payload: dict) -> None:
-        session = payload["session"]
-        frame: dict[str, Any] = {
-            "type": "host/session-added", "sessionId": session.session_id, "blank": True,
-        }
-        meta = session.meta
-        if meta.get("parentSession") is not None:
-            frame["parentSessionId"] = meta["parentSession"]
-        if meta.get("origin") is not None:
-            frame["origin"] = meta["origin"]
-        if meta.get("cwd") is not None:
-            frame["cwd"] = meta["cwd"]
-        if meta.get("agentPreset") is not None:
-            frame["agentPreset"] = meta["agentPreset"]
-        self._broadcast(self._host, _mint(frame))
+    def receive_result(self, result: dict) -> None:
+        """把一条 `$events/result`（词法已由 stream_protocol 校验）交给注册表结算。"""
+        self.events.receive_result(result)
 
-    def _on_session_disposed(self, payload: dict) -> None:
-        session = payload["session"]
-        self._broadcast(self._host, _mint({
-            "type": "host/session-removed", "sessionId": session.session_id,
-        }))
+    def dispose(self) -> None:
+        for fn in reversed(self._disposers):
+            fn()
+        self._disposers.clear()
+        self._attached = False
+        self.events.dispose()
+        self.approvals.dispose()
 
-    def _on_agent_status(self, payload: dict) -> None:
-        agent = payload["agent"]
-        status = payload.get("status")
-        self._broadcast(self._host, _mint({
-            "type": "host/session-status", "sessionId": agent.id, "running": status == "running",
-        }))
 
-    def _on_agent_error(self, payload: dict) -> None:
-        agent = payload["agent"]
-        error = payload.get("error") or {}
-        message = error.get("message") if isinstance(error, dict) else str(error)
-        self._broadcast(self._host, _mint({
-            "type": "host/agent-error", "sessionId": agent.id,
-            "message": message if message else str(error),
-        }))
+class _FollowWaiter:
+    """未实现（保留占位以明确简化）：follow 用 `_poll_new_event` 轮询。"""
+
+
+async def _poll_new_event(api: Any, session_id: str, from_seq: int, signal=None):
+    """轮询会话日志在 from_seq 之后的新事件（简化 follow，无 since 恢复游标）。
+
+    对齐 history.follow 的 gap-free 逐帧语义：从 `from_seq` 起按 seq 严格递增
+    提取。mini 用短轮询替代事件通知（会话日志在进程内 append 即现成可读），
+    心跳/取消信号与轮询间隔由调用方控制。
+    """
+    loop_ = api._agents.get(session_id)
+    if loop_ is None:
+        return None
+    session = loop_.session
+    while True:
+        next_event = None
+        for event in list(session.events):
+            if event.get("seq", 0) > from_seq:
+                next_event = event
+                break
+        if next_event is not None:
+            return next_event
+        if signal is not None and getattr(signal, "cancelled", lambda: False)():
+            return None
+        await asyncio.sleep(FOLLOW_POLL_INTERVAL)
