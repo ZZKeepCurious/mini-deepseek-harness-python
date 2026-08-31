@@ -62,11 +62,13 @@ describe/set/unset/assertUnshadowed/assertOwnerOnly/parseCredentialsDocument）�
      verified-diffs §3.10）。
 
 载体简化（须在文档标注）：上游文档是 YAML（yaml 包），mini 用 JSON
-（stdlib），"严格映射 + 失败即拒"的语义不变；无文件 watch（外部编辑靠
-写入路径的重读折叠生效）；.env 解析覆盖上游 launch-environment 的常见子集
-（KEY=VALUE + # 注释 + 引号剥离）。modifyRecord/deleteRecord 为同步实现
-（上游为 async + 操作队列 enqueue；mini 单进程同步，跨进程互斥由容器锁
-守护，队列等价于天然顺序）。
+（stdlib），"严格映射 + 失败即拒"的语义不变；无文件 watch——外部编辑靠
+**读侧 mtime 探测热重载 + 写路径持锁重读折叠**双保险生效（B 档 2026-08-31：
+读查询/记录读在每次调用前 `os.stat` 比对 mtime/size，变了才重解析整表；写
+路径 reconcile 折叠不变，且外部删除文件也即时清空内存）。.env 解析覆盖上游
+launch-environment 的常见子集（KEY=VALUE + # 注释 + 引号剥离）。
+modifyRecord/deleteRecord 为同步实现（上游为 async + 操作队列 enqueue；
+mini 单进程同步，跨进程互斥由容器锁守护，队列等价于天然顺序）。
 """
 from __future__ import annotations
 
@@ -441,6 +443,10 @@ class LocalCredentialProvider:
         # refs 时 records 不丢）；P2-20 起提供服务侧读写（record 五件套）
         self._records: dict[str, dict] = {}
         self._text: str | None = None
+        # 磁盘变更探测（B 档，2026-08-31）：最后一次成功读取的 mtime/size，
+        # 读侧热重载据此判断外部编辑，无需 watchdog。
+        self._mtime_ns: int | None = None
+        self._size: int | None = None
         self._load_initial()
 
     # ---------- 四层 ----------
@@ -474,6 +480,7 @@ class LocalCredentialProvider:
 
         与上游 resolve 返回 {value, source} | undefined 同语义。
         """
+        self._refresh_if_changed()
         inherited = self._inherited(key)
         if inherited is not None:
             return inherited, "env"
@@ -487,6 +494,7 @@ class LocalCredentialProvider:
 
     def describe(self, key: str) -> dict:
         """{configured, source, writable}：只有继承环境层不可写。"""
+        self._refresh_if_changed()
         inherited = self._inherited(key)
         if inherited is not None:
             return {"configured": True, "source": "env", "writable": False}
@@ -505,6 +513,7 @@ class LocalCredentialProvider:
 
         键经 parse_credential_key 严格语法拒绝非法地址；未存 → None。
         """
+        self._refresh_if_changed()
         parse_credential_key(key)
         return self._records.get(key)
 
@@ -515,6 +524,7 @@ class LocalCredentialProvider:
         记录是"确认走自身环境发现"的存储决策，不是空白——presence 即
         configured。kind 仅在已存储时出现。
         """
+        self._refresh_if_changed()
         parse_credential_key(key)
         stored = self._records.get(key)
         if stored is None:
@@ -527,6 +537,7 @@ class LocalCredentialProvider:
         返回 [{key, kind}, ...]，键即 parse_credential_key 已证可寻址
         的 `<scope>/<id>`。
         """
+        self._refresh_if_changed()
         return [{"key": key, "kind": record["kind"]}
                 for key, record in self._records.items()]
 
@@ -663,6 +674,61 @@ class LocalCredentialProvider:
                 f"so {verb} would be shadowed; unset it in the shell you start dsh from instead"
             )
 
+    def _disk_stat(self):
+        """磁盘当前 stat；缺文件 → None（含并发替换窗口内的瞬时缺失）。"""
+        try:
+            return os.stat(self._filename)
+        except OSError:
+            return None
+
+    def _record_mtime(self) -> None:
+        """记录当前磁盘 mtime/size 快照（装载/重读/原子写之后调用）。"""
+        st = self._disk_stat()
+        self._mtime_ns = st.st_mtime_ns if st is not None else None
+        self._size = st.st_size if st is not None else None
+
+    def _reload_values(self) -> None:
+        """读侧热重载：从磁盘重读整表并更新 mtime 快照。
+
+        与写路径的 `_reconcile_from_disk`（持锁+部分折叠）不同——读侧只负责
+        把外部变更折叠进内存；文件被外部删除 → 清空为"空存储"（对齐"删掉的
+        条目绝不在内存残留"）。原子写（临时文件 + os.replace）保证读者要么
+        看到旧完整文件要么看到新完整文件，无撕裂，故无需持锁。
+        """
+        _assert_owner_only(self._filename)
+        try:
+            with open(self._filename, "r", encoding="utf-8") as handle:
+                text = handle.read()
+        except FileNotFoundError:
+            text = None
+        self._record_mtime()
+        if text is None:
+            self._values = {}
+            self._records = {}
+            self._text = None
+            return
+        document = parse_credentials_document(text, self._filename)
+        self._values = document["refs"]
+        self._records = document["records"]
+        self._text = text
+
+    def _refresh_if_changed(self) -> None:
+        """若磁盘 mtime/size 探测到外部变更，则重读折叠进内存。
+
+        这是"无文件 watch"（§3.10 简化）的产品化落地——单进程发布时外部进程
+        改凭据文件由读侧探测即时感知，不需要 watchdog（B 档 2026-08-31）。
+        一个 stat 成本，仅在有变更时才解析文档。
+        """
+        st = self._disk_stat()
+        current = (st.st_mtime_ns, st.st_size) if st is not None else (None, None)
+        if current == (self._mtime_ns, self._size):
+            return
+        self._reload_values()
+
+    def refresh(self) -> None:
+        """显式按需重读：探测到磁盘外部变更即折叠进内存（否则 no-op）。"""
+        self._refresh_if_changed()
+
     def _reconcile_from_disk(self) -> None:
         _assert_owner_only(self._filename)
         try:
@@ -671,11 +737,13 @@ class LocalCredentialProvider:
         except FileNotFoundError:
             text = None
         if text == self._text or text is None:
+            self._record_mtime()
             return
         document = parse_credentials_document(text, self._filename)
         self._values = document["refs"]
         self._records = document["records"]
         self._text = text
+        self._record_mtime()
 
     def _atomic_write(self, text: str) -> None:
         """临时文件 + 原子替换；POSIX 0600 落盘（Windows 无 mode 语义，跳过）。"""
@@ -697,6 +765,7 @@ class LocalCredentialProvider:
             except OSError:
                 pass
             raise
+        self._record_mtime()
 
     # ---------- 启动 ----------
 
@@ -711,6 +780,7 @@ class LocalCredentialProvider:
             with open(self._filename, "r", encoding="utf-8") as handle:
                 text = handle.read()
         except FileNotFoundError:
+            self._record_mtime()
             return
         if render_flat_layout_migration(text) is not None:
             text = self._migrate_flat_document(text)
@@ -718,6 +788,7 @@ class LocalCredentialProvider:
         self._values = document["refs"]
         self._records = document["records"]
         self._text = text
+        self._record_mtime()
 
     def _migrate_flat_document(self, recognized: str) -> str:
         """一次性升级可识别 flat 布局：写锁内重读磁盘再迁移（并发启动可能

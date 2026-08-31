@@ -682,6 +682,44 @@ class TestCredentialRecords(unittest.TestCase):
                 getattr(provider, method)("x/y/z", lambda _: None) if method == "modify_record" \
                     else getattr(provider, method)("x/y/z")
 
+    # ---- B 档（2026-08-31）：读侧 mtime 热重载（无文件 watch：外部编辑即时感知） ----
+
+    def test_external_ref_edit_hot_reloaded_on_read(self):
+        # 本 provider 不写任何东西，仅读——读侧 mtime 探测应折叠进外部进程的编辑
+        pa = self._provider()
+        pa.set("api_key", "pa-key")
+        pb = self._provider()
+        pb.set("api_key", "pb-key")
+        self.assertEqual(pa.resolve("api_key"), ("pb-key", "file"))
+        self.assertEqual(pa.describe("api_key"),
+                         {"configured": True, "source": "file", "writable": True})
+
+    def test_external_record_edit_hot_reloaded_on_read(self):
+        pa = self._provider()
+        pa.modify_record("a/b", lambda _: {"kind": "grant", "payload": 1})
+        pb = self._provider()
+        pb.modify_record("a/b", lambda _: {"kind": "grant", "payload": 2})
+        self.assertEqual(pa.read_record("a/b"), {"kind": "grant", "payload": 2})
+        self.assertEqual(pa.describe_record("a/b"),
+                         {"configured": True, "kind": "grant", "writable": True})
+        self.assertEqual(pa.list_records(), [{"key": "a/b", "kind": "grant"}])
+
+    def test_external_delete_clears_on_read(self):
+        pa = self._provider()
+        pa.set("api_key", "sk-1")
+        os.remove(self._filename)
+        # 文件被外部删除 → 读侧清空为空存储（删掉的条目绝不在内存残留）
+        self.assertIsNone(pa.resolve("api_key"))
+
+    def test_unchanged_read_does_not_reload(self):
+        pa = self._provider()
+        pa.set("api_key", "sk-1")
+        before = (pa._mtime_ns, pa._size)
+        with mock.patch.object(pa, "_reload_values", wraps=pa._reload_values) as reloaded:
+            pa.resolve("api_key")
+        reloaded.assert_not_called()
+        self.assertEqual((pa._mtime_ns, pa._size), before)
+
 
 def fixture_cyclic():
     value = {}

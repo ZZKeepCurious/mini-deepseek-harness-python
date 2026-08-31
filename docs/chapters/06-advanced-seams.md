@@ -195,7 +195,25 @@ python -m unittest tests.test_seams -v
 
 **沙箱策略服务 + bash 消费者**（`seams/sandbox_policy.py` + `shell/`，对应上游 `sandbox/sandbox-policy`、`session-mode.ts` 与 `shell/bash-sandbox`）：策略与强制分属两个服务——ctx.sandboxPolicy 是唯一的共享策略家（Config `{mode: 缺省 read-only, workspaceRoot}` fail-loud 校验；`resolve()` 决议完整策略：显式 mode > 会话日志最后一条 `sandbox/mode` > 部署缺省；workspace 根先 canonical 后词法规范化，会话 cwd 即 workspace-write 边界），ctx.sandbox 把模式物化为 runner argv。会话覆盖以会话日志为存储：`set_sandbox_mode` 追加恰一条 `sandbox/mode` log-only 事件，`effective_sandbox_mode` 纯 fold 逆序取最后——切换即事件本身，重放即状态。三档策略文案经 systemPrompt `.context('sandbox:policy', order=110)` 进模型可见上下文（loop 侧投影在上下文变化时把快照铸成 durable user 消息注入对话流，见 `core/agent_loop/runtime_context.py`）。消费者在 `shell/` 层：`bash_local.py` 是 ctx.shell 缺省 provider（前台 `bash -c` 直跑），`bash_sandbox.py` 子类每次调用把精确 argv 经 confine 包裹后 spawn 并报告 `{mode, denied, enforcement}`；三路归因对齐上游 helpers.ts——runner 启动失败（ENOENT/EACCES 且错误路径恰为 argv[0]、cwd 可用性独立校验）与 runner 失败规则命中抛 `SandboxUnavailableError` 且优先于 denial，denial = 非零退出 + stderr 大小写不敏感签名命中（普通非零退出仍是正常结算）；danger-full-access 直通不包裹。工具面（`cli/default_tools.py`）检测到 ctx.shell 时把教学 stub 换成真执行器，逐调用以调用方会话决议策略；headless 入口 `run_headless(..., sandbox=配置)` 一键装配全栈。已知简化：后台进程机制未复现。
 
-**凭据四层**（`credentials_local.py`，对应上游 `credentials-local`）：`env > file > project-env > user-env` 按信任度排序——继承环境只读胜出（CI secret / `-e` 是显式意图且进程内不可编辑）、管理文件层可写（`set`/`unset` 读-改-写补丁单键，外部编辑合并、删掉的条目不残留）、project `.env` 优先于 user `.env`。文档解析严格：非映射根 / 非 POSIX 标识符 key / 非字符串 / 空串值整体拒绝，绝不静默跳过；`describe` 报告 `{configured, source, writable}`（只有 env 层不可写）；env 已提供时 `set`/`unset` 拒绝（写了也被遮蔽成无效果）；POSIX 上组/其他可读的文档读前直接拒绝（Windows 无 mode 可查则跳过）。载体简化：文档用 JSON 替代 YAML（解析语义不变）；跨进程写锁已用 `filelock` 闭合（`withFileLock` 同款，`credentials_local.py:553`，写入等待 30s——`DOCUMENT_LOCK_WAIT_SECONDS` 覆盖 atomic-write 2s 默认），仅无文件 watch（凭据文件变更需手动/重启读取，日志文件才 watch）。P2-20 之后 `credentials_local.py` 还实现记录（record）服务侧五件套：`read_record`/`describe_record`/`list_records`/`modify_record`/`delete_record`（modify_record 是唯一写路径：持锁内 reconcile 折叠外部编辑 → mutate 收到当前记录返回替换/拒绝 → 写前准入与读路径同一套 → 原子落盘；`<scope>/<id>` 键语法 `[a-z][a-z0-9-]*`，段非法逐字 TypeError）。
+**沙箱发布/部署平台矩阵与 fail-closed 契约（B 档，2026-08-31）**：上面按平台选链只讲了"怎么选"，这里把它收敛成操作用（release/ops）视角的矩阵：
+
+| 平台 | 候选后端（链序） | 真实强制门槛 | enforcement |
+|---|---|---|---|
+| Linux | `bwrap` → `landlock` | landlock 需内核 ABI ≥ 5 才 full（否则 partial 但仍受限）；非 Linux 宿主 `landlock_run` 干净退出 125 | full / partial |
+| macOS (darwin) | `seatbelt` | 真 SBPL 剖面 | full |
+| Windows (win32) | `windows-acl` | 真内核写法受扫描由门控 e2e 覆盖（`MINIHARNESS_INTEGRATION_WINDOWS_ACL=1`），非 win32 `import` 即抛 OSError | partial（Everyone 边界） |
+
+**fail-closed 契约**（沙箱下"命令绝不裸跑"）：
+
+1. **无候选**：当前平台没有可用后端 → `SandboxUnavailableError`（`SANDBOX_UNAVAILABLE`），不降级为裸跑。
+2. **runner 起不来**：可真后端启动失败（ENOENT/EACCES 且错误路径恰为 argv[0]、cwd 不可用）→ 同样 `SandboxUnavailableError`，且优先于 denial。
+3. **跑起来后被拒**：non-zero 退出 + stderr 大小写不敏感签名命中 → denial（普通非零退出仍是正常结算）。
+4. **windows-acl 方言**：runner 自身失败打印 `windows-acl-run: <detail>` 并 exit 127——靠「127 + fatal 行」双条件区分"没跑起来"与"跑起来后被拒"。
+5. **唯一直通**：`danger-full-access` 直通不包裹——这是操作者的显式决策，不是后端缺省；除此之外沙箱层 fail-closed 绝不静默放行。
+
+纯 sdk/profile 教学形态不受影响（不走真沙箱装配）。
+
+**凭据四层**（`credentials_local.py`，对应上游 `credentials-local`）：`env > file > project-env > user-env` 按信任度排序——继承环境只读胜出（CI secret / `-e` 是显式意图且进程内不可编辑）、管理文件层可写（`set`/`unset` 读-改-写补丁单键，外部编辑合并、删掉的条目不残留）、project `.env` 优先于 user `.env`。文档解析严格：非映射根 / 非 POSIX 标识符 key / 非字符串 / 空串值整体拒绝，绝不静默跳过；`describe` 报告 `{configured, source, writable}`（只有 env 层不可写）；env 已提供时 `set`/`unset` 拒绝（写了也被遮蔽成无效果）；POSIX 上组/其他可读的文档读前直接拒绝（Windows 无 mode 可查则跳过）。载体简化：文档用 JSON 替代 YAML（解析语义不变）；跨进程写锁已用 `filelock` 闭合（`withFileLock` 同款，`credentials_local.py:553`，写入等待 30s——`DOCUMENT_LOCK_WAIT_SECONDS` 覆盖 atomic-write 2s 默认）。凭据读侧热重载：`resolve`/`describe`/`read_record` 等读入口先 `_refresh_if_changed()`——`os.stat` 比对 mtime/size，变了才重解析整表（外部编辑/删除即时生效），写路径 `_reconcile_from_disk` 折叠不变；无撕裂（atomic write os.replace），读侧不需锁。P2-20 之后 `credentials_local.py` 还实现记录（record）服务侧五件套：`read_record`/`describe_record`/`list_records`/`modify_record`/`delete_record`（modify_record 是唯一写路径：持锁内 reconcile 折叠外部编辑 → mutate 收到当前记录返回替换/拒绝 → 写前准入与读路径同一套 → 原子落盘；`<scope>/<id>` 键语法 `[a-z][a-z0-9-]*`，段非法逐字 TypeError）。
 
 **子 agent 远程三通道**（`subagent/providers.py` + `subagent/worker.py`，对应上游 `subagent-fork-in-process` / `subagent-acp` / `subagent-dsh-sdk`）：
 
