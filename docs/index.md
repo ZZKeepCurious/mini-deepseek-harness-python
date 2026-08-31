@@ -1,6 +1,6 @@
 # Mini DeepSeek Harness（Python）— 文档入口
 
-> 用 Python（成熟开源库优先，无语义等价库时才用标准库手写）从 0 到 1 复现 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 核心能力的教学项目。
+> 用 Python（成熟开源库优先，无语义等价库时才用标准库手写）以清晰复现 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 核心契约为基础、**面向产品化的生产就绪**实现。
 > 仓库：https://github.com/ZZKeepCurious/mini-deepseek-harness-python
 
 ## 这是什么
