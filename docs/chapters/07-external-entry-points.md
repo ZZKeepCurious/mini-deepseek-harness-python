@@ -167,7 +167,7 @@ alpha.1 把通信收拢为**单一两信封协议**（对齐 `packages/client/co
 - 服务端 → 客户端：`item`（`{streamId, item}`）、`error`（`{streamId, error:{code,message?}}`）、`end`（`{streamId, ok, error?}`）。
 - 网关内部端点 `$events`（宿主→客户端事件线）与 `$events/result`（客户端→宿主把事件传回宿主）——`open_stream("$events")` 一旦打开即返回 `ready`，宿主 `api-session/*` 事件线逐帧转发；`$events/result` 是 unary 结算帧（`parse_remote_event_result_payload`），供 waterfall 审批等异步通道回投结果。
 
-`server_request`/`server_response`/`rpc_result_ok/error` 等构造器对齐上游；错误投影链：`TypertRemoteFailure`/`TypertLookupFailure` 保留 `failure.cancelled`（`{code:'cancelled'}`）或 `{code:'internal'}`。互操作锚点：`tests/test_web_stream_protocol.py` 逐项断言 open/cancel/item/error/end 全形与 `$events/result` payload 判定（含**无损 JSON 判定**）。
+`server_request`/`server_response`/`rpc_result_ok/error` 等构造器对齐上游；错误投影链：`TypertRemoteFailure`/`TypertLookupFailure` 保留 `failure.cancelled`（`{code:'gateway/cancelled'}`）或 `{code:'gateway/internal'}`。互操作锚点：`tests/test_web_stream_protocol.py` 逐项断言 open/cancel/item/error/end 全形与 `$events/result` payload 判定（含**无损 JSON 判定**）。
 
 ### 7.5.2 会话服务：unary 方法（`web/api.py`）
 
@@ -177,10 +177,10 @@ alpha.1 把通信收拢为**单一两信封协议**（对齐 `packages/client/co
 |---|---|
 | `session.list` | 按 updatedAt 倒序 + blank / lastPromptAt 折叠投影（unary）|
 | `session.search` | 按关键字搜索（unary）|
-| `session.create` | 会话 id 缺省 `session-<uuid4>`；workspaceId → workspace-not-found；重复 id + 同 cwd 幂等返回、异 cwd → session-conflict；create 即 attach |
+| `session.create` | 会话 id 缺省 `session-<uuid4>`；workspaceId → workspace/not-found；重复 id + 同 cwd 幂等返回、异 cwd → session/conflict；create 即 attach |
 | `session.selectModel` / `session.modelCatalog` / `session.canOpenWorkspacePath` / `session.openWorkspacePath` | 模型选择 / 目录打开（unary）|
 | `session.rename` / `session.fork` / `session.cancel` / `session.updateQueue` | 会话维护（unary；cancel 保留 inbox + FIFO 恢复，`_parked` 驻留）|
-| `session.prompt` | mode ∈ {queue, steer}；time zone 校验；`/` 开头单文本块 → 命令注册表；需 `requestId`（缺 → bad-request）|
+| `session.prompt` | mode ∈ {queue, steer}；time zone 校验；`/` 开头单文本块 → 命令注册表；需 `requestId`（缺 → gateway/bad-request）|
 | `session.attachment` | 附件投递（unary）|
 | `session.page` | **取代已删除的 `session.history`**：throughSeq/beforeSeq/maxMessages 游标分页 |
 | `session.follow` / `session.control` | 流式（见 §7.5.3）|
@@ -193,7 +193,7 @@ alpha.1 把通信收拢为**单一两信封协议**（对齐 `packages/client/co
 - **`web/events.py`（`EventStreamRegistry`）**：`$events` 注册表——`ready` 首帧 + `api-session/*` 事件线转发 + `$events/result` 结算对拍。**跨堆线程安全唤醒**：TestClient/uvicorn 把 app 跑在 portal 线程，主线程 `ctx.emit` 广播不能直接调 `asyncio.Event.set()`，`_ClientQueue._wake` 捕获运行 loop 用 `loop.call_soon_threadsafe(waiter)`（含 `loop.is_closed()` 守卫）。
 - **`web/streams.py`（`GatewayStreams`）**：`open_stream` 按 endpoint 分发：
   - `$events`：open 即 `ready`，随后事件帧转发。
-  - `session.follow`：首帧 snapshot `{header, cursor, records, hasMore, projections}`，之后逐 event 帧（snapshot 后重投 cursor+1..end，对齐 `history.ts:92-149`）。lazy async 生成器错误时机——体部 `RemoteStreamError`（session-not-found/arguments-invalid）在首个 `await gen.__anext__()` 处抛、非调用时，测试须迭代驱动。
+  - `session.follow`：首帧 snapshot `{header, cursor, records, hasMore, projections}`，之后逐 event 帧（snapshot 后重投 cursor+1..end，对齐 `history.ts:92-149`）。lazy async 生成器错误时机——体部 `RemoteStreamError`（session/not-found/gateway/arguments-invalid）在首个 `await gen.__anext__()` 处抛、非调用时，测试须迭代驱动。
   - `session.control`：首帧 baseline `{queues, jobs, projections}`，之后 queue/jobs/projection 替换帧（对齐 `control.ts:67-124`）。
   - 未知 endpoint → 抛 `RemoteStreamError`。
 

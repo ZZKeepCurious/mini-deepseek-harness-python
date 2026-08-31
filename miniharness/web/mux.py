@@ -171,16 +171,17 @@ class RemoteStreamMuxConnection:
 
 
 def _failure_code(error: Any) -> str:
-    """把 open/流内异常折成 RPC 码（TypertGatewayError→internal，abort→cancelled）。"""
+    """把 open/流内异常折成 RPC 码（TypertGatewayError→gateway/internal，abort→gateway/cancelled）。"""
     if getattr(error, "code", None) in (
-            "arguments-invalid", "session-not-found", "internal", "cancelled"):
+            "gateway/arguments-invalid", "session/not-found", "gateway/internal",
+            "gateway/cancelled"):
         return error.code
     if getattr(error, "code", None):
         return error.code
     if getattr(error, "name", None) == "AbortError" or isinstance(
             error, (asyncio.CancelledError,)):
-        return "cancelled"
-    return "internal"
+        return "gateway/cancelled"
+    return "gateway/internal"
 
 
 def serve_websocket(gateway: Any, websocket: Any) -> "RemoteStreamMuxConnection":

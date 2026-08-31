@@ -116,7 +116,7 @@ class MuxConnectionTest(unittest.TestCase):
                                     "endpoint": "e", "payload": {}}],
                          wait_sent=2)
         self.assertEqual(ws.sent[0]["type"], "error")
-        self.assertEqual(ws.sent[0]["error"]["code"], "internal")
+        self.assertEqual(ws.sent[0]["error"]["code"], "gateway/internal")
         self.assertEqual(ws.sent[0]["error"]["message"], "boom")
         self.assertEqual(ws.sent[1], {"type": "end", "streamId": "s1"})
 

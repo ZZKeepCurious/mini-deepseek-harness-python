@@ -62,7 +62,7 @@ class WebServerTest(unittest.TestCase):
             resp = self._post("session.list", payload)
             data = resp.json()
             self.assertFalse(data["result"]["ok"], payload)
-            self.assertEqual(data["result"]["error"]["code"], "bad-request", payload)
+            self.assertEqual(data["result"]["error"]["code"], "gateway/bad-request", payload)
 
     def test_unknown_method_not_found(self):
         resp = self._post("session.nope", {"args": {}})
@@ -73,7 +73,7 @@ class WebServerTest(unittest.TestCase):
                                 json={"type": "server-response"})
         data = resp.json()
         self.assertFalse(data["result"]["ok"])
-        self.assertEqual(data["result"]["error"]["code"], "bad-request")
+        self.assertEqual(data["result"]["error"]["code"], "gateway/bad-request")
 
     def test_method_path_mismatch_bad_request(self):
         resp = self._post("session.list", {"args": {}}, rpc_id="r9")
@@ -83,7 +83,7 @@ class WebServerTest(unittest.TestCase):
         resp = self.client.post("/api/session.list", json=body)
         data = resp.json()
         self.assertFalse(data["result"]["ok"])
-        self.assertEqual(data["result"]["error"]["code"], "bad-request")
+        self.assertEqual(data["result"]["error"]["code"], "gateway/bad-request")
 
     def test_create_session_prompt_flow(self):
         resp = self._post("session.create", {"args": {"cwd": os.getcwd()}})
@@ -129,7 +129,7 @@ class WebSocketMuxTest(unittest.TestCase):
                                  "outcome": {"kind": "cancelled"}}}})
         data = resp.json()
         self.assertFalse(data["result"]["ok"])
-        self.assertEqual(data["result"]["error"]["code"], "internal")
+        self.assertEqual(data["result"]["error"]["code"], "gateway/internal")
 
 
 if __name__ == "__main__":

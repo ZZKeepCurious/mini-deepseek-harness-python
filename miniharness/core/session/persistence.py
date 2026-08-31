@@ -1120,11 +1120,19 @@ class SqlitePersistence(SessionPersistence):
 # ---------- 加载与恢复 ----------
 
 def load_events_checked(raw_events: list[dict]) -> list[dict]:
-    """fail-closed：未知事件类型整体拒绝加载（上游无 ignorable 概念）。"""
+    """fail-closed：未知事件类型除非带 `ignorable` 标记否则拒绝加载。
+
+    语义对齐上游 session-persistence coordinator.ts `assertEventsSupported`
+    （:1143-1148）：此构建不认识、且写方未标 `ignorable` 的事件可能是更新版本
+    harness 写入的必需事件——静默跳过会重建出错误的会话，故响亮拒绝；写方将事件
+    标记为 `ignorable`（纯信息记录，丢失不影响重建）则放行保留。
+    """
     for ev in raw_events:
-        if ev.get("type") not in KNOWN_TYPES:
+        if ev.get("type") not in KNOWN_TYPES and ev.get("ignorable") is not True:
             raise RuntimeError(
-                f"未知事件类型 {ev.get('type')!r}，拒绝加载（防止静默丢事件改变解读）"
+                f'session contains event type "{ev.get("type")}" '
+                f'(seq {ev.get("seq")}) unknown to this harness and not marked ignorable; '
+                f"refusing to interpret the log — it was likely written by a newer harness"
             )
     return raw_events
 

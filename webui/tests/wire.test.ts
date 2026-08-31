@@ -150,7 +150,7 @@ describe("RemoteMuxConnection", () => {
     FakeWebSocket.instances[0].serverSend({
       type: "error",
       streamId: parsed.streamId,
-      error: { code: "session-not-found", message: "missing" },
+      error: { code: "session/not-found", message: "missing" },
     });
     const frame = await p;
     expect(frame.type).toBe("error");

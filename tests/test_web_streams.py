@@ -132,7 +132,7 @@ class TestFollow(GatewayStreamsTest):
                 self.fail("expected RemoteStreamError")
             except RemoteStreamError as error:
                 return error.code
-        self.assertEqual(_run(go()), "session-not-found")
+        self.assertEqual(_run(go()), "session/not-found")
 
     def test_arguments_invalid(self):
         async def go(payload):
@@ -144,7 +144,7 @@ class TestFollow(GatewayStreamsTest):
                 return error.code
         for payload in ({"args": {}}, {"args": {"address": {"kind": "host"}}},
                         {"args": {"address": {"kind": "session"}}}):
-            self.assertEqual(_run(go(payload)), "arguments-invalid")
+            self.assertEqual(_run(go(payload)), "gateway/arguments-invalid")
 
 
 class TestControl(GatewayStreamsTest):
@@ -179,7 +179,7 @@ class TestDispatchErrorHandling(GatewayStreamsTest):
     def test_unknown_endpoint_raises(self):
         with self.assertRaises(RemoteStreamError) as cm:
             self.gateway.open_stream("session.nope", {"args": {}})
-        self.assertEqual(cm.exception.code, "internal")
+        self.assertEqual(cm.exception.code, "gateway/internal")
 
     def test_events_endpoint_dispatches(self):
         # $events 端点到 events registry：open 即 ready 帧

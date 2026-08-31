@@ -175,18 +175,25 @@ class TestRecovery(unittest.TestCase):
             p = JsonlPersistence(Path(tmp))
             p.append("s1", {"type": "future/event", "seq": 0, "time": 1, "data": {}})
             p.flush()
-            with self.assertRaises(RuntimeError):
+            with self.assertRaises(RuntimeError) as ctx:
                 load_events_checked(p.load("s1"))
+            self.assertIn(
+                'unknown to this harness and not marked ignorable', str(ctx.exception)
+            )
 
-    def test_unknown_event_rejected_even_if_ignorable(self):
+    def test_unknown_ignorable_event_allowed(self):
+        # alpha.2 对齐上游 coordinator.ts assertEventsSupported：带 ignorable 标记的
+        # 未知事件放行保留（丢失不影响重建），不标则响亮拒绝。
         with tempfile.TemporaryDirectory() as tmp:
             p = JsonlPersistence(Path(tmp))
-            # 上游无 ignorable 概念：即便带 ignorable 标记，未知类型仍整体拒绝
-            p.append("s1", {"type": "future/event", "seq": 0, "time": 1,
-                            "data": {}, "ignorable": True})
+            p.append("s1", {"type": "future/info", "seq": 0, "time": 1,
+                            "data": {"note": "x"}, "ignorable": True})
+            p.append("s1", {"type": "user/message", "seq": 1, "time": 2,
+                            "data": {}, "ignorable": False})
             p.flush()
-            with self.assertRaises(RuntimeError):
-                load_events_checked(p.load("s1"))
+            loaded = load_events_checked(p.load("s1"))
+            self.assertEqual([e["type"] for e in loaded], ["future/info", "user/message"])
+            self.assertTrue(loaded[0]["ignorable"])
 
     def test_resume_conversation_after_restart(self):
         with tempfile.TemporaryDirectory() as tmp:

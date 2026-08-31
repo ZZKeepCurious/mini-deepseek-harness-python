@@ -143,7 +143,7 @@ flowchart TD
 
 - **扩展口**：`ctx.sessionPersistence` 抽象（locate / create / append / 逻辑 load/inspect / 物理后缀读）+ 两个可互换后端：**JSONL**（每会话一个文件，支持 packed chunk 行）与 **SQLite**（多会话一库，单调 `SCHEMA_VERSION`）。
 - **flush 检查点**：`session/event` 是同步通知，持久化插件先复制事件再异步成批写入；`session/flush` 是等待的并行栅栏，用于认领下一个普通 turn 前的排序与错误观察点。
-- **格式拒绝，不迁移**：版本落后 = "升级 harness"；版本超前 = "使用更新的 harness 打开"。未知事件类型整体拒绝加载（防止静默丢事件改变后续解读，无 `ignorable` 豁免）。
+- **格式拒绝，不迁移**：版本落后 = "升级 harness"；版本超前 = "使用更新的 harness 打开"。未知事件类型除非带 `ignorable: true` 标记否则拒绝加载（防止静默丢事件改变后续解读；alpha.2 起支持 `ignorable` 豁免——写方显式标 `ignorable` 的纯信息记录可放行）。
 - **崩溃恢复**：关闭孤儿 turn（合成 `interrupted`），只作用于冷会话；活会话 `load` 等待权威内存快照持久化。
 
 <p class="fig-cap">图 13：会话持久化——双后端、flush 栅栏与崩溃恢复</p>

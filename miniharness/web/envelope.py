@@ -11,9 +11,9 @@
   * RpcResult = {ok:true, value?} | {ok:false, error:RpcError}：成功分支的 value
     可选（业务返回 undefined 时整体省略该字段，`rpc-server.ts` 只回显既有字段）；
     业务方法绝不抛业务错误——一律经 result.ok 表达。
-  * RpcError = {code, message, details}，code 是 session 域闭集（SessionErrorDetailsMap
-    键集，`packages/api/session-controller/src/types.ts`）；details 恒为对象。
-  * transport_error：把载体层异常折进 RpcResult 错误分支，兜底码 'internal'
+  * RpcError = {code, message, details}，code 是命名空间域闭集
+    （RemoteErrorDetailsMap 键集，见 envelope.RPC_ERROR_CODES）；details 恒为对象。
+  * transport_error：把载体层异常折进 RpcResult 错误分支，兜底码 'gateway/internal'
     （每个载体消费者用同一套折叠）。
 
 纯契约层：零第三方依赖、零 HTTP。判定标准：消息能否在两型判别之间无损往返。
@@ -36,30 +36,33 @@ __all__ = [
     "parse_message",
 ]
 
-# SessionErrorDetailsMap 的键集（session-controller types.ts:178-215，21 码闭集）。
-# 上游 `.details` 按 code 判别；mini 无 subagent 目录等域时这些码仍可作兜底拒绝。
+# RemoteErrorDetailsMap 的键集（alpha.2 起统一为 `<namespace>/<name>` 命名空间码：
+# typert-protocol/types.ts:47-53 基础设施 gateway/* + 各域 merge-extensible 注册，
+# 见 verified-diffs §3.4）。上游 `.details` 按 code 判别；mini 无 subagent 目录等域时
+# 这些码仍可作兜底拒绝。
 RPC_ERROR_CODES = frozenset({
-    "bad-request",
-    "cancelled",
-    "session-not-found",
-    "model-unavailable",
-    "session-conflict",
-    "invalid-time-zone",
-    "workspace-attach-failed",
-    "workspace-not-found",
-    "agent-preset-conflict",
-    "agent-preset-not-found",
-    "agent-preset-invalid",
-    "agent-busy",
-    "attachment-error",
-    "queue-item-not-found",
-    "steer-unavailable",
-    "title-invalid",
-    "fork-unavailable",
-    "subagent-not-found",
-    "subagent-catalog-diagnostic",
-    "subagent-unauthorized",
-    "internal",
+    "agent-preset/conflict",
+    "agent-preset/invalid",
+    "agent-preset/not-found",
+    "gateway/arguments-invalid",
+    "gateway/bad-request",
+    "gateway/cancelled",
+    "gateway/internal",
+    "session/agent-busy",
+    "session/attachment-invalid",
+    "session/conflict",
+    "session/fork-unavailable",
+    "session/invalid-time-zone",
+    "session/model-unavailable",
+    "session/not-found",
+    "session/queue-item-not-found",
+    "session/steer-unavailable",
+    "session/title-invalid",
+    "session/workspace-attach-failed",
+    "subagent/catalog-diagnostic",
+    "subagent/not-found",
+    "subagent/unauthorized",
+    "workspace/not-found",
 })
 
 _TYPE_TAGS = frozenset({"client-request", "server-response"})
@@ -85,12 +88,12 @@ def rpc_error(code: str, message: str, details: dict | None = None) -> dict:
 
 
 def transport_error(error: Any) -> dict:
-    """把载体层异常折进 RpcResult 错误分支（上游 rpcFailure 兜底 'internal'）。
+    """把载体层异常折进 RpcResult 错误分支（上游 rpcFailure 兜底 'gateway/internal'）。
 
     返回的是 RpcResult（{ok:false, error}），不是裸 RpcError——每个载体消费者
     用同一套折叠把抛出的值统一成 result 形态。
     """
-    return rpc_result_error(rpc_error("internal", str(error), {}))
+    return rpc_result_error(rpc_error("gateway/internal", str(error), {}))
 
 
 def rpc_result_ok(value: Any = _ABSENT) -> dict:

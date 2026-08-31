@@ -111,7 +111,7 @@ class TestServerMessages(unittest.TestCase):
 
     def test_error_roundtrip(self):
         frame = {"type": "error", "streamId": "s1",
-                 "error": {"code": "internal", "message": "boom", "details": {}}}
+                 "error": {"code": "gateway/internal", "message": "boom", "details": {}}}
         self.assertEqual(parse_remote_stream_server_message(json.dumps(frame)), frame)
 
     def test_error_details_required_object(self):

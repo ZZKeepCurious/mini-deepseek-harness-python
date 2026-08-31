@@ -82,11 +82,11 @@ def _unwrap_args(payload: Any, method: str) -> Any:
     """
     if not isinstance(payload, dict) or set(payload) != {"args"}:
         raise RemoteStreamError(
-            "bad-request",
+            "gateway/bad-request",
             f"typert gateway: {method}: requires exactly one plain-object args field")
     if not isinstance(payload["args"], dict):
         raise RemoteStreamError(
-            "bad-request",
+            "gateway/bad-request",
             f"typert gateway: {method}: payload args must be a plain object")
     return payload["args"]
 
@@ -151,12 +151,12 @@ def create_app(api: WebApi, gateway: GatewayStreams) -> FastAPI:
         except Exception as error:  # noqa: BLE001 - EnvelopeError
             raw_id = body.get("rpcId") if isinstance(body, dict) else None
             rpc_id_ = raw_id if isinstance(raw_id, str) else INVALID_REQUEST_RPC_ID_VALUE
-            return _error_response(rpc_id_, "bad-request", "invalid client-request message",
+            return _error_response(rpc_id_, "gateway/bad-request", "invalid client-request message",
                                    {"issues": [{"path": [], "message": str(error)}]})
 
         # path 与 message.method 不一致 → 200 bad-request
         if message["method"] != method_name:
-            return _error_response(message["rpcId"], "bad-request",
+            return _error_response(message["rpcId"], "gateway/bad-request",
                                    f'method "{message["method"]}" does not match path "{method_name}"',
                                    {"issues": []})
 
@@ -217,15 +217,15 @@ def _events_result_response(gateway: GatewayStreams, body: Any) -> Response:
     try:
         payload = body if isinstance(body, dict) and "args" in body else None
         if payload is None:
-            raise RemoteStreamError("bad-request",
+            raise RemoteStreamError("gateway/bad-request",
                                     "typert gateway: $events/result requires an args field")
         result = parse_remote_event_result_payload(payload)
     except StreamProtocolError as error:
         return envelope(rpc_result_error(rpc_error(
-            "bad-request", str(error), {"issues": []})))
+            "gateway/bad-request", str(error), {"issues": []})))
     except Exception as error:  # noqa: BLE001
         return envelope(rpc_result_error(rpc_error(
-            "internal", str(error), {})))
+            "gateway/internal", str(error), {})))
     try:
         gateway.receive_result(result)
     except RemoteStreamError as error:
@@ -233,5 +233,5 @@ def _events_result_response(gateway: GatewayStreams, body: Any) -> Response:
             error.code, error.message, {})))
     except Exception as error:  # noqa: BLE001
         return envelope(rpc_result_error(rpc_error(
-            "internal", str(error), {})))
+            "gateway/internal", str(error), {})))
     return envelope(rpc_result_ok())

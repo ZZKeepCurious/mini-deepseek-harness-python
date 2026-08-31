@@ -55,7 +55,7 @@
 | turn/step 状态机（agent-loop） | `asyncio.Task` 状态机（idle/running） | turn 打开于认领前；"零 step turn"也须持久化 |
 | 流式 StreamChunk 协议 | dataclass + `AsyncIterator[StreamChunk]` | usage 在 finish 前；tool 参数保持原始 JSON 字符串 |
 | 作用域化注册（per-agent ctx） | 每 agent 一个注册表实例，父子链式查找（继承/遮蔽） | 作用域注册卸载即回滚；restrict 过滤继承工具 |
-| JSONL / SQLite 持久化 + 崩溃恢复 | **zstd 拼接帧容器**（`.jsonl.zstd`）+ StorageRecord 打包行（`compression='none'` 退回明文 `.jsonl`）+ SQLite 元数据后端；启动回放时合成 `interrupted` turn（`commit_repair` 追加 closers），torn 尾部读路径截断 | seq 连续；未知事件类型拒绝加载（fail-closed）；`SESSION_FORMAT_VERSION = 0` 双向拒读 |
+| JSONL / SQLite 持久化 + 崩溃恢复 | **zstd 拼接帧容器**（`.jsonl.zstd`）+ StorageRecord 打包行（`compression='none'` 退回明文 `.jsonl`）+ SQLite 元数据后端；启动回放时合成 `interrupted` turn（`commit_repair` 追加 closers），torn 尾部读路径截断 | seq 连续；未知事件类型拒绝加载（fail-closed，`ignorable: true` 豁免放行）；`SESSION_FORMAT_VERSION = 0` 双向拒读 |
 | 组合层（bundle / patch） | YAML 配置 + 按 id 的整段覆盖 + insert 列表 | 补丁算法单一实现，导出纯函数，禁止复制粘贴 |
 
 ### 7.3 迷你复现项目清单（MiniHarness，用 Python）

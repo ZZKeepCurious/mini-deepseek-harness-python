@@ -115,7 +115,7 @@ class TestSessionCreate(WebApiTest):
         self._create(session_id="session-abc", cwd=CWD)
         error = self._error(self._create(session_id="session-abc",
                                          cwd=os.path.dirname(CWD)))
-        self.assertEqual(error["code"], "session-conflict")
+        self.assertEqual(error["code"], "session/conflict")
         self.assertIn('belongs to', error["message"])
         self.assertEqual(error["details"]["sessionId"], "session-abc")
         self.assertEqual(error["details"]["existingCwd"], CWD)
@@ -123,28 +123,28 @@ class TestSessionCreate(WebApiTest):
     def test_create_preset_conflict(self):
         self._create(session_id="session-abc", agent_preset="a")
         error = self._error(self._create(session_id="session-abc", agent_preset="b"))
-        self.assertEqual(error["code"], "agent-preset-conflict")
+        self.assertEqual(error["code"], "agent-preset/conflict")
         self.assertEqual(error["details"]["sessionId"], "session-abc")
 
     def test_create_workspace_plus_cwd_rejected(self):
         error = self._error(self._create(workspace_id="w-1", cwd=CWD))
-        self.assertEqual(error["code"], "bad-request")
+        self.assertEqual(error["code"], "gateway/bad-request")
         self.assertIn("not both", error["message"])
 
     def test_create_workspace_only_not_found(self):
         error = self._error(self.api.dispatch("session.create", "r1",
                                               {"workspaceId": "w-1"}))
-        self.assertEqual(error["code"], "workspace-not-found")
+        self.assertEqual(error["code"], "workspace/not-found")
         self.assertEqual(error["details"], {"workspaceId": "w-1"})
 
     def test_create_invalid_cwd(self):
         error = self._error(self._create(cwd="relative/path"))
-        self.assertEqual(error["code"], "bad-request")
+        self.assertEqual(error["code"], "gateway/bad-request")
 
     def test_create_bad_payload(self):
         response = self.api.dispatch("session.create", "rid", "nonsense")
         self.assertEqual(response["rpcId"], "rid")
-        self.assertEqual(self._error(response)["code"], "bad-request")
+        self.assertEqual(self._error(response)["code"], "gateway/bad-request")
 
 
 class TestSessionPrompt(WebApiTest):
@@ -205,7 +205,7 @@ class TestSessionPrompt(WebApiTest):
             "sessionId": "session-nope", "mode": "queue", "requestId": "req-1",
             "content": [{"type": "text", "text": "hi"}],
         }))
-        self.assertEqual(error["code"], "session-not-found")
+        self.assertEqual(error["code"], "session/not-found")
         self.assertEqual(error["details"], {"sessionId": "session-nope"})
 
     def test_prompt_requires_request_id(self):
@@ -213,14 +213,14 @@ class TestSessionPrompt(WebApiTest):
             "sessionId": "x", "mode": "queue",
             "content": [{"type": "text", "text": "hi"}],
         }))
-        self.assertEqual(error["code"], "bad-request")
+        self.assertEqual(error["code"], "gateway/bad-request")
 
     def test_prompt_invalid_mode(self):
         error = self._error(self.api.dispatch("session.prompt", "rid", {
             "sessionId": "x", "mode": "explode", "requestId": "req-1",
             "content": [{"type": "text", "text": "hi"}],
         }))
-        self.assertEqual(error["code"], "bad-request")
+        self.assertEqual(error["code"], "gateway/bad-request")
 
     def test_prompt_invalid_time_zone(self):
         session_id = self._value(self._create())["sessionId"]
@@ -228,7 +228,7 @@ class TestSessionPrompt(WebApiTest):
             "sessionId": session_id, "mode": "queue", "requestId": "req-1",
             "content": [{"type": "text", "text": "hi"}], "clientTimeZone": "Not/AZone",
         }))
-        self.assertEqual(error["code"], "invalid-time-zone")
+        self.assertEqual(error["code"], "session/invalid-time-zone")
         self.assertEqual(error["details"], {"value": "Not/AZone"})
 
     def test_prompt_image_not_supported_by_model(self):
@@ -242,7 +242,7 @@ class TestSessionPrompt(WebApiTest):
             "sessionId": session_id, "mode": "queue", "requestId": "req-img",
             "content": [{"type": "image", "mediaType": "image/png", "data": TINY_PNG}],
         }))
-        self.assertEqual(error["code"], "attachment-error")
+        self.assertEqual(error["code"], "session/attachment-invalid")
         self.assertEqual(error["details"], {"reason": "MODEL_DOES_NOT_SUPPORT_IMAGES"})
 
     def test_prompt_image_without_attachment_service(self):
@@ -251,7 +251,7 @@ class TestSessionPrompt(WebApiTest):
             "sessionId": session_id, "mode": "queue", "requestId": "req-img",
             "content": [{"type": "image", "mediaType": "image/png", "data": TINY_PNG}],
         }))
-        self.assertEqual(error["code"], "attachment-error")
+        self.assertEqual(error["code"], "session/attachment-invalid")
         self.assertEqual(error["details"], {"reason": "ATTACHMENT_UNAVAILABLE"})
 
 
@@ -311,17 +311,17 @@ class TestSessionSearch(WebApiTest):
 
     def test_search_empty_query(self):
         error = self._error(self.api.dispatch("session.search", "rid", {"query": "   "}))
-        self.assertEqual(error["code"], "bad-request")
+        self.assertEqual(error["code"], "gateway/bad-request")
         self.assertIn("must not be empty", error["message"])
 
     def test_search_nul_query(self):
         error = self._error(self.api.dispatch("session.search", "rid", {"query": "a\0b"}))
-        self.assertEqual(error["code"], "bad-request")
+        self.assertEqual(error["code"], "gateway/bad-request")
 
     def test_search_overlong_query(self):
         error = self._error(self.api.dispatch("session.search", "rid",
                                               {"query": "a" * 501}))
-        self.assertEqual(error["code"], "bad-request")
+        self.assertEqual(error["code"], "gateway/bad-request")
         self.assertIn("500", error["message"])
 
     def test_search_snippet_truncated(self):
@@ -354,13 +354,13 @@ class TestSessionSelectModel(WebApiTest):
         error = self._error(self.api.dispatch("session.selectModel", "rid", {
             "sessionId": session_id, "provider": "other", "model": "x",
         }))
-        self.assertEqual(error["code"], "model-unavailable")
+        self.assertEqual(error["code"], "session/model-unavailable")
 
     def test_select_model_unknown_session(self):
         error = self._error(self.api.dispatch("session.selectModel", "rid", {
             "sessionId": "session-nope", "provider": "fake", "model": "fake-model",
         }))
-        self.assertEqual(error["code"], "session-not-found")
+        self.assertEqual(error["code"], "session/not-found")
 
 
 class TestWorkspacePath(WebApiTest):
@@ -370,12 +370,12 @@ class TestWorkspacePath(WebApiTest):
 
     def test_open_requires_path(self):
         error = self._error(self.api.dispatch("session.openWorkspacePath", "rid", {}))
-        self.assertEqual(error["code"], "bad-request")
+        self.assertEqual(error["code"], "gateway/bad-request")
 
     def test_open_always_internal(self):
         error = self._error(self.api.dispatch("session.openWorkspacePath", "rid",
                                               {"path": CWD}))
-        self.assertEqual(error["code"], "internal")
+        self.assertEqual(error["code"], "gateway/internal")
 
 
 class TestSessionRename(WebApiTest):
@@ -383,13 +383,13 @@ class TestSessionRename(WebApiTest):
         session_id = self._value(self._create())["sessionId"]
         error = self._error(self.api.dispatch("session.rename", "rid", {
             "sessionId": session_id, "title": "t"}))
-        self.assertEqual(error["code"], "internal")
+        self.assertEqual(error["code"], "gateway/internal")
         self.assertIn("no session-title service", error["message"])
 
     def test_rename_unknown_session(self):
         error = self._error(self.api.dispatch("session.rename", "rid", {
             "sessionId": "session-nope", "title": "t"}))
-        self.assertEqual(error["code"], "session-not-found")
+        self.assertEqual(error["code"], "session/not-found")
 
 
 class TestSessionFork(WebApiTest):
@@ -420,7 +420,7 @@ class TestSessionFork(WebApiTest):
         session_id = self._value(self._create())["sessionId"]
         error = self._error(self.api.dispatch("session.fork", "rid",
                                               {"sessionId": session_id}))
-        self.assertEqual(error["code"], "fork-unavailable")
+        self.assertEqual(error["code"], "session/fork-unavailable")
         self.assertIn("no completed turn", error["message"])
 
     def test_fork_at_seq_beyond_log(self):
@@ -439,13 +439,13 @@ class TestSessionFork(WebApiTest):
     def test_fork_unknown_session(self):
         error = self._error(self.api.dispatch("session.fork", "rid",
                                               {"sessionId": "session-nope"}))
-        self.assertEqual(error["code"], "session-not-found")
+        self.assertEqual(error["code"], "session/not-found")
 
     def test_fork_bad_at_seq(self):
         session_id = self._value(self._create())["sessionId"]
         error = self._error(self.api.dispatch("session.fork", "rid", {
             "sessionId": session_id, "atSeq": -3}))
-        self.assertEqual(error["code"], "bad-request")
+        self.assertEqual(error["code"], "gateway/bad-request")
 
 
 class TestSessionCancel(WebApiTest):
@@ -458,7 +458,7 @@ class TestSessionCancel(WebApiTest):
     def test_cancel_unknown_session(self):
         error = self._error(self.api.dispatch("session.cancel", "rid",
                                               {"sessionId": "session-nope"}))
-        self.assertEqual(error["code"], "session-not-found")
+        self.assertEqual(error["code"], "session/not-found")
         self.assertIn("not attached", error["message"])
 
     def test_cancel_keeps_inbox(self):
@@ -527,7 +527,7 @@ class TestSessionUpdateQueue(WebApiTest):
 
         error = self._queue_then(session_id, action, mode="steer")
         # next-step 条目不允许再 steer（steer 只认 next-turn 且 turn 须 running）
-        self.assertEqual(error["code"], "steer-unavailable")
+        self.assertEqual(error["code"], "session/steer-unavailable")
 
     def test_edit_non_text_rejected(self):
         session_id = self._value(self._create())["sessionId"]
@@ -540,21 +540,21 @@ class TestSessionUpdateQueue(WebApiTest):
                                         "data": TINY_PNG}]}}))
 
         error = self._queue_then(session_id, action)
-        self.assertEqual(error["code"], "attachment-error")
+        self.assertEqual(error["code"], "session/attachment-invalid")
         self.assertEqual(error["details"], {"reason": "QUEUE_EDIT_NON_TEXT"})
 
     def test_unknown_session_queue_item_not_found(self):
         error = self._error(self.api.dispatch("session.updateQueue", "rid", {
             "sessionId": "session-nope", "itemId": "x",
             "action": {"kind": "remove"}}))
-        self.assertEqual(error["code"], "queue-item-not-found")
+        self.assertEqual(error["code"], "session/queue-item-not-found")
 
     def test_stale_item_queue_item_not_found(self):
         session_id = self._value(self._create())["sessionId"]
         error = self._error(self.api.dispatch("session.updateQueue", "rid", {
             "sessionId": session_id, "itemId": "stale",
             "action": {"kind": "remove"}}))
-        self.assertEqual(error["code"], "queue-item-not-found")
+        self.assertEqual(error["code"], "session/queue-item-not-found")
         self.assertEqual(error["details"], {"itemId": "stale"})
 
 
@@ -648,23 +648,23 @@ class TestSessionPage(WebApiTest):
     def test_page_unknown_session(self):
         error = self._error(self.api.dispatch("session.page", "rid", {
             **self._address("session-nope"), "throughSeq": 0}))
-        self.assertEqual(error["code"], "session-not-found")
+        self.assertEqual(error["code"], "session/not-found")
 
     def test_page_through_past_cursor(self):
         self._create(session_id="session-h")
         error = self._error(self.api.dispatch("session.page", "rid", {
             **self._address("session-h"), "throughSeq": 5}))
-        self.assertEqual(error["code"], "bad-request")
+        self.assertEqual(error["code"], "gateway/bad-request")
         self.assertIn("past cursor", error["message"])
 
     def test_page_validation(self):
         self._create(session_id="session-h")
         error = self._error(self.api.dispatch("session.page", "rid", {
             **self._address("session-h"), "throughSeq": -5}))
-        self.assertEqual(error["code"], "bad-request")
+        self.assertEqual(error["code"], "gateway/bad-request")
         error = self._error(self.api.dispatch("session.page", "rid", {
             **self._address("session-h"), "throughSeq": 0, "maxMessages": 0}))
-        self.assertEqual(error["code"], "bad-request")
+        self.assertEqual(error["code"], "gateway/bad-request")
 
     def test_page_subagent_address_rejected(self):
         self._create(session_id="session-p")
@@ -672,7 +672,7 @@ class TestSessionPage(WebApiTest):
             "address": {"kind": "subagent", "parentSessionId": "session-p",
                         "childSessionId": "session-c"},
             "throughSeq": 0}))
-        self.assertEqual(error["code"], "session-not-found")
+        self.assertEqual(error["code"], "session/not-found")
 
 
 class TestSessionFollow(WebApiTest):
@@ -709,14 +709,14 @@ class TestSessionFollow(WebApiTest):
         sub = self.api.follow({"address": {"kind": "session",
                                            "sessionId": "session-nope"}})
         self.assertIsNotNone(sub.error)
-        self.assertEqual(sub.error["code"], "session-not-found")
+        self.assertEqual(sub.error["code"], "session/not-found")
         self.assertIsNone(sub.pull())
 
     def test_bad_max_messages_fails_subscription(self):
         session_id = self._value(self._create())["sessionId"]
         sub = self.api.follow({"address": {"kind": "session", "sessionId": session_id},
                                "maxMessages": 0})
-        self.assertEqual(sub.error["code"], "bad-request")
+        self.assertEqual(sub.error["code"], "gateway/bad-request")
 
     def test_close_stops_stream(self):
         session_id = self._value(self._create())["sessionId"]
@@ -812,13 +812,13 @@ class TestSessionAttachment(WebApiTest):
         session_id = self._value(self._create())["sessionId"]
         error = self._error(self.api.dispatch("session.attachment", "rid", {
             "sessionId": session_id, "attachmentId": "att-nope"}))
-        self.assertEqual(error["code"], "attachment-error")
+        self.assertEqual(error["code"], "session/attachment-invalid")
         self.assertEqual(error["details"], {"reason": "ATTACHMENT_NOT_REFERENCED"})
 
     def test_attachment_unknown_session(self):
         error = self._error(self.api.dispatch("session.attachment", "rid", {
             "sessionId": "session-nope", "attachmentId": "att-1"}))
-        self.assertEqual(error["code"], "session-not-found")
+        self.assertEqual(error["code"], "session/not-found")
 
 
 class TestAttachmentUnavailable(WebApiTest):
@@ -834,7 +834,7 @@ class TestAttachmentUnavailable(WebApiTest):
         }, surfaceOp="append")
         error = self._error(self.api.dispatch("session.attachment", "rid", {
             "sessionId": session_id, "attachmentId": "att-1"}))
-        self.assertEqual(error["code"], "attachment-error")
+        self.assertEqual(error["code"], "session/attachment-invalid")
         self.assertEqual(error["details"], {"reason": "ATTACHMENT_UNAVAILABLE"})
 
 
@@ -852,7 +852,7 @@ class TestDispatch(WebApiTest):
 
     def test_bad_payload_shape(self):
         error = self._error(self.api.dispatch("session.list", "rid", "nope"))
-        self.assertEqual(error["code"], "bad-request")
+        self.assertEqual(error["code"], "gateway/bad-request")
 
 
 class TestSessionSearchConstants(WebApiTest):

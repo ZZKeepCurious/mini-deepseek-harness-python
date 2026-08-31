@@ -31,16 +31,18 @@ class TestRpcId(unittest.TestCase):
 
 class TestErrorCodeSet(unittest.TestCase):
     def test_closed_set_matches_session_error_details_map(self):
-        # SessionErrorDetailsMap 键集（session-controller types.ts:178-215）21 码
-        self.assertEqual(len(RPC_ERROR_CODES), 21)
+        # RemoteErrorDetailsMap 键集（alpha.2 命名空间码，typert-protocol/types.ts + 各域注册）22 码
+        self.assertEqual(len(RPC_ERROR_CODES), 22)
 
     def test_known_codes_present(self):
-        for code in ("bad-request", "session-not-found", "model-unavailable",
-                     "session-conflict", "invalid-time-zone", "workspace-not-found",
-                     "agent-preset-conflict", "agent-busy",
-                     "attachment-error", "queue-item-not-found", "steer-unavailable",
-                     "title-invalid", "fork-unavailable", "subagent-not-found",
-                     "subagent-unauthorized", "internal", "cancelled"):
+        for code in ("gateway/bad-request", "session/not-found", "session/model-unavailable",
+                     "session/conflict", "session/invalid-time-zone", "workspace/not-found",
+                     "agent-preset/conflict", "session/agent-busy",
+                     "session/attachment-invalid", "session/queue-item-not-found",
+                     "session/steer-unavailable", "session/title-invalid",
+                     "session/fork-unavailable", "subagent/not-found",
+                     "subagent/unauthorized", "gateway/internal", "gateway/cancelled",
+                     "gateway/arguments-invalid"):
             self.assertIn(code, RPC_ERROR_CODES)
 
     def test_apiproxy_only_codes_retired(self):
@@ -54,15 +56,15 @@ class TestErrorCodeSet(unittest.TestCase):
             rpc_error("not-a-real-code", "x")
 
     def test_internal_is_explicit_details(self):
-        err = rpc_error("internal", "boom", {})
-        self.assertEqual(err, {"code": "internal", "message": "boom", "details": {}})
+        err = rpc_error("gateway/internal", "boom", {})
+        self.assertEqual(err, {"code": "gateway/internal", "message": "boom", "details": {}}) 
 
 
 class TestTransportError(unittest.TestCase):
     def test_folds_exception_to_internal(self):
         result = transport_error(ValueError("kaboom"))
         self.assertEqual(result, {"ok": False, "error": {
-            "code": "internal", "message": "kaboom", "details": {}}})
+            "code": "gateway/internal", "message": "kaboom", "details": {}}})
 
     def test_folds_non_error_value(self):
         result = transport_error("raw string")
@@ -78,7 +80,7 @@ class TestResult(unittest.TestCase):
         self.assertEqual(rpc_result_ok(), {"ok": True})
 
     def test_error_branch(self):
-        result = rpc_result_error(rpc_error("session-not-found", "missing", {"sessionId": "s1"}))
+        result = rpc_result_error(rpc_error("session/not-found", "missing", {"sessionId": "s1"}))
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"]["details"], {"sessionId": "s1"})
 
@@ -97,7 +99,7 @@ class TestMessages(unittest.TestCase):
                   client_request("a", "session.prompt", {"args": {"sessionId": "s"}}),
                   server_response("b", rpc_result_ok({"accepted": True})),
                   server_response("b", rpc_result_ok()),
-                  server_response("b", rpc_result_error(rpc_error("cancelled", "x", {})))):
+                  server_response("b", rpc_result_error(rpc_error("gateway/cancelled", "x", {})))):
             self.assertEqual(parse_message(m), m)
 
     def test_invalid_shapes_rejected(self):

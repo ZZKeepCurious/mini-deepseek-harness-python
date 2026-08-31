@@ -66,7 +66,7 @@ export async function rpc<T = unknown>(
     if (!result?.ok) {
       throw new RpcFailure(
         (result as { error?: RpcError } | undefined)?.error ?? {
-          code: "internal",
+          code: "gateway/internal",
           message: "no error payload",
         }
       );

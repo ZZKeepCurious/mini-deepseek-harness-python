@@ -95,14 +95,14 @@ class GatewayStreams:
         kind = self.stream_kinds().get(endpoint)
         if kind is None:
             raise RemoteStreamError(
-                "internal",
+                "gateway/internal",
                 f"typert gateway: {endpoint}: no active Remote method exports this endpoint")
         if kind == "$events":
             return self.events.open(payload, signal=signal)
         if (not isinstance(payload, dict) or set(payload) != {"args"}
                 or not isinstance(payload["args"], dict)):
             raise RemoteStreamError(
-                "arguments-invalid",
+                "gateway/arguments-invalid",
                 f"typert gateway: {endpoint}: requires exactly an args object")
         if kind == "follow":
             return self._follow(payload["args"], signal)
@@ -115,12 +115,12 @@ class GatewayStreams:
         if (not isinstance(address, dict) or address.get("kind") != "session"
                 or not isinstance(address.get("sessionId"), str)
                 or not address["sessionId"]):
-            raise RemoteStreamError("arguments-invalid",
+            raise RemoteStreamError("gateway/arguments-invalid",
                                     "session.follow requires a session address")
         session_id = address["sessionId"]
         session = self.api.store.get(session_id)
         if session is None:
-            raise RemoteStreamError("session-not-found",
+            raise RemoteStreamError("session/not-found",
                                     f'session "{session_id}" not found')
         if self.api._agents.get(session_id) is None:
             self.api._attach(session)

@@ -208,7 +208,7 @@ class RemoteEventRegistry:
                 or not isinstance(payload.get("args"), dict)
                 or payload["args"]):
             raise EventSourceFailure(
-                "arguments-invalid",
+                "gateway/arguments-invalid",
                 f"typert gateway: {REMOTE_EVENT_STREAM_ENDPOINT}: "
                 "forwarded Remote event stream requires an empty args object",
                 {},
@@ -247,7 +247,7 @@ class RemoteEventRegistry:
         client = self._clients.get(result["clientId"])
         if client is None:
             raise EventSourceFailure(
-                "internal",
+                "gateway/internal",
                 "typert gateway: Remote event result identifies no active event stream",
                 {})
         pending = self._pending.get(result["eventId"])
@@ -270,7 +270,7 @@ class RemoteEventRegistry:
     def broadcast(self, event: str, *args: Any) -> None:
         """转发一个 emit 宿主事件（args 须无损 JSON，转发源已保证）。"""
         if not event or not isinstance(event, str):
-            raise EventSourceFailure("internal",
+            raise EventSourceFailure("gateway/internal",
                                      "typert gateway: Remote event name must be a "
                                      "nonempty string", {})
         frame = {"type": "emit", "event": event, "args": list(args)}
@@ -286,11 +286,11 @@ class RemoteEventRegistry:
         """
         if (not event or not isinstance(event, str)
                 or not is_remote_event_agent_id(agent_id)):
-            raise EventSourceFailure("internal",
+            raise EventSourceFailure("gateway/internal",
                                      "typert gateway: scoped Remote events require "
                                      "a non-empty Agent identity", {})
         if not is_remote_json_value(request):
-            raise EventSourceFailure("internal",
+            raise EventSourceFailure("gateway/internal",
                                      "typert gateway: Remote event request is not "
                                      "lossless JSON data", {})
         pending = _PendingInvocation(str(uuid.uuid4()), event, agent_id, request,

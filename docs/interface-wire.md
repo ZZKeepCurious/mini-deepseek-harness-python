@@ -59,20 +59,23 @@
 - 成功分支 `value` 可选（业务无值时整体省略该字段）。
 - 业务方法绝不抛业务错误——一律经 `result.ok` 表达；`details` 恒为对象。
 
-**RpcError 的 `code` 是 21 码闭集**（对齐 session-controller `SessionErrorDetailsMap` 键集，
+**RpcError 的 `code` 是 22 码命名空间闭集**（alpha.2 起统一为 `<namespace>/<name>` 形式，
+对齐 typert `RemoteErrorDetailsMap` 键集：基础设施 `gateway/*` + 各域 merge-extensible 注册，
 `web/envelope.py` `RPC_ERROR_CODES`）：
 
 ```
-bad-request            cancelled             session-not-found      model-unavailable
-session-conflict       invalid-time-zone     workspace-attach-failed workspace-not-found
-agent-preset-conflict  agent-preset-not-found agent-preset-invalid   agent-busy
-attachment-error       queue-item-not-found  steer-unavailable      title-invalid
-fork-unavailable       subagent-not-found    subagent-catalog-diagnostic subagent-unauthorized
-internal
+gateway/bad-request       gateway/cancelled         gateway/internal
+gateway/arguments-invalid session/not-found         session/model-unavailable
+session/conflict          session/invalid-time-zone session/workspace-attach-failed
+workspace/not-found       agent-preset/conflict     agent-preset/not-found
+agent-preset/invalid      session/agent-busy        session/attachment-invalid
+session/queue-item-not-found session/steer-unavailable session/title-invalid
+session/fork-unavailable  subagent/not-found        subagent/catalog-diagnostic
+subagent/unauthorized
 ```
 
 寄送方签发 `rpcId`（实践中 UUID 即可，递增非零即可）；`transport_error` 把载体层异常折进
-`result.ok=false` 分支，兜底码恒 `internal`。
+`result.ok=false` 分支，兜底码恒 `gateway/internal`。
 
 ## 3. unary 会话服务端点（`web/api.py`，`session.*`）
 
@@ -80,23 +83,23 @@ internal
 
 | 端点 | 轮廓 | 典型业务错误码 |
 |---|---|---|
-| `session.list` | 会话清单（附 running 位） | —（bad-request 守卫） |
-| `session.search` | 按查询过滤会话 | bad-request |
-| `session.create` | 新建会话（`cwd` 或 `workspaceId` 二选一、`sessionId` 可注入幂等、`agentPreset` 可选） | bad-request / workspace-not-found / agent-preset-conflict / session-conflict / internal |
-| `session.selectModel` | 设置模型 + `reasoningEffort` | bad-request / session-not-found / model-unavailable |
+| `session.list` | 会话清单（附 running 位） | —（gateway/bad-request 守卫） |
+| `session.search` | 按查询过滤会话 | gateway/bad-request |
+| `session.create` | 新建会话（`cwd` 或 `workspaceId` 二选一、`sessionId` 可注入幂等、`agentPreset` 可选） | gateway/bad-request / workspace/not-found / agent-preset/conflict / session/conflict / gateway/internal |
+| `session.selectModel` | 设置模型 + `reasoningEffort` | gateway/bad-request / session/not-found / session/model-unavailable |
 | `session.modelCatalog` | 模型目录 | — |
 | `session.canOpenWorkspacePath` | 工作区路径可达性检查 | — |
-| `session.openWorkspacePath` | 打开工作区 | bad-request |
-| `session.rename` | 改标题 | bad-request / session-not-found |
-| `session.fork` | 分支会话（无 fork 场景 → fork-unavailable） | bad-request / session-not-found / attachment-error / fork-unavailable |
-| `session.prompt` | 投递 prompt（`mode` queue/steer、content 逐块 text/image、时间戳校验） | bad-request / session-not-found / invalid-time-zone / attachment-error / agent-busy |
-| `session.attachment` | 附件受理（media + variantId） | session-not-found / attachment-error / internal |
-| `session.updateQueue` | 队列编辑（edit/remove/steer 三类） | bad-request / attachment-error / queue-item-not-found / steer-unavailable |
-| `session.cancel` | 取消当前回合 | session-not-found / agent-busy |
-| `session.page` | 分页历史（throughSeq/beforeSeq/maxMessages） | bad-request / session-not-found / internal |
+| `session.openWorkspacePath` | 打开工作区 | gateway/bad-request |
+| `session.rename` | 改标题 | gateway/bad-request / session/not-found |
+| `session.fork` | 分支会话（无 fork 场景 → session/fork-unavailable） | gateway/bad-request / session/not-found / session/attachment-invalid / session/fork-unavailable |
+| `session.prompt` | 投递 prompt（`mode` queue/steer、content 逐块 text/image、时间戳校验） | gateway/bad-request / session/not-found / session/invalid-time-zone / session/attachment-invalid / session/agent-busy |
+| `session.attachment` | 附件受理（media + variantId） | session/not-found / session/attachment-invalid / gateway/internal |
+| `session.updateQueue` | 队列编辑（edit/remove/steer 三类） | gateway/bad-request / session/attachment-invalid / session/queue-item-not-found / session/steer-unavailable |
+| `session.cancel` | 取消当前回合 | session/not-found / session/agent-busy |
+| `session.page` | 分页历史（throughSeq/beforeSeq/maxMessages） | gateway/bad-request / session/not-found / gateway/internal |
 
 > 各端点 `args` 的逐字段形状与错误 `details` 以 `api.py` 对应 handler docstring 为准，教程见
-> 07 章 §7.5.2；子代理所属会话被访问时统一折 `agent-busy`（上游 `apiSessionSubagentOwnershipError`）。
+> 07 章 §7.5.2；子代理所属会话被访问时统一折 `session/agent-busy`（上游 `apiSessionSubagentOwnershipError`）。
 
 ## 4. Remote 流（`WS /api/remote.mux`，`web/mux.py` + `web/stream_protocol.py`）
 
@@ -121,7 +124,7 @@ internal
 - 每条 open 立即按 `endpoint` 分发（§4.1/4.2/4.3）；`open` 内抛错 → 该流先发 `error` 帧再 `end`，
   **不关 WS**（单流失败与其它流隔离）；流中途失败同理；`error` 帧本身发送失败 → close 1011。
 - 关键 `endpoint`（`GatewayStreams.stream_kinds`）：`$events`、`session.follow`、`session.control`；
-  未知 endpoint → `error` 帧 `internal`。
+   未知 endpoint → `error` 帧 `gateway/internal`。
 
 ### 4.1 `session.follow`（历史跟随流）
 
@@ -143,7 +146,7 @@ internal
   活体帧应达 `seq`。
 - 续帧：`{"type":"event", "event": <事件信封>}`，首条活体帧 `event.seq == snapshot.cursor`，
   其后 `event.seq` 严格递增；客户端按 seq 去重拼接（webui `TrajectoryBuffer`）。
-- 错误：`arguments-invalid` / `session-not-found`（未知会话）。
+- 错误：`gateway/arguments-invalid` / `session/not-found`（未知会话）。
 - 已核实（对齐交付，见 §4.4）：上游 wire **无 `since` 字段**——`follow`/`control` 每次
   (重)连 = 重开流重投完整 `snapshot`/`baseline`，客户端按 seq 去重即 gap-free；mini 同款，
   重连健壮性不欠账。follow 活体帧的 mini 载体 = ≤50ms 短轮询批量提取（进程内日志现成可读，
@@ -169,7 +172,7 @@ internal
 
 ### 4.3 `$events`（远程事件流，`web/events.py`）
 
-- open payload 必须**恰** `{args:{}}`（非空 args → 该流 `error` 帧 `arguments-invalid`）。
+- open payload 必须**恰** `{args:{}}`（非空 args → 该流 `error` 帧 `gateway/arguments-invalid`）。
 - 首帧 `ready`：`{"type":"ready", "clientId": "<uuid>", "host": {"home": "<宿主 home>"}}`
   （`host.home` 仅用于前端缩写本机路径显示；不依赖已删除的 `host.describe`）。
 - 下游帧三种：
@@ -201,7 +204,7 @@ outcome 三型：
 - `{"kind":"rejected", "error": {"name", "message", "code"?, "details"?}}` —— 监听器抛错。
 
 应答恒 200 `server-response`：合法且结算成功 → `{"ok":true}`；词法非法 / 未知 `clientId` →
-`{ok:false, error:{code:"bad-request"|"internal", ...}}`。
+`{ok:false, error:{code:"gateway/bad-request"|"gateway/internal", ...}}`。
 
 结算语义（对齐 `receiveRemoteEventResult`）：`result` → 终局（首个投出者唯一放行）；`next` →
 该客户端让位、全部客户端耗尽 → `'next'`；`rejected` → `'rejected'`；**已结算/被取代的 eventId
@@ -265,7 +268,7 @@ outcome 归一（`APPROVAL_OUTCOMES = {allowed-once, rejected, cancelled, unavai
 2. 载体层 404/415/400/500 只在信封/HTTP 层面，不代表业务状态。
 3. 流内错误 = `error` 帧（单流隔离），不关 WS；`close` 码只留给协议/形状/危险级错误。
 4. 审批 fail-closed：非 APPROVAL_OUTCOMES 合法值一律 `unavailable`，绝不误放行。
-5. 事件 `seq` 严格递增、0 基（`seq == 追加前日志长度`）；未知事件类型 fail-closed 拒绝，不做静默吞图。
+5. 事件 `seq` 严格递增、0 基（`seq == 追加前日志长度`）；未知事件类型持久化读路径 fail-closed（除非带 `ignorable: true` 豁免放行），不做静默吞图。
 
 ## 10. 与前端实现的映射
 

@@ -22,8 +22,8 @@ mini 教学简化（须同步 verified-diffs §3.4 / AGENTS.md）：
     queue 帧直接发 inbox 当前态（省略 asOfSeq 投影簿记，订阅方观察语义一致）。
   * follow/page 的 subagent 地址分支全部拒绝（mini 不驱动子代理会话，防御对齐）。
   * search 在 live 会话 surface 快照上扫描，不落全文索引。
-  * 精确 details 附加字段按 mini 教学面导出（agent-preset-conflict /
-    session-conflict 的消息文案对齐上游字面量，但携带 mini 的 requested* 路径字段）。
+  * 精确 details 附加字段按 mini 教学面导出（agent-preset/conflict /
+    session/conflict 的消息文案对齐上游字面量，但携带 mini 的 requested* 路径字段）。
 """
 from __future__ import annotations
 
@@ -118,7 +118,7 @@ class _Reject(Exception):
 def _require_id(payload: dict, key: str) -> str:
     value = payload.get(key)
     if not isinstance(value, str) or not value:
-        raise _Reject("bad-request", f"{key} must be a non-empty string", {})
+        raise _Reject("gateway/bad-request", f"{key} must be a non-empty string", {})
     return value
 
 
@@ -190,7 +190,7 @@ class _FollowSubscription(_Subscription):
         max_messages = request.get("maxMessages")
         if max_messages is not None and (not isinstance(max_messages, int)
                                          or isinstance(max_messages, bool) or max_messages <= 0):
-            raise _Reject("bad-request", "maxMessages must be a positive safe integer", {})
+            raise _Reject("gateway/bad-request", "maxMessages must be a positive safe integer", {})
         session_id = api._address_target(request)
         session = self._session_or_reject(session_id)
         cursor = session.seq - 1
@@ -221,7 +221,7 @@ class _FollowSubscription(_Subscription):
             if event["seq"] < state["next_seq"]:
                 continue
             if event["seq"] != state["next_seq"]:
-                self._fail("internal",
+                self._fail("gateway/internal",
                            f"session event stream skipped seq {state['next_seq']}", {})
                 return
             state["next_seq"] += 1
@@ -230,7 +230,7 @@ class _FollowSubscription(_Subscription):
     def _session_or_reject(self, session_id: str) -> Session:
         session = self.api.store.get(session_id)
         if session is None:
-            raise _Reject("session-not-found", f'session "{session_id}" not found',
+            raise _Reject("session/not-found", f'session "{session_id}" not found',
                           {"sessionId": session_id})
         return session
 
@@ -351,7 +351,7 @@ class WebApi:
         if handler is None:
             return None
         if not isinstance(payload, dict):
-            return self._err(rpc_id_, "bad-request", "payload must be a JSON object", {})
+            return self._err(rpc_id_, "gateway/bad-request", "payload must be a JSON object", {})
         try:
             value = getattr(self, handler)(payload)
         except _Reject as error:
@@ -381,7 +381,7 @@ class WebApi:
         if session is None:
             return None
         if self._subagent_owned(session):
-            raise _Reject("agent-busy",
+            raise _Reject("session/agent-busy",
                           f'session "{session_id}" is owned by subagent routing',
                           {"reason": "use subagent delivery for this child session"})
         loop = self._agents.get(session_id)
@@ -414,20 +414,20 @@ class WebApi:
         """校验 SessionAddress 并按 mini 域能力返回目标 sessionId；守卫照上游拒绝。"""
         address = request.get("address")
         if not isinstance(address, dict) or address.get("kind") not in ("session", "subagent"):
-            raise _Reject("bad-request", "address must be a session or subagent address", {})
+            raise _Reject("gateway/bad-request", "address must be a session or subagent address", {})
         if address["kind"] == "session":
             target = _require_id(address, "sessionId")
             session = self.store.get(target)
             if session is None:
-                raise _Reject("session-not-found", f'session "{target}" not found',
+                raise _Reject("session/not-found", f'session "{target}" not found',
                               {"sessionId": target})
-            # header.cwd === undefined → session-not-found；子代理会话经 session
-            # 地址访问 → agent-busy（防御对齐：mini 不生产此类场景）
+            # header.cwd === undefined → session/not-found；子代理会话经 session
+            # 地址访问 → session/agent-busy（防御对齐：mini 不生产此类场景）
             if session.meta.get("cwd") is None:
-                raise _Reject("session-not-found", f'session "{target}" not found',
+                raise _Reject("session/not-found", f'session "{target}" not found',
                               {"sessionId": target})
             if self._subagent_owned(session):
-                raise _Reject("agent-busy",
+                raise _Reject("session/agent-busy",
                               f'session "{target}" is owned by subagent routing',
                               {"reason": "use subagent delivery for this child session"})
             return target
@@ -435,17 +435,17 @@ class WebApi:
         child_session_id = address.get("childSessionId")
         if not (isinstance(parent_session_id, str) and parent_session_id
                 and isinstance(child_session_id, str) and child_session_id):
-            raise _Reject("bad-request",
+            raise _Reject("gateway/bad-request",
                           "subagent address must carry parentSessionId and childSessionId", {})
         session = self.store.get(child_session_id)
         if session is None:
-            raise _Reject("session-not-found", f'session "{child_session_id}" not found',
+            raise _Reject("session/not-found", f'session "{child_session_id}" not found',
                           {"sessionId": child_session_id})
         if self._subagent_owned(session) and session.meta.get("parentSession") == parent_session_id:
-            raise _Reject("subagent-catalog-diagnostic", "subagent descriptor is unavailable",
+            raise _Reject("subagent/catalog-diagnostic", "subagent descriptor is unavailable",
                           {"parentSessionId": parent_session_id,
                            "childSessionId": child_session_id, "reason": "unsupported"})
-        raise _Reject("subagent-unauthorized", "subagent does not belong to the supplied parent",
+        raise _Reject("subagent/unauthorized", "subagent does not belong to the supplied parent",
                       {"childSessionId": child_session_id})
 
     # ---------- session.list ----------
@@ -495,15 +495,15 @@ class WebApi:
     def search(self, payload: dict) -> dict:
         query = payload.get("query")
         if not isinstance(query, str):
-            raise _Reject("bad-request", "session search query must be a string", {})
+            raise _Reject("gateway/bad-request", "session search query must be a string", {})
         query = query.strip()
         if not query:
-            raise _Reject("bad-request", "session search query must not be empty", {})
+            raise _Reject("gateway/bad-request", "session search query must not be empty", {})
         if _utf16_len(query) > 500:
-            raise _Reject("bad-request",
+            raise _Reject("gateway/bad-request",
                           "session search query must contain at most 500 UTF-16 code units", {})
         if "\0" in query:
-            raise _Reject("bad-request", "session search query must not contain NUL", {})
+            raise _Reject("gateway/bad-request", "session search query must not contain NUL", {})
         items = []
         needle = query.lower()
         for session in self.store.list():
@@ -533,37 +533,37 @@ class WebApi:
         workspace_id = payload.get("workspaceId")
         cwd = payload.get("cwd")
         if workspace_id is not None and cwd is not None:
-            raise _Reject("bad-request", "session.create accepts workspaceId or cwd, not both", {})
+            raise _Reject("gateway/bad-request", "session.create accepts workspaceId or cwd, not both", {})
         session_id = payload.get("sessionId")
         if session_id is not None and not (isinstance(session_id, str) and session_id):
-            raise _Reject("bad-request", "sessionId must be a non-empty string", {})
+            raise _Reject("gateway/bad-request", "sessionId must be a non-empty string", {})
         agent_preset = payload.get("agentPreset")
         if agent_preset is not None and not isinstance(agent_preset, str):
-            raise _Reject("bad-request", "agentPreset must be a string", {})
+            raise _Reject("gateway/bad-request", "agentPreset must be a string", {})
         if cwd is not None and not (isinstance(cwd, str) and os.path.isabs(cwd)):
-            raise _Reject("bad-request", "cwd must be an absolute path", {})
+            raise _Reject("gateway/bad-request", "cwd must be an absolute path", {})
         if workspace_id is not None:
-            raise _Reject("workspace-not-found", f'workspace "{workspace_id}" not found',
+            raise _Reject("workspace/not-found", f'workspace "{workspace_id}" not found',
                           {"workspaceId": workspace_id})
         cwd = cwd if cwd is not None else self.cwd
 
         if session_id is not None and self.store.get(session_id) is not None:
             existing = self.store.get(session_id)
             if agent_preset is not None and existing.meta.get("agentPreset") != agent_preset:
-                raise _Reject("agent-preset-conflict",
+                raise _Reject("agent-preset/conflict",
                               f'session "{session_id}" is bound to agent preset '
                               f'"{existing.meta.get("agentPreset")}", not "{agent_preset}"',
                               {"sessionId": session_id, "requestedPreset": agent_preset,
                                "existingPreset": existing.meta.get("agentPreset")})
             existing_cwd = existing.meta.get("cwd")
             if existing_cwd is None:
-                raise _Reject("session-conflict",
+                raise _Reject("session/conflict",
                               f'session "{session_id}" records no cwd and cannot be adopted '
                               f'for "{cwd}"',
                               {"sessionId": session_id, "requestedCwd": cwd,
                                "existingCwd": existing_cwd})
             if existing_cwd != cwd:
-                raise _Reject("session-conflict",
+                raise _Reject("session/conflict",
                               f'session "{session_id}" belongs to "{existing_cwd}", not "{cwd}"',
                               {"sessionId": session_id, "requestedCwd": cwd,
                                "existingCwd": existing_cwd})
@@ -573,7 +573,7 @@ class WebApi:
         try:
             os.makedirs(cwd, exist_ok=True)
         except OSError as error:
-            raise _Reject("internal",
+            raise _Reject("gateway/internal",
                           f'failed to ensure project directory "{cwd}": {error}', {}) from error
         meta: dict[str, Any] = {"cwd": cwd}
         if agent_preset is not None:
@@ -600,18 +600,18 @@ class WebApi:
         provider = payload.get("provider")
         model = payload.get("model")
         if not (isinstance(provider, str) and isinstance(model, str)):
-            raise _Reject("bad-request", "provider and model must be strings", {})
+            raise _Reject("gateway/bad-request", "provider and model must be strings", {})
         reasoning_effort = payload.get("reasoningEffort")
         if reasoning_effort is not None and not isinstance(reasoning_effort, str):
-            raise _Reject("bad-request", "reasoningEffort must be a string", {})
+            raise _Reject("gateway/bad-request", "reasoningEffort must be a string", {})
         found = self._agent_for(session_id)
         if found is None:
-            raise _Reject("session-not-found", f'session "{session_id}" not found',
+            raise _Reject("session/not-found", f'session "{session_id}" not found',
                           {"sessionId": session_id})
         session, _loop = found
         selection = self._selection()
         if selection["provider"] != provider or selection["model"] != model:
-            raise _Reject("model-unavailable",
+            raise _Reject("session/model-unavailable",
                           f'no adapter serves provider "{provider}" model "{model}"',
                           {"provider": provider, "model": model})
         resolved: dict[str, Any] = {"provider": provider, "model": model}
@@ -639,8 +639,8 @@ class WebApi:
     def open_workspace_path(self, payload: dict) -> None:
         path = payload.get("path")
         if not isinstance(path, str) or not path:
-            raise _Reject("bad-request", "session.openWorkspacePath requires a non-empty path", {})
-        raise _Reject("internal",
+            raise _Reject("gateway/bad-request", "session.openWorkspacePath requires a non-empty path", {})
+        raise _Reject("gateway/internal",
                       "path open failed: no native desktop opener is available in this deployment",
                       {"path": path})
 
@@ -650,11 +650,11 @@ class WebApi:
         session_id = _require_id(payload, "sessionId")
         title = payload.get("title")
         if title is not None and not isinstance(title, str):
-            raise _Reject("bad-request", "title must be a string", {})
+            raise _Reject("gateway/bad-request", "title must be a string", {})
         if self._agent_for(session_id) is None:
-            raise _Reject("session-not-found", f'session "{session_id}" not found',
+            raise _Reject("session/not-found", f'session "{session_id}" not found',
                           {"sessionId": session_id})
-        raise _Reject("internal",
+        raise _Reject("gateway/internal",
                       "renaming is unavailable: this deployment mounts no session-title service",
                       {})
 
@@ -665,32 +665,32 @@ class WebApi:
         session_id = _require_id(payload, "sessionId")
         mode = payload.get("mode")
         if mode not in ("queue", "steer"):
-            raise _Reject("bad-request", "mode must be one of 'queue', 'steer'", {})
+            raise _Reject("gateway/bad-request", "mode must be one of 'queue', 'steer'", {})
         content = payload.get("content")
         if not isinstance(content, list) or not content:
-            raise _Reject("bad-request",
+            raise _Reject("gateway/bad-request",
                           "content must be a non-empty array of PromptContentPart", {})
         for part in content:
             if not isinstance(part, dict) or part.get("type") not in ("text", "image"):
-                raise _Reject("bad-request", "each content part must be a text or image object", {})
+                raise _Reject("gateway/bad-request", "each content part must be a text or image object", {})
             if part["type"] == "text" and not isinstance(part.get("text"), str):
-                raise _Reject("bad-request", "text part must carry a string text", {})
+                raise _Reject("gateway/bad-request", "text part must carry a string text", {})
             if part["type"] == "image" and not (isinstance(part.get("mediaType"), str)
                                                 and isinstance(part.get("data"), str)):
-                raise _Reject("bad-request", "image part must carry mediaType and data", {})
+                raise _Reject("gateway/bad-request", "image part must carry mediaType and data", {})
 
         client_time_zone = payload.get("clientTimeZone")
         canonical_time_zone = None
         if client_time_zone is not None:
             canonical_time_zone = canonical_client_time_zone(client_time_zone)
             if canonical_time_zone is None:
-                raise _Reject("invalid-time-zone",
+                raise _Reject("session/invalid-time-zone",
                               "clientTimeZone must be UTC or a valid IANA Area/Location name",
                               {"value": client_time_zone})
 
         found = self._agent_for(session_id)
         if found is None:
-            raise _Reject("session-not-found", f'session "{session_id}" not found',
+            raise _Reject("session/not-found", f'session "{session_id}" not found',
                           {"sessionId": session_id})
         loop = found[1]
 
@@ -711,12 +711,12 @@ class WebApi:
             else:
                 loop.followup(message)
         except AttachmentError as error:
-            raise _Reject("attachment-error", error.message,
+            raise _Reject("session/attachment-invalid", error.message,
                           {"reason": error.code}) from error
         except _Reject:
             raise
         except Exception as error:  # noqa: BLE001 - 其余 admit/落盘失败折叠 agent-busy
-            raise _Reject("agent-busy", "prompt rejected",
+            raise _Reject("session/agent-busy", "prompt rejected",
                           {"reason": str(error)}) from error
         return {"accepted": True}
 
@@ -724,11 +724,11 @@ class WebApi:
         info = self.adapter.resolve_model_info()
         modalities = info.get("input_modalities") or ["text"]
         if "image" not in modalities:
-            raise _Reject("attachment-error",
+            raise _Reject("session/attachment-invalid",
                           f'Model "{info.get("model") or "unknown"}" does not support image input.',
                           {"reason": "MODEL_DOES_NOT_SUPPORT_IMAGES"})
         if self.attachments is None:
-            raise _Reject("attachment-error",
+            raise _Reject("session/attachment-invalid",
                           "image prompt admission is unavailable: this deployment mounts "
                           "no attachment service",
                           {"reason": "ATTACHMENT_UNAVAILABLE"})
@@ -757,28 +757,28 @@ class WebApi:
         item_id = _require_id(payload, "itemId")
         action = payload.get("action")
         if not isinstance(action, dict) or action.get("kind") not in ("edit", "remove", "steer"):
-            raise _Reject("bad-request", "action must be a queue edit, remove, or steer action", {})
+            raise _Reject("gateway/bad-request", "action must be a queue edit, remove, or steer action", {})
         if action["kind"] == "edit":
             content = action.get("content")
             if not isinstance(content, list):
-                raise _Reject("bad-request", "edit action must carry a content array", {})
+                raise _Reject("gateway/bad-request", "edit action must carry a content array", {})
             if any(not (isinstance(part, dict) and part.get("type") == "text") for part in content):
-                raise _Reject("attachment-error", "queue edits accept text content only",
+                raise _Reject("session/attachment-invalid", "queue edits accept text content only",
                               {"reason": "QUEUE_EDIT_NON_TEXT"})
 
         agent = self._agents.get(session_id)
         if agent is None or self._subagent_owned(agent.session):
-            raise _Reject("queue-item-not-found", "queued item is no longer pending",
+            raise _Reject("session/queue-item-not-found", "queued item is no longer pending",
                           {"itemId": item_id})
 
         target = self._queue_target(agent, item_id)
         if target is None:
-            raise _Reject("queue-item-not-found", "queued item is no longer pending",
+            raise _Reject("session/queue-item-not-found", "queued item is no longer pending",
                           {"itemId": item_id})
 
         kind = action["kind"]
         if kind == "steer" and (target != "next_turn" or agent.status != "running"):
-            raise _Reject("steer-unavailable", "current turn no longer accepts steering",
+            raise _Reject("session/steer-unavailable", "current turn no longer accepts steering",
                           {"itemId": item_id})
 
         message = next(m for m in getattr(agent.inbox, target) if m["id"] == item_id)
@@ -805,10 +805,10 @@ class WebApi:
         session_id = _require_id(payload, "sessionId")
         agent = self._agents.get(session_id)
         if agent is None:
-            raise _Reject("session-not-found", f'session "{session_id}" not found (not attached)',
+            raise _Reject("session/not-found", f'session "{session_id}" not found (not attached)',
                           {"sessionId": session_id})
         if self._subagent_owned(agent.session):
-            raise _Reject("agent-busy",
+            raise _Reject("session/agent-busy",
                           f'session "{session_id}" is owned by subagent routing',
                           {"reason": "use subagent delivery for this child session"})
         agent.cancel("user", keep_inbox=True)
@@ -821,23 +821,23 @@ class WebApi:
         attachment_id = _require_id(payload, "attachmentId")
         session = self.store.get(session_id)
         if session is None:
-            raise _Reject("session-not-found", f'session "{session_id}" not found',
+            raise _Reject("session/not-found", f'session "{session_id}" not found',
                           {"sessionId": session_id})
         ref = self._referenced_image(session.events, attachment_id)
         if ref is None:
-            raise _Reject("attachment-error", "Image is not referenced by this session.",
+            raise _Reject("session/attachment-invalid", "Image is not referenced by this session.",
                           {"reason": "ATTACHMENT_NOT_REFERENCED"})
         if self.attachments is None:
-            raise _Reject("attachment-error",
+            raise _Reject("session/attachment-invalid",
                           "attachment service is unavailable in this deployment",
                           {"reason": "ATTACHMENT_UNAVAILABLE"})
         try:
             stored = self.attachments.read_image(ref)
         except AttachmentError as error:
-            raise _Reject("attachment-error", error.message,
+            raise _Reject("session/attachment-invalid", error.message,
                           {"reason": error.code}) from error
         except Exception as error:  # noqa: BLE001 - 载体层折叠
-            raise _Reject("internal", "Unable to read image attachment.", {}) from error
+            raise _Reject("gateway/internal", "Unable to read image attachment.", {}) from error
         return {"attachment": stored.ref.to_dict(),
                 "data": base64.b64encode(stored.data).decode("ascii")}
 
@@ -910,21 +910,21 @@ class WebApi:
         at_seq = payload.get("atSeq")
         if at_seq is not None and (not isinstance(at_seq, int)
                                    or isinstance(at_seq, bool) or at_seq < 0):
-            raise _Reject("bad-request", "atSeq must be a non-negative integer", {})
+            raise _Reject("gateway/bad-request", "atSeq must be a non-negative integer", {})
         source = self.store.get(session_id)
         if source is None:
-            raise _Reject("session-not-found", f'session "{session_id}" not found',
+            raise _Reject("session/not-found", f'session "{session_id}" not found',
                           {"sessionId": session_id})
         events = source.events
         last_seq = events[-1]["seq"] if events else -1
         boundary = self._fork_boundary(events, at_seq)
         if boundary is None:
             if at_seq is not None and at_seq <= last_seq:
-                raise _Reject("fork-unavailable",
+                raise _Reject("session/fork-unavailable",
                               f'session "{session_id}" has not completed the turn '
                               f'containing event {at_seq}',
                               {"sessionId": session_id})
-            raise _Reject("fork-unavailable",
+            raise _Reject("session/fork-unavailable",
                           f'session "{session_id}" has no completed turn to fork from',
                           {"sessionId": session_id})
         cut = boundary["seq"] + 1
@@ -961,24 +961,24 @@ class WebApi:
 
         through_seq = payload.get("throughSeq")
         if not isinstance(through_seq, int) or isinstance(through_seq, bool) or through_seq < -1:
-            raise _Reject("bad-request", "throughSeq must be an integer greater than or equal to -1",
+            raise _Reject("gateway/bad-request", "throughSeq must be an integer greater than or equal to -1",
                           {})
         if through_seq > source_cursor:
-            raise _Reject("bad-request",
+            raise _Reject("gateway/bad-request",
                           f"session page through seq {through_seq} is past cursor {source_cursor}",
                           {"sessionId": session_id})
         if 0 <= through_seq < len(source) and source[through_seq]["seq"] != through_seq:
-            raise _Reject("internal", f"session log does not contain through seq {through_seq}",
+            raise _Reject("gateway/internal", f"session log does not contain through seq {through_seq}",
                           {"sessionId": session_id})
 
         before_seq = payload.get("beforeSeq")
         if before_seq is not None and (not isinstance(before_seq, int)
                                        or isinstance(before_seq, bool) or before_seq < 0):
-            raise _Reject("bad-request", "beforeSeq must be a non-negative safe integer", {})
+            raise _Reject("gateway/bad-request", "beforeSeq must be a non-negative safe integer", {})
         max_messages = payload.get("maxMessages")
         if max_messages is not None and (not isinstance(max_messages, int)
                                          or isinstance(max_messages, bool) or max_messages <= 0):
-            raise _Reject("bad-request", "maxMessages must be a positive safe integer", {})
+            raise _Reject("gateway/bad-request", "maxMessages must be a positive safe integer", {})
 
         page_events, has_more = self._paginate(source, before_seq, max_messages or DEFAULT_MAX_MESSAGES,
                                                through_seq)

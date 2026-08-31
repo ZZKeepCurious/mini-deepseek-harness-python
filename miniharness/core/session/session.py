@@ -124,7 +124,10 @@ class Session:
             if not isinstance(ev, (dict, MappingProxyType)) or ev.get("seq") != i:
                 raise ValueError(f"seed 事件 seq 必须从 0 连续，第 {i} 条不符")
             etype = ev.get("type")
-            if etype not in KNOWN_TYPES:
+            ign = ev.get("ignorable")
+            if ign is not None and ign is not True:
+                raise ValueError(f"ignorable 必须为 true 或缺失，第 {i} 条不符: {ign!r}")
+            if etype not in KNOWN_TYPES and ign is not True:
                 raise ValueError(f"未知事件类型: {etype!r}")
             data = ev.get("data", {})
             surface_op = ev.get("surfaceOp")
