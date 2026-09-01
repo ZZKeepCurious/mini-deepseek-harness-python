@@ -16,6 +16,7 @@ from .core.agent_loop.agent import AgentLoop
 from .core.session.persistence import JsonlPersistence, repair_and_replay
 from .core.session import Session, create_message, derive_messages, text_block, turn_balance
 from .core.session_store import install_sessions
+from .core.agents import install_agents
 from .core.system_prompt import install_system_prompt
 from .core.tools import Tool, ToolRegistry
 from .jobs import install_jobs, register_job_tools
@@ -43,6 +44,7 @@ def main() -> None:
     install_skills(ctx)
     install_system_prompt(ctx)
     store = install_sessions(ctx)
+    install_agents(ctx)
     session = store.prepare("demo-001", {"meta": {"cwd": str(root)}})
     reg = ToolRegistry(ctx)
     register_job_tools(reg, ctx.get("jobs"))

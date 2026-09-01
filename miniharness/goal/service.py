@@ -12,8 +12,7 @@
   * 错误统一 GoalError(message, code)，code 与上游一致（GOAL_ALREADY_EXISTS /
     GOAL_STALE_REVISION / GOAL_INVALID_TRANSITION / GOAL_NOT_FOUND / ...）。
 
-mini 简化（须在文档中标注）：无 agent registry（assertLive 省略——不存在
-registry 内实例身份检查）；无 Typert remote 边界（remoteExport* 未复现）；
+mini 简化（须在文档中标注）：无 Typert remote 边界（remoteExport* 未复现）；
 session-start 重置 activation 依赖 cache 创建时机（mini Session 为进程内对象，
 fork/恢复天然新 cache → 'disarmed'）。
 """
@@ -24,6 +23,7 @@ import time
 import uuid
 
 from ..core.scope import Context
+from ..core.agents import assert_live_agent
 from .domain import (
     GOAL_CHANGE_VERSION,
     GoalError,
@@ -106,6 +106,9 @@ class GoalService:
             cache["observedSeq"] += 1
 
     def _prepare_mutation(self, agent) -> dict:
+        # R4：沿用 jobs 公共的 assertLive 边界——agent 须为 ctx.agents 中当前登记的
+        # live 实例（陈旧/重复实例拒绝；未安装 agents 服务的裸装配不强制）。
+        assert_live_agent(agent)
         cache = self._cache(agent.session)
         self._sync(agent.session, cache)
         return cache

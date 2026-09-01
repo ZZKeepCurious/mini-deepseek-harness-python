@@ -48,6 +48,7 @@ from ..core.session.chunk_rows import pack_chunk_runs
 from ..core.session.message import create_message, image_block, text_block
 from ..core.session.surface import derive_event_message
 from ..core.session_store import SessionStore
+from ..core.agents import install_agents
 from ..core.tools import ToolRegistry
 from ..llm import LlmAdapter
 from .args import (
@@ -315,6 +316,7 @@ class WebApi:
         self.store = ctx.get("sessions")
         if self.store is None:
             self.store = SessionStore(ctx)
+        install_agents(ctx)
         self.attachments = ctx.get("attachments")
         self._agents: dict[str, AgentLoop] = {}
         # selectModel 记录（advisory：单适配器部署回落恒单模型，不驱动路由）

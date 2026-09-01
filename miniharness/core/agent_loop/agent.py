@@ -150,6 +150,9 @@ class AgentLoop:
         # publish() 捕获 enter 的 detach disposer，dispose() 在拆 scope 后调用——
         # 会话随 loop 生命周期进/离店。
         self._detach_session: Callable[[], None] | None = None
+        # R4：agent 注册的 detach disposer（publish() 时安装；effect 已随 scope
+        # 自动卸载，此字段仅用于 dispose() 显式次序保障）
+        self._detach_agent: Callable[[], None] | None = None
         self.system_prompt = system_prompt
         if max_steps is not None:
             self.max_steps = max_steps
@@ -246,6 +249,12 @@ class AgentLoop:
             detach, self._detach_session = self._detach_session, None
             detach()
             raise
+        # R4：登记为 ctx.agents 的 live 实例（对齐上游 publish() 的 agents.enter +
+        # announce）。安装 agents 服务的组合上下文 → 注册 + agent/created；未安装
+        # （裸单测装配）则跳过，assert_live 亦随之不强制（见 core/agents.py）。
+        agents = self.ctx.get("agents")
+        if agents is not None:
+            self._detach_agent = agents.register(self)
         self.ctx.emit("agent/session-start",
                       {"agent": self, "source": source}, this_arg=self._carrier)
         return self
@@ -264,6 +273,9 @@ class AgentLoop:
         """
         self.cancel(cause="disposed")
         self.scope.dispose()
+        detach_agent, self._detach_agent = self._detach_agent, None
+        if detach_agent is not None:
+            detach_agent()
         detach, self._detach_session = self._detach_session, None
         if detach is not None:
             detach()

@@ -33,6 +33,7 @@ from ..skills import install_skills
 from ..core.agent_loop.agent import AgentLoop
 from ..core.session.persistence import JsonlPersistence
 from ..core.session_store import install_sessions
+from ..core.agents import install_agents
 from ..core.system_prompt import install_system_prompt
 from ..core.tools import ToolRegistry
 from .default_tools import default_tools
@@ -114,6 +115,7 @@ def run_headless(
         install_bash_executor(ctx)
     tools = tools or default_tools(ctx)
     store = install_sessions(ctx)
+    install_agents(ctx)
     # 缺省 id 随机 uuid（上游 headless index.ts:112 `session-${randomUUID()}`，
     # 122 bit 熵；此前 12 hex = 48 bit 为分歧，已对齐）
     # 三段式（对齐上游 agent-loop 工厂：prepare → 构造 loop → publish）：

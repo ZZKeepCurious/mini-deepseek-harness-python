@@ -24,6 +24,7 @@ from ..core.agent_loop.agent import AgentLoop
 from ..core.session.persistence import JsonlPersistence, load_events_checked, repair_and_replay
 from ..core.session import Session, repair_interrupted_turn, turn_balance
 from ..core.session_store import install_sessions
+from ..core.agents import install_agents
 
 
 def sessions_root() -> Path:
@@ -112,6 +113,7 @@ def resume_session(
     install_jobs(ctx)
     install_system_prompt(ctx)
     store = install_sessions(ctx)
+    install_agents(ctx)
     # 三段式（对齐 headless / 上游 agent-loop 工厂）：prepare → 构造 loop →
     # publish（enter + announce + agent/session-start；店成员资格归 loop）
     loop = AgentLoop(session, adapter, default_tools(ctx), ctx)

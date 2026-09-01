@@ -43,6 +43,7 @@ LAYER_UNITS = [
     ("core.schema", 0),
     ("core.version", 0),
     ("core.session_store", 1),
+    ("core.agents", 1),
     ("core.tools", 1),
     ("core.system_prompt", 1),
     ("llm", 1),

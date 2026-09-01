@@ -96,6 +96,7 @@ from ..core.system_prompt import install_system_prompt
 from ..core.agent_loop.agent import AgentLoop
 from ..core.session import Session, create_message, image_block, text_block
 from ..core.session_store import install_sessions
+from ..core.agents import install_agents
 from ..core.tools import ToolRegistry
 
 __all__ = [
@@ -840,6 +841,7 @@ class AcpServer:
         install_skills(ctx)
         install_system_prompt(ctx)
         install_sessions(ctx)
+        install_agents(ctx)
         reg = ToolRegistry(ctx)
         register_job_tools(reg, ctx.get("jobs"))
         register_skill_tools(reg, ctx.get("skills"))

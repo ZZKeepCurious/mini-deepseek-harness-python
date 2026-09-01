@@ -20,6 +20,8 @@ mini 教学适配（有意保留，须在文档标注）：
     mini 无 inject 重绑，以显式 `ctx=` 参数承载"注册 scope"（缺省=注册表自身
     ctx → 全局层），语义等价、载体不同
   * 无 agent registry：owner 不校验"当前注册实例"，只要求 owner.id 与 owner.ctx
+    ——**已闭合（2026-09-01 R4）**：访问闸 `_assert_access` 前置 `assert_live_agent`
+    （ctx.agents 精确实例边界）；未安装 agents 服务的裸装配不强制（见 core/agents.py）
   * teardown 排干等每任务 settled 事件（对齐上游 await Promise.all(settled)：
     先 cancel-all 再逐任务等待，无时间上限——producer 永不结算会挂起 teardown，
     上游同款限制；producer 契约要求响应 cancel 并最终结算）
@@ -34,6 +36,7 @@ from typing import Any, Callable
 from ..core.session import now_ms
 from ..core.scope import Context
 from ..core.dsh_scope import AnonymousEntries, ScopedLayers, scope_of
+from ..core.agents import assert_live_agent
 from .types import (
     DEFAULT_MAX_CONCURRENT_JOBS_PER_OWNER,
     TERMINAL_STATUSES,
@@ -356,6 +359,9 @@ class LocalJobRegistry:
         return job
 
     def _assert_access(self, job: dict, caller: Any) -> None:
+        # R4：调用方须为 ctx.agents 中当前登记的 live 实例（陈旧/重复实例拒绝）。
+        # 未安装 agents 服务的裸装配不强制（见 core/agents.py assert_live_agent）。
+        assert_live_agent(caller)
         owner = job["owner"]
         if owner is not None and getattr(caller, "id", None) != owner.id:
             raise RuntimeError(f"job {job['id']} belongs to another session")
