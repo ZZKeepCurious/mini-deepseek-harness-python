@@ -47,6 +47,7 @@ RPC_ERROR_CODES = frozenset({
     "gateway/arguments-invalid",
     "gateway/bad-request",
     "gateway/cancelled",
+    "gateway/input-invalid",
     "gateway/internal",
     "session/agent-busy",
     "session/attachment-invalid",

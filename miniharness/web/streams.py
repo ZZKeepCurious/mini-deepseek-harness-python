@@ -30,6 +30,11 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from .args import (
+    BoundaryReject,
+    boundary_error_message,
+    validate_args,
+)
 from .events import RemoteEventRegistry
 from .stream_protocol import REMOTE_EVENT_STREAM_ENDPOINT
 
@@ -104,6 +109,11 @@ class GatewayStreams:
             raise RemoteStreamError(
                 "gateway/arguments-invalid",
                 f"typert gateway: {endpoint}: requires exactly an args object")
+        try:
+            validate_args(endpoint, payload["args"])
+        except BoundaryReject as error:
+            raise RemoteStreamError(
+                error.code, boundary_error_message(endpoint, error.message)) from error
         if kind == "follow":
             return self._follow(payload["args"], signal)
         return self._control(signal)
@@ -112,7 +122,7 @@ class GatewayStreams:
 
     async def _follow(self, args: dict, signal=None):
         address = args.get("address")
-        if (not isinstance(address, dict) or address.get("kind") != "session"
+        if (address.get("kind") != "session"
                 or not isinstance(address.get("sessionId"), str)
                 or not address["sessionId"]):
             raise RemoteStreamError("gateway/arguments-invalid",

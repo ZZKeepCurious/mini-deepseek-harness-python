@@ -31,8 +31,9 @@ class TestRpcId(unittest.TestCase):
 
 class TestErrorCodeSet(unittest.TestCase):
     def test_closed_set_matches_session_error_details_map(self):
-        # RemoteErrorDetailsMap 键集（alpha.2 命名空间码，typert-protocol/types.ts + 各域注册）22 码
-        self.assertEqual(len(RPC_ERROR_CODES), 22)
+        # RemoteErrorDetailsMap 键集（alpha.2 命名空间码，typert-protocol/types.ts + 各域注册）23 码
+        # （R3 闭合：路由层边界校验新增 gateway/input-invalid）
+        self.assertEqual(len(RPC_ERROR_CODES), 23)
 
     def test_known_codes_present(self):
         for code in ("gateway/bad-request", "session/not-found", "session/model-unavailable",
@@ -42,7 +43,7 @@ class TestErrorCodeSet(unittest.TestCase):
                      "session/steer-unavailable", "session/title-invalid",
                      "session/fork-unavailable", "subagent/not-found",
                      "subagent/unauthorized", "gateway/internal", "gateway/cancelled",
-                     "gateway/arguments-invalid"):
+                     "gateway/arguments-invalid", "gateway/input-invalid"):
             self.assertIn(code, RPC_ERROR_CODES)
 
     def test_apiproxy_only_codes_retired(self):

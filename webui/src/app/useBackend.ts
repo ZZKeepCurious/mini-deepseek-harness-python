@@ -242,7 +242,8 @@ export function useBackend(): UseBackend {
       await rpc("session/prompt", {
         sessionId: selected,
         requestId: `req-${Date.now()}`,
-        prompt: text,
+        mode: "queue",
+        content: [{ type: "text", text }],
       });
     } catch (e) {
       setError((e as Error).message);
@@ -266,7 +267,7 @@ export function useBackend(): UseBackend {
 
   const cancelSession = useCallback(async (id: string) => {
     try {
-      await rpc("session/cancel", { sessionId: id, requestId: `req-${Date.now()}` });
+      await rpc("session/cancel", { sessionId: id });
     } catch (e) {
       setError((e as Error).message);
     }

@@ -50,6 +50,11 @@ from ..core.session.surface import derive_event_message
 from ..core.session_store import SessionStore
 from ..core.tools import ToolRegistry
 from ..llm import LlmAdapter
+from .args import (
+    BoundaryReject,
+    boundary_error_message,
+    validate_args,
+)
 from .envelope import rpc_error, rpc_result_ok
 
 __all__ = [
@@ -345,7 +350,9 @@ class WebApi:
     def dispatch(self, method: str, rpc_id_: str, payload: Any) -> dict | None:
         """按路由表派发；未知方法返回 None（载体层映射 404）。
 
-        返回完整 server-response 帧。payload 非 dict 按 bad-request 拒绝。
+        返回完整 server-response 帧。payload 非 dict 按 bad-request 拒绝；
+        方法级 `{args}` 先经路由层边界校验（args.py），越界抛 `BoundaryReject`
+        折成 gateway/arguments-invalid 或 gateway/input-invalid。
         """
         handler = self.ROUTES.get(method)
         if handler is None:
@@ -353,7 +360,11 @@ class WebApi:
         if not isinstance(payload, dict):
             return self._err(rpc_id_, "gateway/bad-request", "payload must be a JSON object", {})
         try:
+            validate_args(method, payload)
             value = getattr(self, handler)(payload)
+        except BoundaryReject as error:
+            return self._err(rpc_id_, error.code,
+                             boundary_error_message(method, error.message), error.details)
         except _Reject as error:
             return self._err(rpc_id_, error.code, error.message, error.details)
         return self._ok(rpc_id_, value)
@@ -494,8 +505,6 @@ class WebApi:
 
     def search(self, payload: dict) -> dict:
         query = payload.get("query")
-        if not isinstance(query, str):
-            raise _Reject("gateway/bad-request", "session search query must be a string", {})
         query = query.strip()
         if not query:
             raise _Reject("gateway/bad-request", "session search query must not be empty", {})
@@ -532,15 +541,13 @@ class WebApi:
     def create_session(self, payload: dict) -> dict:
         workspace_id = payload.get("workspaceId")
         cwd = payload.get("cwd")
+        agent_preset = payload.get("agentPreset")
         if workspace_id is not None and cwd is not None:
             raise _Reject("gateway/bad-request", "session.create accepts workspaceId or cwd, not both", {})
         session_id = payload.get("sessionId")
-        if session_id is not None and not (isinstance(session_id, str) and session_id):
+        if session_id is not None and not session_id:
             raise _Reject("gateway/bad-request", "sessionId must be a non-empty string", {})
-        agent_preset = payload.get("agentPreset")
-        if agent_preset is not None and not isinstance(agent_preset, str):
-            raise _Reject("gateway/bad-request", "agentPreset must be a string", {})
-        if cwd is not None and not (isinstance(cwd, str) and os.path.isabs(cwd)):
+        if cwd is not None and not os.path.isabs(cwd):
             raise _Reject("gateway/bad-request", "cwd must be an absolute path", {})
         if workspace_id is not None:
             raise _Reject("workspace/not-found", f'workspace "{workspace_id}" not found',
@@ -599,11 +606,7 @@ class WebApi:
         session_id = _require_id(payload, "sessionId")
         provider = payload.get("provider")
         model = payload.get("model")
-        if not (isinstance(provider, str) and isinstance(model, str)):
-            raise _Reject("gateway/bad-request", "provider and model must be strings", {})
         reasoning_effort = payload.get("reasoningEffort")
-        if reasoning_effort is not None and not isinstance(reasoning_effort, str):
-            raise _Reject("gateway/bad-request", "reasoningEffort must be a string", {})
         found = self._agent_for(session_id)
         if found is None:
             raise _Reject("session/not-found", f'session "{session_id}" not found',
@@ -638,7 +641,7 @@ class WebApi:
 
     def open_workspace_path(self, payload: dict) -> None:
         path = payload.get("path")
-        if not isinstance(path, str) or not path:
+        if not path:
             raise _Reject("gateway/bad-request", "session.openWorkspacePath requires a non-empty path", {})
         raise _Reject("gateway/internal",
                       "path open failed: no native desktop opener is available in this deployment",
@@ -648,9 +651,6 @@ class WebApi:
 
     def rename(self, payload: dict) -> None:
         session_id = _require_id(payload, "sessionId")
-        title = payload.get("title")
-        if title is not None and not isinstance(title, str):
-            raise _Reject("gateway/bad-request", "title must be a string", {})
         if self._agent_for(session_id) is None:
             raise _Reject("session/not-found", f'session "{session_id}" not found',
                           {"sessionId": session_id})
@@ -667,7 +667,7 @@ class WebApi:
         if mode not in ("queue", "steer"):
             raise _Reject("gateway/bad-request", "mode must be one of 'queue', 'steer'", {})
         content = payload.get("content")
-        if not isinstance(content, list) or not content:
+        if not content:
             raise _Reject("gateway/bad-request",
                           "content must be a non-empty array of PromptContentPart", {})
         for part in content:
@@ -756,7 +756,7 @@ class WebApi:
         session_id = _require_id(payload, "sessionId")
         item_id = _require_id(payload, "itemId")
         action = payload.get("action")
-        if not isinstance(action, dict) or action.get("kind") not in ("edit", "remove", "steer"):
+        if action.get("kind") not in ("edit", "remove", "steer"):
             raise _Reject("gateway/bad-request", "action must be a queue edit, remove, or steer action", {})
         if action["kind"] == "edit":
             content = action.get("content")
@@ -908,8 +908,7 @@ class WebApi:
     def fork(self, payload: dict) -> dict:
         session_id = _require_id(payload, "sessionId")
         at_seq = payload.get("atSeq")
-        if at_seq is not None and (not isinstance(at_seq, int)
-                                   or isinstance(at_seq, bool) or at_seq < 0):
+        if at_seq is not None and at_seq < 0:
             raise _Reject("gateway/bad-request", "atSeq must be a non-negative integer", {})
         source = self.store.get(session_id)
         if source is None:
@@ -960,7 +959,7 @@ class WebApi:
         source_cursor = source[-1]["seq"] if source else -1
 
         through_seq = payload.get("throughSeq")
-        if not isinstance(through_seq, int) or isinstance(through_seq, bool) or through_seq < -1:
+        if through_seq < -1:
             raise _Reject("gateway/bad-request", "throughSeq must be an integer greater than or equal to -1",
                           {})
         if through_seq > source_cursor:
@@ -972,12 +971,10 @@ class WebApi:
                           {"sessionId": session_id})
 
         before_seq = payload.get("beforeSeq")
-        if before_seq is not None and (not isinstance(before_seq, int)
-                                       or isinstance(before_seq, bool) or before_seq < 0):
+        if before_seq is not None and before_seq < 0:
             raise _Reject("gateway/bad-request", "beforeSeq must be a non-negative safe integer", {})
         max_messages = payload.get("maxMessages")
-        if max_messages is not None and (not isinstance(max_messages, int)
-                                         or isinstance(max_messages, bool) or max_messages <= 0):
+        if max_messages is not None and max_messages <= 0:
             raise _Reject("gateway/bad-request", "maxMessages must be a positive safe integer", {})
 
         page_events, has_more = self._paginate(source, before_seq, max_messages or DEFAULT_MAX_MESSAGES,

@@ -136,8 +136,8 @@ class TestFollow(GatewayStreamsTest):
 
     def test_arguments_invalid(self):
         async def go(payload):
-            gen = self.gateway.open_stream("session.follow", payload)
             try:
+                gen = self.gateway.open_stream("session.follow", payload)
                 await gen.__anext__()
                 return None
             except RemoteStreamError as error:
@@ -145,6 +145,31 @@ class TestFollow(GatewayStreamsTest):
         for payload in ({"args": {}}, {"args": {"address": {"kind": "host"}}},
                         {"args": {"address": {"kind": "session"}}}):
             self.assertEqual(_run(go(payload)), "gateway/arguments-invalid")
+
+    def test_field_type_input_invalid(self):
+        async def go(payload):
+            try:
+                gen = self.gateway.open_stream("session.follow", payload)
+                await gen.__anext__()
+                return None
+            except RemoteStreamError as error:
+                return (error.code, error.message)
+        code, message = _run(go({"args": {"address": {"kind": "session",
+                                                      "sessionId": "x"},
+                                          "maxMessages": "5"}}))
+        self.assertEqual(code, "gateway/input-invalid")
+        self.assertIn('wire field "maxMessages" failed boundary validation', message)
+
+    def test_control_extra_key_rejected(self):
+        async def go():
+            try:
+                gen = self.gateway.open_stream("session.control",
+                                               {"args": {"bogus": 1}})
+                await gen.__anext__()
+                return None
+            except RemoteStreamError as error:
+                return error.code
+        self.assertEqual(_run(go()), "gateway/arguments-invalid")
 
 
 class TestControl(GatewayStreamsTest):

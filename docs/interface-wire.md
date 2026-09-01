@@ -59,19 +59,19 @@
 - 成功分支 `value` 可选（业务无值时整体省略该字段）。
 - 业务方法绝不抛业务错误——一律经 `result.ok` 表达；`details` 恒为对象。
 
-**RpcError 的 `code` 是 22 码命名空间闭集**（alpha.2 起统一为 `<namespace>/<name>` 形式，
+**RpcError 的 `code` 是 23 码命名空间闭集**（alpha.2 起统一为 `<namespace>/<name>` 形式，
 对齐 typert `RemoteErrorDetailsMap` 键集：基础设施 `gateway/*` + 各域 merge-extensible 注册，
-`web/envelope.py` `RPC_ERROR_CODES`）：
+`web/envelope.py` `RPC_ERROR_CODES`；R3 闭合路由层边界校验后新增 `gateway/input-invalid`）：
 
 ```
 gateway/bad-request       gateway/cancelled         gateway/internal
-gateway/arguments-invalid session/not-found         session/model-unavailable
-session/conflict          session/invalid-time-zone session/workspace-attach-failed
-workspace/not-found       agent-preset/conflict     agent-preset/not-found
-agent-preset/invalid      session/agent-busy        session/attachment-invalid
-session/queue-item-not-found session/steer-unavailable session/title-invalid
-session/fork-unavailable  subagent/not-found        subagent/catalog-diagnostic
-subagent/unauthorized
+gateway/arguments-invalid gateway/input-invalid     session/not-found
+session/model-unavailable session/conflict          session/invalid-time-zone
+session/workspace-attach-failed workspace/not-found agent-preset/conflict
+agent-preset/not-found    agent-preset/invalid      session/agent-busy
+session/attachment-invalid session/queue-item-not-found session/steer-unavailable
+session/title-invalid     session/fork-unavailable  subagent/not-found
+subagent/catalog-diagnostic subagent/unauthorized
 ```
 
 寄送方签发 `rpcId`（实践中 UUID 即可，递增非零即可）；`transport_error` 把载体层异常折进
@@ -98,8 +98,14 @@ subagent/unauthorized
 | `session.cancel` | 取消当前回合 | session/not-found / session/agent-busy |
 | `session.page` | 分页历史（throughSeq/beforeSeq/maxMessages） | gateway/bad-request / session/not-found / gateway/internal |
 
-> 各端点 `args` 的逐字段形状与错误 `details` 以 `api.py` 对应 handler docstring 为准，教程见
-> 07 章 §7.5.2；子代理所属会话被访问时统一折 `session/agent-busy`（上游 `apiSessionSubagentOwnershipError`）。
+> 各端点 `args` 先在路由层经 `web/args.py` 做**统一 `{args}` 边界校验**（对齐 gateway
+> `assertExactArguments`/`decode`）：字段集合精确匹配——缺 required / 多 unexpected →
+> `gateway/arguments-invalid`（消息 `args fields do not match the descriptor: missing "x"; unexpected "y"`）；
+> 顶层字段 JSON 类型错 → `gateway/input-invalid`（`wire field "x" failed boundary validation`，
+> details 带 `field`）。枚举/范围/非空/跨字段语义仍留在 handler 以业务码表达，故上表
+> `gateway/bad-request` 等仍涵盖业务语义错误。逐字段形状与错误 `details` 以 `api.py` 对应
+> handler docstring 为准，教程见 07 章 §7.5.2；子代理所属会话被访问时统一折
+> `session/agent-busy`（上游 `apiSessionSubagentOwnershipError`）。
 
 ## 4. Remote 流（`WS /api/remote.mux`，`web/mux.py` + `web/stream_protocol.py`）
 

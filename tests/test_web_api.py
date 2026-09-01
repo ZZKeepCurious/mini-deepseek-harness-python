@@ -213,7 +213,8 @@ class TestSessionPrompt(WebApiTest):
             "sessionId": "x", "mode": "queue",
             "content": [{"type": "text", "text": "hi"}],
         }))
-        self.assertEqual(error["code"], "gateway/bad-request")
+        self.assertEqual(error["code"], "gateway/arguments-invalid")
+        self.assertIn("missing \"requestId\"", error["message"])
 
     def test_prompt_invalid_mode(self):
         error = self._error(self.api.dispatch("session.prompt", "rid", {
@@ -370,7 +371,7 @@ class TestWorkspacePath(WebApiTest):
 
     def test_open_requires_path(self):
         error = self._error(self.api.dispatch("session.openWorkspacePath", "rid", {}))
-        self.assertEqual(error["code"], "gateway/bad-request")
+        self.assertEqual(error["code"], "gateway/arguments-invalid")
 
     def test_open_always_internal(self):
         error = self._error(self.api.dispatch("session.openWorkspacePath", "rid",
@@ -879,6 +880,60 @@ class TestTimeZone(WebApiTest):
             available = False
         if available:
             self.assertEqual(canonical_client_time_zone("Asia/Shanghai"), "Asia/Shanghai")
+
+
+class TestArgsBoundary(WebApiTest):
+    """R3 路由层 `{args}` 边界校验：字段集合 + 顶层 JSON 类型（对齐 gateway assertExactArguments）。"""
+
+    def test_missing_required_arguments_invalid(self):
+        error = self._error(self.api.dispatch("session.search", "rid", {}))
+        self.assertEqual(error["code"], "gateway/arguments-invalid")
+        self.assertIn('missing "query"', error["message"])
+        self.assertEqual(error["details"], {"endpoint": "session.search"})
+
+        error = self._error(self.api.dispatch("session.page", "rid", {
+            "address": {"kind": "session", "sessionId": "x"}}))
+        self.assertEqual(error["code"], "gateway/arguments-invalid")
+        self.assertIn('missing "throughSeq"', error["message"])
+
+    def test_unexpected_fields_arguments_invalid(self):
+        error = self._error(self.api.dispatch("session.cancel", "rid", {
+            "sessionId": "x", "requestId": "req-1"}))
+        self.assertEqual(error["code"], "gateway/arguments-invalid")
+        self.assertIn('unexpected "requestId"', error["message"])
+
+    def test_missing_and_unexpected_clauses(self):
+        error = self._error(self.api.dispatch("session.prompt", "rid", {
+            "mode": "queue", "bogus": 1}))
+        self.assertEqual(error["code"], "gateway/arguments-invalid")
+        self.assertIn('missing "requestId"', error["message"])
+        self.assertIn('unexpected "bogus"', error["message"])
+
+    def test_field_type_input_invalid(self):
+        error = self._error(self.api.dispatch("session.search", "rid", {"query": 5}))
+        self.assertEqual(error["code"], "gateway/input-invalid")
+        self.assertIn('wire field "query" failed boundary validation', error["message"])
+        self.assertEqual(error["details"],
+                         {"endpoint": "session.search", "field": "query"})
+
+        error = self._error(self.api.dispatch("session.cancel", "rid", {"sessionId": 5}))
+        self.assertEqual(error["code"], "gateway/input-invalid")
+
+    def test_int_kind_rejects_bool(self):
+        error = self._error(self.api.dispatch("session.fork", "rid", {
+            "sessionId": "x", "atSeq": True}))
+        self.assertEqual(error["code"], "gateway/input-invalid")
+
+    def test_empty_object_methods_reject_extra(self):
+        error = self._error(self.api.dispatch("session.modelCatalog", "rid", {"x": 1}))
+        self.assertEqual(error["code"], "gateway/arguments-invalid")
+
+    def test_boundary_precedes_business_semantics(self):
+        # 越界（多键）在业务语义之前拒绝：workspaceId+cwd 互斥被 unexpected 键先命中
+        error = self._error(self.api.dispatch("session.create", "rid", {
+            "workspaceId": "w", "cwd": CWD, "bogus": True}))
+        self.assertEqual(error["code"], "gateway/arguments-invalid")
+        self.assertIn('unexpected "bogus"', error["message"])
 
 
 class TestToolTurn(WebApiTest):
