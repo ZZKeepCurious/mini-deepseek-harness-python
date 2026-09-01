@@ -12,11 +12,13 @@
     （GOAL_TOOL_INVALID_UPDATE 提示文案逐字）；action 专属参数校验；
     blocked 带 {code:'model-reported', message}；goal 轮次内未达
     blockedAfterConsecutiveRounds（默认 3）即报 blocked → GOAL_TOOL_BLOCK_THRESHOLD。
+  * canonical value + render 分离（对齐上游 GOAL_OUTPUT.schema + output.render，
+    index.ts:175-178）：execute 返回结构化 GoalToolValue（dict），render 把
+    canonical 值转成模型可见单 text 块（JSON.stringify 等价）。
   * 工具策略以 systemPrompt section 'tool:goal'（order 114）注入。
 
 mini 简化（须在文档中标注）：无 completionAuthority 权威模块（子代理/人类直答
-判定未复现），requireDirectHuman 省略；deferContext wrapup 摘要注入未复现；
-execute 直接返回模型可见 JSON 文本（无 canonical value + native renderer 分离）。
+判定未复现），requireDirectHuman 省略；deferContext wrapup 摘要注入未复现。
 """
 from __future__ import annotations
 
@@ -121,6 +123,15 @@ def goal_value(goal: dict | None) -> dict:
     return result
 
 
+def render_goal_value(value: dict) -> list[dict]:
+    """canonical GoalToolValue → 模型可见单 text 块（对齐上游 output.render）。
+
+    上游 `render: (args, value) => [{type:'text', text: JSON.stringify(value)}]`
+    （tool-goal/src/index.ts:177）；mini 以 `json.dumps` 等价，保持既有模型可见输出。
+    """
+    return [{"type": "text", "text": json.dumps(value)}]
+
+
 def _require_agent(exec_: Any, name: str) -> Any:
     if getattr(exec_, "agent", None) is None:
         raise GoalError(f"{name} requires a calling agent (no session to update)",
@@ -167,18 +178,18 @@ def register_goal_tools(reg: ToolRegistry, goals, ctx: Context | None = None,
         system_prompt.section(GOAL_POLICY_SECTION, GOAL_POLICY_ORDER,
                               lambda _context: _guidance(blocked_after))
 
-    async def get_goal(args: dict, exec_: Any) -> str:
+    async def get_goal(args: dict, exec_: Any) -> dict:
         agent = _require_agent(exec_, "get_goal")
-        return json.dumps(goal_value(goals.get(agent)))
+        return goal_value(goals.get(agent))
 
-    async def create_goal(args: dict, exec_: Any) -> str:
+    async def create_goal(args: dict, exec_: Any) -> dict:
         agent = _require_agent(exec_, "create_goal")
         request = {"objective": args.get("objective", "")}
         if args.get("max_goal_rounds") is not None:
             request["maxGoalRounds"] = args["max_goal_rounds"]
-        return json.dumps(goal_value(goals.create(agent, request)))
+        return goal_value(goals.create(agent, request))
 
-    async def update_goal(args: dict, exec_: Any) -> str:
+    async def update_goal(args: dict, exec_: Any) -> dict:
         agent = _require_agent(exec_, "update_goal")
         ref = _goal_ref(args.get("goal_id"), args.get("revision"))
         replacements = {}
@@ -196,7 +207,7 @@ def register_goal_tools(reg: ToolRegistry, goals, ctx: Context | None = None,
                 raise GoalError("blocked_reason is valid only with action blocked",
                                 "GOAL_TOOL_INVALID_UPDATE")
             goal = goals.edit(agent, ref, replacements)
-            return json.dumps(goal_value(goal))
+            return goal_value(goal)
         if action in ("pause", "resume"):
             if _has_text(args.get("objective")) or _has_round_cap(args.get("max_goal_rounds")) \
                     or _has_text(blocked_reason):
@@ -205,7 +216,7 @@ def register_goal_tools(reg: ToolRegistry, goals, ctx: Context | None = None,
                     "blocked_reason is valid only with action blocked",
                     "GOAL_TOOL_INVALID_UPDATE")
             goal = goals.pause(agent, ref) if action == "pause" else goals.resume(agent, ref)
-            return json.dumps(goal_value(goal))
+            return goal_value(goal)
         if _has_text(args.get("objective")) or _has_round_cap(args.get("max_goal_rounds")):
             raise GoalError("objective and max_goal_rounds are valid only with action edit",
                             "GOAL_TOOL_INVALID_UPDATE")
@@ -213,7 +224,7 @@ def register_goal_tools(reg: ToolRegistry, goals, ctx: Context | None = None,
             if _has_text(blocked_reason):
                 raise GoalError("blocked_reason is valid only with action blocked",
                                 "GOAL_TOOL_INVALID_UPDATE")
-            return json.dumps(goal_value(goals.complete(agent, ref)))
+            return goal_value(goals.complete(agent, ref))
         # blocked
         if not _has_text(blocked_reason):
             raise GoalError("blocked_reason is required with action blocked",
@@ -226,13 +237,14 @@ def register_goal_tools(reg: ToolRegistry, goals, ctx: Context | None = None,
                     f"current round is {view['roundsStarted']}",
                     "GOAL_TOOL_BLOCK_THRESHOLD")
         goal = goals.block(agent, ref, {"code": "model-reported", "message": blocked_reason})
-        return json.dumps(goal_value(goal))
+        return goal_value(goal)
 
     reg.register(Tool(
         name="get_goal",
         description=GET_DESCRIPTION,
         parameters={"type": "object", "properties": {}},
         output=_GOAL_VALUE_SCHEMA,
+        render=render_goal_value,
         execute=get_goal,
     ))
     reg.register(Tool(
@@ -253,6 +265,7 @@ def register_goal_tools(reg: ToolRegistry, goals, ctx: Context | None = None,
             "required": ["objective"],
         },
         output=_GOAL_VALUE_SCHEMA,
+        render=render_goal_value,
         execute=create_goal,
     ))
     reg.register(Tool(
@@ -273,5 +286,6 @@ def register_goal_tools(reg: ToolRegistry, goals, ctx: Context | None = None,
             "required": ["goal_id", "revision", "action"],
         },
         output=_GOAL_VALUE_SCHEMA,
+        render=render_goal_value,
         execute=update_goal,
     ))

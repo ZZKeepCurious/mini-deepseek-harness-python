@@ -413,18 +413,18 @@ class GoalToolsTest(unittest.TestCase):
     def test_get_goal_empty(self):
         _, _, reg, loop = self._make()
         out = self._call(reg, "get_goal", {}, ToolExec(agent=loop))
-        self.assertEqual(json.loads(out), {"goal": None})
+        self.assertEqual(out, {"goal": None})
 
     def test_create_and_read(self):
         _, goals, reg, loop = self._make()
         out = self._call(reg, "create_goal",
                          {"objective": "build it", "max_goal_rounds": 5}, ToolExec(agent=loop))
-        value = json.loads(out)
+        value = out
         self.assertEqual(value["goal"]["objective"], "build it")
         self.assertEqual(value["goal"]["phase"], "active")
         self.assertEqual(value["activation"], "armed")
         out = self._call(reg, "get_goal", {}, ToolExec(agent=loop))
-        self.assertEqual(json.loads(out)["goal"]["revision"], 1)
+        self.assertEqual(out["goal"]["revision"], 1)
 
     def test_create_invalid_objective_code(self):
         _, _, reg, loop = self._make()
@@ -438,7 +438,7 @@ class GoalToolsTest(unittest.TestCase):
         out = self._call(reg, "update_goal",
                          {"goal_id": goals.get(loop)["id"], "revision": 1, "action": "complete"},
                          ToolExec(agent=loop))
-        self.assertEqual(json.loads(out)["goal"]["phase"], "complete")
+        self.assertEqual(out["goal"]["phase"], "complete")
 
     def test_update_invalid_ref(self):
         _, goals, reg, loop = self._make()
@@ -502,7 +502,7 @@ class GoalToolsTest(unittest.TestCase):
                          {"goal_id": created["id"], "revision": 1, "action": "blocked",
                           "blocked_reason": "still stuck"},
                          ToolExec(agent=loop))
-        value = json.loads(out)
+        value = out
         self.assertEqual(value["goal"]["phase"], "blocked")
         self.assertEqual(value["goal"]["blockedReason"]["code"], "model-reported")
 
@@ -510,6 +510,22 @@ class GoalToolsTest(unittest.TestCase):
         _, _, reg, loop = self._make()
         with self.assertRaises(GoalError):
             self._call(reg, "get_goal", {}, ToolExec())
+
+    def test_canonical_value_and_render_separated(self):
+        """execute 返回 canonical dict，render 转模型可见单 text JSON 文本（R1）。"""
+        _, _, reg, loop = self._make()
+        tool = reg.resolve("get_goal")
+        self.assertIsNotNone(tool.render)
+        out = self._call(reg, "get_goal", {}, ToolExec(agent=loop))
+        self.assertIsInstance(out, dict)
+        self.assertEqual(out, {"goal": None})
+        rendered = tool.render(out)
+        self.assertEqual(rendered, [{"type": "text", "text": '{"goal": null}'}])
+        # create_goal 同样分离：canonical dict 含 goal，render 输出可 JSON 解析文本
+        create = reg.resolve("create_goal")
+        created = self._call(reg, "create_goal", {"objective": "a"}, ToolExec(agent=loop))
+        rendered = create.render(created)
+        self.assertEqual(json.loads(rendered[0]["text"])["goal"]["phase"], "active")
 
 
 if __name__ == "__main__":

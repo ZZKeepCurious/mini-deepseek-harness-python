@@ -20,8 +20,6 @@ catalog 注入 listener + 目录渲染/digest）。
     渲染层 escapeText 只发生在帧层不落库
 
 mini 简化（有意保留，须在文档标注）：
-  * execute 直接返回渲染文本 render_skill_content(skill)（上游 canonical
-    value + output.render 分离未复现，与 jobs 同款简化）
   * lookup.cwd 读 session.meta 的 cwd（对齐上游 agent.session.header.cwd，
     经 `_lookup_for` 从 agent.session.meta 取，无则 None → 不扫描项目根）
   * signal 为 _AbortProxy / threading.Event：仅检查标记不中断执行
@@ -231,6 +229,7 @@ class SkillTool:
                 },
                 "required": ["name", "provider", "content"],
             },
+            render=lambda value: [{"type": "text", "text": render_skill_content(value)}],
             present_call=self._present_call,
         )
         # 手势先、catalog 后：waterfall 顺序保证 catalog 消息先注入，
@@ -255,7 +254,7 @@ class SkillTool:
             raise ValueError(f'skill "{name}" is unknown or no longer available')
         if not is_model_invocable(skill):
             raise ValueError(f'skill "{name}" is not available for model invocation')
-        return render_skill_content(skill)
+        return skill
 
     @staticmethod
     def _present_call(args: dict) -> dict:

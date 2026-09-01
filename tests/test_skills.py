@@ -494,10 +494,17 @@ class SkillToolExecuteTest(unittest.TestCase):
         """执行 skill 工具（async 契约 → asyncio.run 包装）。"""
         return asyncio.run(self.tool.execute(args, self._exec()))
 
-    def test_success_renders_content(self):
+    def test_success_returns_canonical_value(self):
         result = self._call({"name": "bun"})
-        self.assertIn('<skill_content name="bun">', result)
-        self.assertIn(SIMPLE_SKILL["content"], result)
+        self.assertEqual(result["name"], "bun")
+        self.assertEqual(result["content"], SIMPLE_SKILL["content"])
+        # canonical value + render 分离（R1）：render 产模型可见 <skill_content> 文本
+        self.assertIsNotNone(self.tool.render)
+        rendered = self.tool.render(result)
+        self.assertEqual(len(rendered), 1)
+        text = rendered[0]["text"]
+        self.assertIn('<skill_content name="bun">', text)
+        self.assertIn(SIMPLE_SKILL["content"], text)
 
     def test_invalid_name_error(self):
         with self.assertRaises(ValueError) as cm:

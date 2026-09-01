@@ -166,10 +166,10 @@ miniharness/
 | `llm/token_meter.py` | `packages/llm/token-meter/src/` | |
 | `compaction/`（config + region + summarizer + engine + tool_result_pruner） | `packages/compaction/compaction-basic/src/` + `compaction-tool-result-pruner/src/`（config / region / summarizer / index.ts） | 前缀重放无 KV cache 语义；toolResultPruner 可选阶段已对齐（`compaction/tool_result_pruner.py`，上游注入 `ctx.toolResultPruner`，mini 经 `ctx.get('toolResultPruner')` 取用） |
 | `jobs/`（types + registry + tools） | `packages/jobs/`（seam + jobs-local + tool-jobs） | controller/监听器按 scope 分层（P1-4a）；canonical value + render 分离；finalizeContent 可见输出二次封顶（job_output/job_kill）；无 agent registry；`run_in_background` 触发入口经模型侧 `subagent` 工具复现（简化标注见模块 docstring） |
-| `plan/`（config + mode + review + projection） | `packages/plan/plan-mode/src/` | 状态机 + plan:policy 节 + 审查 UI（exit_plan_mode / /plan / userQuestions）+ plan 投影；无 canonical value / presentCall（简化标注见模块 docstring） |
+| `plan/`（config + mode + review + projection） | `packages/plan/plan-mode/src/` | 状态机 + plan:policy 节 + 审查 UI（exit_plan_mode / /plan / userQuestions）+ plan 投影；canonical value + Tool.render 已对齐（简化标注见模块 docstring） |
 | `commands/` | `packages/interaction/commands/src/` | 命令注册/派发 + `command/run|done` 配对 + commands/change 通知 + normalizeResult fail-loud；handler 签名 `(agent, raw)` 为教学扩展（简化标注见模块 docstring） |
-| `goal/`（domain + service + prompt + driver + tools + commands） | `packages/goal/`（goal + goal-round-driver + tool-goal + command-goal） | 无 agent registry / Typert remote；driver 模式事件驱动续跑（同步门面保留 `continue_rounds`）；权威判定近似（简化标注见模块 docstring） |
-| `skills/`（registry + filesystem + tool_skill） | `packages/skill/`（skill + skill-filesystem + tool-skill） | 无 chokidar watch、无 ctx.fs 适配、execute 直接返回渲染文本（简化标注见模块 docstring） |
+| `goal/`（domain + service + prompt + driver + tools + commands） | `packages/goal/`（goal + goal-round-driver + tool-goal + command-goal） | 无 agent registry / Typert remote；driver 模式事件驱动续跑（同步门面保留 `continue_rounds`）；权威判定近似；三工具 canonical value + render 已对齐（简化标注见模块 docstring） |
+| `skills/`（registry + filesystem + tool_skill） | `packages/skill/`（skill + skill-filesystem + tool-skill） | 无 chokidar watch、无 ctx.fs 适配；skill 工具 canonical value + render 已对齐（简化标注见模块 docstring） |
 | `boot/boot.py` | `packages/boot/app-boot` | `load_optional_patches`（缺文件→空层、坏文件 fail loud）+ `watch_user_patches`（对齐 app-boot watchUserPatches：经 HMR 服务 watch 用户补丁层→刷新重挂；上游经 Include entry.update() 事务性重挂，mini 无 Include 插件由宿主供 remount 回调） |
 | `boot/composition.py` | `packages/boot/app-boot` + `apps/cli/src/args.ts` | |
 | `boot/dotenv.py` | `packages/boot/app-boot`（loadEnv） | |
