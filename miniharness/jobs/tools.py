@@ -17,8 +17,9 @@
     直接每次现查即上游回退路径 `outputLimits.get(exec) ?? visibleOutputLimit(...)`
     的等价——无 policy 时行为一致
 
-owner 无 agent/inbox/claimed 会话事件：经 AgentLoop.on_inbox_claimed
-钩子列表近似（payload 语义对齐，见 AGENTS.md 简化清单）
+载体对齐（R2，2026-09-02）：owner 无钩子近似——jobs 经安装 ctx 订阅
+  agent/inbox/claimed 恢复预算（payload {agent, message, turn}，仅 user 源
+  恢复，对齐 tool-jobs spendWakes.delete），agent/disposed 防 id 键泄漏
 """
 from __future__ import annotations
 
@@ -252,29 +253,36 @@ def install_completion_delivery(jobs: Any, config: dict | None = None,
                                 ctx: Any = None) -> None:
     """注册 onJobDone 监听：unreported 完成投递到精确 owner。
 
-    wakeup：idle owner 开 turn（预算 maxConsecutiveWakes，user 输入恢复）；
-    busy owner 一律注入（notice 进下一步 inbox，同一步合并多个结算）。
-    `ctx` 为注册方上下文（上游 tool-jobs 从自己组合 scope 注册；mini 显式
-    传参）：监听器只接收该 scope 覆盖的 owner 的结算，缺省=全局层。
+    wakeup：idle owner 开 turn（预算 maxConsecutiveWakes，user 输入经
+    agent/inbox/claimed 事件恢复）；busy owner 一律注入（notice 进下一步
+    inbox，同一步合并多个结算）。`ctx` 为注册方上下文（上游 tool-jobs 从
+    自己组合 scope 注册；mini 显式传参）：onJobDone 监听与 claimed/disposed
+    订阅都限该 scope 覆盖的 owner（事件经 ctx.on 以父 scope 收到子循环发送，
+    对齐 tool-jobs ctx.on 订阅语义），缺省=全局层。
     """
     cfg = resolve_config(config)
     delivery = cfg["completionDelivery"]
     wake_budget = cfg["maxConsecutiveWakes"]
     spent_wakes: dict[int, int] = {}
-    armed: set[int] = set()
     lock = threading.Lock()
 
-    def reset_budget(owner: Any) -> None:
+    def handle_claimed(payload: dict) -> None:
+        """agent/inbox/claimed：仅 user 源消息恢复预算（对齐 tool-jobs
+        spendWakes.delete(agent) 的 source.kind === 'user' 判定）。"""
+        message = payload.get("message") or {}
+        source = message.get("source") if isinstance(message, dict) else None
+        if isinstance(source, dict) and source.get("kind") == "user":
+            with lock:
+                spent_wakes.pop(id(payload.get("agent")), None)
+
+    def handle_disposed(payload: dict) -> None:
+        """agent/disposed：清掉已销毁 loop 的预算项（防 id 键泄漏）。"""
         with lock:
-            spent_wakes.pop(id(owner), None)
+            spent_wakes.pop(id(payload.get("agent")), None)
 
     def on_done(snapshot: dict, owner: Any) -> None:
         if snapshot["reported"] or owner is None:
             return
-        # 用户输入消费后恢复预算（mini 经 AgentLoop.on_inbox_claimed 钩子近似）
-        if id(owner) not in armed and hasattr(owner, "on_inbox_claimed"):
-            armed.add(id(owner))
-            owner.on_inbox_claimed(reset_budget)
         notice = fit_completion_notice(snapshot)
         with lock:
             should_wake = (delivery == "wakeup" and getattr(owner, "status", None) == "idle"
@@ -287,6 +295,10 @@ def install_completion_delivery(jobs: Any, config: dict | None = None,
             owner.inject(notice, source="tool-jobs")
 
     jobs.on_job_done(on_done, ctx)
+    scope = ctx if ctx is not None else getattr(jobs, "ctx", None)
+    if scope is not None:
+        scope.on("agent/inbox/claimed", handle_claimed)
+        scope.on("agent/disposed", handle_disposed)
 
 
 # ---------- 三工具 ----------

@@ -41,8 +41,6 @@ def _fake_owner(owner_id: str, ctx: Context):
     owner.status = "idle"
     owner.delivered: list[tuple[str, str]] = []      # (kind, notice)
     owner.wakes = 0
-    owner.claimed_hooks = []
-    owner.armed = False
 
     def followup(content, source):
         owner.wakes += 1
@@ -51,13 +49,8 @@ def _fake_owner(owner_id: str, ctx: Context):
     def inject(content, source):
         owner.delivered.append(("inject", content))
 
-    def on_inbox_claimed(hook):
-        owner.claimed_hooks.append(hook)
-        return lambda: owner.claimed_hooks.remove(hook) if hook in owner.claimed_hooks else None
-
     owner.followup = followup
     owner.inject = inject
-    owner.on_inbox_claimed = on_inbox_claimed
     return owner
 
 
@@ -562,21 +555,58 @@ class NoticeDeliveryTest(unittest.TestCase):
 
     def test_user_claim_resets_budget(self):
         self.owner.status = "idle"
-        # 第一次完成 → wakeup，并注册 claimed 钩子
+        # 第一次完成 → wakeup
         box = JobDoneBox()
         self.registry.start({"kind": "bash", "label": "j0", "owner": self.owner,
                              "run": lambda: {"done": box, "cancel": lambda r: None}})
         box.settle({"status": "completed"})
         self.assertEqual(self.owner.wakes, 1)
-        self.assertEqual(len(self.owner.claimed_hooks), 1)
-        # 用户输入被认领 → 钩子复位预算
-        self.owner.claimed_hooks[0](self.owner)
+        # 用户输入被认领 → agent/inbox/claimed（user 源）复位预算
+        self.ctx.emit("agent/inbox/claimed",
+                      {"agent": self.owner, "message": {"source": {"kind": "user"}}, "turn": 1})
         for i in range(3):
             b = JobDoneBox()
             self.registry.start({"kind": "bash", "label": f"j{i+1}", "owner": self.owner,
                                  "run": lambda: {"done": b, "cancel": lambda r: None}})
             b.settle({"status": "completed"})
         self.assertEqual(self.owner.wakes, 4)   # 预算已回填 → 全部 wakeup
+
+    def test_plugin_claim_does_not_reset_budget(self):
+        # 对齐 tool-jobs.spec.ts:666-681：非 user 源认领不恢复预算
+        self.owner.status = "idle"
+        for i in range(3):
+            box = JobDoneBox()
+            self.registry.start({"kind": "bash", "label": f"j{i}", "owner": self.owner,
+                                 "run": lambda: {"done": box, "cancel": lambda r: None}})
+            box.settle({"status": "completed"})
+        self.assertEqual(self.owner.wakes, 3)
+        self.ctx.emit("agent/inbox/claimed",
+                      {"agent": self.owner,
+                       "message": {"source": {"kind": "plugin", "plugin": "tool-jobs"}},
+                       "turn": 2})
+        box = JobDoneBox()
+        self.registry.start({"kind": "bash", "label": "j3", "owner": self.owner,
+                             "run": lambda: {"done": box, "cancel": lambda r: None}})
+        box.settle({"status": "completed"})
+        self.assertEqual(self.owner.wakes, 3)   # 预算未复位 → 仍 inject
+        self.assertEqual(self.owner.delivered[3][0], "inject")
+
+    def test_disposed_event_clears_budget(self):
+        self.owner.status = "idle"
+        for i in range(4):
+            box = JobDoneBox()
+            self.registry.start({"kind": "bash", "label": f"j{i}", "owner": self.owner,
+                                 "run": lambda: {"done": box, "cancel": lambda r: None}})
+            box.settle({"status": "completed"})
+        self.assertEqual(self.owner.wakes, 3)
+        self.assertEqual(self.owner.delivered[3][0], "inject")
+        # agent/disposed：销毁 loop 清预算项 → 下一个完成重新 wakeup
+        self.ctx.emit("agent/disposed", {"agent": self.owner})
+        box = JobDoneBox()
+        self.registry.start({"kind": "bash", "label": "j4", "owner": self.owner,
+                             "run": lambda: {"done": box, "cancel": lambda r: None}})
+        box.settle({"status": "completed"})
+        self.assertEqual(self.owner.wakes, 4)
 
     def test_waiters_suppress_notice(self):
         box = JobDoneBox()
@@ -836,6 +866,36 @@ class RealLoopIntegrationTest(unittest.TestCase):
         self.assertTrue(notices, "notice 应作为 plugin user/message 落日志")
         self.assertEqual(len(loop.inbox), 0)
         self.assertIn(tid, [j["id"] for j in registry.list(loop)])
+
+    def test_real_loop_user_claim_resets_budget(self):
+        # 真实 loop：claimed 事件经载波路由到安装 scope（R2 载体闭合的端点）
+        ctx = Context(name="jobs-real-2")
+        install_jobs(ctx)
+        session = Session("jobs-real-2")
+        loop = AgentLoop(session, _TextAdapter("done"), ToolRegistry(ctx), ctx)
+        wakes = {"n": 0}
+        orig = loop.followup
+        def _count(content, source="user"):
+            if source == "tool-jobs":
+                wakes["n"] += 1
+            return orig(content, source=source)
+        loop.followup = _count
+        registry = ctx.get("jobs")
+        def _settle(label):
+            box = JobDoneBox()
+            registry.start({"kind": "bash", "label": label, "owner": loop,
+                            "run": lambda: {"done": box, "cancel": lambda r: None}})
+            box.settle({"status": "completed"})
+        for i in range(4):
+            _settle(f"j{i}")
+        self.assertEqual(wakes["n"], 3)      # 第 4 次 inject（预算满）
+        # 真实 loop 认领 user 输入（同步 pump 开 turn）→ agent/inbox/claimed
+        # user 源 → 安装 scope 的订阅复位预算
+        loop.followup("hi", source="user")
+        self.assertEqual(loop.status, "idle")
+        _settle("j4")
+        _settle("j5")
+        self.assertEqual(wakes["n"], 5)      # 已复位 → 又两次 wakeup
 
     def test_job_tools_registered_through_default_tools(self):
         from miniharness.cli.default_tools import default_tools

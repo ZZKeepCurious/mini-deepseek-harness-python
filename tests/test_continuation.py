@@ -844,15 +844,17 @@ class TestAsyncContinuation(unittest.TestCase):
         asyncio.run(scenario())
 
     def test_fire_inbox_claimed_user_source_fix(self):
-        # {"kind":"user"} 消息触发零参钩子（A8 修复 source 比较后）。
+        # {"kind":"user"} 认领触发 ctx 事件 agent/inbox/claimed（对齐上游
+        # agent.ts claimed 回调；tool-jobs 预算恢复经父 scope 订阅此事件）。
         async def scenario():
             parent, _, _ = _parent_loop()
             parent.start_driver()
             fired = []
-            parent.on_inbox_claimed(lambda _loop: fired.append(True))
+            parent.ctx.on("agent/inbox/claimed", lambda p: fired.append(p))
             parent.followup("用户输入")
             await asyncio.wait_for(parent.when_idle_async(), 1.0)
-            self.assertEqual(fired, [True])
+            self.assertEqual(len(fired), 1)
+            self.assertEqual(fired[0]["message"]["source"]["kind"], "user")
         asyncio.run(scenario())
 
     def test_async_report_foreground_wakeup_idle_parent(self):

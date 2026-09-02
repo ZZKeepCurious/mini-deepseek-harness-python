@@ -171,7 +171,9 @@ class AgentLoop:
         self.status = "idle"
         # 双队列 Inbox（上游 agent/src/inbox.ts）：followup → next-turn，
         # steer/inject → next-step；每次变更落 durable agent/inbox/spliced。
-        # 通知同时派发 ctx 事件（agent/inbox/inserted|discarded|claimed，扩展点）。
+        # 通知同时派发 ctx 事件（agent/inbox/inserted|discarded|claimed）；
+        # claimed 是 job wake 预算恢复的权威来源（tool-jobs 经父 scope 订阅，
+        # payload {agent, message, turn} 对齐上游 runtime-types.ts）。
         self.inbox = Inbox(self.session, {
             "inserted": lambda message: self.ctx.emit(
                 "agent/inbox/inserted", {"agent": self, "message": message},
@@ -205,11 +207,9 @@ class AgentLoop:
         # A5：最近一次 request/header 落打印时的 surface 位置替换代数
         # （上游 agent.ts requestSurfaceGeneration，undefined 起步）
         self._request_surface_generation: int | None = None
-        # 上游 agent/inbox/claimed 扩展点的 mini 简化：每 owner 钩子列表，
-        # 在 user 输入被认领进 step 时触发（job 的 wake 预算据此恢复）
-        self._inbox_claimed_hooks: list[Callable[["AgentLoop"], None]] = []
         # A8：消息认领通道（携带被认领消息本身，含 id）——continuation 管理器
-        # 据此跟踪激活的 accepted 集合（对齐上游 agent/inbox/claimed 会话事件）
+        # 据此跟踪激活的 accepted 集合；job 的 wake 预算恢复不再经此，
+        # 走 ctx 事件 agent/inbox/claimed（jobs/tools.py 订阅）
         self._inbox_claimed_msg_hooks: list[Callable[[dict | None], None]] = []
         # A8 事件驱动 driver：driver 任务在事件循环上消费 inbox；followup/steer
         # 只入队 + 线程安全唤醒，_quiescent 表示真静默（inbox 排空），
@@ -285,22 +285,17 @@ class AgentLoop:
         """会话 id（上游 Agent.id 即 session id，作业按此栅栏）。"""
         return self.session.session_id
 
-    def on_inbox_claimed(self, hook: Callable[["AgentLoop"], None]) -> Callable[[], None]:
-        """注册 user 输入认领钩子（对齐上游 agent/inbox/claimed 事件；mini 无会话事件总线）。"""
-        self._inbox_claimed_hooks.append(hook)
-        return lambda: self._inbox_claimed_hooks.remove(hook) if hook in self._inbox_claimed_hooks else None
-
     def on_message_claimed(self, hook: Callable[[dict | None], None]) -> Callable[[], None]:
         """注册消息认领钩子：每一条被认领的消息（含 None 续步）都回调，携带消息
-        本身（含 id）。A8 continuation 用它跟踪激活 accepted 集合；区别于
-        on_inbox_claimed（零参、仅 user 输入、jobs 预算用）。"""
+        本身（含 id）。A8 continuation 用它跟踪激活 accepted 集合；job 的
+        wake 预算恢复走 ctx 事件 agent/inbox/claimed，不占此通道。"""
         self._inbox_claimed_msg_hooks.append(hook)
         return lambda: (self._inbox_claimed_msg_hooks.remove(hook)
                         if hook in self._inbox_claimed_msg_hooks else None)
 
     def _fire_inbox_claimed(self, claimed: dict | None) -> None:
-        """消息被认领进 step 时触发钩子（job 的 wake 预算据此恢复；A8 的
-        accepted 跟踪据此排空投递集合）。"""
+        """消息被认领进 step 时触发钩子（A8 的 accepted 跟踪据此排空投递集合；
+        job 的 wake 预算恢复走 ctx 事件 agent/inbox/claimed）。"""
         for hook in list(self._inbox_claimed_msg_hooks):
             try:
                 hook(claimed)
@@ -308,19 +303,6 @@ class AgentLoop:
                 logger = getattr(self.ctx, "logger", None)
                 if logger is not None and hasattr(logger, "warn"):
                     logger.warn(f"on_message_claimed hook threw: {error}")
-        if claimed is None:
-            return
-        source = claimed.get("source")
-        if isinstance(source, dict) and source.get("kind") == "user" and self._inbox_claimed_hooks:
-            for hook in list(self._inbox_claimed_hooks):
-                try:
-                    hook(self)
-                except Exception as error:
-                    logger = getattr(self.ctx, "logger", None)
-                    if logger is not None and hasattr(logger, "warn"):
-                        logger.warn(f"on_inbox_claimed hook threw: {error}")
-        if source is None:
-            self._inbox_claimed_hooks.clear()
 
     # ---------- 对外入口 ----------
 
