@@ -49,7 +49,7 @@ loader 的 include 展开（上游由 `@deepseek-ai/cordis-plugin-include` 实�
 
 ## 8.3 mini 复现：preset roster 与挂载
 
-mini 组合层支持 YAML（`boot/composition.py` 的 pyyaml 可选依赖，缺省退化 JSON）；preset 清单用 JSON 承载（载体简化，契约对齐）。目录结构：
+mini 组合层支持 YAML（`boot/composition.py`，pyyaml 硬依赖承载）；preset 清单用 JSON 承载（载体简化，契约对齐）。目录结构：
 
 ```
 miniharness/preset/

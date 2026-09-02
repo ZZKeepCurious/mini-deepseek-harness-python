@@ -7,7 +7,7 @@
   2. 补丁按层叠顺序应用：bundle 层 → profile 级 → home 级 → --patch overlay
   3. 启动结束必须断言"条目已激活"，否则 fail loud：ACTIVE 通过、FAILED 重抛
      装载错误、PENDING 点名缺失的注入服务（对齐 assertEntriesActivated）
-  4. 配置载体支持 JSON 与 YAML（pyyaml 可选依赖）；!!js 表达式求值见 composition
+   4. 配置载体支持 JSON 与 YAML（pyyaml 硬依赖）；!!js 表达式求值见 composition
 
 激活语义（对齐 vendor/cordis registry）：每个 entry 经 ctx.plugin() 铸造一
 枚 fiber；entry 的 inject 依赖缺失时 fiber 保持 PENDING，提供方在 apply 期

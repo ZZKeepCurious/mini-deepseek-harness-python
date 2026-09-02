@@ -111,7 +111,7 @@ web 传输层（`miniharness/web/`，07 章 §7.5）：两信封 RPC（`client-r
 
 模型请求重试/退避（`miniharness/llm/retry_policy.py` + `miniharness/llm/retry.py` + `core/agent_loop/agent.py` 接线，手册 04 章 §4.9）——`agent/request-error` waterfall 扩展点、normal/always 策略、有界指数退避 + 对称抖动、`providerRetryAfterMs`（429 Retry-After）优先、durable `llm/retry` + `llm/retry-started` 审计对；派发前熔合信号检查（请求 signal + 重试插件 lifetime，等价 `AbortSignal.any`）、事件驱动多信号竞速等待、插件 effect teardown（注销监听器 + lifetime.abort + 排干在途恢复）与陈旧回调守卫；上下文溢出/认证不在默认可重试白名单 → 终局降级，对齐上游 `llm-retry/src/index.ts` 与 `retry-policy.ts`。
 
-YAML 配置 + `!!js` 插值子集（`miniharness/boot/composition.py`）——pyyaml 可选依赖双载体、`process.env.<NAME>` 子集（其它表达式 fail loud，全量 JS eval 有意不复制、仅放开 env 子集为对齐目标）、`.env` 加载（ENOENT 静默/其它 warn/已存在不覆盖）、组合 dump 渲染；启动器选项（`miniharness/cli/main.py`）——`--patch` 可重复、`--dump-config`/`--dump-default-config` 互斥且 boot-free、dump 不接受任务参数、default 不接受 `--patch`，行级 `# ==` 来源注释 + `!!js` 原样未求值 + skipped patch warn 不失败 + 单文档可再加载；会话管理子命令（`miniharness/cli/session_cmds.py`，mini 教学扩展——上游会话管理在 web 表层；以上测试位于 `tests/test_cli.py`（启动器/会话子命令）与 `tests/test_composition.py`（YAML 组合））；CI（`.github/workflows/ci.yml`：unittest + Python 3.10~3.13 matrix × ubuntu/windows + demo 冒烟）+ integration 标签真实 API 测试（`tests/test_real_api.py`，`MINIHARNESS_INTEGRATION=1` + key 缺一即跳过）。
+YAML 配置 + `!!js` 插值子集（`miniharness/boot/composition.py`）——pyyaml 硬依赖承载 YAML、`process.env.<NAME>` 子集（其它表达式 fail loud，全量 JS eval 有意不复制、仅放开 env 子集为对齐目标）、`.env` 加载（ENOENT 静默/其它 warn/已存在不覆盖）、组合 dump 渲染；启动器选项（`miniharness/cli/main.py`）——`--patch` 可重复、`--dump-config`/`--dump-default-config` 互斥且 boot-free、dump 不接受任务参数、default 不接受 `--patch`，行级 `# ==` 来源注释 + `!!js` 原样未求值 + skipped patch warn 不失败 + 单文档可再加载；会话管理子命令（`miniharness/cli/session_cmds.py`，mini 教学扩展——上游会话管理在 web 表层；以上测试位于 `tests/test_cli.py`（启动器/会话子命令）与 `tests/test_composition.py`（YAML 组合））；CI（`.github/workflows/ci.yml`：unittest + Python 3.10~3.13 matrix × ubuntu/windows + windows-acl 门控 e2e + demo 冒烟）+ integration 标签真实 API 测试（`tests/test_real_api.py`，`MINIHARNESS_INTEGRATION=1` + key 缺一即跳过）。
 
 ## 议题 3：Trajectory 轨迹台账
 
@@ -168,7 +168,7 @@ Trajectory 是 **web 专属**的"Agent 的 DevTools"：一个按 turn 组织的�
 | 上游 | mini 现状 | 规划 |
 |---|---|---|
 | 折叠引擎（纯函数） | `client/trajectory.py`：turn/step 聚合 chunk→message→timing、callId 树、tool-call 节点只来自 `tool/call` 事件、崩溃尾部 partial 标记、纯函数（手册 10 章） | turn 摘要为教学扩展（上游 trajectory-contract 无 turns 摘要） |
-| 虚拟化 / Overview / 搜索 | 无（终端输出） | 终端渲染或 JSON dump 简化版；不复制浏览器 UI |
+| 虚拟化 / Overview / 搜索 | `client/trajectory.py` 为终端纯函数引擎（R5 在浏览器前端落地） | ✅ 浏览器前端 `webui/` 已实现（2026-09-02 R5）：Trajectory 虚拟化窗口 + Overview 折叠跳转 + 全文 search（`webui/src/trajectory/{model,search}.ts`，纯前端零契约改动）；`client/trajectory.py` 保持终端渲染不变 |
 
 ## 议题 4：Agent 干预面
 
@@ -543,7 +543,7 @@ XML 转义（escapeText/escapeAttr，index.ts:217-234），资源指引按 provi
 **已复现**（`miniharness/skills/`，L2 编排层；装配在 demo/headless/ACP/SDK 入口）。对上四包的落地：
 
 - `registry.py` —— `SkillRegistry`（`ctx.skills` 服务）：global + scope 链分层注册、`list`/`snapshot`/`get` 三接口、候选校验 fail fast、incomplete 不缓存 + revision 抖动重试一次、collect 缓存按 (cwd, scope 链, revision) 键控 LRU、`invalidate_cache`（revision++ + 清缓存 + `skills/change` 事件，监听器异常容错）、`get()` 定义名不符 → 精确失效该 provider 条目；`renderSkillContent`/escapeText/escapeAttr、digest 均逐字对齐。register_provider 同时接受"create 工厂返回 dict 或对象"两种形态。
-- `filesystem.py` —— `FileSystemSkillProvider`：六类根（project-dsh 100 / project-agents 200 / custom 300 / user-dsh 400 / user-agents 500 / bundled 600，同根 rank 一致靠 providerOrder+localOrder 决胜）、目录 bundle `<name>/SKILL.md` + 扁平 `<name>.md`、`find_project_root`（向上找 `.git`）、user-dsh 根跳过 `.system`；frontmatter 用 pyyaml 可选（无 pyyaml 时用内置极简 YAML 子集解析器，fail-closed：标量/引号/嵌套映射/`-` 列表/块标量，不支持语法抛错→整条忽略）；camelCase 旧键或非法布尔 → fail-closed 丢弃 + warn；`get()` 每次重读文件取正文。
+- `filesystem.py` —— `FileSystemSkillProvider`：六类根（project-dsh 100 / project-agents 200 / custom 300 / user-dsh 400 / user-agents 500 / bundled 600，同根 rank 一致靠 providerOrder+localOrder 决胜）、目录 bundle `<name>/SKILL.md` + 扁平 `<name>.md`、`find_project_root`（向上找 `.git`）、user-dsh 根跳过 `.system`；frontmatter 经 pyyaml（硬依赖 `safe_load`）；camelCase 旧键或非法布尔 → fail-closed 丢弃 + warn；`get()` 每次重读文件取正文。
 - `tool_skill.py` —— 消费端：pre-step 目录注入（首次非空且 `skill` 工具可见 → durable user 消息）、digest 判变（成员/描述/可见性变化 → 完整替换目录）、空目录退役 tombstone、incomplete 不发、工具可见性参与 digest（身份比较用本插件注册的定义）、`skill` 工具（错误三态逐字）、`/名字` 手势（skill-invocation source、去重保序、未知/user 禁用名保持普通文本）；手势 listener 先注册、catalog 后注册（waterfall 顺序保证目录在前、手势离答案最近）。
 - 装配：`install_skills(ctx)`（幂等；创建注册表 + 挂 filesystem provider + 两个 pre-step listener），`register_skill_tools(reg, registry)` 把 `skill` 工具注册进现有 ToolRegistry；demo/headless/ACP/SDK 均已接线，standard preset 的 tools 列表保留 `"skills"` 与实现对齐。
 

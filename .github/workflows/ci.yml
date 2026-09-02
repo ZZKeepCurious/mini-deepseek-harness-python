@@ -19,7 +19,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install dependencies
-        run: pip install -e .[yaml,web] coverage
+        run: pip install -e .[web] coverage
       - name: Compile all sources
         run: python -m compileall -q miniharness tests examples
       - name: Run unit tests with coverage
@@ -33,3 +33,28 @@ jobs:
         run: python -m coverage report --fail-under=85
       - name: Demo smoke test
         run: python -m miniharness.demo
+
+  webui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: webui/pnpm-lock.yaml
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: webui
+      - name: Typecheck
+        run: pnpm run typecheck
+        working-directory: webui
+      - name: Test
+        run: pnpm run test
+        working-directory: webui
+      - name: Build
+        run: pnpm run build
+        working-directory: webui

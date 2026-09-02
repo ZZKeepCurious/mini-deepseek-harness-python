@@ -21,7 +21,8 @@
     ApprovalService 是独立教学面，见 AGENTS.md 标注）。
 
 mini 简化（须同步 verified-diffs §3.4）：只转发 api-session/* + approval/request
-两个族；无 agent registry 时 agentId = 会话 id（root 常驻，无子代理下游）。
+两个族；Remote 事件 wire 的 agentId 对 root 常驻 agent 取会话 id（`api._agents`
+按 session 挂接，无子代理下游；`is_remote_event_agent_id` 仅做非空格式校验）。
 """
 from __future__ import annotations
 

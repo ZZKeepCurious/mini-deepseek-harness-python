@@ -11,7 +11,7 @@
     - **`repair_and_replay`**：本章为逐条 `append` 重放；实现为 seed 回放——从 `session/end-seed` 标记重放，且修复合成的 closers 经 `commit_repair` 持久化落盘（`core/session/persistence.py`，基类接口 + JSONL 后端实现）。
     - **`turn/end` reason**：本章差异表写 `reason = "interrupted"` 字符串；实现为对象 `{kind:'interrupted'}`（配合 `repair_interrupted_turn` 合成 closers，见第 1 章横幅）。
     - **崩溃演示**：本章 §5.2"kill 进程"实为手动构造未闭合回合来模拟崩溃尾部，非真实 kill（`tests/test_persistence_boot.py` 可复核）。
-    - **简化载体**：配置为 YAML（pyyaml 可选，缺省退化 JSON）+ `!!js` 仅 `process.env.<NAME>` 子集。JSONL 载体**已对齐上游默认形态**（2026-08-25）：zstd 拼接帧容器 + StorageRecord 打包行 + format.ts 目录布局（`root/--<projectKey(cwd)>--/<encodeSegment(id)>/session.jsonl[.zstd]`，编码互斥/遗留布局响亮拒绝），见 `chunk_rows.py`/`zstd_frames.py` 与 `tests/test_persistence_zstd.py`。
+    - **简化载体**：配置为 YAML（pyyaml 硬依赖承载）+ `!!js` 仅 `process.env.<NAME>` 子集。JSONL 载体**已对齐上游默认形态**（2026-08-25）：zstd 拼接帧容器 + StorageRecord 打包行 + format.ts 目录布局（`root/--<projectKey(cwd)>--/<encodeSegment(id)>/session.jsonl[.zstd]`，编码互斥/遗留布局响亮拒绝），见 `chunk_rows.py`/`zstd_frames.py` 与 `tests/test_persistence_zstd.py`。
 
 ## 5.1 这一章要做什么
 
@@ -250,7 +250,7 @@ def boot(config_path, *patch_paths, env=None):
 
 最后一步是**启动断言**：启动结束必须"条目已加载 + 已激活"，否则 fail loud。常规做法是"尽力而为"——加载失败记个 warning 继续跑，结果插件没生效，等运行期才爆。dsh 选择启动时就把话说死。
 
-> 载体说明：真实 dsh 用 YAML（cordis.yml）；mini 的 `boot()` 同时支持 `.json` 与 `.yaml/.yml`（pyyaml 可选依赖）。YAML 里的 `!!js` 表达式（上游 `loadOverlayPatches` 语义：tag → `{__jsExpr}` 节点、激活时求值）在 mini 中仅支持 `process.env.<NAME>` 完整匹配、读取时求值，其它表达式 fail loud（上游是 JS eval 全量表达式，mini 不求值 JS —— 简化标注）。补丁语义（id 定位整段替换 / insert / 插值）与 JSON 载体完全一致。组合 dump（`--dump-config` / `--dump-default-config`，见 07 章 CLI）与 `boot()` 共用同一补丁算法。
+> 载体说明：真实 dsh 用 YAML（cordis.yml）；mini 的 `boot()` 同时支持 `.json` 与 `.yaml/.yml`（pyyaml 硬依赖）。YAML 里的 `!!js` 表达式（上游 `loadOverlayPatches` 语义：tag → `{__jsExpr}` 节点、激活时求值）在 mini 中仅支持 `process.env.<NAME>` 完整匹配、读取时求值，其它表达式 fail loud（上游是 JS eval 全量表达式，mini 不求值 JS —— 简化标注）。补丁语义（id 定位整段替换 / insert / 插值）与 JSON 载体完全一致。组合 dump（`--dump-config` / `--dump-default-config`，见 07 章 CLI）与 `boot()` 共用同一补丁算法。
 
 ## 5.5 端到端验收（无 key）
 

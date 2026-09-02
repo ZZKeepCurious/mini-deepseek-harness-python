@@ -2,7 +2,7 @@
 
 覆盖：SKILL_NAME 校验、register/list/snapshot/get、rank 与 scope 层决胜、
 incomplete 不缓存、revision 抖动重试、invalidate 清缓存与 emit、filesystem
-六类根发现与 fail-closed、frontmatter（pyyaml 或子集解析器）、invocation
+六类根发现与 fail-closed、frontmatter（pyyaml 硬依赖）、invocation
 kebab-case 策略、渲染精确文本、digest 确定性、skill 工具三态错误、present_call、
 手势注入（user 源过滤/去重/未知名忽略）、catalog 注入（可见性、digest 幂等、
 首次空目录不注入、replacement 与退役）、install_skills 幂等与工具收编。
@@ -433,8 +433,8 @@ class FileSystemProviderTest(unittest.TestCase):
     def test_parse_skill_file_no_frontmatter(self):
         self.assertIsNone(parse_skill_file("just body"))
 
-    def test_frontmatter_yaml_subset(self):
-        # 无 pyyaml 时子集解析器也必须能吃常见 frontmatter（含 metadata 嵌套）
+    def test_frontmatter_yaml(self):
+        # frontmatter 经 pyyaml（硬依赖）解析，须吃常见 frontmatter（含 metadata 嵌套）
         parsed = parse_skill_file(
             "---\n"
             "name: tool\n"
@@ -726,42 +726,6 @@ class GestureLoopIntegrationTest(unittest.TestCase):
                           and ev["data"]["source"]["kind"] == "skill-invocation"]
         self.assertEqual(len(gesture_events), 1)
         self.assertEqual(gesture_events[0]["data"]["source"]["name"], "bun")
-
-
-class FrontmatterSubsetTest(unittest.TestCase):
-    """pyyaml 缺失时子集解析器的核心行为（直接测解析器本体）。"""
-
-    def _parse(self, text: str):
-        from miniharness.skills.filesystem import _parse_yaml_subset
-        return _parse_yaml_subset(text)
-
-    def test_scalars(self):
-        data = self._parse("name: bun\ndesc: 'x'\nnum: 42\nflag: true\nnone: null\n")
-        self.assertEqual(data, {"name": "bun", "desc": "x", "num": 42, "flag": True, "none": None})
-
-    def test_nested_mapping(self):
-        data = self._parse("metadata:\n  owner: team\n  nested:\n    deep: yes\n")
-        self.assertEqual(data["metadata"], {"owner": "team", "nested": {"deep": "yes"}})
-
-    def test_block_scalar_literal(self):
-        data = self._parse("desc: |\n  line one\n  line two\n")
-        self.assertEqual(data["desc"], "line one\nline two")
-
-    def test_block_scalar_fold(self):
-        data = self._parse("desc: >\n  line one\n  line two\n")
-        self.assertEqual(data["desc"], "line one line two")
-
-    def test_unsupported_flow_raises(self):
-        with self.assertRaises(ValueError):
-            self._parse("metadata: {a: 1}\n")
-
-    def test_list_in_mapping(self):
-        data = self._parse("items:\n  - a\n  - b\n")
-        self.assertEqual(data["items"], ["a", "b"])
-
-    def test_tab_indent_raises(self):
-        with self.assertRaises(ValueError):
-            self._parse("a:\n\tb: 1\n")
 
 
 # ---------- 内置 dsh-badge provider（对齐 packages/skill/skill-badge） ----------

@@ -16,7 +16,6 @@ mini 简化（须标注）：
 - !!js 求值仅支持 process.env.<NAME> 完整匹配；其它表达式 fail loud
   （上游是 JS eval 全量表达式，mini 不求值 JS）
 - 求值时机为读取时（上游为激活时）
-- dump 无 pyyaml 时退化为 JSON（无行注释，仍可再加载）
 - .env 解析复用凭据层 parse_dotenv（宽松跳过坏行）
 """
 from __future__ import annotations
@@ -26,6 +25,8 @@ import os
 import re
 from pathlib import Path
 from typing import Any, Callable
+
+import yaml
 
 from .dotenv import BootstrapEnvNameError, is_bootstrap_only, parse_dotenv
 
@@ -44,11 +45,6 @@ __all__ = [
 JS_ENV_EXPR = re.compile(r"^process\.env\.([A-Za-z_][A-Za-z0-9_]*)$")
 _JS_TAG = "tag:yaml.org,2002:js"
 
-try:  # pyyaml 为可选依赖（stdlib 优先的例外之一，httpx 之外，文档已标注）
-    import yaml
-except ImportError:  # pragma: no cover - 依赖缺失路径
-    yaml = None
-
 
 def _js_constructor(loader: Any, node: Any) -> dict[str, str]:
     """!!js <expr> → {'__jsExpr': <expr>}；无体/非标量 → 解析失败（对齐上游）。"""
@@ -60,13 +56,10 @@ def _js_constructor(loader: Any, node: Any) -> dict[str, str]:
     return {"__jsExpr": text}
 
 
-if yaml is not None:
-    yaml.SafeLoader.add_constructor(_JS_TAG, _js_constructor)
+yaml.SafeLoader.add_constructor(_JS_TAG, _js_constructor)
 
 
 def _load_yaml_text(text: str) -> Any:
-    if yaml is None:
-        raise RuntimeError("需要可选依赖 PyYAML：pip install pyyaml")
     return yaml.safe_load(text)
 
 
@@ -282,11 +275,8 @@ def render_composition_dump(
     注释（上游 groupedDump index.ts:460-462），!!js 原样，单文档可再加载。
 
     对齐 renderConfigDump（config-dump.spec.ts）：skipped patch → warn 不失败。
-    无 pyyaml 时退化为 JSON 数组（无注释，简化标注）。
     """
     combined, records = compose_with_origins(base_entries, layers, warn)
-    if yaml is None:
-        return json.dumps(combined, ensure_ascii=False, indent=2)
 
     blocks: list[str] = []
     current_label: str | None = None

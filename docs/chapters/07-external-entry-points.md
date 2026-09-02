@@ -283,7 +283,7 @@ mini 的同步近似：上游是字节流 + async，mini 是"行馈送 + 内存�
 
 ### 7.7.1 握手与会话
 
-- `initialize` → `agentInfo.name == 'deepseek-harness-acp'`、`promptCapabilities` 全 `false`（不宣称富媒体）、`authMethods: []`——本桥只承诺 text / resource_link；
+- `initialize` → `agentInfo.name == 'deepseek-harness-acp'`、`promptCapabilities.image` 按 worker 实际能力**条件声明**（`supports_acp_image_prompts(attachment, adapter)`：附件服务在场且 adapter 声明 image 输入模态时置 `true`，否则 `false`）、`audio`/`embeddedContext` 恒 `false`、`authMethods: []`——本桥承诺 text / resource_link，并在能力具备时受理 image；
 - `new_session`：cwd 必须绝对路径；`additionalDirectories` 非空拒绝；`mcpServers` 非空拒绝；mint sessionId；
 - `cancel`：未知 session **no-op**，已知 session 取消 agent。
 
@@ -302,7 +302,7 @@ mini 的同步近似：上游是字节流 + async，mini 是"行馈送 + 内存�
 
 ### 7.7.4 硬性规定
 
-1. 握手不宣称富媒体能力（image/audio/embeddedContext 全 false）。
+1. 握手按能力声明富媒体：`promptCapabilities.image` 动态（`supports_acp_image_prompts`），`audio`/`embeddedContext` 恒 false；admitAcpPrompt 受理 image 时走富媒体管线（`attachment/`，见 6 章）。
 2. cwd 非绝对路径、additionalDirectories 非空、mcpServers 非空 → invalid params（-32602）。
 3. prompt：未知 session / inflight / 空 prompt / 非 text·resource_link 内容 → 拒绝；回合真实跑完（turn/start + turn/end 落日志）。
 4. stopReason 映射表逐项与上游一致。
@@ -313,7 +313,7 @@ mini 的同步近似：上游是字节流 + async，mini 是"行馈送 + 内存�
 
 ### 7.7.5 简化标注
 
-- 上游 async（whenIdle 等待、stream 通知、`agent_message_chunk` 增量）；mini 同步跑完整个回合，会话更新流以 `updates` 记录承载；
+- 上游 async（whenIdle 等待、stream 通知、`agent_message_chunk` 增量）；mini 同步跑完整个回合，会话更新按 updates 记录**逐条**排发为 `session/update` 通知（`_notify_acp_updates`，方法名与粒度对齐上游 notify:124-133），assistant/message 带 usage 且会话有 contextWindow 时另发 `usage_update`——仍为回合结束后批量一次性投影（非上游并发流式，残余载体差异）；
 - 上游经 cordis 插件挂载（`inject: ['agents']`）+ ACP SDK 的 stdio 连接；mini 直接操作服务对象；
 - inflight 拒绝在同步模型下只能手动置标志触发（真并发不存在）。
 

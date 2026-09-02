@@ -22,9 +22,7 @@ discoverRoot / parseSkillFile / parseInvocationPolicy）。
 
 mini 简化（有意保留，须在文档标注）：
   * 同步 os 读取（上游 async ctx.fs / node:fs/promises）
-  * frontmatter YAML：pyyaml 可选依赖（与 boot/composition 同款）；无 pyyaml
-    时用内置极简 YAML 子集解析器（仅标量/引号/嵌套 mapping/块 scalar 列表；
-    不支持的语法抛错 → 文件被忽略）
+  * frontmatter YAML：经 `pyyaml`（硬依赖，`yaml.safe_load`，与 boot/composition 同款）
   * 无 skipSystem 之外的系统目录过滤启发（上游 nodeEntryKind 的 symlink
     跟随保留，目录条目归类到 'other' 时静默跳过）
   * 无 fs/observed 事件桥（mini 工具不产出 fs/observed 事件）
@@ -33,15 +31,10 @@ from __future__ import annotations
 
 import logging
 import os
-import re
-import sys
 from pathlib import Path
 from typing import Any
 
-try:
-    import yaml
-except ImportError:  # pragma: no cover - pyyaml 为可选依赖
-    yaml = None
+import yaml
 
 from .registry import (
     BUNDLED_SKILL_RANK,
@@ -89,167 +82,7 @@ def find_project_root(cwd: str) -> Path:
 # ---------- frontmatter YAML ----------
 
 def _load_yaml_text(text: str) -> Any:
-    if yaml is not None:
-        return yaml.safe_load(text)
-    return _parse_yaml_subset(text)
-
-
-def _split_yaml_lines(text: str) -> list[tuple[int, str, str]]:
-    """返回 [(indent, content, line_no)]，空行/纯注释行剔除，缩进以空格计。
-
-    行内 `#` 注释（# 前有空白）在值解析阶段再处理，这里只保留原文。
-    """
-    result: list[tuple[int, str, str]] = []
-    for line_no, raw in enumerate(text.splitlines(), start=1):
-        if "\t" in raw[: len(raw) - len(raw.lstrip())]:
-            raise ValueError(f"YAML 缩进不得使用 tab（行 {line_no}）")
-        content = raw.rstrip()
-        if not content.strip() or content.lstrip().startswith("#"):
-            continue
-        stripped = content.lstrip()
-        indent = len(content) - len(stripped)
-        result.append((indent, stripped, line_no))
-    return result
-
-
-def _parse_yaml_scalar(raw: str) -> Any:
-    """解析一个标量值；裸字符串去行内注释。"""
-    stripped = raw.strip()
-    if stripped.startswith('"'):
-        if len(stripped) < 2 or not stripped.endswith('"'):
-            raise ValueError("未闭合的双引号字符串")
-        return _unescape_quoted(stripped[1:-1])
-    if stripped.startswith("'"):
-        if len(stripped) < 2 or not stripped.endswith("'"):
-            raise ValueError("未闭合的单引号字符串")
-        return stripped[1:-1].replace("''", "'")
-    if stripped in ("null", "Null", "NULL", "~"):
-        return None
-    if stripped in ("true", "True", "TRUE"):
-        return True
-    if stripped in ("false", "False", "FALSE"):
-        return False
-    if re.fullmatch(r"-?\d+", stripped):
-        return int(stripped)
-    if re.fullmatch(r"-?\d+\.\d+([eE][+-]?\d+)?", stripped):
-        return float(stripped)
-    if "#" in stripped:
-        hash_index = stripped.index("#")
-        if hash_index > 0 and stripped[hash_index - 1] in " \t":
-            stripped = stripped[:hash_index].rstrip()
-    return stripped
-
-
-def _unescape_quoted(value: str) -> str:
-    return (value.replace("\\n", "\n")
-                .replace("\\t", "\t")
-                .replace("\\\\", "\\")
-                .replace('\\"', '"'))
-
-
-def _parse_yaml_subset(text: str) -> Any:
-    """极简 YAML 子集解析器（仅 frontmatter 常见形态，fail-closed）。
-
-    支持：嵌套 mapping（空格缩进）、`- ` 列表（扁平或作为映射值）、
-    引号字符串、布尔/数字/null、块标量 `|` / `>`（literal / fold）。
-    不支持的语法抛 ValueError——调用方把文件当作坏 frontmatter 忽略。
-    """
-    lines = _split_yaml_lines(text)
-    root: dict[str, Any] = {}
-    # 解析状态栈：(indent, container, parent_key_into_parent)
-    stack: list[tuple[int, Any, str | None]] = [(-1, root, None)]
-    index = 0
-    block_buffer: list[str] = []
-    block_mode: str | None = None  # '|' 或 '>'
-    block_indent = 0
-
-    def flush_block() -> None:
-        nonlocal block_buffer, block_mode
-        if block_mode is None:
-            return
-        parent = stack[-1][1]
-        key = stack[-1][2]
-        joined = "\n".join(block_buffer)
-        if block_mode == ">":
-            joined = re.sub(r"\n{2,}", "\n", joined)
-            joined = joined.replace("\n", " ")
-        if key is not None:
-            parent[key] = joined
-        else:
-            parent.append(joined)
-        block_buffer = []
-        block_mode = None
-
-    while index < len(lines):
-        indent, stripped, line_no = lines[index]
-        if block_mode is not None:
-            if indent > block_indent:
-                # 块标量内容行（教学简化：逐行去除公共前导空白）
-                block_buffer.append(stripped)
-                index += 1
-                continue
-            flush_block()
-        while len(stack) > 1 and indent <= stack[-1][0]:
-            stack.pop()
-        container = stack[-1][1]
-        key = stack[-1][2]
-        if stripped.startswith("- "):
-            items = stripped[2:].strip()
-            if isinstance(container, list):
-                pass
-            elif (isinstance(container, dict) and len(container) == 0
-                    and len(stack) >= 2 and stack[-1][2] is not None):
-                # 惰性类型：`key:` 后首个内容是列表 → 把空 dict 换成 list
-                parent_container = stack[-2][1]
-                new_list: list[Any] = []
-                parent_container[stack[-1][2]] = new_list
-                stack[-1] = (stack[-1][0], new_list, None)
-                container = new_list
-            else:
-                raise ValueError(f"列表项出现在非列表上下文（行 {line_no}）")
-            if items:
-                container.append(_parse_yaml_scalar(items))
-            else:
-                child: list[Any] = []
-                container.append(child)
-                stack.append((indent, child, None))
-                index += 1
-                continue
-            index += 1
-            continue
-        if ":" not in stripped:
-            raise ValueError(f"YAML 行缺少 ':'（行 {line_no}）")
-        pair_key, _, pair_value = stripped.partition(":")
-        pair_key = pair_key.strip()
-        if not pair_key:
-            raise ValueError(f"空映射键（行 {line_no}）")
-        if pair_key in ("true", "false", "null"):
-            raise ValueError(f"非法映射键 {pair_key!r}（行 {line_no}）")
-        raw_value = pair_value.strip()
-        if raw_value in ("|", ">"):
-            if not isinstance(container, dict):
-                raise ValueError(f"块标量只能作映射值（行 {line_no}）")
-            container[pair_key] = ""
-            stack.append((indent, container, pair_key))
-            block_mode = raw_value
-            block_indent = indent
-            index += 1
-            continue
-        parsed = _parse_yaml_scalar(raw_value) if raw_value else None
-        if raw_value and raw_value.startswith("{"):
-            raise ValueError(f"flow mapping 不受支持（行 {line_no}）")
-        if isinstance(container, dict):
-            if parsed is None and raw_value == "":
-                child: dict[str, Any] = {}
-                container[pair_key] = child
-                stack.append((indent, child, pair_key))
-            else:
-                container[pair_key] = parsed
-        elif key is not None:
-            raise ValueError(f"映射值出现在嵌套列表后（行 {line_no}）")
-        index += 1
-    flush_block()
-    return root
+    return yaml.safe_load(text)
 
 
 def parse_frontmatter(raw: str) -> dict | None:

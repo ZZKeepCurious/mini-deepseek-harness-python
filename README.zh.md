@@ -2,9 +2,9 @@
 
 [English](README.md) | 中文
 
-**Mini DeepSeek Harness** 是用 **Python（成熟开源库优先，无语义等价库时才用标准库手写）** 逐层复现 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`，由 [DeepSeek AI](https://deepseek.com) 开发的开源 Agent 运行时）的核心约定、**面向产品化的生产就绪**实现（`httpx` 承载 DeepSeek SSE 传输、可选 `pyyaml`、可选 `[web]` extra：`fastapi` + `uvicorn` 承载 HTTP/SSE 传输层）。
+**Mini DeepSeek Harness** 是用 **Python（成熟开源库优先，无语义等价库时才用标准库手写）** 逐层复现 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`，由 [DeepSeek AI](https://deepseek.com) 开发的开源 Agent 运行时）的核心约定、**面向产品化的生产就绪**实现（`httpx` 承载 DeepSeek SSE 传输、`pyyaml` 承载配置、可选 `[web]` extra：`fastapi` + `uvicorn` 承载 HTTP/SSE 传输层）。
 
-上游项目整个系统建立在一个设计哲学之上：**一切皆插件**（everything is a plugin），其底层是 [Cordis](https://github.com/cordiverse/cordis)，一个依赖注入 + 事件总线框架，设计思想见论文 [_A Programming Paradigm for Spatiotemporal Composability_](https://github.com/cordiverse/paper)。我们对这一设计深表敬意。本仓库是我们的致敬之作：不止于阅读，而是亲手用 Python 重建其核心约定——事件溯源会话日志、插件事件总线、turn/step Agent Loop、能力扩展口三角色（Service Definition / Service Provider / Consumer），**成熟开源库优先**（必需第三方：`httpx` 承载 DeepSeek SSE 传输、`filelock` 承载凭据跨进程写锁、`watchdog` 承载 Cordis HMR 文件监视；可选 `pyyaml` 用于 YAML 配置），任何有 `python3` 的人都可以阅读、运行和修改它们。
+上游项目整个系统建立在一个设计哲学之上：**一切皆插件**（everything is a plugin），其底层是 [Cordis](https://github.com/cordiverse/cordis)，一个依赖注入 + 事件总线框架，设计思想见论文 [_A Programming Paradigm for Spatiotemporal Composability_](https://github.com/cordiverse/paper)。我们对这一设计深表敬意。本仓库是我们的致敬之作：不止于阅读，而是亲手用 Python 重建其核心约定——事件溯源会话日志、插件事件总线、turn/step Agent Loop、能力扩展口三角色（Service Definition / Service Provider / Consumer），**成熟开源库优先**（必需第三方：`httpx` 承载 DeepSeek SSE 传输、`filelock` 承载凭据跨进程写锁、`watchdog` 承载 Cordis HMR 文件监视、`pyyaml` 承载 YAML 配置），任何有 `python3` 的人都可以阅读、运行和修改它们。
 
 > **面向生产的复现，不是逐字节移植。** 与 DeepSeek AI 官方无关联。我们优先追求清晰与**真实部署里最要紧的契约**——wire 契约、事件溯源会话日志、可靠性/安全/互操作语义的忠实复现——而非逐包复刻上游；偏差都显式登记，绝不静默假定。
 
@@ -55,7 +55,7 @@
 
 ## 快速开始
 
-要求：Python 3.10+。必装依赖随 `pip install -e .` 一并安装：`httpx`（DeepSeek SSE 传输）、`filelock`（凭据跨进程写锁）、`watchdog`（HMR 文件监视）；可选 `pyyaml` 用于 YAML 配置；web 传输层需 `pip install ".[web]"`。
+要求：Python 3.10+。必装依赖随 `pip install -e .` 一并安装：`httpx`（DeepSeek SSE 传输）、`filelock`（凭据跨进程写锁）、`watchdog`（HMR 文件监视）、`pyyaml`（YAML 配置）；web 传输层需 `pip install ".[web]"`。
 
 ```sh
 # 跑全部测试

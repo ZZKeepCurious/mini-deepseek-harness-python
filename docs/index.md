@@ -5,7 +5,7 @@
 
 ## 这是什么
 
-本手册用 **Python（成熟开源库优先：SSE 传输 `httpx`、凭据跨进程写锁 `filelock`、文件监视 `watchdog`；YAML 可选 `pyyaml`）** 从零实现一个 `MiniHarness`：一个最小可用的 Agent 运行时核心子集，逐条复现 DeepSeek Harness（`dsh`）的**约定与硬性规定**。
+本手册用 **Python（成熟开源库优先：SSE 传输 `httpx`、凭据跨进程写锁 `filelock`、文件监视 `watchdog`；YAML 配置 `pyyaml`）** 从零实现一个 `MiniHarness`：一个最小可用的 Agent 运行时核心子集，逐条复现 DeepSeek Harness（`dsh`）的**约定与硬性规定**。
 
 复现目标不是逐行移植 TypeScript，而是**掌握约定**：
 
@@ -83,7 +83,7 @@ flowchart LR
 ```bash
 # 在仓库根目录执行（代码包 miniharness/ 与测试 tests/ 都在根下）
 
-# 1. 跑全部测试（Python 3.10+；httpx 为 SSE 传输依赖，可选 pyyaml）
+# 1. 跑全部测试（Python 3.10+；`httpx`/`filelock`/`watchdog`/`pyyaml` 为依赖）
 python -m unittest discover -s tests -t .
 
 # 2. 体验一个真实回合（无需 API key，用内置假模型）

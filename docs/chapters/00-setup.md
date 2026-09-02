@@ -1,6 +1,6 @@
 ﻿# 第 00 章：环境准备
 
-> 目标：把 MiniHarness 跑起来，知道代码在哪里、测试怎么跑、每个文件对应什么。读完整本手册不装 Node.js、不装 TypeScript；必需的 pip 包只有三个基础件：SSE 传输用的 `httpx`、跨进程锁用的 `filelock`、文件观察用的 `watchdog`（另有可选 `pyyaml`）。
+> 目标：把 MiniHarness 跑起来，知道代码在哪里、测试怎么跑、每个文件对应什么。读完整本手册不装 Node.js、不装 TypeScript；必需的 pip 包有四个基础件：SSE 传输用的 `httpx`、跨进程锁用的 `filelock`、文件观察用的 `watchdog`、YAML 配置用的 `pyyaml`。
 
 ## 0.1 前置知识
 
@@ -72,7 +72,7 @@ MiniHarness 是清晰的 Python 复现（以可复现、可学习为核心），
 | 工具体执行体直接 `await`（async 契约）；同步工具函数经 `_maybe_await` 解包；阻塞调用以 `asyncio.to_thread` 显式放行（第 12 章） | `isConcurrencySafe` 并行池 + 串行屏障 |
 | LLM 流式 async 契约 + httpx 异步 SSE 传输（abort 置位即关闭连接，真取消；per-read idle 300s 对齐上游） | `fetch` + AbortSignal 原生异步流 |
  | 同步门面经进程级常驻单事件循环驱动（`core/agent_loop/resident_loop.py` 懒加载单例；主线程 Ctrl+C 协作取消） | 常驻单事件循环（Node 进程固有） |
-| JSON/YAML 配置 + 补丁（pyyaml 可选，缺省退化 JSON；`!!js` 仅 `process.env.<NAME>` 子集） | YAML cordis.yml（同样的 id/insert/replace 语义） |
+| JSON/YAML 配置 + 补丁（pyyaml 硬依赖承载 YAML；`!!js` 仅 `process.env.<NAME>` 子集） | YAML cordis.yml（同样的 id/insert/replace 语义） |
 | LLM 失败以异常抛出（finish 带内 `{kind:'error'|'aborted'}` 与异常同走 `agent/request-error` waterfall） | `LlmError` 编码 `CONTEXT_WINDOW_EXCEEDED` / `EMPTY_RESPONSE`（可重试）等 |
 | `agent/turn-stopping`、`system-prompt/assemble` waterfall 已实现（turn-stopping 为串行终点检查点，见第 4/13 章） | 上游都有 |
 | JSONL 载体已对齐（zstd 拼接帧 + 打包行 + format.ts 目录布局，明文模式可配；教学章节用简化明文形态）；SQLite 列 `(session_id, seq, type, data)` | JSONL 默认 checksum+Zstandard 帧容器；SQLite 列 `(session_id, seq, type, time, data, source_event_seqs, surface_op)` |
