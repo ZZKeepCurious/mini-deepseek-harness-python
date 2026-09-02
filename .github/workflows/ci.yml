@@ -23,6 +23,11 @@ jobs:
       - name: Compile all sources
         run: python -m compileall -q miniharness tests examples
       - name: Run unit tests with coverage
+        env:
+          # windows-acl 真内核 e2e（tests/test_windows_acl_e2e.py）仅在真实
+          # win32 宿主 + 此环境变量门控下运行；CI 只在 windows-latest 腿开启，
+          # ubuntu 腿保持跳过（fail-closed 行为由单元测试覆盖）。
+          MINIHARNESS_INTEGRATION_WINDOWS_ACL: ${{ runner.os == 'Windows' && '1' || '0' }}
         run: python -m coverage run --source=miniharness -m unittest discover -s tests -t .
       - name: Coverage gate
         run: python -m coverage report --fail-under=85
