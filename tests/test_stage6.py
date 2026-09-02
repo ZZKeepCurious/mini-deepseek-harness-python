@@ -824,6 +824,30 @@ class TestAcpChannel(unittest.TestCase):
         finally:
             child.close()
 
+    def test_acp_child_streams_per_update_session_notifications(self):
+        provider = AcpSubAgentProvider()
+        child = provider.spawn("researcher", "你是一个研究员", cwd=os.getcwd())
+        try:
+            before = list(child._client.notifications)
+            child.run("查一下")
+            updates = [
+                (m, params) for m, params in child._client.notifications[before.__len__():]
+                if m == "session/update"
+            ]
+            self.assertTrue(updates)
+            # 每条 update 一个 session/update 通知（对齐上游逐块流式粒度）
+            self.assertTrue(all(
+                params.get("sessionId") == child._session_id
+                for _, params in updates))
+            chunk = next(
+                (params["update"] for _, params in updates
+                 if params["update"].get("sessionUpdate") == "agent_message_chunk"),
+                None)
+            self.assertIsNotNone(chunk)
+            self.assertEqual(chunk["content"], {"type": "text", "text": "任务完成。"})
+        finally:
+            child.close()
+
     def test_acp_provider_validates_permission(self):
         with self.assertRaises(ValueError):
             AcpSubAgentProvider(permission="bogus")

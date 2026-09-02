@@ -25,7 +25,7 @@ import json
 from types import MappingProxyType
 from typing import Any
 
-from ..core.session import SURFACE_TYPES, derive_event_message
+from ..core.session import SURFACE_TYPES, derive_event_message, thaw
 from .protocol import BlockAssembler
 
 __all__ = ["BLOCK_OVERHEAD", "CHARS_PER_TOKEN", "ROLE_OVERHEAD", "TokenMeter",
@@ -74,7 +74,7 @@ def estimate_tools_tokens(header) -> int:
     tools = (header or {}).get("tools") or []
     if not tools:
         return 0
-    return _ceil_len(json.dumps(tools, ensure_ascii=False, sort_keys=True)) + BLOCK_OVERHEAD
+    return _ceil_len(json.dumps(thaw(tools), ensure_ascii=False, sort_keys=True)) + BLOCK_OVERHEAD
 
 
 def estimate_header(header) -> int:

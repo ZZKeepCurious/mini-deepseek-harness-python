@@ -99,6 +99,23 @@ class _ThoughtAdapter(FakeLlmAdapter):
         yield StreamChunk("finish", reason={"kind": "stop"})
 
 
+class _UsageAdapter(FakeLlmAdapter):
+    """带 contextWindow 容量 + 产出 usage chunk 的适配器（测试 usage_update）。"""
+
+    context_window = 64_000
+
+    async def stream(self, messages, tools, signal=None):
+        yield StreamChunk("block-start", index=0, blockType="text")
+        yield StreamChunk("text-delta", index=0, text="answer")
+        yield StreamChunk("block-end", index=0,
+                          block={"type": "text", "text": "answer"})
+        yield StreamChunk("usage", usage={
+            "inputTokens": 10, "outputTokens": 5,
+        })
+        yield StreamChunk("finish", reason={"kind": "stop"})
+
+
+
 def _assert_invalid(cm, needle: str | None = None) -> str:
     """统一断言：code -32602 + 可选子串。"""
     assert isinstance(cm.exception, AcpRequestError), cm.exception
@@ -501,6 +518,36 @@ class TestSessionUpdates(unittest.TestCase):
         chunks = [u for u in server.updates
                   if u["update"]["sessionUpdate"] == "agent_message_chunk"]
         self.assertEqual(len(chunks), 2)
+
+    def test_usage_update_emitted_when_usage_and_capacity(self):
+        server = AcpServer(adapter=_UsageAdapter())
+        session_id = server.new_session(_CWD)["sessionId"]
+        server.prompt(session_id, [{"type": "text", "text": "hi"}])
+        usage = next(u["update"] for u in server.updates
+                     if u["update"]["sessionUpdate"] == "usage_update")
+        self.assertEqual(usage["size"], 64_000)
+        self.assertIsInstance(usage["used"], int)
+        self.assertGreaterEqual(usage["used"], 0)
+        # 优于消息块之后（对齐上游 assistantUpdates：usage 尾随 message chunks）
+        kinds = [u["update"]["sessionUpdate"] for u in server.updates]
+        chunk = kinds.index("agent_message_chunk")
+        self.assertLess(chunk, kinds.index("usage_update"))
+
+    def test_request_context_logs_context_window(self):
+        server = AcpServer(adapter=_UsageAdapter())
+        session_id = server.new_session(_CWD)["sessionId"]
+        server.prompt(session_id, [{"type": "text", "text": "hi"}])
+        ctx = server.sessions[session_id]["session"].request_context()
+        self.assertEqual(ctx["provider"], "fake")
+        self.assertEqual(ctx["contextWindow"], 64_000)
+
+    def test_no_usage_update_without_capacity(self):
+        # FakeLlmAdapter 无 context_window → 即便有 usage 也不发射（对齐 usageUpdate）
+        server = AcpServer(adapter=FakeLlmAdapter())
+        session_id = server.new_session(_CWD)["sessionId"]
+        server.prompt(session_id, [{"type": "text", "text": "hi"}])
+        kinds = [u["update"]["sessionUpdate"] for u in server.updates]
+        self.assertNotIn("usage_update", kinds)
 
 
 if __name__ == "__main__":

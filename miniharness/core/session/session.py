@@ -70,6 +70,16 @@ class Session:
                 return event["data"].get("header")
         return None
 
+    def request_context(self) -> dict | None:
+        """最近一次 request/context 的路由元数据（上游 session.ts requestContext()）。
+
+        返回 {provider, model, contextWindow?}；尚无 context 事件返回 None。
+        """
+        for event in reversed(self._events):
+            if event["type"] == "request/context":
+                return dict(event["data"])
+        return None
+
     def surface_nodes(self) -> list[dict]:
         """当前 surface 节点（含 seq，模型可见顺序）。
 

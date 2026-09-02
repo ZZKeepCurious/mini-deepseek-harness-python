@@ -769,7 +769,10 @@ class AgentLoop:
             })
         self._header_baseline = header
         self._request_surface_generation = self.session.replace_generation
+        context_window = getattr(self.adapter, "context_window", None)
         context = {"provider": config.get("provider"), "model": config.get("model")}
+        if context_window is not None:
+            context["contextWindow"] = context_window
         if context != self._context_baseline:
             self.session.append("request/context", context)
             self._context_baseline = context

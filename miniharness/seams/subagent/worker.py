@@ -71,8 +71,9 @@ def _dispatch_acp(server: AcpServer, method: Any, params: dict) -> Any:
         return result
     if method == "prompt":
         session_id = params["sessionId"]
+        start = len(server.updates)
         result = server.prompt(session_id, params.get("prompt") or [])
-        _notify_acp_updates(server, session_id)
+        _notify_acp_updates(server, session_id, start)
         return result
     if method == "cancel":
         server.cancel(params.get("sessionId", ""))
@@ -85,23 +86,22 @@ def _dispatch_acp(server: AcpServer, method: Any, params: dict) -> Any:
     raise AcpRequestError(-32601, f"method not found: {method}")
 
 
-def _notify_acp_updates(server: AcpServer, session_id: str) -> None:
-    """prompt 完成后发一次 session 更新通知（最后一次提交的 assistant 文本）。
+def _notify_acp_updates(server: AcpServer, session_id: str, start: int) -> None:
+    """prompt 返回后把本次追加的 updates 逐条发成 session/update 通知。
 
-    mini 同步载体的单帧终态通知（上游是流式多次 session/update 通知，
-    简化标注，见 AGENTS.md）。
+    对齐上游 subagent-acp run.ts onNotification(session/update)：每条 update
+    一个方法为 session/update 的通知（params {sessionId, update}），客户端按
+    agent_message_chunk 折叠最终文本。mini 仍为同步载体（回合结束后才批量
+    排发，非上游并发流式），但通知粒度与方法名已对齐。
     """
-    record = server.sessions.get(session_id)
-    if record is None:
-        return
-    text = record["loop"].last_response()
-    if not text:
-        return
-    _write_stdout(json.dumps({"jsonrpc": "2.0", "method": "session", "params": {
-        "sessionId": session_id,
-        "updates": [{"type": "assistant", "message": {
-            "role": "assistant", "content": [{"type": "text", "text": text}]}}],
-    }}, ensure_ascii=False))
+    for record in server.updates[start:]:
+        if record.get("sessionId") != session_id:
+            continue
+        _write_stdout(json.dumps({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {"sessionId": session_id, "update": record["update"]},
+        }, ensure_ascii=False))
 
 
 # ---------- SDK 协议端点 ----------

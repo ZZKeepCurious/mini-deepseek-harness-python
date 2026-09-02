@@ -212,14 +212,20 @@ class _AcpChild(SubAgent):
         return self._last_assistant_text(pending)
 
     def _last_assistant_text(self, start: int) -> str:
+        """从 session/update 的 agent_message_chunk 通知折叠最终 assistant 文本。
+
+        对齐上游 subagent-acp AssistantOutputFold：跨全部 agent_message_chunk
+        按序拼接 text（其他 update 类型消费但不影响返回文本）。
+        """
+        parts: list[str] = []
         for method, params in self._client.notifications[start:]:
-            if method == "session" and params.get("sessionId") == self._session_id:
-                for update in params.get("updates") or []:
-                    block = update.get("message", {}).get("content", [])
-                    texts = [b.get("text", "") for b in block if b.get("type") == "text"]
-                    if texts:
-                        return "".join(texts)
-        return ""
+            if method == "session/update" and params.get("sessionId") == self._session_id:
+                update = params.get("update") or {}
+                if update.get("sessionUpdate") == "agent_message_chunk":
+                    content = update.get("content") or {}
+                    if content.get("type") == "text":
+                        parts.append(content.get("text", ""))
+        return "".join(parts)
 
     def close(self) -> None:
         self._client.close()

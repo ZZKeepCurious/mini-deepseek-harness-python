@@ -51,9 +51,9 @@ model-control.ts + updates.ts）：
   * 错误码：invalid params / internal error（JSON-RPC -32602 / -32603）。
 
 载体简化：上游 async（whenIdle 等待 + stream 通知 + 磁盘持久化）；mini 同步
-——prompt 直接跑完整回合后返回 stopReason，session/update 通知以 updates 记录
-列表承载（无真实事件总线，回合结束一次性投影）；close 归档在内存（无磁盘
-持久化目录，恢复复用同一 Session 对象与装配 ctx、冷重建 loop；createdAt 取
+——prompt 直接跑完整回合后返回 stopReason，session/update 通知按 updates 记录逐条
+排发（无真实事件总线，回合结束后批量一次性投影，非上游并发流式）；close 归档在
+内存（无磁盘持久化目录，恢复复用同一 Session 对象与装配 ctx、冷重建 loop；createdAt 取
 Session.created_at 的进程内时间戳）；模型选择为单一 adapter 路由——provider/
 model 多选目录经可选的 adapter.models_catalog 教学扩展承载（上游为 llm 服务
 listProviders/listModels），reasoning 目录经可选的
@@ -64,8 +64,7 @@ adapter.resolve_model_info()['reasoning'] 承载（内置适配器不声明 → 
 实例，config 里的 provider/model/reasoningEffort 只写入 request 信封
 （request/header、request/context 日志）成为「模型可见」事实，执行同源。如实
 标注：这是单适配器载体的教学边界，wire 层换路由不在 mini 范围内；
-usage_update 不发射（mini 无会话级 contextWindow/requestContext，
-token_meter 只有 totalTokens——如实省略）；同步单飞下 pin_turn/release_turn
+同步单飞下 pin_turn/release_turn
 无 turn 编号匹配（单一提示符串行回合语义等价）。双平台：会话事件流的
 request/header 数据形状为 {header:{config, adapterDefaults?}, reason}。
 """
@@ -89,7 +88,11 @@ from ..attachment import (
 from ..core.scope import Context
 from ..llm import FakeLlmAdapter
 from ..llm.retry import apply_retry_planner
-from ..compaction import install_compaction, install_tool_result_pruner
+from ..compaction import (
+    TokenMeter,
+    install_compaction,
+    install_tool_result_pruner,
+)
 from ..jobs import install_jobs, register_job_tools
 from ..skills import install_skills, register_skill_tools
 from ..core.system_prompt import install_system_prompt
@@ -630,7 +633,8 @@ class AcpServer:
 
     对齐上游 apply() 的方法集：initialize / authenticate / new_session /
     resume_session / list_sessions / set_session_config_option /
-    close_session / prompt / cancel；会话更新流以 updates 记录承载（简化标注）。
+    close_session / prompt / cancel；会话更新流经 `_emit_session_updates` 投影为
+    `session/update` 通知（逐条排发，回合结束后批量一次性投影，简化标注）。
     会话生命周期在内存完成：close 归档、resume 复用同一 Session 对象与装配
     ctx、冷重建 loop（无磁盘持久化，见模块 docstring 载体简化）。
     """
@@ -703,6 +707,7 @@ class AcpServer:
             "selection": self._initial_selection,
             "projected_seq": 0,
             "inflight": False,
+            "meter": TokenMeter(),
         }
         record["model_control"] = AcpModelControl(self._adapter,
                                                   self._initial_selection)
@@ -955,7 +960,8 @@ class AcpServer:
         agent_message_chunk，均携带 messageId）；tool/call → tool_call 起始，
         tool/result → tool_call_update 结算。projected_seq 截止杜绝跨 prompt
         重复投射旧 turn 的工具更新；image 块经 readImage 读回 base64 内联。
-        usage_update 不上线（mini 无会话级 contextWindow，见模块 docstring）。
+        assistant/message 带 usage 且会话有 contextWindow 时，块更新之后额外
+        发射 usage_update（对齐 updates.ts usageUpdate）。
         """
         session = record["session"]
         events = session.events
@@ -990,6 +996,7 @@ class AcpServer:
                         "messageId": message_id,
                         "content": content,
                     })
+                self._emit_usage_update(record, event)
             elif etype == "tool/call":
                 data = event["data"]
                 self._push_update(record, {
@@ -1019,6 +1026,25 @@ class AcpServer:
                     "content": content,
                 })
         record["projected_seq"] = len(events)
+
+    def _emit_usage_update(self, record: dict, event: dict) -> None:
+        """assistant/message 带 usage 且会话有 contextWindow 时发射 usage_update。
+
+        对齐 updates.ts usageUpdate：三个事实齐备才发射（usage 存在、
+        requestContext().contextWindow 存在、tokenMeter 可用），缺任一个静默
+        省略；used = tokenMeter.measure(session).totalTokens，size = contextWindow。
+        """
+        if event["data"].get("usage") is None:
+            return
+        size = (record["session"].request_context() or {}).get("contextWindow")
+        if size is None:
+            return
+        total = record["meter"].measure(record["session"])["totalTokens"]
+        self._push_update(record, {
+            "sessionUpdate": "usage_update",
+            "used": total,
+            "size": size,
+        })
 
     def _push_update(self, record: dict, update: dict) -> None:
         """追加一条 session/update 记录（简化载体；上游经 notify 发送标准通知）。"""
