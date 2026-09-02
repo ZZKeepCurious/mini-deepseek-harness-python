@@ -84,6 +84,6 @@ fold_events_json(events)   # {"partial":…, "turns":[…], "requests":[…]}
 - [ ] 说出"投影"设计的价值：日志唯一数据源，折叠可重放可纠正；
 - [ ] 解释 turn 摘要为什么必须由 turn/start 驱动（而不是从消息推断）；
 - [ ] 手动构造一个崩溃尾部事件流，观察 partial 标记与 duration=None；
-- [ ] 说出 mini 相对上游的简化（无虚拟化/增量搜索/UI，折叠语义对齐）。
+- [ ] 说出 mini Python 折叠引擎（`client/trajectory.py`）相对上游的简化（折叠语义对齐、无 UI）；浏览器侧 `webui/` Trajectory 已按上游概念补虚拟化窗口 + Overview 折叠跳转 + 增量搜索（2026-09-02 R5，见 verified-diffs §2.17）。
 
 > 下一章：运行时自我修改——agent 在进程内给自己加插件的生命周期。

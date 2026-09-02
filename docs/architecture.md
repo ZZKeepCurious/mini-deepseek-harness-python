@@ -232,7 +232,7 @@ miniharness/
 
 前端唯一的耦合面是 `web/` 层发布的 wire 契约，不是 Python 内部 API——这保证前端可独立选用现代化技术栈（如 React）而无需改造内核。
 
-**`webui/`**（仓库顶层独立工程，React+TS+Vite，2026-08-30 落地）：产品化浏览器前端，只消费 `web/` 发布的 alpha.1 wire 契约（两信封 RPC `/api/<endpoint>` + `/api/remote.mux` WS 帧 + `$events`/`$events/result` + `session.follow`/`control`），零 Python import。三层结构：`src/wire/`（契约客户端层，纯 TS 可单测）、`src/app/`（React 编排 hooks）、`src/ui/`（无状态展示组件）；测试用 vitest（mock fetch/WS）。开发期 Vite dev server 把 `/api` 与 `/api/remote.mux` 代理到本地 Python 后端；生产期 `vite build` 产出 `webui/dist/`，后端 `web/frontend.py` 经 `MINIHARNESS_WEBUI_DIST` 指向该产物即可承载（`serve_static` 契约不变）。覆盖范围对齐教学 SPA 功能面（会话列表/新建、Trajectory、审批瀑布、队列/作业），不整体移植上游 `packages/client` 40 模块。
+**`webui/`**（仓库顶层独立工程，React+TS+Vite，2026-08-30 落地）：产品化浏览器前端，只消费 `web/` 发布的 alpha.1 wire 契约（两信封 RPC `/api/<endpoint>` + `/api/remote.mux` WS 帧 + `$events`/`$events/result` + `session.follow`/`control`），零 Python import。三层结构：`src/wire/`（契约客户端层，纯 TS 可单测）、`src/app/`（React 编排 hooks）、`src/ui/`（无状态展示组件）；测试用 vitest（mock fetch/WS）。开发期 Vite dev server 把 `/api` 与 `/api/remote.mux` 代理到本地 Python 后端；生产期 `vite build` 产出 `webui/dist/`，后端 `web/frontend.py` 经 `MINIHARNESS_WEBUI_DIST` 指向该产物即可承载（`serve_static` 契约不变）。覆盖范围对齐教学 SPA 功能面（会话列表/新建、Trajectory（虚拟化窗口 + Overview 折叠跳转 + 全文搜索，2026-09-02 R5）、审批瀑布、队列/作业），不整体移植上游 `packages/client` 40 模块。
 
 规则：
 
