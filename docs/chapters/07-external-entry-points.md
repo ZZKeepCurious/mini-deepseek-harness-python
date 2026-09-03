@@ -313,7 +313,7 @@ mini 的同步近似：上游是字节流 + async，mini 是"行馈送 + 内存�
 
 ### 7.7.5 简化标注
 
-- 上游 async（whenIdle 等待、stream 通知、`agent_message_chunk` 增量）；mini 同步跑完整个回合，会话更新按 updates 记录**逐条**排发为 `session/update` 通知（`_notify_acp_updates`，方法名与粒度对齐上游 notify:124-133），assistant/message 带 usage 且会话有 contextWindow 时另发 `usage_update`——仍为回合结束后批量一次性投影（非上游并发流式，残余载体差异）；
+- 上游 async（whenIdle 等待、stream 通知、`agent_message_chunk` 增量）；mini 同步跑完整个回合但 `session/update` **并发逐块流式**——`AcpServer._install_update_stream` 订阅 `session/event`（对齐上游 onSessionEvent）把已提交事件逐事件实时投影，`update_sink` 即时外发（stdio worker 经 `_acp_update_sink` 逐块写通知、先于 prompt 响应帧）；in-process 载体 `update_sink=None` 时收敛 `server.updates` 批量。assistant/message 带 usage 且会话有 contextWindow 时另发 `usage_update`；
 - 上游经 cordis 插件挂载（`inject: ['agents']`）+ ACP SDK 的 stdio 连接；mini 直接操作服务对象；
 - inflight 拒绝在同步模型下只能手动置标志触发（真并发不存在）。
 

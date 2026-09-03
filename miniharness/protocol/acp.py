@@ -51,8 +51,9 @@ model-control.ts + updates.ts）：
   * 错误码：invalid params / internal error（JSON-RPC -32602 / -32603）。
 
 载体简化：上游 async（whenIdle 等待 + stream 通知 + 磁盘持久化）；mini 同步
-——prompt 直接跑完整回合后返回 stopReason，session/update 通知按 updates 记录逐条
-排发（无真实事件总线，回合结束后批量一次性投影，非上游并发流式）；close 归档在
+——prompt 直接跑完整回合后返回 stopReason，session/update 通知经订阅 session/event
+逐事件实时投影即时外发（并发逐块，非回合后批量；update_sink 提供时每条即写
+wire，否则收敛 server.updates batch 供 in-process 读取）；close 归档在
 内存（无磁盘持久化目录，恢复复用同一 Session 对象与装配 ctx、冷重建 loop；createdAt 取
 Session.created_at 的进程内时间戳）；模型选择为单一 adapter 路由——provider/
 model 多选目录经可选的 adapter.models_catalog 教学扩展承载（上游为 llm 服务
@@ -633,8 +634,9 @@ class AcpServer:
 
     对齐上游 apply() 的方法集：initialize / authenticate / new_session /
     resume_session / list_sessions / set_session_config_option /
-    close_session / prompt / cancel；会话更新流经 `_emit_session_updates` 投影为
-    `session/update` 通知（逐条排发，回合结束后批量一次性投影，简化标注）。
+    close_session / prompt / cancel；会话更新流经 `_install_update_stream` 订阅
+    session/event 逐事件实时投影为 `session/update`（对齐上游 onSessionEvent 并发
+    逐块推送；update_sink 提供时即时外发，否则收敛 batch 列表）。
     会话生命周期在内存完成：close 归档、resume 复用同一 Session 对象与装配
     ctx、冷重建 loop（无磁盘持久化，见模块 docstring 载体简化）。
     """
@@ -643,7 +645,8 @@ class AcpServer:
 
     def __init__(self, adapter: Any = None, provider: str | None = None,
                  model: str | None = None, attachment: Any = None,
-                 session_list_page_size: int | None = None):
+                 session_list_page_size: int | None = None,
+                 update_sink: Callable[[str, dict], None] | None = None):
         self._adapter = adapter or FakeLlmAdapter()
         # 初始路由：构造参数优先，缺省取 adapter 声明的路由（上游 AcpConfig
         # provider/model；mini 单一 adapter 即路由本体）
@@ -655,7 +658,11 @@ class AcpServer:
         self._sessions: dict[str, dict] = {}    # 活跃: session_id -> record
         self._archived: dict[str, dict] = {}    # 已关闭归档（可恢复池）
         self._closed = False
-        self.updates: list[dict] = []          # 会话更新流（简化载体）
+        # 会话更新流。update_sink 提供时（真流式载体，如 stdio worker）每条
+        # 投影即经 sink 即时外发（对齐上游 notify('session/update') 逐块推送）；
+        # 缺省时收敛到 self.updates 批量（in-process 载体，测试读该列表）。
+        self._update_sink = update_sink
+        self.updates: list[dict] = []          # 会话更新流（批量载体）
         self._answerer: Callable | None = None   # 审批决策注入（测试用）
         self._session_list_page_size = _resolve_session_list_page_size(
             session_list_page_size)
@@ -705,13 +712,13 @@ class AcpServer:
             "loop": None,
             "model_control": None,
             "selection": self._initial_selection,
-            "projected_seq": 0,
             "inflight": False,
             "meter": TokenMeter(),
         }
         record["model_control"] = AcpModelControl(self._adapter,
                                                   self._initial_selection)
         self._install_model_selection(ctx, record)
+        self._install_update_stream(record)
         record["loop"] = self._activate(record)
         self._sessions[session_id] = record
         self._archived[session_id] = record
@@ -930,7 +937,6 @@ class AcpServer:
                 record["loop"].followup(message)
             finally:
                 record["model_control"].release_turn()
-            self._emit_session_updates(record)
         finally:
             record["inflight"] = False
         reason = self._last_turn_end(record["loop"])
@@ -952,80 +958,99 @@ class AcpServer:
                 return event["data"].get("reason")
         return None
 
-    def _emit_session_updates(self, record: dict) -> None:
-        """把新已提交会话事件投影为 ACP 更新流（updates.ts + session.ts 同款）。
+    def _install_update_stream(self, record: dict) -> None:
+        """订阅 session/event 把已提交事件实时投影为 ACP 更新流（对齐上游
+        onSessionEvent → updates.ts 逐块推送；mini 在同步回合内以 ctx/session/event
+        载波监听实现并发逐块，而非回合后批量投影）。
 
-        assistant/message 仅 inflight turn 内的块可见（事件逐 block：reasoning
-        非空 → agent_thought_chunk；其余经 assistantBlockToAcp →
-        agent_message_chunk，均携带 messageId）；tool/call → tool_call 起始，
-        tool/result → tool_call_update 结算。projected_seq 截止杜绝跨 prompt
-        重复投射旧 turn 的工具更新；image 块经 readImage 读回 base64 内联。
-        assistant/message 带 usage 且会话有 contextWindow 时，块更新之后额外
-        发射 usage_update（对齐 updates.ts usageUpdate）。
+        随事件 append 即时投影：assistant/message → agent_thought_chunk /
+        agent_message_chunk（+usage_update），tool/call → tool_call 起始，
+        tool/result → tool_call_update 结算；只投影当前开启回合（open_turn）内的
+        事件，跨 prompt 不会重复投射旧回合（每个事件恰投影一次）。幂等：每
+        record 仅安装一次，resume 复用同一 ctx/监听，不重复注册。
         """
-        session = record["session"]
-        events = session.events
-        cutoff = record["projected_seq"]
-        inflight_turn = None
-        for event in reversed(events):
-            if event["type"] == "turn/end":
-                inflight_turn = event["data"].get("turn")
-                break
-        for event in events[cutoff:]:
-            etype = event["type"]
-            if etype == "assistant/message":
-                if event["data"].get("turn") != inflight_turn:
+        if getattr(record["ctx"], "_miniharness_acp_stream_hooked", False):
+            return
+        state = {"open_turn": None}
+
+        def on_session_event(payload: dict) -> None:
+            event = payload.get("event") or {}
+            etype = event.get("type")
+            if etype == "turn/start":
+                state["open_turn"] = event["data"].get("turn")
+                return
+            if etype == "turn/end":
+                state["open_turn"] = None
+                return
+            if etype not in ("assistant/message", "tool/call", "tool/result"):
+                return
+            if event.get("data", {}).get("turn") != state["open_turn"]:
+                return
+            self._project_event(record, event)
+
+        record["ctx"].on("session/event", on_session_event)
+        record["ctx"]._miniharness_acp_stream_hooked = True
+
+    def _project_event(self, record: dict, event: dict) -> None:
+        """把一条已提交会话事件投影成 ACP 更新（updates.ts + session.ts 同款）。
+
+        assistant/message 事件逐 block（reasoning 非空 → agent_thought_chunk；
+        其余经 assistantBlockToAcp → agent_message_chunk，均携带 messageId）；
+        tool/call → tool_call 起始，tool/result → tool_call_update 结算；image
+        块经 readImage 读回 base64 内联；带 usage 且会话有 contextWindow 时，
+        块更新之后额外发射 usage_update（对齐 updates.ts usageUpdate）。
+        """
+        etype = event["type"]
+        if etype == "assistant/message":
+            message = event["data"].get("message") or {}
+            message_id = message.get("id")
+            for block in message.get("content", []):
+                if block.get("type") == "reasoning":
+                    text = block.get("text", "")
+                    if text:
+                        self._deliver_update(record, {
+                            "sessionUpdate": "agent_thought_chunk",
+                            "messageId": message_id,
+                            "content": {"type": "text", "text": text},
+                        })
                     continue
-                message = event["data"].get("message") or {}
-                message_id = message.get("id")
-                for block in message.get("content", []):
-                    if block.get("type") == "reasoning":
-                        text = block.get("text", "")
-                        if text:
-                            self._push_update(record, {
-                                "sessionUpdate": "agent_thought_chunk",
-                                "messageId": message_id,
-                                "content": {"type": "text", "text": text},
-                            })
-                        continue
-                    content = assistant_block_to_acp(self._attachment, block)
-                    if content is None:
-                        continue
-                    self._push_update(record, {
-                        "sessionUpdate": "agent_message_chunk",
-                        "messageId": message_id,
-                        "content": content,
-                    })
-                self._emit_usage_update(record, event)
-            elif etype == "tool/call":
-                data = event["data"]
-                self._push_update(record, {
-                    "sessionUpdate": "tool_call",
-                    "toolCallId": data.get("callId"),
-                    "title": data.get("name"),
-                    "kind": "other",
-                    "status": "in_progress",
-                    "rawInput": _parse_tool_arguments(data.get("arguments", "")),
-                })
-            elif etype == "tool/result":
-                data = event["data"]
-                blocks = (data.get("message") or {}).get("content") or []
-                if not blocks:
+                content = assistant_block_to_acp(self._attachment, block)
+                if content is None:
                     continue
-                block = blocks[0]
-                content = []
-                for inner in block.get("content", []):
-                    converted = assistant_block_to_acp(self._attachment, inner)
-                    if converted is None:
-                        continue
-                    content.append({"type": "content", "content": converted})
-                self._push_update(record, {
-                    "sessionUpdate": "tool_call_update",
-                    "toolCallId": block.get("toolCallId"),
-                    "status": "failed" if block.get("isError") else "completed",
+                self._deliver_update(record, {
+                    "sessionUpdate": "agent_message_chunk",
+                    "messageId": message_id,
                     "content": content,
                 })
-        record["projected_seq"] = len(events)
+            self._emit_usage_update(record, event)
+        elif etype == "tool/call":
+            data = event["data"]
+            self._deliver_update(record, {
+                "sessionUpdate": "tool_call",
+                "toolCallId": data.get("callId"),
+                "title": data.get("name"),
+                "kind": "other",
+                "status": "in_progress",
+                "rawInput": _parse_tool_arguments(data.get("arguments", "")),
+            })
+        elif etype == "tool/result":
+            data = event["data"]
+            blocks = (data.get("message") or {}).get("content") or []
+            if not blocks:
+                return
+            block = blocks[0]
+            content = []
+            for inner in block.get("content", []):
+                converted = assistant_block_to_acp(self._attachment, inner)
+                if converted is None:
+                    continue
+                content.append({"type": "content", "content": converted})
+            self._deliver_update(record, {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": block.get("toolCallId"),
+                "status": "failed" if block.get("isError") else "completed",
+                "content": content,
+            })
 
     def _emit_usage_update(self, record: dict, event: dict) -> None:
         """assistant/message 带 usage 且会话有 contextWindow 时发射 usage_update。
@@ -1040,18 +1065,19 @@ class AcpServer:
         if size is None:
             return
         total = record["meter"].measure(record["session"])["totalTokens"]
-        self._push_update(record, {
+        self._deliver_update(record, {
             "sessionUpdate": "usage_update",
             "used": total,
             "size": size,
         })
 
-    def _push_update(self, record: dict, update: dict) -> None:
-        """追加一条 session/update 记录（简化载体；上游经 notify 发送标准通知）。"""
-        self.updates.append({
-            "sessionId": record["session"].session_id,
-            "update": update,
-        })
+    def _deliver_update(self, record: dict, update: dict) -> None:
+        """外发一条 session/update：有 update_sink 即时推送（并发流式），否则收敛 batch。"""
+        session_id = record["session"].session_id
+        if self._update_sink is not None:
+            self._update_sink(session_id, update)
+        else:
+            self.updates.append({"sessionId": session_id, "update": update})
 
     # ---------- cancel ----------
 

@@ -3,8 +3,9 @@
 `python -m miniharness.seams.subagent.worker <acp|sdk> [--permission allow|reject]`
 
 每个 worker 是独立进程：读 stdin 的 newline-delimited JSON-RPC 请求帧，
-以 AcpServer / SdkRuntime 承载回合（假模型适配器），事件通知先于响应帧
-写出（mini 同步载体的顺序约定，上游为并发流），EOF 后退出 0。
+以 AcpServer / SdkRuntime 承载回合（假模型适配器）。ACP 通道经
+update_sink 在回合执行期间逐事件并发流式写 session/update 通知（先于
+响应帧；对齐上游 notify 并发流）；SDK 通道按事件终态逐条转发，EOF 后退出 0。
 
 对齐上游：ACP 通道（subagent-acp run.ts 的 startAcpRun）与 SDK 通道
 （subagent-dsh-sdk run.ts 的 startSdkRun）的子进程端点；mini 端点的
@@ -35,7 +36,7 @@ def _error_frame(id_: str, code: int, message: str) -> str:
 # ---------- ACP 协议端点 ----------
 
 def run_acp_worker(permission: str) -> int:
-    server = AcpServer()
+    server = AcpServer(update_sink=_acp_update_sink)
     if permission == "reject":
         # 上游 reject 策略经 wire 应答 {outcome:'cancelled'}（subagent-acp
         # run.ts:262），桥映射为审批 'cancelled'；对齐取 'cancelled' 而非 'rejected'
@@ -63,6 +64,19 @@ def run_acp_worker(permission: str) -> int:
     return 0
 
 
+def _acp_update_sink(session_id: str, update: dict) -> None:
+    """把每条 session/update 即时写成一个 notification 帧（对齐上游 notify）。
+
+    prompt 回合执行期间（followup 同步泵送、事件逐条 append 时）逐块外发，
+    先于 prompt 的 response 帧到达客户端——并发流式，非回合后批量排发。
+    """
+    _write_stdout(json.dumps({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {"sessionId": session_id, "update": update},
+    }, ensure_ascii=False))
+
+
 def _dispatch_acp(server: AcpServer, method: Any, params: dict) -> Any:
     if method == "initialize":
         return server.initialize()
@@ -70,10 +84,8 @@ def _dispatch_acp(server: AcpServer, method: Any, params: dict) -> Any:
         result = server.new_session(params.get("cwd", "."))
         return result
     if method == "prompt":
-        session_id = params["sessionId"]
-        start = len(server.updates)
-        result = server.prompt(session_id, params.get("prompt") or [])
-        _notify_acp_updates(server, session_id, start)
+        result = server.prompt(session_id=params["sessionId"],
+                               prompt=params.get("prompt") or [])
         return result
     if method == "cancel":
         server.cancel(params.get("sessionId", ""))
@@ -85,23 +97,6 @@ def _dispatch_acp(server: AcpServer, method: Any, params: dict) -> Any:
     # /sdk 0.25.1 RequestError.methodNotFound → -32601，acp.js:548,1270）
     raise AcpRequestError(-32601, f"method not found: {method}")
 
-
-def _notify_acp_updates(server: AcpServer, session_id: str, start: int) -> None:
-    """prompt 返回后把本次追加的 updates 逐条发成 session/update 通知。
-
-    对齐上游 subagent-acp run.ts onNotification(session/update)：每条 update
-    一个方法为 session/update 的通知（params {sessionId, update}），客户端按
-    agent_message_chunk 折叠最终文本。mini 仍为同步载体（回合结束后才批量
-    排发，非上游并发流式），但通知粒度与方法名已对齐。
-    """
-    for record in server.updates[start:]:
-        if record.get("sessionId") != session_id:
-            continue
-        _write_stdout(json.dumps({
-            "jsonrpc": "2.0",
-            "method": "session/update",
-            "params": {"sessionId": session_id, "update": record["update"]},
-        }, ensure_ascii=False))
 
 
 # ---------- SDK 协议端点 ----------

@@ -13,6 +13,7 @@ import json
 import os
 import unittest
 
+from miniharness.core.tools import Tool
 from miniharness.llm import FakeLlmAdapter, StreamChunk
 from miniharness.protocol.acp import (
     AcpModelConfigError,
@@ -548,6 +549,92 @@ class TestSessionUpdates(unittest.TestCase):
         server.prompt(session_id, [{"type": "text", "text": "hi"}])
         kinds = [u["update"]["sessionUpdate"] for u in server.updates]
         self.assertNotIn("usage_update", kinds)
+
+
+class TestAcpStreaming(unittest.TestCase):
+    def test_update_sink_streams_live_during_turn(self):
+        """update_sink 在回合执行期间即时外发：tool/call 更新先于工具结算送达。
+
+        探针工具在真正执行时快照已投递的更新：此时应已含 tool_call（tool/call
+        事件 append 即投影），而尚未含 tool_call_update（tool/result 尚未发生）。
+        若仍是回合后批量，探针看到的投递列表必为空。
+        """
+        delivered = []
+        adapter = FakeLlmAdapter(
+            tool_call={"name": "probe_stream", "arguments": {}})
+        server = AcpServer(adapter=adapter,
+                           update_sink=lambda sid, u: delivered.append((sid, u)))
+        session_id = server.new_session(_CWD)["sessionId"]
+        record = server.sessions[session_id]
+        observed = {}
+
+        def probe_execute(_args, _exec):
+            observed["during_probe"] = list(delivered)
+            return {"text": "probe-done"}
+
+        record["ctx"].get("tools").register(
+            Tool(name="probe_stream", description="probe",
+                 execute=probe_execute, parameters={"type": "object"}))
+
+        server.prompt(session_id, [{"type": "text", "text": "hi"}])
+
+        during = observed.get("during_probe", [])
+        # 探针执行时 tool_call 已实时投递
+        self.assertTrue(any(
+            sid == session_id and u["sessionUpdate"] == "tool_call"
+            for sid, u in during))
+        # 但工具结算尚未发生 → 无 tool_call_update
+        self.assertFalse(any(
+            sid == session_id and u["sessionUpdate"] == "tool_call_update"
+            for sid, u in during))
+        # 回合结束后全部投递齐
+        after = [u for sid, u in delivered if sid == session_id]
+        kinds = [u["sessionUpdate"] for u in after]
+        self.assertEqual(kinds.count("tool_call"), 1)
+        self.assertEqual(kinds.count("tool_call_update"), 1)
+        self.assertLess(kinds.index("tool_call"),
+                        kinds.index("tool_call_update"))
+
+    def test_update_sink_matches_batch_content(self):
+        """同一次 prompt，update_sink 投递内容与批量载体 server.updates 一致。"""
+        delivered = []
+        adapter = FakeLlmAdapter(
+            tool_call={"name": "job_list", "arguments": {"detail": False}})
+        server = AcpServer(adapter=adapter,
+                           update_sink=lambda sid, u: delivered.append(u))
+        session_id = server.new_session(_CWD)["sessionId"]
+        server.prompt(session_id, [{"type": "text", "text": "看下作业"}])
+
+        batch_server = AcpServer(adapter=FakeLlmAdapter(
+            tool_call={"name": "job_list", "arguments": {"detail": False}}))
+        batch_sid = batch_server.new_session(_CWD)["sessionId"]
+        batch_server.prompt(batch_sid, [{"type": "text", "text": "看下作业"}])
+        batch = [u["update"] for u in batch_server.updates]
+
+        self.assertEqual([u["sessionUpdate"] for u in delivered],
+                         [u["sessionUpdate"] for u in batch])
+
+        def _strip(upd):
+            out = dict(upd)
+            out.pop("messageId", None)
+            return out
+
+        self.assertEqual([_strip(u) for u in delivered],
+                         [_strip(u) for u in batch])
+
+    def test_update_sink_cross_turn_no_repeat(self):
+        """跨回合不重复投射旧工具调用：第二回合无工具 → 只有 message chunk。"""
+        delivered = []
+        server = AcpServer(adapter=FakeLlmAdapter(
+            tool_call={"name": "job_list", "arguments": {}}),
+            update_sink=lambda sid, u: delivered.append(u))
+        session_id = server.new_session(_CWD)["sessionId"]
+        server.prompt(session_id, [{"type": "text", "text": "第一轮"}])
+        server.prompt(session_id, [{"type": "text", "text": "第二轮"}])
+        kinds = [u["sessionUpdate"] for u in delivered]
+        self.assertEqual(kinds.count("tool_call"), 1)
+        self.assertEqual(kinds.count("tool_call_update"), 1)
+        self.assertEqual(kinds.count("agent_message_chunk"), 2)
 
 
 if __name__ == "__main__":

@@ -218,7 +218,7 @@ python -m unittest tests.test_seams -v
 **子 agent 远程三通道**（`subagent/providers.py` + `subagent/worker.py`，对应上游 `subagent-fork-in-process` / `subagent-acp` / `subagent-dsh-sdk`）：
 
 - **fork**（进程内）：子 agent 以父会话日志的 completed-turn 前缀作 seed（到最后一个 `turn/end` 为止，in-flight 工具回合不平衡不能重放），`Session(seed=...)` 回放 + 自动补 `session/end-seed` 标记——子会话直接继承父上下文。
-- **ACP**（真子进程）：`python -m miniharness.seams.subagent.worker acp` 起独立进程，newline-delimited JSON-RPC over stdio（与上游 `ndJsonStream` 同帧形状）；`initialize → newSession → prompt → cancel → shutdown`；唯一从父读的是 workspace cwd；permission 策略自动应答（reject 默认 / allow），不上报人；事件通知先于响应帧写出（mini 同步载体约定，上游为并发流）。
+- **ACP**（真子进程）：`python -m miniharness.seams.subagent.worker acp` 起独立进程，newline-delimited JSON-RPC over stdio（与上游 `ndJsonStream` 同帧形状）；`initialize → newSession → prompt → cancel → shutdown`；唯一从父读的是 workspace cwd；permission 策略自动应答（reject 默认 / allow），不上报人；`session/update` 经 update_sink 在回合执行期间逐事件并发流式写通知、先于响应帧（对齐上游 notify 并发流）。
 - **SDK**（真子进程）：`subagent_worker sdk` 承载 `SdkRuntime`，`initialize → session/prompt`（懒创建会话）→ `shutdown`；回合级透传 `session.event`（本次回合新增的 inbox 回执、assistant/message、turn/end 逐条，`_event_boundary` 边界保证会话复用不重发历史事件）+ 末尾 `session.status idle` 通知，可被官方 Python SDK 客户端直接驱动（见第 7 章 7.6.4）。
 
 三者保持同一 Consumer 接口 `spawn(name, prompt) -> SubAgent`：换通道只改 Provider 构造，消费方代码不动。
