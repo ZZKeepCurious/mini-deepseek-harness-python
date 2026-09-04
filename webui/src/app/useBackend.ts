@@ -86,11 +86,12 @@ export function useBackend(): UseBackend {
           const item = (frame as { item: unknown }).item as { type?: string };
           if (item?.type === "snapshot") {
             const snap = item as unknown as {
-              records: EventEnvelope[];
+              records: { type: "event"; event: EventEnvelope }[];
               hasMore: boolean;
               header: Record<string, unknown>;
             };
-            buf.push(snap.records);
+            // SessionHistoryRecord 包装（上游 entryFor）：{type:'event', event} 解包
+            buf.push(snap.records.map((r) => r.event));
             setRunning(Boolean(snap.header?.running));
             bump((n) => n + 1);
           } else if (item?.type === "event") {

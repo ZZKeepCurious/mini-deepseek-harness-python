@@ -97,8 +97,8 @@ class TestSessionExport(_PersistCase):
         raw = self.persistence.read_raw("session-root")
         expected = "\n".join(raw.split("\n")[1:])
         with zipfile.ZipFile(io.BytesIO(result.body)) as z:
-            self.assertEqual(z.namelist(), ["session.jsonl"])
-            self.assertEqual(z.read("session.jsonl").decode("utf-8"), expected)
+            self.assertEqual(z.namelist(), ["session.v2.jsonl"])
+            self.assertEqual(z.read("session.v2.jsonl").decode("utf-8"), expected)
 
     def test_head_preflights_without_body(self):
         _write_jsonl(self.persistence, "session-root")
@@ -124,9 +124,9 @@ class TestSessionExport(_PersistCase):
         result = build_session_export(self._ctx(), "session-root", True)
         with zipfile.ZipFile(io.BytesIO(result.body)) as z:
             self.assertEqual(sorted(z.namelist()), [
-                "session.jsonl",
-                "subagents/child-a/session.jsonl",
-                "subagents/grandchild-a/session.jsonl",
+                "session.v2.jsonl",
+                "subagents/child-a/session.v2.jsonl",
+                "subagents/grandchild-a/session.v2.jsonl",
             ])
 
     def test_shared_descendant_deduped(self):
@@ -138,7 +138,7 @@ class TestSessionExport(_PersistCase):
         result = build_session_export(self._ctx(), "session-root", True)
         with zipfile.ZipFile(io.BytesIO(result.body)) as z:
             names = sorted(z.namelist())
-        self.assertEqual(names.count("subagents/shared/session.jsonl"), 1)
+        self.assertEqual(names.count("subagents/shared/session.v2.jsonl"), 1)
 
     def test_descendant_stored_artifact_read_failure_fails_whole_export_500(self):
         # 谱系里有后代，但其制品读取报错（非 NotImplementedError）→ 整档 fail-loud
@@ -181,7 +181,7 @@ class TestSessionExport(_PersistCase):
         _write_jsonl(self.persistence, "session-root")  # header only
         result = build_session_export(self._ctx(), "session-root", False)
         with zipfile.ZipFile(io.BytesIO(result.body)) as z:
-            self.assertEqual(z.read("session.jsonl").decode("utf-8"), "")
+            self.assertEqual(z.read("session.v2.jsonl").decode("utf-8"), "")
 
     def test_compression_level_from_config_affects_size(self):
         big = ("compressible line\n" * (32 * 1024))
@@ -200,7 +200,7 @@ class TestSessionExport(_PersistCase):
         _write_jsonl(self.persistence, "session-root", content=content)
         result = build_session_export(self._ctx(), "session-root", False)
         with zipfile.ZipFile(io.BytesIO(result.body)) as z:
-            self.assertEqual(z.read("session.jsonl").decode("utf-8"), content)
+            self.assertEqual(z.read("session.v2.jsonl").decode("utf-8"), content)
 
     def test_live_session_flushed_before_read(self):
         # 内存 SessionStore 里的新会话 → 序列化内存事件（最权威），命中根制品
@@ -212,7 +212,7 @@ class TestSessionExport(_PersistCase):
         result = build_session_export(ctx, "live-root", False)
         self.assertEqual(result.status, 200)
         with zipfile.ZipFile(io.BytesIO(result.body)) as z:
-            text = z.read("session.jsonl").decode("utf-8")
+            text = z.read("session.v2.jsonl").decode("utf-8")
         self.assertIn("turn/start", text)
         self.assertIn('"turn": 1', text)
 
@@ -272,7 +272,7 @@ class TestMediaEntries(unittest.TestCase):
             result = build_session_export(_fake_ctx(persistence=persistence),
                                           "session-root", False)
             with zipfile.ZipFile(io.BytesIO(result.body)) as z:
-                self.assertEqual(z.namelist(), ["session.jsonl"])
+                self.assertEqual(z.namelist(), ["session.v2.jsonl"])
         finally:
             tmp.cleanup()
 
@@ -330,7 +330,7 @@ class TestServerRoute(unittest.TestCase):
         self.assertIn("dsh-session-session-root.zip",
                       resp.headers["content-disposition"])
         with zipfile.ZipFile(io.BytesIO(resp.content)) as z:
-            self.assertEqual(z.namelist(), ["session.jsonl"])
+            self.assertEqual(z.namelist(), ["session.v2.jsonl"])
 
     def test_head_preflight_200_empty_body(self):
         _write_jsonl(self.persistence, "session-root")

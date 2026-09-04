@@ -38,9 +38,10 @@
 - `1003`：收到二进制帧（协议错误）。
 - `1008`：文本非 JSON / 帧形状非法 / 重复 `open` 同一 `streamId`。
 - `1011`：某流 `error` 帧自身发送失败。
-- 心跳：每条连接每 30s 一次 transport 级协议 Ping（`web/launcher.py` uvicorn
-  `ws_ping_interval=30`，`ws_ping_timeout=None` 不强制 Pong）——只保活中间代理、
-  不杀僵死连接，对齐上游 `stream-server.ts` heartbeat（对齐交付，见 §4.4）。
+- 心跳：每条连接每 **2s** 一次 transport 级协议 Ping（`web/launcher.py` uvicorn
+  `ws_ping_interval=2`），连续 miss 判死预算 **4s**（`ws_ping_timeout=4`，
+  ≈ 上游 `MAX_MISSED_HEARTBEATS=2 × interval=2s`）——僵死连接被回收，对齐上游
+  gateway heartbeat 契约（`websocketHeartbeatIntervalMs` @default 2000，见 §4.4）。
 
 ## 2. 信封层（`web/envelope.py`）
 
@@ -59,13 +60,15 @@
 - 成功分支 `value` 可选（业务无值时整体省略该字段）。
 - 业务方法绝不抛业务错误——一律经 `result.ok` 表达；`details` 恒为对象。
 
-**RpcError 的 `code` 是 23 码命名空间闭集**（alpha.2 起统一为 `<namespace>/<name>` 形式，
+**RpcError 的 `code` 是 24 码命名空间闭集**（alpha.2 起统一为 `<namespace>/<name>` 形式，
 对齐 typert `RemoteErrorDetailsMap` 键集：基础设施 `gateway/*` + 各域 merge-extensible 注册，
-`web/envelope.py` `RPC_ERROR_CODES`；R3 闭合路由层边界校验后新增 `gateway/input-invalid`）：
+`web/envelope.py` `RPC_ERROR_CODES`；R3 闭合路由层边界校验后新增 `gateway/input-invalid`；
+复核批对齐上游 gateway 未知端点折算码新增 `gateway/invocation-unavailable`）：
 
 ```
 gateway/bad-request       gateway/cancelled         gateway/internal
-gateway/arguments-invalid gateway/input-invalid     session/not-found
+gateway/arguments-invalid gateway/input-invalid     gateway/invocation-unavailable
+session/not-found
 session/model-unavailable session/conflict          session/invalid-time-zone
 session/workspace-attach-failed workspace/not-found agent-preset/conflict
 agent-preset/not-found    agent-preset/invalid      session/agent-busy
@@ -228,9 +231,11 @@ by deltas」。
 - **`$events`**：新代次先 `ready`（新 `clientId`）；对旧代次已转发过的单向 emit **不重放**
   （无 since 恢复游标，非缺口）；**挂起的 waterfall 保留 `eventId` 跨代次重投**（新客户端
   open 即收到，首个 `$events/result` 结算，幂等 no-op）。
-- **心跳**：transport 级（不归 `web/mux.py`，前端无感）：每连接每 30s 一次协议 Ping，
-  `ws_ping_timeout=None` 不强制 Pong、不杀僵死连接（对齐上游 `stream-server.ts`——只保活、
-  不要求 timely Pong）；由 uvicorn `websockets` 实现透传（`web/launcher.py` `uvicorn_options`）。
+- **心跳**：transport 级（不归 `web/mux.py`，前端无感）：每连接每 2s 一次协议 Ping，
+  连续 2 周期无 Pong 判死（`ws_ping_timeout=4` ≈ 上游 `MAX_MISSED_HEARTBEATS=2`，
+  stream-server.ts terminate 契约）；由 uvicorn `websockets` 实现透传
+  （`web/launcher.py` `uvicorn_options`，间隔=上游 `websocketHeartbeatIntervalMs`
+  @default 2000）。
 
 ## 6. 审批桥（`tools/ask` ↔ `approval/request` waterfall，`web/approvals.py`）
 

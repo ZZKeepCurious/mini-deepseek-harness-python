@@ -24,9 +24,11 @@ from miniharness.core.session.persistence import (
     JsonlPersistence,
     SessionFormatUnsupportedError,
     _log_path,
+    _to_header_line,
     balanced_after_replay,
     decode_segment,
     encode_segment,
+    inherited_cut,
     project_key,
     repair_and_replay,
 )
@@ -111,7 +113,8 @@ class TestJsonlCarrierLayout(unittest.TestCase):
             p.append("s1", _plain(0))
             p.flush()
             path = p.path_of("s1")
-            self.assertEqual(path.name, "session.jsonl.zstd")
+            # v2 generation 制品名（上游 sessionFormatLogFilename：vN 段）
+            self.assertEqual(path.name, "session.v2.jsonl.zstd")
             buf = path.read_bytes()
             self.assertEqual(buf[:4], ZSTD_MAGIC.to_bytes(4, "little"))
             first = read_first_frame(lambda: buf)
@@ -146,7 +149,7 @@ class TestJsonlCarrierLayout(unittest.TestCase):
             p.append("s1", _plain(0))
             p.flush()
             path = p.path_of("s1")
-            self.assertEqual(path.name, "session.jsonl")
+            self.assertEqual(path.name, "session.v2.jsonl")
             lines = path.read_text(encoding="utf-8").splitlines()
             self.assertEqual(json.loads(lines[0])["type"], "session")
 
@@ -199,12 +202,12 @@ class TestJsonlCarrierLayout(unittest.TestCase):
             JsonlPersistence(root, compression="none")
             second_root = JsonlPersistence(root)
             second_root._cwd.clear()
-            # 同一根内伪造第二个项目目录里的同 id 头帧
+            # 同一根内伪造第二个项目目录里的同 id 头帧（v2 generation 制品名）
             other = root / project_key("/w2") / encode_segment("dup")
             other.mkdir(parents=True)
             header = {"type": "session", "version": SESSION_FORMAT_VERSION, "id": "dup",
-                      "createdAt": 1, "delegationDepth": 0, "cwd": "/w2"}
-            (other / "session.jsonl.zstd").write_bytes(
+                      "createdAt": 1, "isSeeded": False, "delegationDepth": 0, "cwd": "/w2"}
+            (other / "session.v2.jsonl.zstd").write_bytes(
                 compress_zstd_frame((json.dumps(header) + "\n").encode("utf-8")))
             with self.assertRaises(ValueError) as ctx:
                 second_root.list_headers()
@@ -246,8 +249,9 @@ class TestJsonlCarrierLayout(unittest.TestCase):
                 d = root / project_key(str(tmp)) / encode_segment("s1")
                 d.mkdir(parents=True)
                 header = {"type": "session", "version": version, "id": "s1",
-                          "createdAt": 1, "delegationDepth": 0, "cwd": str(tmp)}
-                (d / "session.jsonl.zstd").write_bytes(
+                          "createdAt": 1, "isSeeded": False, "delegationDepth": 0,
+                          "cwd": str(tmp)}
+                (d / "session.v2.jsonl.zstd").write_bytes(
                     compress_zstd_frame((json.dumps(header) + "\n").encode("utf-8")))
                 with self.assertRaises(SessionFormatUnsupportedError) as ctx:
                     JsonlPersistence(root).load("s1")
@@ -287,6 +291,93 @@ class TestDirectoryLayout(unittest.TestCase):
         self.assertEqual(encode_segment("~"), "~007E")
         self.assertEqual(decode_segment("~002E~002E"), "..")
         self.assertEqual(decode_segment(encode_segment("a b/c:d")), "a b/c:d")
+
+    def test_v2_generation_artifact_name(self):
+        """generation 制品名版本化（上游 sessionFormatLogFilename）：v2 带 vN 段。"""
+        self.assertEqual(_log_path(Path("r"), None, "s", "zstd").name,
+                         "session.v2.jsonl.zstd")
+        self.assertEqual(_log_path(Path("r"), None, "s", "none").name,
+                         "session.v2.jsonl")
+
+    def test_header_key_closure_write_rejects_unknown(self):
+        """物理 header 键闭集（上游 format.ts HEADER_KEYS）：未知键写侧 fail loud。"""
+        with self.assertRaises(ValueError) as ctx:
+            _to_header_line({"version": 2, "id": "s", "createdAt": 1, "label": "x"})
+        self.assertIn("closed physical header key set", str(ctx.exception))
+        self.assertIn("['label']", str(ctx.exception))
+
+    def test_header_key_closure_read_rejects_unknown_and_missing_required(self):
+        """读守卫：未知键 / 缺必填键 / isSeeded 非 boolean / cwd 相对路径 → 非 header。"""
+        from miniharness.core.session.persistence import _is_header_line
+        base = {"type": "session", "version": 2, "id": "s", "createdAt": 1,
+                "isSeeded": False, "delegationDepth": 0}
+        self.assertTrue(_is_header_line(base))
+        self.assertTrue(_is_header_line({**base, "cwd": "/abs/path", "origin": "subagent"}))
+        # 未知键拒读（扩展 meta 键上行会让上游拒读本制品）
+        self.assertFalse(_is_header_line({**base, "label": "x"}))
+        self.assertFalse(_is_header_line({**base, "seedLength": 3}))
+        # 缺必填键
+        for key in ("type", "version", "id", "createdAt", "isSeeded", "delegationDepth"):
+            broken = {k: v for k, v in base.items() if k != key}
+            self.assertFalse(_is_header_line(broken), key)
+        # isSeeded 严格 boolean
+        self.assertFalse(_is_header_line({**base, "isSeeded": "true"}))
+        self.assertFalse(_is_header_line({**base, "isSeeded": 1}))
+        # cwd 绝对路径
+        self.assertFalse(_is_header_line({**base, "cwd": "relative/path"}))
+        self.assertFalse(_is_header_line({**base, "cwd": 5}))
+        self.assertFalse(_is_header_line({**base, "origin": "other"}))
+
+    def test_inherited_cut_derives_from_marker_with_corrupt_checks(self):
+        """cut 由最后一个 `{inherited:true}` marker 派生（上游 format.ts inheritedCut），
+        seeded 无 marker / unseeded 有 marker 双向 corrupt。"""
+        unseeded = {"isSeeded": False}
+        seeded = {"isSeeded": True}
+        normal_seed = [{"type": "session/end-seed", "seq": 0, "data": {}}]
+        self.assertEqual(inherited_cut(unseeded, normal_seed), 0)
+        forked = [
+            {"type": "user/message", "seq": 0, "data": {}, "surfaceOp": "append"},
+            {"type": "session/end-seed", "seq": 2, "data": {"inherited": True}},
+            {"type": "session/end-seed", "seq": 3, "data": {}},
+        ]
+        self.assertEqual(inherited_cut(seeded, forked), 2)
+        # seeded header 缺 marker → corrupt
+        with self.assertRaises(ValueError) as ctx:
+            inherited_cut(seeded, normal_seed)
+        self.assertIn("seeded v2 header lacks an inherited end-seed marker", str(ctx.exception))
+        # unseeded header 带 inherited marker → corrupt
+        with self.assertRaises(ValueError) as ctx:
+            inherited_cut(unseeded, forked)
+        self.assertIn("unseeded v2 header contains an inherited end-seed marker",
+                      str(ctx.exception))
+
+    def test_fork_child_disk_roundtrip_recovers_cut_from_marker(self):
+        """fork 子会话落盘重载：cut 不随 header 携带，由 marker 派生——
+        own_events 恰为 marker 之后的自有事件。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            p = JsonlPersistence(Path(tmp))
+            inherited = [_user_msg(i) for i in range(3)]
+            p.declare("child-1", {"parentSession": "p", "origin": "subagent",
+                                  "isSeeded": True, "delegationDepth": 1})
+            for event in inherited:
+                p.append("child-1", event)
+            p.append("child-1", {"type": "session/end-seed", "seq": 3, "time": 9,
+                                 "data": {"inherited": True}})
+            p.append("child-1", {"type": "subagent/descriptor", "seq": 4, "time": 10,
+                                 "data": {"version": 3, "mode": "continuable",
+                                          "provider": "in-process", "label": "研"}})
+            p.flush()
+            resumed = repair_and_replay(p, "child-1", Session("child-1"))
+            self.assertTrue(resumed.is_seeded)
+            self.assertEqual(resumed.inherited_event_count, 3)
+            own = resumed.own_events()
+            # own = [继承切割 marker(inherited:true), descriptor] + restore 边界
+            # {} marker（上游 restore：seed 尾非 end-seed → 补记）
+            self.assertEqual([e["type"] for e in own],
+                             ["session/end-seed", "subagent/descriptor", "session/end-seed"])
+            self.assertIs(own[0]["data"].get("inherited"), True)
+            self.assertEqual(own[1]["data"]["label"], "研")
+            self.assertEqual(own[2]["data"], {})
 
     def test_project_key_lossy_truncation(self):
         long = "x" * 400
@@ -337,7 +428,7 @@ class TestUpstreamInterop(unittest.TestCase):
             root = Path(tmp)
             header_line = json.dumps(
                 {"type": "session", "version": SESSION_FORMAT_VERSION, "id": "up-1",
-                 "createdAt": 1234, "cwd": cwd, "delegationDepth": 0},
+                 "createdAt": 1234, "cwd": cwd, "isSeeded": False, "delegationDepth": 0},
                 separators=(",", ":"),
             ) + "\n"
             events = [_plain(i) for i in range(3)]
@@ -382,7 +473,7 @@ class TestUpstreamInterop(unittest.TestCase):
             self.assertEqual(meta["cwd"], cwd)
             self.assertIsNotNone(q.read_raw("s-lossy"))
             self.assertEqual(q.path_of("s-lossy"), q.path_of("s-lossy"))
-            self.assertTrue(str(q.path_of("s-lossy")).endswith("session.jsonl.zstd"))
+            self.assertTrue(str(q.path_of("s-lossy")).endswith("session.v2.jsonl.zstd"))
 
 
 if __name__ == "__main__":

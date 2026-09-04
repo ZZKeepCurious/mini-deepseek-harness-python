@@ -22,17 +22,22 @@ mini 对齐说明（push→pull 重构，2026-08-22 部分对齐）：
    * 同步门面（demo/headless 的 run()）无嵌套 asyncio.run，仍由宿主显式
      continue_rounds() 驱动（保持原 pull 式契约）；driver 模式的 idle 监听在
      `_driver is None` 时 no-op，两条路径互不干扰。
-   * 未复现项（保留简化，须在 AGENTS.md 标注）：无 agent 身份断言与 reserved
-     attempt 集（同步模型下 reservation 只在排队→pre-step 间存活）；
-     competingQueued 竞争提示护栏未实现（armed 目标在任意 idle 都会续跑，
-     不区分是否刚有人类提示）；deferContext wrapup 注入未复现；连续
-     block-after 阈值策略在 tool-goal 层近似判定（见 tools.py）。
+   * 未复现项（保留简化，须在 AGENTS.md 标注）：无 agent 身份断言（R4 已补
+     registry assert_live 边界）与编排入口级 withInitiator 归因（仅保留 turn
+     执行栈内 `current_initiator()` 最小载体，供 host-pause 判别）；competingQueued
+     竞争提示护栏未实现（armed 目标在任意 idle 都会续跑，不区分是否刚有人类
+     提示）；deferContext wrapup 注入未复现；连续 block-after 阈值策略在
+     tool-goal 层近似判定（见 tools.py）。alpha.1（2026-09-05）已对齐：
+     RoundAttempt 记录 + idle pause fence（ref 钉住被弃 attempt）+ host pause
+     中止 live turn（上游 index.ts:259-294）。
 """
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import Callable
 
+from ..core.agents import current_initiator
 from ..core.scope import Context, _maybe_await
 from ..core.session.message import create_message
 from .prompt import render_goal_round_prompt
@@ -51,12 +56,16 @@ class GoalDriver:
         self._reservations: dict[int, dict] = {}
         #: session id (str) -> AgentLoop（driver 模式自动续跑用；agent/session-start 登记）
         self._loops: dict[str, Any] = {}
-        #: session id (int, id(session)) -> 已排队未消费轮次号（防 driver 模式重排）
-        self._pending: dict[int, int] = {}
+        #: session id (int, id(session)) -> RoundAttempt（排队/认领/已入志的 goal 轮次
+        # 记录，上游 RoundAttempt 集的 mini 载体：identity + phase + cancelled；
+        # idle pause fence 依据它钉住被弃 attempt 的确切 ref）
+        self._attempts: dict[int, dict] = {}
         ctx.on("agent/pre-step", self._on_pre_step)
         ctx.on("agent/session-start", self._on_session_start)
         ctx.on("agent/status", self._on_status)
         ctx.on("goal/changed", self._on_goal_changed)
+        ctx.on("agent/inbox/claimed", self._on_inbox_claimed)
+        ctx.on("session/event", self._on_session_event)
 
     # ---------- 内部 ----------
 
@@ -120,6 +129,68 @@ class GoalDriver:
         if view is not None and view["phase"] == "active":
             self._goals.pause(loop, {"id": view["id"], "revision": view["revision"]})
 
+    # ---------- idle pause fence（alpha.1，上游 index.ts:259-282） ----------
+
+    def _on_inbox_claimed(self, payload: dict) -> None:
+        """排队 attempt 被认领 → phase 'claimed'（上游 agent/inbox/claimed 监听）。"""
+        agent = payload.get("agent")
+        message = payload.get("message")
+        if agent is None or not isinstance(message, Mapping):
+            return
+        attempt = self._attempts.get(self._sid(agent))
+        if attempt is not None and message.get("id") == attempt["messageId"]:
+            attempt["phase"] = "claimed"
+
+    def _on_session_event(self, payload: dict) -> None:
+        """日志结算（上游 session/event 监听）：user/message → admitted；
+        turn/end aborted → claimed/admitted attempt 置 cancelled。
+
+        冻结载体注意：session/event 的 event 是 mappingproxy，判形用
+        `Mapping`（runtime_context 同款坑）。"""
+        session = payload.get("session")
+        event = payload.get("event")
+        if session is None or not isinstance(event, Mapping):
+            return
+        loop = self._loops.get(session.session_id)
+        if loop is None:
+            return
+        attempt = self._attempts.get(self._sid(loop))
+        if attempt is None:
+            return
+        if event["type"] == "user/message":
+            if event["data"].get("id") == attempt["messageId"]:
+                attempt["phase"] = "admitted"
+        elif event["type"] == "turn/end":
+            reason = event["data"].get("reason") or {}
+            if (reason.get("kind") == "aborted"
+                    and attempt["phase"] in ("claimed", "admitted")):
+                attempt["cancelled"] = True
+
+    def _pause_dropped(self, loop) -> None:
+        """pause fence（alpha.1）：pause 只钉在被弃 attempt 的确切 ref 上——
+        attempt 处于 queued/claimed 或已 cancelled，且 goalId+revision 与当前
+        live 目标均匹配、目标 active+armed 才落 pause。resume 会推高 revision，
+        故「宿主 pause 后立即 resume（被中止回合尚未收敛到 idle）」不会把已
+        复活的目标再次误杀。pause 失败 → warn + disarm（上游 catch 分支）。"""
+        attempt = self._attempts.get(self._sid(loop))
+        if attempt is None:
+            return
+        if not (attempt["phase"] in ("queued", "claimed") or attempt["cancelled"]):
+            return
+        view = self._goals.get(loop)
+        if (view is None or view["phase"] != "active" or view["activation"] != "armed"
+                or attempt["goalId"] != view["id"] or attempt["revision"] != view["revision"]):
+            return
+        self._attempts.pop(self._sid(loop), None)
+        try:
+            self._goals.pause(loop, {"id": view["id"], "revision": view["revision"]})
+        except Exception as error:
+            logger = getattr(self._ctx, "logger", None)
+            if logger is not None and hasattr(logger, "warn"):
+                logger.warn(f'goal-round-driver: could not pause cancelled goal for agent '
+                            f'"{loop.id}": {error}')
+            self._goals.disarm(loop)
+
     # ---------- 事件驱动续跑（driver 模式，对齐上游 goal-round-driver） ----------
 
     @staticmethod
@@ -127,22 +198,39 @@ class GoalDriver:
         return id(loop.session)
 
     def _on_session_start(self, payload: dict) -> None:
-        """登记 loop 供 driver 模式自动续跑（`agent/session-start` 载波）。"""
+        """登记 loop 供 driver 模式自动续跑（`agent/session-start` 载波）；
+        在途 attempt 一并清除（上游 session-start → attempt=undefined）。"""
         agent = payload.get("agent")
         if agent is not None and getattr(agent, "session", None) is not None:
             self._loops[agent.session.session_id] = agent
+            self._attempts.pop(self._sid(agent), None)
 
     def _on_status(self, payload: dict) -> None:
-        """idle 且处于 driver 模式时触发一次续跑（上游 agent/status idle → drive）。"""
+        """idle 且处于 driver 模式时触发一次续跑（上游 agent/status idle → drive）。
+
+        idle 到达先走 pause fence（被弃 attempt 钉 ref），再请求续跑。"""
         if payload.get("status") != "idle":
             return
         loop = payload.get("agent")
         if loop is None or getattr(loop, "_driver", None) is None:
             return
+        self._pause_dropped(loop)
         self._drive(loop)
 
-    def _on_goal_changed(self, _payload: dict) -> None:
-        """目标变更即请求续跑（上游 goal/changed → requestDrive）：armed 时排首轮。"""
+    def _on_goal_changed(self, payload: dict) -> None:
+        """目标变更即请求续跑（上游 goal/changed → requestDrive）：armed 时排首轮。
+
+        host-pause 边界（alpha.1，index.ts:283-294）：宿主发起的 pause 在回合
+        运行中时中止 live turn（keepInbox）——模型不能在已被叫停的目标里继续
+        行事或同回合复活；模型自身回合内的 pause（update_goal 工具）正常走完。
+        判据 = `current_initiator() is not agent`（turn 执行栈内为模型自身）。
+        """
+        change = (payload or {}).get("change") or {}
+        agent = (payload or {}).get("agent")
+        if (change.get("operation") == "pause" and agent is not None
+                and getattr(agent, "status", None) == "running"
+                and current_initiator() is not agent):
+            agent.cancel("user", keep_inbox=True)
         for loop in list(self._loops.values()):
             if getattr(loop, "_driver", None) is not None:
                 self._drive(loop)
@@ -150,17 +238,27 @@ class GoalDriver:
     def _drive(self, loop) -> None:
         """driver 模式单次续跑（对齐上游 goal-round-driver drive）：
 
-        idle 到达意味着上一轮已消费，先清在飞标记；若目标 active+armed 且
-        无在飞轮次，排恰好一个下一轮。round 预算用尽 / 回合拒绝 / 终止按上游
-        语义 block/disarm/pause。reservation 持久到该 round 回合结束（idle
-        清除），因 driver 模式 followup 只入队、pre-step 仍需 reservation 校验。
+        在途 attempt 先按 token 消费（一次 drive 只吃一个：回合运行中再触发
+        只置「待重排」而不叠加排队，对齐上游 drive 的 attempt 早退 + 再请求）；
+        无在飞且目标 active+armed 时排恰好一个下一轮。round 预算用尽 / 回合
+        拒绝 / 终止按上游语义 block/disarm/pause；aborted 回合的 pause 由 idle
+        fence 按被弃 attempt 的 ref 决定（resume 复活的目标 revision 已变，
+        不再误杀）。reservation 持久到该 round 回合结束（idle 清除），因
+        driver 模式 followup 只入队、pre-step 仍需 reservation 校验。
         """
         if getattr(loop, "_driver", None) is None:
             return
+        # 上游 readyToDrive：仅在静默（idle）时驱动——回合运行中的触发只置
+        # 「待重排」，在途 attempt 留到 idle 由 agent/status 触发再消费
+        if getattr(loop, "status", None) != "idle":
+            return
         sid = self._sid(loop)
-        # idle 即上一轮已消费：清除在飞标记与 reservation，再决定是否排下一轮
-        self._pending.pop(sid, None)
+        # 上游 drive()：在途 attempt 先消费即返回（token 语义），同一触发内
+        # 立即重入一次以排下一轮（对齐 requestDrive 的 while requested 循环）
+        attempt = self._attempts.pop(sid, None)
         self._reservations.pop(sid, None)
+        if attempt is not None:
+            return self._drive(loop)
         view = self._goals.get(loop)
         if view is None or view["phase"] != "active" or view["activation"] != "armed":
             return
@@ -171,8 +269,10 @@ class GoalDriver:
                 self._goals.disarm(loop)
                 return
             if kind == "aborted":
-                self._pause_latest(loop)
-                return
+                # pause 已由 idle fence 按被弃 attempt ref 决定（或有意跳过：
+                # resume 复活的目标 revision 已变）——此处继续按 active+armed
+                # 排下一轮（对齐上游 drive()：无 aborted 特判）
+                pass
             if kind == "blocked":
                 self._block_latest(loop, "prompt-rejected",
                                    "Goal round was rejected before entering its step.")
@@ -195,7 +295,10 @@ class GoalDriver:
              "round": round_no},
         )
         self._reserve(loop, message, round_no)
-        self._pending[sid] = round_no
+        self._attempts[sid] = {
+            "goalId": view["id"], "revision": view["revision"], "round": round_no,
+            "messageId": message["id"], "phase": "queued", "cancelled": False,
+        }
         # 不在此清除 reservation：driver 模式回合稍后运行，pre-step 仍需它；
         # 下一轮 idle 到达时由本方法起始处清除。
         loop.followup(message)

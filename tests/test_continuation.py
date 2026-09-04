@@ -257,8 +257,9 @@ class TestPersistenceApi(unittest.TestCase):
     """declare / inspect / list_headers：两个后端一致。"""
 
     def _check(self, persistence):
+        # v2 物理 header 键闭集：label 不再入 header meta（随 descriptor 事件持久化）
         persistence.declare("c1", {"parentSession": "p1", "origin": "subagent",
-                                   "delegationDepth": 1, "label": "研"})
+                                   "delegationDepth": 1})
         persistence.declare("c1", {"parentSession": "p1"})  # 幂等：第二次忽略
         session = Session("c1")
         session.append("subagent/descriptor", {"version": 2, "mode": "continuable",
@@ -268,13 +269,19 @@ class TestPersistenceApi(unittest.TestCase):
         persistence.flush()
         info = persistence.inspect("c1")
         self.assertEqual(info["meta"]["parentSession"], "p1")
-        self.assertEqual(info["meta"]["label"], "研")
+        self.assertNotIn("label", info["meta"])
+        descriptor = next(e for e in info["events"] if e["type"] == "subagent/descriptor")
+        self.assertEqual(descriptor["data"]["label"], "研")
         self.assertEqual(info["events"][0]["type"], "subagent/descriptor")
         headers = persistence.list_headers()
         self.assertEqual([h["id"] for h in headers], ["c1"])
         self.assertEqual(headers[0]["meta"]["delegationDepth"], 1)
         self.assertIsNone(persistence.inspect("nope")["meta"])
         self.assertEqual(persistence.inspect("nope")["events"], [])
+        # 键闭集 fail loud：未知 meta 键在写边界拒绝
+        with self.assertRaises(ValueError) as ctx:
+            persistence.declare("c2", {"parentSession": "p1", "label": "x"})
+        self.assertIn("closed physical header key set", str(ctx.exception))
 
     def test_jsonl(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -303,12 +310,14 @@ class TestContinuationManager(unittest.TestCase):
         mgr = self._manager()
         cid = mgr.start_continuable(label="研", persona="你是子代理研究员")
         self.assertTrue(cid.startswith("child-"))
-        # 创建即落盘：header meta + 描述符事件（无需任何运行）
+        # 创建即落盘：header meta + 描述符事件（无需任何运行）。
+        # v2 header 键闭集：label 不入 header，随 descriptor 事件持久化。
         info = self.persistence.inspect(cid)
         self.assertEqual(info["meta"]["parentSession"], "parent")
         self.assertEqual(info["meta"]["origin"], "subagent")
         self.assertEqual(info["meta"]["delegationDepth"], 1)
-        self.assertEqual(info["meta"]["label"], "研")
+        descriptor = next(e for e in info["events"] if e["type"] == "subagent/descriptor")
+        self.assertEqual(descriptor["data"]["label"], "研")
         # V2：显式空 seed 的子会话携带 {} end-seed 标记（上游 constructor：
         # seed !== undefined 且日志末尾非 end-seed → 补记；不带 inherited 键）
         self.assertEqual([e["type"] for e in info["events"]],

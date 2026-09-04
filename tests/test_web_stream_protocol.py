@@ -27,8 +27,8 @@ class TestConstants(unittest.TestCase):
         self.assertEqual(REMOTE_STREAM_MUX_PATH, "/api/remote.mux")
 
     def test_heartbeat_interval_matches_gateway_config(self):
-        # gateway Config websocketHeartbeatIntervalMs = 30000
-        self.assertEqual(DEFAULT_WEBSOCKET_HEARTBEAT_INTERVAL_MS, 30_000)
+        # gateway Config websocketHeartbeatIntervalMs @default 2000（index.ts）
+        self.assertEqual(DEFAULT_WEBSOCKET_HEARTBEAT_INTERVAL_MS, 2_000)
 
 
 class TestClientMessages(unittest.TestCase):

@@ -52,9 +52,11 @@ REMOTE_EVENT_STREAM_ENDPOINT = "$events"
 #: 返回一个客户端 Remote 事件结果的 unary 端点（REMOTE_EVENT_RESULT_ENDPOINT）
 REMOTE_EVENT_RESULT_ENDPOINT = "$events/result"
 
-#: WebSocket Ping 间隔（gateway Config websocketHeartbeatIntervalMs=30000）。
-#: mini 简化：不发送协议 Ping（Starlette WebSocket 无 Ping API，见 verified-diffs）。
-DEFAULT_WEBSOCKET_HEARTBEAT_INTERVAL_MS = 30_000
+#: WebSocket Ping 间隔缺省（gateway Config `websocketHeartbeatIntervalMs`
+#: @default 2000，index.ts；miss 2 次即 terminate，stream-server.ts
+#: MAX_MISSED_HEARTBEATS=2）。mini 的实际 Ping 由 launcher 的 transport 级
+#: uvicorn 选项承载（ws_ping_interval=2 / ws_ping_timeout=4）。
+DEFAULT_WEBSOCKET_HEARTBEAT_INTERVAL_MS = 2_000
 
 
 class StreamProtocolError(ValueError):

@@ -58,7 +58,7 @@ from ...core.agent_loop.agent import AgentLoop
 from ...core.dsh_scope import scope_of, scope_target
 from ...core.scope import Context
 from ...core.session import Session, create_message, is_json_safe, text_block, thaw
-from ...core.session.persistence import SessionPersistence
+from ...core.session.persistence import SessionPersistence, inherited_cut
 from ...core.system_prompt import SYSTEM_PROMPT_SERVICE, SystemPromptService
 from ...core.tools import Tool, ToolExec, ToolRegistry
 from ...attachment import admit_prompt_content
@@ -618,8 +618,9 @@ class SubagentContinuationManager:
             "origin": "subagent",
             "delegationDepth": child_depth,
         }
-        if label:
-            meta["label"] = label
+        # label 不入 header meta（v2 物理 header 键闭集拒绝未知键——上游
+        # isHeaderLine 同款）；label 随 subagent/descriptor 事件持久化，读路径
+        # 从描述符恢复（见 _child_entry / restore descriptor fold）。
         # 描述符对齐上游 descriptor.ts schema：{version, mode, provider, label?,
         # agentProvider?, agentModel?, agentReasoningEffort?, persona?, toolFilter?}
         # （无 kind 字段）。agentProvider/agentModel/agentReasoningEffort 取解析后
@@ -1032,6 +1033,19 @@ class SubagentContinuationManager:
                 frontier.append(cid)
         return [self._child_entry(cid) for cid in sorted(descendants)]
 
+    def _descriptor_label(self, child_id: str) -> str | None:
+        """从持久化日志恢复子代理 label（v2 header 键闭集后 label 随
+        `subagent/descriptor` 事件持久化，header meta 不再携带）。"""
+        try:
+            events = self.persistence.load(child_id)
+        except Exception:
+            return None
+        for event in reversed(events):
+            if event.get("type") == "subagent/descriptor":
+                label = (event.get("data") or {}).get("label")
+                return label if label else None
+        return None
+
     def _child_entry(self, child_id: str) -> dict:
         depth = 0
         label = child_id
@@ -1044,9 +1058,10 @@ class SubagentContinuationManager:
                 d = meta.get("delegationDepth")
                 if isinstance(d, int) and not isinstance(d, bool) and d >= 0:
                     depth = d
-                if meta.get("label"):
-                    label = meta["label"]
             break
+        descriptor_label = self._descriptor_label(child_id)
+        if descriptor_label:
+            label = descriptor_label
         act = self._activations.get(child_id)
         if act is not None:
             status = act["status"]
@@ -1086,10 +1101,16 @@ class SubagentContinuationManager:
         descriptor = fold_subagent_descriptor(events)
         if descriptor is None or descriptor.get("mode") != "continuable":
             raise SubagentError("子会话不可继续（描述符缺失或非 continuable）", "NOT_RESUMABLE")
-        # rc.1: 恢复子会话标记 isSeeded
-        if events:
+        # V2：cut 由 `{inherited:true}` end-seed marker 派生（inherited_cut，
+        # 上游 resume 从日志 marker 派生同款）——seeded 语义只在真有继承前缀
+        # 时成立（空 fork 子会话的 {} 标记是普通边界，不是继承切割）
+        cut = inherited_cut(meta, events)
+        if cut:
             meta["isSeeded"] = True
-        child_session = Session(child_id, seed=events, meta=meta)
+        else:
+            meta.pop("isSeeded", None)
+        child_session = Session(child_id, seed=events, meta=meta,
+                                inherited_event_count=cut, mode="restore")
         return self._build_activation(child_session, descriptor, persisted=len(events),
                                       parent=parent)
 

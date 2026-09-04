@@ -45,6 +45,8 @@ __all__ = [
     "deep_freeze",
     "derive_event_message",
     "derive_messages",
+    "file_block",
+    "image_block",
     "is_json_safe",
     "now_ms",
     "reasoning_block",

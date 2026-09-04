@@ -15,15 +15,18 @@
 `ctx` 的 jobs 注册表）。跨进程耦合面只有本类发布给 mux 的 wire 契约（endpoint
 名 + 帧形状）；同包内部直接引用 WebApi（对齐上游同进程组装）。
 
-mini 简化 / 已核实（须同步 verified-diffs §3.4)：follow 的 records 用会话日志
-事件流 `Session.events` 投影，无 page/projection 域的 message 对齐游标；
-`_attach` 冷会话自动 resume 后取日志尾部快照，再以 `_poll_new_events`（短轮询 +
-空闲 sleep，一次捞出全部新事件，seq 严格递增）实时补 event 帧。**已核实：alpha.1
-wire 无 since 字段**（客户端连回 = 重开流重新投递完整 snapshot/baseline，README
-明言单向通知重连不重放）——mini 同款，重连健壮性由「重开全量 + 客户端按 seq 去重」
-（webui TrajectoryBuffer）保证，无游标也无需再造。jobs 来自 ctx 的 on_jobs_changed
-回调，owner 恒为 AgentLoop；心跳 Ping 由 launcher 的 transport 级 ping 闭合
-（`web/launcher.py` uvicorn_options，不在此层）。
+mini 简化 / 已核对（须同步 verified-diffs §3.4)：follow 的 records 用会话日志
+事件流 `Session.events` 投影（wire 形状对齐上游 `{type:'event', event}` 包装、
+cursor = 最后已提交 seq、projections 空基线 `{asOfSeq, values:{}}`——无投影
+注册表），无 message 对齐游标；`_attach` 冷会话自动 resume 后取日志尾部快照，
+再以 `_poll_new_events`（短轮询 + 空闲 sleep，一次捞出全部新事件，seq 严格
+递增）实时补 event 帧。**已核实：alpha.1 wire 无 since 字段**（客户端连回 =
+重开流重新投递完整 snapshot/baseline，README 明言单向通知重连不重放）——mini
+同款，重连健壮性由「重开全量 + 客户端按 seq 去重」（webui TrajectoryBuffer）
+保证，无游标也无需再造。control baseline 对齐上游 control.ts（全部 live 会话
+每会话一条，空也放；projections 每会话空基线块）。jobs 来自 ctx 的
+on_jobs_changed 回调，owner 恒为 AgentLoop；心跳 Ping 由 launcher 的 transport
+级 ping 闭合（`web/launcher.py` uvicorn_options，不在此层）。
 """
 from __future__ import annotations
 
@@ -99,8 +102,10 @@ class GatewayStreams:
         """
         kind = self.stream_kinds().get(endpoint)
         if kind is None:
+            # 未知 endpoint：上游 gateway 报 invocation-unavailable（index.ts:660
+            # 「no active Remote method exports this endpoint」折算码）
             raise RemoteStreamError(
-                "gateway/internal",
+                "gateway/invocation-unavailable",
                 f"typert gateway: {endpoint}: no active Remote method exports this endpoint")
         if kind == "$events":
             return self.events.open(payload, signal=signal)
@@ -134,41 +139,34 @@ class GatewayStreams:
                                     f'session "{session_id}" not found')
         if self.api._agents.get(session_id) is None:
             self.api._attach(session)
-        seq = session.seq
-        records = [self._record(e) for e in list(session.events)]
+        events = list(session.events)
+        # cursor = 最后一条已提交事件 seq（上游 0 基 seq 的 inclusive cursor，
+        # history.ts `sourceLog.at(-1)?.seq ?? -1`；空日志 -1）
+        cursor = events[-1]["seq"] if events else -1
+        records = [self._record(e) for e in events]
         has_more = False
         max_messages = args.get("maxMessages")
         if isinstance(max_messages, int) and max_messages > 0 and len(records) > max_messages:
             records = records[-max_messages:]
             has_more = True
-        yield {"type": "snapshot", "header": self._header(session), "cursor": seq,
-               "records": records, "hasMore": has_more, "projections": {}}
-        subscribed = seq
+        yield {"type": "snapshot", "header": self.api._wire_header(session),
+               "cursor": cursor, "records": records, "hasMore": has_more,
+               # 无投影注册表：空 values 基线（上游 history.ts:197-199 的
+               # {asOfSeq, values} 形状，asOfSeq 与 snapshot cursor 同源）
+               "projections": {"asOfSeq": cursor, "values": {}}}
+        subscribed = cursor + 1
         while True:
             events = await _poll_new_events(self.api, session_id, subscribed, signal)
             if events is None:
                 return
             for event in events:
-                subscribed = event["seq"]
+                subscribed = event["seq"] + 1
                 yield {"type": "event", "event": event}
 
     @staticmethod
-    def _header(session) -> dict:
-        meta = session.meta
-        header: dict[str, Any] = {"sessionId": session.session_id}
-        if meta.get("cwd") is not None:
-            header["cwd"] = meta["cwd"]
-        if meta.get("parentSession") is not None:
-            header["parentSessionId"] = meta["parentSession"]
-        if meta.get("origin") is not None:
-            header["origin"] = meta["origin"]
-        # alpha.1：wire header isSeeded 布尔（seedLength 翻译废止）
-        header["isSeeded"] = session.is_seeded
-        return header
-
-    @staticmethod
     def _record(event: dict) -> dict:
-        return _as_plain(event)
+        """SessionEventEntry 包装（上游 history.ts entryFor：`{type:'event', event}`）。"""
+        return {"type": "event", "event": _as_plain(event)}
 
     # ---------- session.control（宿主级 live control） ----------
 
@@ -202,14 +200,19 @@ class GatewayStreams:
             self._control_queues.pop(queue, None)
 
     def _control_baseline(self) -> dict:
+        """control baseline（上游 control.ts:67-81）：全部 live 会话每会话一条
+        （无 agent 挂接的会话空数组也放）+ 每会话 projections 空基线块。"""
         queues: dict[str, list] = {}
         jobs: dict[str, list] = {}
-        for session_id in sorted(self.api._agents):
+        projections: dict[str, dict] = {}
+        for session in self.api.store.list():
+            session_id = session.session_id
             queues[session_id] = self._queue_view(session_id)
-            jobs_view = self._jobs_view(session_id)
-            if jobs_view:
-                jobs[session_id] = jobs_view
-        return {"queues": queues, "jobs": jobs, "projections": {}}
+            jobs[session_id] = self._jobs_view(session_id)
+            # 无投影注册表：{asOfSeq, values:{}} 空基线（上游 projectionBaseline
+            # 的块形状，asOfSeq = 最后已提交 seq）
+            projections[session_id] = {"asOfSeq": session.seq - 1, "values": {}}
+        return {"queues": queues, "jobs": jobs, "projections": projections}
 
     def _on_session_event(self, payload: dict) -> None:
         session = payload["session"]
@@ -252,15 +255,25 @@ class GatewayStreams:
         items = []
         for message in loop.inbox.next_turn:
             items.append({"id": message["id"], "placement": "queued",
+                          **self._prompt_rpc_id(message),
                           "message": {"id": message["id"],
                                       "content": message.get("content", [])}})
         for message in loop.inbox.next_step:
             placement = ("steering" if message.get("source", {}).get("kind") == "user"
                          else "context")
             items.append({"id": message["id"], "placement": placement,
+                          **self._prompt_rpc_id(message),
                           "message": {"id": message["id"],
                                       "content": message.get("content", [])}})
         return items
+
+    @staticmethod
+    def _prompt_rpc_id(message: dict) -> dict:
+        """Prompt-RPC 身份（上游 promptRpcId：browser 提交消息的 user source 携带）。"""
+        source = message.get("source") or {}
+        if source.get("kind") == "user" and "rpcId" in source:
+            return {"rpcId": source["rpcId"]}
+        return {}
 
     def _jobs_registry(self):
         return self.ctx.get("jobs")
@@ -298,10 +311,11 @@ async def _poll_new_events(api: Any, session_id: str, from_seq: int, signal=None
 
     对齐 history.follow 的 gap-free 逐帧语义；mini 用短轮询替代事件通知
     （会话日志在进程内 append 即现成可读）。事件 seq 为 0 基（`seq == 追加前
-    日志长度`，对齐上游 EventLog），snapshot `cursor` = 日志条数 = 下一条应达
-    seq；因此过滤用 `>= from_seq`，保证快照后第一条活体事件不漏判（旧 `>` 会
-    永久吞掉该条）。一次返回全部新事件避免逐条重扫：调用方顺序 yield，seq 保证
-    严格递增。心跳/取消信号与轮询间隔由调用方控制。
+    日志长度`，对齐上游 EventLog），snapshot `cursor` = 最后已提交事件 seq
+    （inclusive，上游 history.ts `sourceLog.at(-1)?.seq ?? -1`），下一条应达
+    seq = cursor + 1；因此过滤用 `>= from_seq`，保证快照后第一条活体事件不
+    漏判（旧 `>` 会永久吞掉该条）。一次返回全部新事件避免逐条重扫：调用方
+    顺序 yield，seq 保证严格递增。心跳/取消信号与轮询间隔由调用方控制。
     """
     loop_ = api._agents.get(session_id)
     if loop_ is None:

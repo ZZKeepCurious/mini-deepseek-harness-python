@@ -17,7 +17,7 @@ packages/session/session-format/src/{format,zstd}.ts。
      再把恢复事件连同 closers 经 commit_repair 持久化（截断点 = 残帧起点，
      对齐上游 commitRepair(truncateTo, recoveredEvents, closers)）
    6. load 时未知事件类型整体拒绝 —— fail-closed
-  7. 目录布局：root/<--projectKey(cwd)-->/<encodeSegment(id)>/session.jsonl[.zstd]；
+  7. 目录布局：root/<--projectKey(cwd)-->/<encodeSegment(id)>/session.v2.jsonl[.zstd]；
      cwd 缺省退化到 _no-cwd 项目目录；项目目录下的散置 *.jsonl 制品
      （遗留平铺布局）响亮拒绝
 
@@ -30,7 +30,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import zstandard
@@ -202,24 +202,48 @@ def _project_dir(root: Path, cwd: str | None) -> Path:
     return Path(root) / project_key(cwd)
 
 
+def _generation_log_name(compression: str | None) -> str:
+    """canonical generation 制品名（上游 sessionFormatLogFilename + jsonl
+    generationLogFilename）：v0 保留 `session.jsonl`；此后每代带小写 `vN` 段
+    ——当前 v2 = `session.v2.jsonl[.zstd]`。"""
+    return f"session.v{SESSION_FORMAT_VERSION}{_log_suffix(compression)}"
+
+
 def _session_dir(root: Path, cwd: str | None, session_id: str) -> Path:
     """对齐上游 format.ts `sessionDir`：项目目录 → 会话目录。"""
     return _project_dir(root, cwd) / encode_segment(session_id)
 
 
 def _log_path(root: Path, cwd: str | None, session_id: str, compression: str | None) -> Path:
-    """对齐上游 format.ts `logPath`：会话目录下 session.jsonl[.zstd]。"""
-    return _session_dir(root, cwd, session_id) / f"session{_log_suffix(compression)}"
+    """对齐上游 format.ts `logPath`：会话目录下 generation 制品名。"""
+    return _session_dir(root, cwd, session_id) / _generation_log_name(compression)
+
+
+#: 物理 header 键闭集（上游 format.ts:91-93）：必填六键 + 可选四键；未知键拒读。
+HEADER_REQUIRED_KEYS = ("type", "version", "id", "createdAt", "isSeeded", "delegationDepth")
+HEADER_OPTIONAL_KEYS = ("cwd", "parentSession", "origin", "agentPreset")
+_HEADER_KEYS = frozenset(HEADER_REQUIRED_KEYS + HEADER_OPTIONAL_KEYS)
+
+
+def _is_absolute_path(value: str) -> bool:
+    """绝对路径判定（上游 isAbsolute，按平台语法跨 POSIX/Windows 形态判定）。"""
+    return (PurePosixPath(value).is_absolute()
+            or PureWindowsPath(value).is_absolute())
 
 
 def _to_header_line(header: dict) -> dict:
-    """构造 header 行对象（上游 toHeaderLine，rc.1 schema）：type 标签居首、
-    delegationDepth 必填（缺省补 0）、isSeeded boolean 必填、
-    可选字段缺席即省略（绝不 null）。
-
-    rc.1 变更：seedLength 移除，改用 isSeeded: boolean；wire form 的
-    seedLength 由 wireHeader() 在 follow snapshot 时翻译。
+    """构造 header 行对象（上游 toHeaderLine，v2 schema）：必填六键居首、
+    可选字段缺席即省略（绝不 null）、**键闭集**——未知键 fail loud（上游
+    isHeaderLine 拒绝未知键；扩展 meta 键上行会让上游拒读本制品，写侧同
+    样拒绝而不是静默丢弃）。cut 不入行：inheritedEventCount 由最后一个
+    `{inherited:true}` end-seed marker 在读路径派生（见 `inherited_cut`）。
     """
+    unknown = sorted(key for key in header
+                     if key not in _HEADER_KEYS and key not in _HEADER_BASE_KEYS)
+    if unknown:
+        raise ValueError(
+            f"session header uses keys outside the closed physical header key set: "
+            f"{unknown}; the v2 header carries only {sorted(_HEADER_KEYS)}")
     line: dict[str, Any] = {
         "type": "session",
         "version": header["version"],
@@ -229,13 +253,8 @@ def _to_header_line(header: dict) -> dict:
     for optional in ("cwd", "parentSession", "origin", "agentPreset"):
         if optional in header:
             line[optional] = header[optional]
-    # rc.1: isSeeded 必填 boolean（缺省 false）
     line["isSeeded"] = bool(header.get("isSeeded", False))
     line["delegationDepth"] = header.get("delegationDepth", 0)
-    # mini 扩展 meta 键（label 等）随行携带；上游解析守卫容忍未知额外键。
-    for key, value in header.items():
-        if key not in line and key not in ("delegationDepth",):
-            line[key] = value
     return line
 
 
@@ -252,11 +271,16 @@ def _is_number(value: Any) -> bool:
 
 
 def _is_header_line(value: Any) -> bool:
-    """类型守卫：解析出的首行是形状完好的 session header（rc.1 schema）。
+    """类型守卫：解析出的首行是形状完好的 session header（上游 isHeaderLine，v2）。
 
-    rc.1 变更：拒绝 seedLength 字段；要求 isSeeded 为 boolean。
+    v2 收紧：必填键齐备 + **未知键拒绝**（键闭集）+ `isSeeded` 严格 boolean 必填
+    + `cwd` 必须是绝对路径字符串；退役政策字段（seedLength 等）随键闭集自然拒绝。
     """
     if not isinstance(value, dict) or value.get("type") != "session":
+        return False
+    if any(key not in value for key in HEADER_REQUIRED_KEYS):
+        return False
+    if any(key not in _HEADER_KEYS for key in value):
         return False
     if not _is_number(value.get("version")):
         return False
@@ -268,18 +292,18 @@ def _is_header_line(value: Any) -> bool:
     depth = value.get("delegationDepth")
     if not _is_safe_int(depth) or depth < 0:
         return False
+    cwd = value.get("cwd")
+    if cwd is not None and not (isinstance(cwd, str) and _is_absolute_path(cwd)):
+        return False
+    if value.get("parentSession") is not None and not isinstance(value.get("parentSession"), str):
+        return False
+    if not isinstance(value.get("isSeeded"), bool):
+        return False
     origin = value.get("origin")
     if origin is not None and origin != "subagent":
         return False
     preset = value.get("agentPreset")
     if preset is not None and not isinstance(preset, str):
-        return False
-    # rc.1: 拒绝 seedLength（已废弃字段）
-    if "seedLength" in value:
-        return False
-    # rc.1: isSeeded 必须是 boolean
-    is_seeded = value.get("isSeeded")
-    if is_seeded is not None and not isinstance(is_seeded, bool):
         return False
     return True
 
@@ -287,18 +311,12 @@ def _is_header_line(value: Any) -> bool:
 def _from_header_line(line: dict) -> dict:
     """header 行还原为扁平 header；退役政策基线字段响亮拒绝。
 
-    rc.1 兼容：旧版 seedLength 自动翻译为 isSeeded + inheritedEventCount（仅读路径）。
+    v2：cut 不随行携带（读路径由 `inherited_cut` 从 end-seed marker 派生）；
+    旧版 seedLength 已随键闭集在读守卫拒收，无翻译路径。
     """
     if "sandboxMode" in line or "approvalPolicy" in line:
         raise ValueError("session header uses retired policy baseline fields")
-    result = dict(line)
-    # rc.1 兼容迁移：seedLength → isSeeded + inheritedEventCount
-    if "seedLength" in result:
-        seed_len = result.pop("seedLength")
-        if "isSeeded" not in result:
-            result["isSeeded"] = seed_len is not None and seed_len > 0
-        # inheritedEventCount 由 meta 层传递，不落 header 行
-    return result
+    return dict(line)
 
 
 def _parse_header_line_object(parsed: Any) -> dict:
@@ -446,11 +464,13 @@ class SessionPersistence:
     def read_prepared(self, session_id: str, cwd: str | None = None) -> dict:
         """读出已提交前缀与崩溃恢复信息（上游 StoredPrefix 的 mini 形态）。
 
-        返回 {events, recovered_events, truncate_to}：events 为保留前缀 +
-        从 torn 尾恢复的完整记录；truncate_to 为应回退的字节偏移（无 torn 为
-        None）。缺省实现无恢复面。
+        返回 {meta, events, recovered_events, truncate_to}：meta 为 header
+        元数据（无 header 的后端为 None）；events 为保留前缀 + 从 torn 尾
+        恢复的完整记录；truncate_to 为应回退的字节偏移（无 torn 为 None）。
+        缺省实现无恢复面。
         """
-        return {"events": self.load(session_id, cwd), "recovered_events": [], "truncate_to": None}
+        return {"meta": None, "events": self.load(session_id, cwd),
+                "recovered_events": [], "truncate_to": None}
 
     def declare(self, session_id: str, meta: dict | None = None, created_at: int | None = None,
                 cwd: str | None = None) -> None:
@@ -488,7 +508,7 @@ class JsonlPersistence(SessionPersistence):
     """JSONL 后端：每会话一个拼接帧容器文件（默认 zstd）或明文 JSONL。
 
     目录布局对齐上游 session-persistence-jsonl：
-        root/<--projectKey(cwd)-->/<encodeSegment(id)>/session.jsonl[.zstd]
+        root/<--projectKey(cwd)-->/<encodeSegment(id)>/session.v2.jsonl[.zstd]
     cwd 缺省时按 header.meta.cwd 或既有落盘位置反查；新会话反查不到时退化
     到 _no-cwd 项目目录。两种物理编码在同一根目录互斥——发现对立编码的
     制品即响亮拒绝（encodingMismatch），项目目录下的散置制品（遗留平铺
@@ -534,7 +554,7 @@ class JsonlPersistence(SessionPersistence):
         """根目录里任何对立编码制品都拒绝（上游 checkRootEncoding）。"""
         for project in self._list_project_dirs():
             for session_dir in self._list_session_dirs(project):
-                incompatible = session_dir / f"session{_log_suffix(self._opposite_compression())}"
+                incompatible = session_dir / _generation_log_name(self._opposite_compression())
                 if incompatible.exists():
                     raise self._encoding_mismatch(incompatible)
 
@@ -665,15 +685,13 @@ class JsonlPersistence(SessionPersistence):
         """跨全部项目目录按编码后的 id 子目录定位唯一物理日志（上游 findLog）。"""
         self._ensure_root_encoding()
         matches: list[Path] = []
-        suffix = _log_suffix(self.compression)
-        opposite_suffix = _log_suffix(self._opposite_compression())
         for project in self._list_project_dirs():
             self._reject_legacy_flat_artifacts(project)
             session_dir = project / encode_segment(session_id)
-            opposite = session_dir / f"session{opposite_suffix}"
+            opposite = session_dir / _generation_log_name(self._opposite_compression())
             if opposite.exists():
                 raise self._encoding_mismatch(opposite)
-            candidate = session_dir / f"session{suffix}"
+            candidate = session_dir / _generation_log_name(self.compression)
             if candidate.exists():
                 matches.append(candidate)
         if len(matches) > 1:
@@ -923,11 +941,12 @@ class JsonlPersistence(SessionPersistence):
     def read_prepared(self, session_id: str, cwd: str | None = None) -> dict:
         path = self._resolve(session_id, cwd)
         if not path.exists():
-            return {"events": [], "recovered_events": [], "truncate_to": None}
-        _, events, marker = self._read_by_id(path, session_id)
+            return {"meta": None, "events": [], "recovered_events": [], "truncate_to": None}
+        header, events, marker = self._read_by_id(path, session_id)
         if marker is not None:
             self._truncate_to(path, marker["truncate_to"])
         return {
+            "meta": _header_meta(header),
             "events": events,
             "recovered_events": list(marker["recovered_events"]) if marker else [],
             "truncate_to": marker["truncate_to"] if marker else None,
@@ -943,15 +962,13 @@ class JsonlPersistence(SessionPersistence):
         self._ensure_root_encoding()
         headers = []
         ids: set[str] = set()
-        suffix = _log_suffix(self.compression)
-        opposite_suffix = _log_suffix(self._opposite_compression())
         for project in self._list_project_dirs():
             self._reject_legacy_flat_artifacts(project)
             for session_dir in self._list_session_dirs(project):
-                opposite = session_dir / f"session{opposite_suffix}"
+                opposite = session_dir / _generation_log_name(self._opposite_compression())
                 if opposite.exists():
                     raise self._encoding_mismatch(opposite)
-                path = session_dir / f"session{suffix}"
+                path = session_dir / _generation_log_name(self.compression)
                 if not path.exists():
                     continue
                 first = self._read_first_line(path)
@@ -998,7 +1015,7 @@ class JsonlPersistence(SessionPersistence):
         """读出会话的逐字原始制品文本：完整帧解压后拼接（或明文原文）。
 
         内容是后端写下的确切 JSONL 文本——绝不从解析后的事件重建，打包行、
-        键序与换行逐字节幸存。逻辑制品名恒为 session.jsonl（.zstd 后缀只标
+        键序与换行逐字节幸存。逻辑制品名恒为 session.v2.jsonl（.zstd 后缀只标
         物理编码）。
         """
         path = self.path_of(session_id, cwd)
@@ -1064,6 +1081,14 @@ class SqlitePersistence(SessionPersistence):
     def declare(self, session_id: str, meta: dict | None = None, created_at: int | None = None,
                 cwd: str | None = None) -> None:
         meta = dict(meta) if meta else {}
+        # 键闭集同源（上游 SessionHeader 类型化闭集）：未知键 fail loud，
+        # 与 JSONL 物理 header 的写边界校验一致
+        unknown = sorted(key for key in meta
+                         if key not in _HEADER_KEYS and key != "createdAt")
+        if unknown:
+            raise ValueError(
+                f"session header uses keys outside the closed physical header key set: "
+                f"{unknown}; the v2 header carries only {sorted(_HEADER_KEYS)}")
         if cwd is not None and "cwd" not in meta:
             meta["cwd"] = cwd
         self._conn.execute(
@@ -1099,6 +1124,17 @@ class SqlitePersistence(SessionPersistence):
         ).fetchone()
         meta = json.loads(row[0]) if row and row[0] else None
         return {"meta": meta, "events": self.load(session_id, cwd)}
+
+    def read_prepared(self, session_id: str, cwd: str | None = None) -> dict:
+        row = self._conn.execute(
+            "SELECT meta FROM sessions WHERE session_id=?", (session_id,)
+        ).fetchone()
+        return {
+            "meta": json.loads(row[0]) if row and row[0] else None,
+            "events": self.load(session_id, cwd),
+            "recovered_events": [],
+            "truncate_to": None,
+        }
 
     def list_headers(self):
         rows = self._conn.execute(
@@ -1159,6 +1195,29 @@ def load_events_checked(raw_events: list[dict]) -> list[dict]:
     return raw_events
 
 
+def inherited_cut(meta: dict, events: list) -> int:
+    """从最后一个 lineage 标记派生 v2 fork 切割点（上游 format.ts inheritedCut，
+    公开契约：`isHeaderLine` 闭集同层的读路径派生规则）。
+
+    fork 子会话的 `{inherited:true}` end-seed marker 落在继承前缀末尾——其
+    seq（0 基 == 追加前日志长度）恰为继承事件数。双向 corrupt 校验：
+    seeded header 无 marker / unseeded header 有 marker 一律拒绝。
+    """
+    cut = None
+    for event in events:
+        if event.get("type") == "session/end-seed":
+            data = event.get("data") or {}
+            if data.get("inherited") is True:
+                cut = event.get("seq")
+    if meta.get("isSeeded") is True and cut is None:
+        raise ValueError(
+            "corrupt session log: seeded v2 header lacks an inherited end-seed marker")
+    if meta.get("isSeeded") is not True and cut is not None:
+        raise ValueError(
+            "corrupt session log: unseeded v2 header contains an inherited end-seed marker")
+    return cut if cut is not None else 0
+
+
 def repair_and_replay(persistence: SessionPersistence, session_id: str, session: Session) -> Session:
     """load → 校验 → 崩溃修复 → 以 seed 回放进内存 Session（重启后继续对话）。
 
@@ -1167,9 +1226,9 @@ def repair_and_replay(persistence: SessionPersistence, session_id: str, session:
     读路径已即时落盘，此处把「从 torn 尾恢复的完整事件 + 合成 closers」一并
     追加落盘。已平衡的日志返回空 closers，二次加载幂等。
 
-    rc.1：从 header meta 中提取 inheritedEventCount 并传入 Session 构造。
-    V2：恢复路径以 mode="restore" 构造（对齐上游 restore 边界语义：end-seed
-    marker 已随日志持久化，不再推导）。
+    V2：恢复路径以 mode="restore" 构造；inheritedEventCount 不随 header meta
+    携带——由 `inherited_cut` 从最后一个 `{inherited:true}` end-seed marker
+    派生（上游 format.ts:358-371，双向 corrupt 校验）。
     """
     prepared = persistence.read_prepared(session_id)
     meta = prepared.get("meta") or {}
@@ -1180,8 +1239,7 @@ def repair_and_replay(persistence: SessionPersistence, session_id: str, session:
         persistence.commit_repair(session_id, closers, recovered=recovered)
     repaired = raw + closers
     if repaired:
-        # rc.1: 从 meta 读 inheritedEventCount（fork 子会话在 meta 中携带）
-        inherited_event_count = meta.get("inheritedEventCount", 0)
+        inherited_event_count = inherited_cut(meta, raw)
         session = Session(session_id, seed=repaired, created_at=session.created_at,
                           meta=meta, inherited_event_count=inherited_event_count,
                           mode="restore")

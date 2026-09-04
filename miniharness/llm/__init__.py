@@ -13,6 +13,7 @@ from .protocol import *  # noqa: F401,F403
 from .fake import *  # noqa: F401,F403
 from .deepseek import *  # noqa: F401,F403
 from .assistant_stream import *  # noqa: F401,F403
+from .content import *  # noqa: F401,F403
 
 __all__ = [
     "AssistantStreamAccumulator",
@@ -35,8 +36,11 @@ __all__ = [
     "TimedStreamChunk",
     "TRANSPORT",
     "UNSUPPORTED_CONTENT",
+    "content_has_file",
     "content_has_image",
     "expand_assistant_stream",
+    "file_handle_text",
+    "project_files_to_text",
     "provider_retry_after_ms",
     "request_id",
     "serialize_messages",

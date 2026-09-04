@@ -9,6 +9,7 @@ import uuid
 
 __all__ = [
     "create_message",
+    "file_block",
     "image_block",
     "reasoning_block",
     "text_block",
@@ -47,6 +48,17 @@ def image_block(attachment: dict) -> dict:
     由 attachment 服务的 save_images 产出；本构造不持有原始字节。
     """
     return {"type": "image", "attachment": attachment}
+
+
+def file_block(attachment: dict) -> dict:
+    """file 块：verbatim 文件引用（alpha.1 第六类 ContentBlock）。
+
+    对齐上游 FileBlock：{type:'file', attachment: FileAttachmentRef}
+    （llm/llm/src/types.ts）。FileAttachmentRef = {attachmentId（原样字节
+    sha256）, name, bytes}；请求组装经 project_files_to_text 无条件投影为
+    handle 文本——file 永不原生 dispatch（llm/content.ts:137-201）。
+    """
+    return {"type": "file", "attachment": attachment}
 
 
 def tool_call_block(call_id: str, name: str, arguments: str) -> dict:

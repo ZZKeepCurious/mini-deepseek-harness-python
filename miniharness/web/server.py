@@ -24,8 +24,8 @@
 
 教学简化（须在 AGENTS.md 标注）：session 日志事件是 mappingproxy/tuple 冻结形态
 （core/session/json.py deep_freeze），序列化前经 thaw 还原；`$events` 为单帧
-载体（无 mux `since` 恢复游标，见 verified-diffs §3.4）；心跳 Ping 省略（WS
-docstring）。
+载体（无 mux `since` 恢复游标，见 verified-diffs §3.4）；心跳 = launcher
+transport 级 uvicorn 选项（2s Ping + 4s 判死，见 mux docstring）。
 """
 from __future__ import annotations
 

@@ -19,8 +19,11 @@
     AgentLoop.publish() 调用 register（对齐发布时机），但 mini 单同步进程、构造即
     运行态，agent/created 在 register 时立即派发（无 announce 两步；detach 补发
     agent/disposed 时同理）
-  * 无 initiator AsyncLocalStorage 机制（currentInitiator/requireInitiator/withInitiator
-    为上游异步驱动链归因，mini 同步模型不适用，属架构不适用项）
+  * initiator 最小载体（alpha.1 goal-round-driver host-pause 边界所需）：
+    `_CURRENT_INITIATOR` ContextVar 在 AgentLoop turn 执行期间置位（tool 子任务
+    经 create_task 继承），`current_initiator()` 供「模型自身回合内 vs 宿主侧」
+    判别（对齐上游 `ctx.agents.currentInitiator()`；编排入口级 withInitiator/
+    withoutInitiator 上下文管理仍为架构不适用项）
   * owner 缺省 None（root 级），subagent 运行时所有权仍由 SubagentContinuationManager
     ._live 承担（该注册表不承载运行时 owner 链）；roots() 当前即 list() 近似
   * assert_live 只对"安装 ctx.agents 的组合上下文"强制；裸单测装配（未安装 agents
@@ -28,6 +31,7 @@
 """
 from __future__ import annotations
 
+from contextvars import ContextVar
 from typing import Any
 
 from .scope import Context, Service
@@ -35,6 +39,7 @@ from .scope import Context, Service
 __all__ = [
     "AgentNotLive",
     "AgentRegistry",
+    "current_initiator",
     "install_agents",
     "assert_live_agent",
 ]
@@ -42,6 +47,17 @@ __all__ = [
 
 class AgentNotLive(Exception):
     """目标 agent 不是 ctx.agents 中当前登记的 live 实例（陈旧/重复实例拒绝）。"""
+
+
+#: turn 执行栈内的当前 initiator（上游 `ctx.agents` initiator AsyncLocalStorage 的
+#: 最小 ContextVar 载体）：AgentLoop 在 turn 执行期间置位，tool 子任务经 create_task
+#: 继承同一上下文；编排入口级 withInitiator 归因仍不适用（mini 无多编排入口驱动链）。
+_CURRENT_INITIATOR: ContextVar = ContextVar("miniharness_current_initiator", default=None)
+
+
+def current_initiator() -> Any:
+    """当前 turn 执行栈的 initiator agent（栈外/宿主侧返回 None）。"""
+    return _CURRENT_INITIATOR.get()
 
 
 class AgentRegistry(Service):

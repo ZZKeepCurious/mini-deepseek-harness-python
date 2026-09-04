@@ -9,10 +9,11 @@ MINIHARNESS_WEB_HOST / MINIHARNESS_WEB_PORT 环境变量读（缺省
 '127.0.0.1' / '0'），而非上游组合配置节；本 profile 的持久化沿用
 WebApi 的默认内存 SessionStore（无 JSONL 落盘，与 headless 不同）。
 
-心跳：每条 WS 连接 30s 发一次 transport 级 Ping（`ws_ping_interval`
-=30），`ws_ping_timeout=None` 不强制 Pong——对齐 upstream
-`stream-server.ts` 的 heartbeat（只保活、不杀僵死连接）。由 uvicorn
-`websockets` 实现透传（autodetect：auto → websockets 库）。
+心跳（alpha.1 复核批对齐上游 gateway heartbeat 契约）：每条 WS 连接按
+`websocketHeartbeatIntervalMs` 缺省 **2000ms** 发 transport 级 Ping，连续
+**2 个周期未收到 Pong 即 terminate**（上游 `RemoteStreamMuxServer`
+MAX_MISSED_HEARTBEATS=2）。mini 由 uvicorn `websockets` 透传等价语义：
+`ws_ping_interval=2`、`ws_ping_timeout=4`（miss 2 周期 ≈ 4s 无 Pong 判死）。
 """
 from __future__ import annotations
 
@@ -31,22 +32,36 @@ __all__ = ["build_app", "run_web", "uvicorn_options"]
 
 HOSTS = ("127.0.0.1", "0.0.0.0")
 
-#: transport 级心跳间隔（秒）。对齐 upstream stream-server.ts heartbeat：
-#: 定期发起 WS protocol ping 保活中间代理空闲超时；不验证 Pong（timeout=None）。
-WS_HEARTBEAT_INTERVAL = 30.0
+#: transport 级心跳间隔（秒）。对齐 upstream gateway `websocketHeartbeatIntervalMs`
+#: 缺省 2000（index.ts Config @default 2000）。
+WS_HEARTBEAT_INTERVAL = 2.0
+
+#: 连续 miss 判死预算（秒）≈ MAX_MISSED_HEARTBEATS × interval（上游
+#: stream-server.ts MAX_MISSED_HEARTBEATS=2：连续 2 周期无 Pong 即 terminate）。
+WS_HEARTBEAT_TIMEOUT = 4.0
 
 
-def uvicorn_options(heartbeat_interval: float | None = WS_HEARTBEAT_INTERVAL) -> dict:
+def uvicorn_options(heartbeat_interval: float | None = WS_HEARTBEAT_INTERVAL,
+                    heartbeat_timeout: float | None = WS_HEARTBEAT_TIMEOUT) -> dict:
     """构造 `uvicorn.run` 的 WS 相关选项（可测的纯函数）。
 
     @param heartbeat_interval - 心跳间隔；None 关闭（测试/禁用）。
-    @returns 传给 uvicorn 的 kwargs（`ws_ping_timeout=None`=只保活不强制 Pong）。
+    @param heartbeat_timeout - Pong 判死预算（上游 miss 2 周期 terminate 的
+    transport 级等价映射）；None = 只保活不强制 Pong。
+    @returns 传给 uvicorn 的 kwargs。
     """
     if heartbeat_interval is None:
         return {}
     if not isinstance(heartbeat_interval, (int, float)) or not heartbeat_interval > 0:
         raise ValueError("ws heartbeat interval must be a positive number")
-    return {"ws_ping_interval": heartbeat_interval, "ws_ping_timeout": None}
+    options: dict[str, Any] = {"ws_ping_interval": heartbeat_interval}
+    if heartbeat_timeout is None:
+        options["ws_ping_timeout"] = None
+    else:
+        if (not isinstance(heartbeat_timeout, (int, float)) or not heartbeat_timeout > 0):
+            raise ValueError("ws heartbeat timeout must be a positive number")
+        options["ws_ping_timeout"] = heartbeat_timeout
+    return options
 
 
 def _resolve_bind(host: str | None, port: int | None) -> tuple[str, int]:

@@ -391,6 +391,106 @@ class GoalDriverTest(unittest.TestCase):
         asyncio.run(run())
         self.assertEqual(goals.get(loop)["phase"], "paused")
 
+    @staticmethod
+    def _slow_adapter():
+        """首次流式加延迟的假模型：让宿主操作落在 round 1 运行中。"""
+        adapter = FakeLlmAdapter(final_text="完成。")
+        slept = []
+
+        async def slow_stream(messages, tools, signal=None):
+            if not slept:
+                slept.append(True)
+                await asyncio.sleep(0.02)
+            async for c in FakeLlmAdapter.stream(adapter, messages, tools, signal):
+                yield c
+        adapter.stream = slow_stream
+        return adapter
+
+    def test_driver_mode_host_pause_aborts_live_turn(self):
+        """host-pause 边界（alpha.1，上游 index.ts:283-294）：宿主在回合运行中
+        pause 目标 → live turn 被中止（keepInbox）、turn 以 aborted 闭合；
+        模型自身回合内的 pause（update_goal 工具）不受影响。"""
+        ctx, goals, reg = self._fresh()
+        loop = AgentLoop(Session("d1"), self._slow_adapter(), reg, ctx)
+        driver = install_goal_driver(ctx, goals)
+        install_sessions(ctx)
+        loop.publish()
+        turn_started = asyncio.Event()
+
+        def on_pre_step(payload, nxt):
+            if any((m.get("source") or {}).get("kind") == "goal"
+                   for m in payload.get("messages", [])):
+                turn_started.set()
+            return nxt()
+        ctx.on("agent/pre-step", on_pre_step)
+
+        async def run():
+            loop.start_driver()
+            goals.create(loop, {"objective": "do the thing", "maxGoalRounds": 3})
+            # 宿主侧任务（不在 turn 执行栈内 → current_initiator() ≠ agent）
+            async def host_pause():
+                await turn_started.wait()
+                view = goals.get(loop)
+                goals.pause(loop, {"id": view["id"], "revision": view["revision"]})
+            pauser = asyncio.create_task(host_pause())
+            await loop.when_idle_async()
+            await pauser
+        asyncio.run(run())
+        self.assertEqual(goals.get(loop)["phase"], "paused")
+        turn_ends = [e for e in loop.session.events if e["type"] == "turn/end"]
+        self.assertTrue(any(e["data"]["reason"].get("kind") == "aborted" for e in turn_ends))
+
+    def test_driver_mode_resume_after_host_pause_not_repause(self):
+        """pause fence（alpha.1，上游 index.ts:262-281）：宿主 pause 后立即
+        resume（被中止回合尚未收敛到 idle）——被弃 attempt 的 revision 已过时，
+        fence 不得把复活的目标再次误杀为 paused；驱动以新 revision 续跑。"""
+        ctx, goals, reg = self._fresh()
+        loop = AgentLoop(Session("d2"), self._slow_adapter(), reg, ctx)
+        install_goal_driver(ctx, goals)
+        install_sessions(ctx)
+        loop.publish()
+        turn_started = asyncio.Event()
+
+        def on_pre_step(payload, nxt):
+            if any((m.get("source") or {}).get("kind") == "goal"
+                   for m in payload.get("messages", [])):
+                turn_started.set()
+            return nxt()
+        ctx.on("agent/pre-step", on_pre_step)
+
+        async def run():
+            loop.start_driver()
+            goals.create(loop, {"objective": "do the thing", "maxGoalRounds": 2})
+
+            async def host_pause_then_resume():
+                await turn_started.wait()
+                view = goals.get(loop)
+                goals.pause(loop, {"id": view["id"], "revision": view["revision"]})
+                resumed = goals.get(loop)
+                goals.resume(loop, {"id": resumed["id"], "revision": resumed["revision"]})
+            actor = asyncio.create_task(host_pause_then_resume())
+            await loop.when_idle_async()
+            await actor
+        asyncio.run(run())
+        view = goals.get(loop)
+        # 复活的目标继续跑到 round-limit（2 轮），而非被再次 pause
+        self.assertEqual(view["phase"], "blocked")
+        self.assertEqual(view["blockedReason"]["code"], "round-limit")
+        self.assertEqual(view["roundsStarted"], 2)
+        goal_msgs = [e for e in loop.session.events
+                     if e["type"] == "user/message"
+                     and e["data"]["source"].get("kind") == "goal"]
+        self.assertEqual(len(goal_msgs), 2)
+
+    @staticmethod
+    def _fresh():
+        """独立组合（同一 ctx 的 tools 服务槽只能注册一次）。"""
+        ctx = _ctx()
+        goals = install_goals(ctx)
+        reg = ToolRegistry(ctx)
+        register_goal_tools(reg, goals, ctx)
+        return ctx, goals, reg
+
 
 class GoalToolsTest(unittest.TestCase):
     def _make(self):

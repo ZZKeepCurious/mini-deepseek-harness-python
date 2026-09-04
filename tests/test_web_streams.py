@@ -57,12 +57,23 @@ class TestFollow(GatewayStreamsTest):
             gen = self._open(sid)
             snap = await gen.__anext__()
             self.assertEqual(snap["type"], "snapshot")
-            self.assertEqual(snap["header"]["sessionId"], sid)
+            # snapshot.header = 平铺 SessionWireHeader（上游 history.ts wireHeader）
+            self.assertEqual(snap["header"]["id"], sid)
+            self.assertEqual(snap["header"]["version"], 2)
+            self.assertIs(snap["header"]["isSeeded"], False)
+            self.assertIn("createdAt", snap["header"])
             self.assertIn("cursor", snap)
             self.assertIn("records", snap)
             self.assertIn("hasMore", snap)
             self.assertIs(snap["hasMore"], False)
-            self.assertIn("projections", snap)
+            # records 为 {type:'event', event} 包装（上游 entryFor）；空日志
+            # cursor = -1、projections 空基线 {asOfSeq, values}
+            for record in snap["records"]:
+                self.assertEqual(record["type"], "event")
+            self.assertEqual(snap["cursor"],
+                             snap["records"][-1]["event"]["seq"] if snap["records"] else -1)
+            self.assertEqual(snap["projections"],
+                             {"asOfSeq": snap["cursor"], "values": {}})
             response = self.api.dispatch("session.prompt", "rp", {
                 "sessionId": sid, "mode": "queue", "requestId": "req-" + sid,
                 "content": [{"type": "text", "text": "hello"}],
@@ -185,8 +196,13 @@ class TestControl(GatewayStreamsTest):
             value = baseline["value"]
             self.assertIn("queues", value)
             self.assertIn("jobs", value)
+            # baseline 对齐上游 control.ts：全部 live 会话每会话一条（空也放）
+            # + 每会话 projections 空基线块 {asOfSeq, values}
             self.assertIn(sid, value["queues"])
+            self.assertIn(sid, value["jobs"])
+            self.assertIn(sid, value["projections"])
             self.assertEqual(value["queues"][sid][0]["placement"], "queued")
+            self.assertEqual(value["projections"][sid]["values"], {})
             # 触发一次 inbox splice → 实时 queue 帧（gen 已 running 消费队列）
             loop.inbox.append("next-turn",
                               create_message("user", [text_block("again")], {"kind": "user"}))
@@ -202,9 +218,10 @@ class TestControl(GatewayStreamsTest):
 
 class TestDispatchErrorHandling(GatewayStreamsTest):
     def test_unknown_endpoint_raises(self):
+        # 未知 endpoint：上游 gateway 折算 invocation-unavailable（index.ts:660）
         with self.assertRaises(RemoteStreamError) as cm:
             self.gateway.open_stream("session.nope", {"args": {}})
-        self.assertEqual(cm.exception.code, "gateway/internal")
+        self.assertEqual(cm.exception.code, "gateway/invocation-unavailable")
 
     def test_events_endpoint_dispatches(self):
         # $events 端点到 events registry：open 即 ready 帧
@@ -259,13 +276,14 @@ class TestReconnectResilience(GatewayStreamsTest):
 
         c0, evs1, snap2 = _run(go())
         first_gen = {f["event"]["seq"] for f in evs1}
-        second_gen = {e["seq"] for e in snap2["records"]}
-        total = c0 + 4
-        self.assertEqual(snap2["cursor"], total)
-        # 事件 seq 为 0 基（seq == 追加前日志长度）；快照 cursor = 条数 = 下一条 seq
+        second_gen = {r["event"]["seq"] for r in snap2["records"]}
+        # 事件 seq 为 0 基（seq == 追加前日志长度）；snapshot cursor = 最后已提交
+        # 事件 seq（inclusive，上游 history.ts sourceLog.at(-1)?.seq ?? -1，空日志 -1）
+        count = (c0 + 1) + 4
+        self.assertEqual(snap2["cursor"], count - 1)
         merged = first_gen | second_gen
-        self.assertEqual(merged, set(range(0, total)))
-        self.assertEqual(len(merged), total)
+        self.assertEqual(merged, set(range(0, count)))
+        self.assertEqual(len(merged), count)
         self.assertTrue(second_gen.issuperset(first_gen))
 
     def test_control_reconnect_refreshes_baseline(self):

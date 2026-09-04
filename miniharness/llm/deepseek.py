@@ -42,7 +42,15 @@ from .protocol import (
 )
 from .retry_policy import resolve_retry_policy
 
-__all__ = ["DeepSeekAdapter", "provider_retry_after_ms", "request_id", "serialize_messages"]
+__all__ = [
+    "DeepSeekAdapter",
+    "UNSUPPORTED_CONTENT",
+    "content_has_file",
+    "content_has_image",
+    "provider_retry_after_ms",
+    "request_id",
+    "serialize_messages",
+]
 
 
 # ---------- DeepSeek wire 序列化（llm-deepseek/src/serialize.ts） ----------
@@ -55,6 +63,16 @@ def content_has_image(blocks: list) -> bool:
     return any(b.get("type") == "image" for b in blocks or [])
 
 
+def content_has_file(blocks: list) -> bool:
+    """内容块是否含 file 块（含嵌套 tool-result 递归；上游 contentHasFile，
+    alpha.1 第六类 ContentBlock）。"""
+    return any(
+        b.get("type") == "file"
+        or (b.get("type") == "tool-result" and content_has_file(b.get("content") or []))
+        for b in blocks or []
+    )
+
+
 def serialize_messages(messages: list[dict]) -> list[dict]:
     """把 harness 消息序列化为 DeepSeek chat-completions wire 消息。
 
@@ -65,8 +83,10 @@ def serialize_messages(messages: list[dict]) -> list[dict]:
     文本走 {role:'user'}，每个 tool-result 块展开为独立的
     {role:'tool', tool_call_id} 消息（空输出用 '(no output)'）。
 
-    image 块显式拒绝（上游 serialize.ts assertTextOnly → UNSUPPORTED_CONTENT）：
-    此 wire 路由是纯文本，静默丢弃会丢失图片内容。
+    image / file 块显式拒绝（上游 serialize.ts assertTextOnly → UNSUPPORTED_CONTENT；
+    file 块在请求组装即被 project_files_to_text 无条件投影为 handle 文本，正常
+    不会到达 serialize——此处是 last-line 防御）：此 wire 路由是纯文本，静默
+    丢弃会丢失内容。
     """
     wire: list[dict] = []
 
@@ -75,7 +95,7 @@ def serialize_messages(messages: list[dict]) -> list[dict]:
 
     for message in messages:
         blocks = message.get("content", [])
-        if content_has_image(blocks):
+        if content_has_image(blocks) or content_has_file(blocks):
             raise LlmFailure(
                 UNSUPPORTED_CONTENT,
                 "The DeepSeek chat-completions adapter does not support image content.",
@@ -205,6 +225,13 @@ def request_id(headers) -> str | None:
     if value is None or len(value) == 0:
         return None
     return str(value)
+
+
+def _accept_identity(current: str | None, incoming) -> str | None:
+    """上游 acceptIdentity（translate.ts:74-87）：tool-call 的 id/name 是 identity
+    而非累加——wire 只在首 delta 发送一次；continuation 重发 ''/null（部分
+    OpenAI 兼容网关会填充 null）表示「无更新」，绝不覆盖已建立值。"""
+    return incoming if isinstance(incoming, str) and len(incoming) > 0 else current
 
 
 def _map_finish_reason(reason: str | None) -> dict:
@@ -442,11 +469,15 @@ class DeepSeekAdapter(LlmAdapter):
                         if delta.get("content"):
                             texts[choice["index"]] = texts.get(choice["index"], "") + delta["content"]
                         for tc in delta.get("tool_calls") or []:
-                            slot = pending.setdefault(tc["index"], {"id": "", "name": "", "arguments": ""})
-                            fn = tc.get("function", {})
-                            slot["id"] = tc.get("id") or slot["id"]
-                            slot["name"] += fn.get("name", "")
-                            slot["arguments"] += fn.get("arguments", "")
+                            slot = pending.setdefault(tc["index"], {"id": None, "name": None, "arguments": ""})
+                            fn = tc.get("function") or {}
+                            # identity 非累加（translate.ts:74-87 acceptIdentity）：id/name 由
+                            # 首 delta 建立，continuation 重发 ''/null 表示「无更新」而非「清空」；
+                            # arguments 片段为 identity 补集，null/缺省按 ''（translate.ts:186 ?? ''）。
+                            slot["id"] = _accept_identity(slot["id"], tc.get("id"))
+                            slot["name"] = _accept_identity(slot["name"], fn.get("name"))
+                            fragment = fn.get("arguments")
+                            slot["arguments"] += fragment if isinstance(fragment, str) else ""
                 continue
             if line.startswith("data:"):
                 payload = line[5:]
@@ -474,11 +505,12 @@ class DeepSeekAdapter(LlmAdapter):
         for idx, slot in sorted(pending.items()):
             emitted = True
             call_id = slot["id"] or f"call_{idx}"
+            name = slot["name"] or ""
             yield StreamChunk("block-start", index=idx, blockType="tool-call")
             yield StreamChunk("tool-call-delta", index=idx, id=call_id,
-                              name=slot["name"], argumentsDelta=slot["arguments"])
+                              name=name, argumentsDelta=slot["arguments"])
             yield StreamChunk("block-end", index=idx, block={
-                "type": "tool-call", "id": call_id, "name": slot["name"],
+                "type": "tool-call", "id": call_id, "name": name,
                 "arguments": slot["arguments"],
             })
         if not emitted:

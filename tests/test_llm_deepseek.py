@@ -39,6 +39,21 @@ def _chunk(text='ok', finish=None):
 DONE = 'data: [DONE]\n'
 
 
+def _tool_chunk(index=0, call_id=None, name=None, arguments=None, finish=None):
+    fn: dict = {}
+    if name is not None:
+        fn['name'] = name
+    if arguments is not None:
+        fn['arguments'] = arguments
+    delta: dict = {'tool_calls': [{'index': index, **({'id': call_id} if call_id is not None else {}),
+                                  **({'function': fn} if fn else {})}]}
+    return 'data: ' + json.dumps({'choices': [{'index': 0, 'delta': delta, 'finish_reason': finish}]}) + '\n'
+
+
+def _tool_block(out):
+    return [c for c in out if c['type'] == 'block-end'][0]['block']
+
+
 class SseParsingTest(unittest.TestCase):
     def test_terminated_events_dispatch(self):
         out = _run([_chunk(), '', DONE, ''])
@@ -97,6 +112,48 @@ class SseParsingTest(unittest.TestCase):
 
         with self.assertRaises(StreamAborted):
             asyncio.run(scenario())
+
+
+class ToolCallIdentityTest(unittest.TestCase):
+    """tool-call delta identity 健壮化（translate.ts:74-87 acceptIdentity，alpha.1）。
+
+    id/name 是 identity 而非累加：continuation 重发 ''/null 表示「无更新」；
+    arguments 片段遇 null 按 ''（translate.ts:186 ?? ''）。
+    """
+
+    def test_name_resent_on_continuation_keeps_established(self):
+        # continuation delta 重发 name（某些网关会整段重发）不得拼接成 'get_weatherget_weather'
+        out = _run([_tool_chunk(name='get_weather', arguments='{"ci'),
+                    '',
+                    _tool_chunk(name='get_weather', arguments='ty":"SF"}'),
+                    '', DONE, ''])
+        block = _tool_block(out)
+        self.assertEqual(block['name'], 'get_weather')
+        self.assertEqual(block['arguments'], '{"city":"SF"}')
+
+    def test_identity_empty_or_null_keeps_established(self):
+        # '' / null 均为「无更新」：不清空、不覆盖
+        out = _run([_tool_chunk(call_id='call_1', name='get_weather', arguments='{}'),
+                    '',
+                    _tool_chunk(call_id='', name=None),
+                    '', DONE, ''])
+        block = _tool_block(out)
+        self.assertEqual(block['id'], 'call_1')
+        self.assertEqual(block['name'], 'get_weather')
+
+    def test_arguments_explicit_null_does_not_crash(self):
+        # arguments 显式 null（wire 放宽 string|null）：不得 TypeError，按 '' 贡献
+        out = _run([_tool_chunk(call_id='call_1', name='ping', arguments=None),
+                    '',
+                    _tool_chunk(arguments='{}'),
+                    '', DONE, ''])
+        block = _tool_block(out)
+        self.assertEqual(block['arguments'], '{}')
+
+    def test_missing_name_falls_back_empty(self):
+        # 从未建立 name → closeBlock 缺省 ''（translate.ts:97 block.name ?? ''）
+        out = _run([_tool_chunk(call_id='call_1', arguments='{}'), '', DONE, ''])
+        self.assertEqual(_tool_block(out)['name'], '')
 
     def test_usage_maps_total_tokens_and_cache(self):
         # 上游 mapUsage（translate.ts）：totalTokens = prompt+completion（权威

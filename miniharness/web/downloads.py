@@ -10,7 +10,7 @@ session-export.ts + api/downloads.ts + fetch/handler.ts 的 GET 下载通道）�
     后端路径——对齐 upstream 的私有错误安全壳）。
   * 响应头：content-type=application/zip；Content-Disposition: attachment;
     filename="dsh-session-<safe>.zip"（safe = 非 [A-Za-z0-9_-] 折下划线）。
-  * 归档条目（zip 顺序）：根制品逐字置于其原始文件名（session.jsonl）→ 每个
+  * 归档条目（zip 顺序）：根制品逐字置于其原始文件名（session.v2.jsonl）→ 每个
     subagent 后代置于 `subagents/<safe-id>/<filename>`（按 lineage BFS，seen-set
     去重）→ 每个被含日志引用的独立媒体置于 `media/<attachmentId>.<ext>`（内容寻址）。
     根制品在读出前先经 live-session 的 flush 栅栏落盘（cold 会话无需）。
@@ -41,6 +41,7 @@ from ..core.session import SESSION_FORMAT_VERSION, thaw
 
 __all__ = [
     "DEFAULT_SESSION_LOG_COMPRESSION_LEVEL",
+    "SESSION_LOG_FILENAME",
     "SessionLogExportDeps",
     "resolve_export_deps",
     "safe_session_id_segment",
@@ -51,6 +52,10 @@ __all__ = [
 ]
 
 DEFAULT_SESSION_LOG_COMPRESSION_LEVEL = 6
+
+#: 导出制品名（上游 session-log-export archive.ts
+#: `SESSION_LOG_FILENAME = sessionFormatLogFilename(SESSION_FORMAT_VERSION)`）。
+SESSION_LOG_FILENAME = f"session.v{SESSION_FORMAT_VERSION}.jsonl"
 
 #: 上游媒体类型 → zip 扩展名（session-export.ts MEDIA_TYPE_EXTENSIONS）。
 _MEDIA_TYPE_EXTENSIONS: dict[str, str] = {
@@ -183,12 +188,12 @@ def _read_raw_artifact(deps: SessionLogExportDeps, session_id: str) -> tuple[str
         # 其它异常 → 准备失败壳（调用方 500）。均向上传播由 build_session_export 分类。
         raw = deps.persistence.read_raw(session_id)
         if raw is not None:
-            return ("session.jsonl", _events_text(raw))
+            return (SESSION_LOG_FILENAME, _events_text(raw))
         if live_events:
-            return ("session.jsonl", _session_to_jsonl(live))
+            return (SESSION_LOG_FILENAME, _session_to_jsonl(live))
         return None
     if live is not None:
-        return ("session.jsonl", _session_to_jsonl(live))
+        return (SESSION_LOG_FILENAME, _session_to_jsonl(live))
     return None
 
 

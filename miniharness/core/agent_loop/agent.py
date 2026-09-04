@@ -48,7 +48,9 @@ DEFAULT_MAX_STEPS = 50
 from ..dsh_scope import scope_target
 from ..scope import Context
 from ..system_prompt import join_context_sections, render_context_sections, render_prompt
+from ..agents import _CURRENT_INITIATOR
 from ...llm import LlmAdapter, LlmFailure, StreamAborted
+from ...llm.content import project_files_to_text
 from .assistant_stream import AssistantStreamAttempt
 from .inbox import Inbox
 from .resident_loop import run_on_resident
@@ -612,7 +614,13 @@ class AgentLoop:
 
     async def _pump_async(self) -> None:
         """async 主循环（asyncio 化重构后唯一 pump；driver 核心——由 _drive
-        在事件循环上驱动，同步门面经一次性 asyncio.run 驱动）。"""
+        在事件循环上驱动，同步门面经一次性 asyncio.run 驱动）。
+
+        initiator 载体：turn 执行期间（含 tool 子任务，经 create_task 继承
+        上下文）`current_initiator()` 即本实例——goal driver 的 host-pause
+        边界据此区分「模型自身回合内的 pause」与「宿主侧 pause」。
+        """
+        token = _CURRENT_INITIATOR.set(self)
         steps = 0
         try:
             first = True
@@ -656,6 +664,7 @@ class AgentLoop:
                           this_arg=self._carrier)
             raise
         finally:
+            _CURRENT_INITIATOR.reset(token)
             if self._turn_open:
                 self._close_turn(self._turn_end)
 
@@ -870,6 +879,13 @@ class AgentLoop:
         """
         while True:
             messages = self._derive_history()
+            # file 块投影（alpha.1，llm/content.ts projectFilesToText）：请求组装
+            # 无条件把 file（含嵌套 tool-result）换为 handle 文本——file 永不原生
+            # dispatch；路径解析经 attachments 服务的 file_host_path（未安装该
+            # 服务或路径不可达 → handle 文本走「无可读路径」分支）。
+            attachments = self.ctx.get("attachments")
+            resolve = (attachments.file_host_path) if attachments is not None else None
+            messages = project_files_to_text(messages, resolve)
             live = AssistantStreamAttempt(
                 self.session.session_id, self._assistant_attempt_counter,
                 self._turn, self._step)

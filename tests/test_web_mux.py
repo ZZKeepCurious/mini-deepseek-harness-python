@@ -104,31 +104,34 @@ class MuxConnectionTest(unittest.TestCase):
         self.assertEqual(ws.sent[0]["value"], "a")
         self.assertEqual(ws.sent[2], {"type": "end", "streamId": "s1"})
 
-    def test_open_without_value_omits_value_key(self):
+    def test_open_without_value_keeps_null_value_key(self):
+        # item 帧 value 恒在（上游 `{type,streamId,value}` 构造后由
+        # JSON.stringify 丢 undefined；null 是合法 wire 值不丢）
         ws = self._drive(_FakeGateway(values=(None,)),
                          [{"type": "open", "streamId": "s", "endpoint": "e",
                            "payload": {}}], wait_sent=2)
-        self.assertEqual(ws.sent[0], {"type": "item", "streamId": "s"})
+        self.assertEqual(ws.sent[0], {"type": "item", "streamId": "s", "value": None})
 
-    def test_open_failure_emits_error_then_end(self):
+    def test_open_failure_emits_error_only(self):
+        # error 即终态帧（上游 pump catch 只发 error、不补 end）
         gateway = _FakeGateway(fail_open=lambda: RuntimeError("boom"))
         ws = self._drive(gateway, [{"type": "open", "streamId": "s1",
                                     "endpoint": "e", "payload": {}}],
-                         wait_sent=2)
+                         wait_sent=1)
+        self.assertEqual(len(ws.sent), 1)
         self.assertEqual(ws.sent[0]["type"], "error")
         self.assertEqual(ws.sent[0]["error"]["code"], "gateway/internal")
         self.assertEqual(ws.sent[0]["error"]["message"], "boom")
-        self.assertEqual(ws.sent[1], {"type": "end", "streamId": "s1"})
 
-    def test_midstream_failure_emits_error_then_end(self):
+    def test_midstream_failure_emits_error_only(self):
         def fail():
             raise RuntimeError("mid")
         ws = self._drive(_FakeGateway(fail_mid=fail),
                          [{"type": "open", "streamId": "s1", "endpoint": "e",
-                           "payload": {}}], wait_sent=3)
+                           "payload": {}}], wait_sent=2)
         self.assertEqual(ws.sent[0]["value"], "a")
         self.assertEqual(ws.sent[1]["type"], "error")
-        self.assertEqual(ws.sent[2], {"type": "end", "streamId": "s1"})
+        self.assertEqual(len(ws.sent), 2)
 
     def test_binary_message_closes_1003(self):
         async def go():

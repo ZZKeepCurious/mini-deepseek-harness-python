@@ -11,12 +11,13 @@
     binary 消息（非文本帧）→ close 1003（协议错）；JSON/形状非法 → close 1008。
     重复 open（同 streamId 已活跃）→ close 1008（非法 open）。
   * 每条 open 立即转给 `GatewayStreams.open_stream`（gateway 域分发）；流内每
-    value 发一个 `item` 帧（streamId + value）；流结束发 `end`；`$events` 的
-    ready/emit/waterfall/cancel 都是 item value（帧内已带 type）。open 内抛错
-    → 该流先发 `error` 帧再 `end`，不关 WS（与其它流隔离）；错误帧自身发送失败
-    → close 1011。
-  * 心跳：上游 30s Ping；mini 简化省缺（Starlette WebSocket 无 Ping API，见
-    verified-diffs §3.4）。
+    value 发一个 `item` 帧（streamId + value 恒在——null 是合法 wire 值）；正常
+    结束发 `end`；open 内抛错或流内失败 → 该流发 `error` 帧即终态（不补 end，
+    上游 stream-server.ts pump catch 同款），不关 WS（与其它流隔离）；错误帧
+    自身发送失败 → close 1011。
+  * 心跳：transport 级（不归本层）：launcher uvicorn 选项 `ws_ping_interval=2 /
+    ws_ping_timeout=4` 对齐上游 gateway heartbeat（缺省 2s Ping + 连续 2 周期
+    无 Pong terminate，见 verified-diffs §3.4）。
 
 属性：`RemoteStreamMuxConnection` 持有 active 流的任务集合，dispose 全量取消。
 """
@@ -105,10 +106,10 @@ class RemoteStreamMuxConnection:
             return
         try:
             stream = self.gateway.open_stream(frame["endpoint"], frame["payload"])
-        except Exception as error:  # noqa: BLE001 - open 内抛错折 error 帧（流内隔离）
+        except Exception as error:  # noqa: BLE001 - open 内抛错折 error 帧（流内隔离；
+            # 上游 pump catch 只发 error、不补 end——error 即该流的终态帧）
             await self._send_text(json.dumps(
                 _error_frame(stream_id, _failure_code(error), str(error))))
-            await self._send_text(json.dumps({"type": "end", "streamId": stream_id}))
             return
         loop = asyncio.get_running_loop()
         task = loop.create_task(self._pump(stream_id, stream))
@@ -118,18 +119,18 @@ class RemoteStreamMuxConnection:
     async def _pump(self, stream_id: str, stream) -> None:
         try:
             async for value in stream:
-                frame = {"type": "item", "streamId": stream_id}
-                if value is not None:
-                    frame["value"] = value
-                await self._send_text(json.dumps(frame))
+                # item 帧 value 恒在（上游 `{type,streamId,value}` 构造后由
+                # JSON.stringify 丢 undefined；null 是合法 wire 值不丢）
+                await self._send_text(json.dumps(
+                    {"type": "item", "streamId": stream_id, "value": value}))
             await self._send_text(json.dumps({"type": "end", "streamId": stream_id}))
         except asyncio.CancelledError:
             raise
-        except Exception as error:  # noqa: BLE001 - 流中途失败折 error 帧后 end
+        except Exception as error:  # noqa: BLE001 - 流中途失败折 error 帧（终态，
+            # 不补 end——上游 stream-server.ts pump catch 同款）
             try:
                 await self._send_text(json.dumps(
                     _error_frame(stream_id, _failure_code(error), str(error))))
-                await self._send_text(json.dumps({"type": "end", "streamId": stream_id}))
             except Exception:  # noqa: BLE001 - 错误帧发送失败 → close 1011
                 await self._close(1011)
 

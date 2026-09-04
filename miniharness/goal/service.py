@@ -142,7 +142,9 @@ class GoalService:
         notification = {"operation": change["operation"], "ref": dict(ref)}
         if goal is not None:
             notification["goal"] = goal
-        self._ctx.emit("goal/changed", {"change": notification})
+        # 上游经 agentEvents(ctx, agent) 载波派发（监听器收 {agent, change}）；
+        # mini 载体：agent 进 payload（goal driver 的 host-pause 边界需要它）
+        self._ctx.emit("goal/changed", {"change": notification, "agent": agent})
 
     def _commit_snapshot(self, agent, cache: dict, operation: str, goal: dict,
                          rounds_started: int, created_at: int, updated_at: int,
