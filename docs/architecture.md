@@ -23,9 +23,8 @@ miniharness/
 ├── core/                  # packages/core
 │   ├── session/           # Session 本体 + types/invariant/json/message/repair/surface，__init__.py 聚合
 │   │   │                  #   message.py 上游在 llm/llm/src/message.ts，mini 保留会话域（L0 不依赖 llm，简化标注）
-│   │   ├── chunk_rows.py # StorageRecord 打包行（assistant/chunk 连续段，MIN_RUN=3，对齐 core/session/src/chunk-rows.ts）
 │   │   ├── zstd_frames.py # zstd 拼接帧容器扫描/解码/截断前缀恢复（python-zstandard）
-│   │   └── persistence.py # JSONL(zstd 帧容器/明文) / SQLite 持久化（上游独立包组 packages/session）
+│   │   └── persistence.py # JSONL(zstd 帧容器/明文) / SQLite 持久化（上游独立包组 packages/session；V2 一行一事件）
 │   ├── session_store.py   # SessionStore（ctx.sessions 服务：create/prepare/enter/announce + fork + flush）
 │   ├── scope.py           # Context + RegistryService（vendor/cordis 语义）
 │   ├── dsh_scope.py       # dsh-scope 原语（scopeParents 图 + scopeTarget 载波 + createScope，对齐 packages/core/scope）
@@ -33,23 +32,25 @@ miniharness/
 │   ├── schema.py           # schemastery 配置引擎全量移植（vendor/schemastery）
 │   ├── tools.py            # 工具注册表 + 执行管线
 │   ├── system_prompt.py   # SystemPromptService（分节渲染，systemPrompt 服务）
-│   └── agent_loop/        # agent.py（turn/step 状态机）+ resident_loop.py（常驻单循环）+ tool_calls.py（并行调度）+ inbox.py（双队列收件箱）
+│   └── agent_loop/        # agent.py（turn/step 状态机，V2 内嵌流落盘）+ assistant_stream.py（AssistantStreamAttempt）+ resident_loop.py（常驻单循环）+ tool_calls.py（并行调度）+ inbox.py（双队列收件箱）
 ├── llm/                   # packages/llm
 │   ├── protocol.py        # StreamChunk / LlmAdapter / LlmFailure / BlockAssembler（协议层）
+│   ├── assistant_stream.py # AssistantStreamRecord codec：Accumulator 压缩 / expand 解码 / validate 校验（V2 流内嵌）
 │   ├── deepseek.py        # DeepSeek wire 序列化 + SSE 适配器
 │   ├── fake.py            # FakeLlmAdapter（教学扩展）
 │   ├── retry_policy.py    # retry policy 解析（normal/always）
 │   ├── retry.py           # agent/request-error 恢复 + 退避
 │   └── token_meter.py     # TokenMeter 增量 fold + usage 折入锚
 ├── attachment/             # packages/attachment（attachment + attachment-local）
-│   ├── types.py            # ImageAttachmentRef（含 originalDimensions）/ SaveImageAttachment / ImageAttachmentLimits / ImageRequestPolicy / RequestImageAttachment
-│   ├── error.py            # AttachmentError + 15 错误码 + is_image_admission_error
+│   ├── types.py            # ImageAttachmentRef（含 originalDimensions）/ FileAttachmentRef / SaveImage·SaveFile·SaveFileStreamAttachment / ImageAttachmentLimits / ImageRequestPolicy / RequestImageAttachment
+│   ├── error.py            # AttachmentError + 17 错误码（含 INVALID_FILE_BASE64 / ATTACHMENT_FILES_UNSUPPORTED）+ is_attachment_error
 │   ├── encoding.py         # 共享质量阶梯 [85,75,60] + encodeFirstWithinLimit 惰性候选执行
 │   ├── normalization.py    # provider 无关规范化管线（直通/总像素预算+长边封顶/按 alpha 分流编码）
 │   ├── projection.py       # requestImageDimensions 纯请求投影几何（alpha.1 抽到 seam 包）
 │   ├── request_image.py    # variantId 确定身份的请求图缓存版本
-│   ├── admission.py        # canonical base64 wire 受理入口
-│   └── store.py            # LocalAttachmentStore（规范化字节 sha256 内容寻址 + 完整性复验）
+│   ├── admission.py        # canonical base64 wire 受理入口（图片批次 + 文件单个）
+│   ├── file_store.py       # verbatim 文件内容寻址存储（files/<sha2>/<sha>/<name> 别名 + file-objects 规范对象）
+│   └── store.py            # LocalAttachmentStore（规范化字节 sha256 内容寻址 + 完整性复验 + verbatim 文件族 + admit_prompt_content）
 ├── compaction/            # packages/compaction
 │   ├── config.py          # 压缩规格解析（threshold / retain / retries）
 │   ├── region.py          # selectCompactableRange + 压缩事务（surface replace 检查点）
@@ -143,8 +144,7 @@ miniharness/
 | mini 路径 | 上游对应（唯一权威） | 备注 |
 |---|---|---|
 | `core/session/`（session + types/invariant/json/message/repair/surface，共 7 文件） | `packages/core/session/src/`（types/invariant/json/repair/surface 等 10 文件，index.ts 聚合）+ `packages/llm/llm/src/message.ts` | message 构造保留在会话域（L0 不依赖 llm，简化标注） |
-| `core/session/persistence.py` | `packages/session/session-persistence-{jsonl,sqlite}` | 上游是独立包组，mini 并入会话域（简化标注）；目录布局对齐上游 `session-persistence-jsonl/src/format.ts`：`root/--<projectKey(cwd)>--/<encodeSegment(id)>/session.jsonl[.zstd]`（`~XXXX` 段转义、projectKey 分隔符折叠+251 截断、cwd 缺省 `_no-cwd`）；**默认载体 zstd 拼接帧容器**（`zstd_frames.py`，一帧一记录/打包行，torn 末帧前缀恢复；可选明文 `.jsonl`），编码互斥/遗留平铺/重复 id/版本双向拒读均响亮拒绝（逐字文案）；头行与目录同源（header.cwd 回写）；崩溃修复 closers 经 `commit_repair` 落盘（对齐上游 commitRepair） |
-| `core/session/chunk_rows.py` | `packages/core/session/src/chunk-rows.ts` | StorageRecord 打包行全语义移植：MIN_RUN=3、assistant/chunk 白名单分类与连续性、行信封 `{type,seq0,time0,data:{turn,step,index,dt[,id][,name],texts|args}}`、validate_row fail-closed 先于 expand_row |
+| `core/session/persistence.py` | `packages/session/session-persistence-{jsonl,sqlite}` | 上游是独立包组，mini 并入会话域（简化标注）；目录布局对齐上游 `session-persistence-jsonl/src/format.ts`：`root/--<projectKey(cwd)>--/<encodeSegment(id)>/session.jsonl[.zstd]`（`~XXXX` 段转义、projectKey 分隔符折叠+251 截断、cwd 缺省 `_no-cwd`）；**默认载体 zstd 拼接帧容器**（`zstd_frames.py`，一帧一记录，torn 末帧前缀恢复；可选明文 `.jsonl`），编码互斥/遗留平铺/重复 id/版本双向拒读均响亮拒绝（逐字文案）；**V2 一行一事件**（上游仅 v0→v1 迁移 codec 保留打包，`assistant/message` 内嵌流）；头行与目录同源（header.cwd 回写）；崩溃修复 closers 经 `commit_repair` 落盘（对齐上游 commitRepair），恢复构造 `mode="restore"` |
 | `core/session_store.py` | `packages/core/session/src/index.ts`（SessionStore 部分） | 内存会话服务：create/prepare/enter/announce 生命周期 + get/list/fork（五错误码）+ flush 检查点 + `session/created|disposed|event|flush` 四事件；create 对齐上游 generator effect（enter 先 yield、announce 抛错自动回滚）；事件派发经 scope_target 载波（carrier=scope_target(session, scope_of(owner_ctx or self.ctx))，对齐上游 enter 的 scopeTarget(session, scopeOf(store.ctx))）；**结构对齐（§3.2 已闭合）：`SessionStore(Service)`，构造 `super(ctx, "sessions")` 即经 ctx.provide 自动登记、随拥有 fiber 自动注销（对齐上游 index.ts:790 `extends Service` + `super(ctx, 'sessions')`），install_sessions/web/api 手工 provide 已简化移除**；无 typert lookup、flush 为同步近似（简化标注见模块 docstring） |
 | `core/agents.py` | `packages/core/agent/src/index.ts`（AgentRegistry） | 进程内 live 代理实例注册表（ctx.agents，L1）：`AgentRegistry(Service)` 构造即 `super(ctx, "agents")` 登记、随拥有 fiber 注销；`register(agent, owner=None)`（id 与会话不符 / 同 id 已登记 fail-loud）、查询面 get/list/roots/is_owned_by、`agent/created`/`agent/disposed`（agent 自有载波，非会话日志事件；对齐上游 publish 时 enter+announce 公告，mini 单同步进程一键发布）；`install_agents(ctx)` 幂等装配（生产 6 处 root 组合均接在 install_sessions 旁）；模块级 `assert_live_agent(agent)`——装配即强制（无 agents 服务的裸装配 no-op）。注册点 = `AgentLoop.publish()`；jobs `_assert_access` / goal `_prepare_mutation` 共用 assertLive 边界（陈旧/重复实例拒绝）。载体差异：上游 initiator AsyncLocalStorage 机制与 enter+announce 两步、subagent 运行时 owner 链不承载（本节只登记 root/父子全部 live 实例），见 verified-diffs §2.15 |
 | `core/scope.py` | `vendor/cordis` + `packages/core/scope` | Context（服务仓库 + 事件总线 + 四种派发 + asyncio 变体）+ fiber 生命周期（对齐 fiber.ts：状态机 PENDING/LOADING/ACTIVE/FAILED/UNLOADING/DISPOSED + `internal/status`；`effect(execute, label)` 上游形态——execute 立即执行、返回值按 None/callable/awaitable/生成器收集为 disposer；单发 + 可 await；注册先于执行 + setup barrier 重入保护；dispose 幂等 join 在途；同步立即逆序、异步并发 unload、错误 contained；装载半边 + 注册表——`RegistryService`（`ctx.plugin` 缩写 + 插件形态归一 + 运行记录按 callback 键控）、fiber 携带 inject 依赖 + epoch 重载（依赖变化卸载→重装）、`restart()`/`update()`（`internal/update` waterfall）、`internal/config` waterfall + schema 校验（`resolve_config`，`core/schema.py`）、`internal/plugin` 每次装载/卸载派发）+ `create_scope` fiber-backed 作用域（父拆解收回子 fiber）+ 服务仓库（reflect.ts 对齐：按隔离标签键控的全局 store，`ctx.get` strict 缺省返回 None，`ctx.isolate(name)` 换标签，per-agent 的 tools/systemPrompt 经隔离不冲撞 root realm，重复提供同一标签 fail loud）；另含 `Service` 基类（service.ts 对齐：构造即经 `ctx.provide` 自动登记、随 fiber 注销、`_invoke` 可调用、`_check`/`_init`）、`ctx.extend(meta)`/`ctx.intercept(name, config)`（intercept 配置经 `Service._resolve_config` 沿祖先链近根优先合并）、内建 `LoggerService`（logger.ts 对齐：`ctx.logger(name)` 铸具名 Logger 门面 + printf 格式 + exporter 注册/级别过滤/默认缓冲导出器，`ctx.logger` 属性为绑定访问方 ctx 的视图）；dsh-scope 对齐：事件派发模型改上游形态——`on` 双写 root `_flat_hooks`（全局 Hook 表）+ 祖先链 `_listeners`，dispatch 系加 `this_arg` 载波参数（有载波走扁平表按载波键过滤，无载波保留祖先链）；`create_scope` 返回 Scope 包装 + 自动绑父 scope；`scope_key` = `scope_of(self)`（scopeParents 图）；残余简化标注见模块 docstring |
@@ -152,16 +152,18 @@ miniharness/
 | `core/dsh_scope.py` | `packages/core/scope/src/index.ts` + `store.ts` | dsh-scope 协议本尊（纯库，L0）：ScopeKey 弱引用身份键、scopeParents 图（bind/link/rebind + 环检测）、`scope_parent_of`/`scope_chain_of`（nearest-first）、`scope_target`/`_ScopeCarrier`/`is_scope_carrier`/`carrier_key_of`、`scope_of`（parent 链）、NamedEntries/AnonymousEntries/ScopedLayers 对齐 store.ts；`Context.create_scope` 返回 Scope 包装（delegation 包装，`__slots__` 无 `__dict__`） |
 | `core/hmr.py` | `vendor/hmr/src/index.ts` | Cordis HMR 服务：`Hmr(Service)` provide="hmr"；`register_config(filename, refresh)`——findWatchRoot walk-up 根定位（realpath+depth+缺盘拒绝）、重复注册拒绝、初扫已存在目标即刷（chokidar ignoreInitial=false 语义：缺文件无初扫）、disposer 注销+关 watcher+join 在飞刷新；`refresh_config(key)` 单飞+dirty 合并循环、失败 logger.warn + `hmr/config-update-failed` 并行事件外泄不毒化循环；销毁期注册归一 `CordisError(INACTIVE_EFFECT)`。载体 watchdog（上游 chokidar）；Node ESM 模块图热重载（ModuleLoader/externals/accepted）不适用 Python 载体；Windows 短路径两侧 normcase+realpath 归一 |
 | `core/tools.py` | `packages/core/tools` | 作用域化注册表（ScopedLayers/NamedEntries 存储：注册即 effect 归目标 fiber、拆解自动注销；resolve/names 缺省视角 = 注册表 root 的 scope 键，显式 scope 沿键父链最近者胜 + 全局层兜底）+ 守卫执行管线（pre/execute/post waterfall + schema 校验 + 超时） |
-| `core/agent_loop/agent.py` | `packages/core/agent-loop/src/agent.ts` | 单一 async 泵（`_pump_async`/`_run_step_async`）+ `followup`/`steer` 同步门面（经常驻单事件循环驱动，见下行 resident_loop）+ 协作式取消（`_cancel_event` 每轮新建 + `call_soon_threadsafe` 跨线程置位——对应上游 agent.ts:325 每 phase 新建 AbortController）；agent/pre-step 决策经 `awaterfall`；publish/dispose 生命周期（enter+announce+agent/session-start / cancel(disposed)+scope.dispose+detach，会话店成员资格归 loop）+ agent/* 事件载波派发（scopeTarget(agent, loop scope 键)，兄弟作用域隔离）+ turn/step 编号 1 起经 `_replayed_next_turn` 从会话日志续号（对齐 invariant.ts `nextTurn`：turn/end 闭合后 +1、尾部未闭合停在当前号；resume 冷重建 loop 不重置回合号） |
+| `core/agent_loop/agent.py` | `packages/core/agent-loop/src/agent.ts` | 单一 async 泵（`_pump_async`/`_run_step_async`）+ `followup`/`steer` 同步门面（经常驻单事件循环驱动，见下行 resident_loop）+ 协作式取消（`_cancel_event` 每轮新建 + `call_soon_threadsafe` 跨线程置位——对应上游 agent.ts:325 每 phase 新建 AbortController）；agent/pre-step 决策经 `awaterfall`；publish/dispose 生命周期（enter+announce+agent/session-start / cancel(disposed)+scope.dispose+detach，会话店成员资格归 loop）+ agent/* 事件载波派发（scopeTarget(agent, loop scope 键)，兄弟作用域隔离）+ turn/step 编号 1 起经 `_replayed_next_turn` 从会话日志续号（对齐 invariant.ts `nextTurn`：turn/end 闭合后 +1、尾部未闭合停在当前号；resume 冷重建 loop 不重置回合号）；**V2 流结算**（agent.ts:375-458）：正常完成 settle `assistant/message`（内嵌 stream、content=原始 assembler 块）、finish error/aborted 与异常先 settle `assistant/attempt` 再走 request-error waterfall、取消定稿 interruptedBlocks 前缀（空则 attempt） |
 | `core/agent_loop/resident_loop.py` | （无独立文件：Node 进程固有单事件循环） | 教学扩展：进程级懒加载单例循环（守护线程 run_forever）；`run_on_resident` 阻塞提交协程、异常冒泡、主线程 Ctrl+C 协作取消在途泵；同步门面由此驱动后跨调用共享同一循环，与上游形态一致 |
 | `core/agent_loop/tool_calls.py` | `packages/core/agent-loop/src/tool-calls.ts` | |
 | `core/agent_loop/inbox.py` | `packages/core/agent-loop/src/inbox.ts` | 双队列（followup→next-turn / steer→next-step）+ `agent/inbox/spliced` 持久化 |
+| `core/agent_loop/assistant_stream.py` | `packages/core/agent-loop/src/assistant-stream.ts` | `AssistantStreamAttempt`：一次模型 attempt 的压缩 + 组装 + 终态结算封装（attemptId/revision/start/push/settle/abandon；settle 在持久事件 append 成功后发 committed、失败 abandon；push 同时喂 Accumulator 与 BlockAssembler）；V2 `assistant/message.stream` 内嵌与 `assistant/attempt` 的生产端 |
+| `llm/assistant_stream.py` | `packages/llm/llm/src/assistant-stream.ts` | `AssistantStreamRecord` codec：`AssistantStreamAccumulator` 游程压缩（text/reasoning/tool-call delta 连续段 + 不可压缩原样 chunk，dt 不变量）、`expand_assistant_stream` 逐 delta 边界还原、`validate_record` exactKeys fail-closed；V2 seed 边界展开验证（`_assert_current_assistant_stream`）消费同 codec |
 | `core/agent_loop/runtime_context.py` | `packages/core/agent-loop/src/runtime-context.ts` | loop 侧运行时上下文投影：retained 三态（undefined/null/{seq,text}）restore（倒序找最近一条仍在 surface 的 owned 快照）+ 按追加序惰性消化新事件；`project(current, sections)` 文本相等去重、变化铸快照 user 消息（sections 非空带 `form:'snapshot'` 归因，空即 CLEARED 哨兵不带归因）；SOURCE/CLEARED 逐字对齐；接线在 `_run_step_async` pre-step waterfall 前（默认进入把快照追加在 claimed 之后，显式 enter 决策整体接管） |
 | `core/system_prompt.py` | `packages/core/system-prompt/src/` | assemble waterfall + contexts/tools/variables 提供器 + `{{variable}}` 严格插值 + `render_context_sections`/`join_context_sections` 节渲染面（上游 renderContextSections/joinContextSections）；scope 层叠、assembly.tools→请求工具集成未复现（简化标注见模块 docstring） |
 | `llm/protocol.py` | `packages/llm/llm/src/` | `stream(messages, tools, signal)` async 契约 + `StreamAborted` + `_aiter_raced`（异步迭代与 abort 事件竞速，asyncio 原生载体） |
 | `llm/deepseek.py` | `packages/llm/llm-deepseek/src/` | httpx 异步传输（原生 asyncio，abort 置位即关闭连接、真取消）+ per-read idle 300s watchdog（对齐上游 fetch）+ SSE spec-strict 解析 |
 | `llm/fake.py` | 无 | 教学扩展 |
-| `attachment/`（types + error + image + encoding + normalization + projection + request_image + admission + store） | `packages/attachment/attachment`（seam + types + error + admission + request-projection）+ `packages/attachment/attachment-local`（store + image + encoding + normalization + request-image） | sharp→Pillow（权威全量解码/EXIF 定向/重编码）；规范化管线（总像素预算 + 长边封顶 + 共享质量阶梯按 alpha 分流）与 variantId 请求图缓存（request-image-v5）对齐 alpha.1；CompressionLimiter 并发闸与 SharedRequest 单飞登记架构不适用（同步载体天然串行）；显式 root（上游 DSH_HOME/attachments/v1）；见 verified-diffs §3.9 |
+| `attachment/`（types + error + image + encoding + normalization + projection + request_image + admission + file_store + store） | `packages/attachment/attachment`（seam + types + error + admission + request-projection）+ `packages/attachment/attachment-local`（store + image + encoding + normalization + request-image + file-store） | sharp→Pillow（权威全量解码/EXIF 定向/重编码）；规范化管线（总像素预算 + 长边封顶 + 共享质量阶梯按 alpha 分流）与 variantId 请求图缓存（request-image-v5）对齐 alpha.1；**verbatim 文件族对齐 alpha.1**（`file_store.py`：file_leaf_name 清洗 / `files/<sha2>/<sha>/<name>` 别名 + `file-objects` 规范对象 / save·save_stream·read_stream 摘要验证；AttachmentStore 七方法含 admit_prompt_content 实例方法）；CompressionLimiter 并发闸与 SharedRequest 单飞登记架构不适用（同步载体天然串行）；显式 root（上游 DSH_HOME/attachments/v1）；见 verified-diffs §3.9 |
 | `llm/retry_policy.py` | `packages/llm/llm/src/retry-policy.ts` | |
 | `llm/retry.py` | `packages/llm/llm-retry/src/` | async 恢复决策（派发前熔合信号检查 + always 派发后复查中止胜过决策）+ 事件驱动多信号竞速可取消等待（等价 `AbortSignal.any`；裸测试替身信号回退轮询）+ 插件 effect teardown（注销监听器 + lifetime.abort + 排干在途恢复） |
 | `llm/token_meter.py` | `packages/llm/token-meter/src/` | |

@@ -12,8 +12,10 @@ core/session 同规约，详见其 __init__ 说明）。
 from .protocol import *  # noqa: F401,F403
 from .fake import *  # noqa: F401,F403
 from .deepseek import *  # noqa: F401,F403
+from .assistant_stream import *  # noqa: F401,F403
 
 __all__ = [
+    "AssistantStreamAccumulator",
     "AUTH",
     "BlockAssembler",
     "CONTEXT_WINDOW_EXCEEDED",
@@ -30,10 +32,13 @@ __all__ = [
     "StreamAborted",
     "StreamChunk",
     "TIMEOUT",
+    "TimedStreamChunk",
     "TRANSPORT",
     "UNSUPPORTED_CONTENT",
     "content_has_image",
+    "expand_assistant_stream",
     "provider_retry_after_ms",
     "request_id",
     "serialize_messages",
+    "validate_record",
 ]

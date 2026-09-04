@@ -61,6 +61,7 @@ from ...core.session import Session, create_message, is_json_safe, text_block, t
 from ...core.session.persistence import SessionPersistence
 from ...core.system_prompt import SYSTEM_PROMPT_SERVICE, SystemPromptService
 from ...core.tools import Tool, ToolExec, ToolRegistry
+from ...attachment import admit_prompt_content
 from ...llm import FakeLlmAdapter, LlmAdapter
 from .descriptor import CONTINUATION_PROVIDER, fold_subagent_descriptor, seed_descriptor_turn
 from .providers import completed_turn_prefix
@@ -619,8 +620,6 @@ class SubagentContinuationManager:
         }
         if label:
             meta["label"] = label
-        if seed:
-            meta["seedLength"] = len(seed)
         # 描述符对齐上游 descriptor.ts schema：{version, mode, provider, label?,
         # agentProvider?, agentModel?, agentReasoningEffort?, persona?, toolFilter?}
         # （无 kind 字段）。agentProvider/agentModel/agentReasoningEffort 取解析后
@@ -643,6 +642,9 @@ class SubagentContinuationManager:
             # 上游 toolFilter 形状：{allow?: string[], deny?: string[]}
             descriptor["toolFilter"] = {"allow": list(tool_filter)}
 
+        # rc.1: fork 子会话标记 isSeeded
+        if seed:
+            meta["isSeeded"] = True
         child_session = Session(child_id, seed=seed, meta=meta)
         seed_descriptor_turn(child_session, descriptor)
         self.persistence.declare(child_id, meta, created_at=child_session.created_at)
@@ -662,6 +664,8 @@ class SubagentContinuationManager:
         send_message_async（内联泵保证确定性结算）。
         @param parent - 委托父（授权与所有权主体）；缺省顶层父。嵌套续跑时
             为发起委托的子代理 loop（其激活将 owned_children 记账孙代）。
+        alpha.1：dict 消息经 admit_prompt_content 图像/文件拒绝门
+        （subagent/attachment-invalid；文件 reason=SUBAGENT_FILE_UNSUPPORTED）。
         """
         parent = parent or self.parent
         self.assert_admitting(parent)
@@ -675,8 +679,11 @@ class SubagentContinuationManager:
             self._release_ownership(child_id)
             raise
         msg = message if isinstance(message, dict) else create_message(
-            "user", [text_block(message)], {"kind": "user"},
+            "user", [text_block(message)],
+            {"kind": "coordinator", "form": "relay", "senderSessionId": parent.id},
         )
+        if isinstance(message, dict):
+            admit_prompt_content(child_id, msg.get("content") or [])
         if parent._driver is not None:
             parent._loop.call_soon_threadsafe(self._submit_on_loop, child_id, activation, msg, parent)
         else:
@@ -705,8 +712,11 @@ class SubagentContinuationManager:
             self._release_ownership(child_id)
             raise
         msg = message if isinstance(message, dict) else create_message(
-            "user", [text_block(message)], {"kind": "user"},
+            "user", [text_block(message)],
+            {"kind": "coordinator", "form": "relay", "senderSessionId": parent.id},
         )
+        if isinstance(message, dict):
+            admit_prompt_content(child_id, msg.get("content") or [])
         if parent._driver is not None:
             parent._loop.call_soon_threadsafe(self._submit_on_loop, child_id, activation, msg, parent)
         else:
@@ -893,12 +903,14 @@ class SubagentContinuationManager:
             raise ValueError(
                 f"unknown report delivery {delivery!r}; expected one of {REPORT_DELIVERIES}"
             )
+        # rc.1: report 消息前缀（对齐上游 deliverReport → 追加 "Background subagent {childId} reported:"）
+        prefixed = f"Background subagent {child_id} reported: {report}"
         message = create_message(
             "user",
-            [text_block(report)],
+            [text_block(prefixed)],
             {
                 "kind": "subagent-report",
-                "form": "background-report" if delivery == "quiet" else "report",
+                "form": "relay",
                 "senderSessionId": child_id,
             },
         )
@@ -1074,6 +1086,9 @@ class SubagentContinuationManager:
         descriptor = fold_subagent_descriptor(events)
         if descriptor is None or descriptor.get("mode") != "continuable":
             raise SubagentError("子会话不可继续（描述符缺失或非 continuable）", "NOT_RESUMABLE")
+        # rc.1: 恢复子会话标记 isSeeded
+        if events:
+            meta["isSeeded"] = True
         child_session = Session(child_id, seed=events, meta=meta)
         return self._build_activation(child_session, descriptor, persisted=len(events),
                                       parent=parent)

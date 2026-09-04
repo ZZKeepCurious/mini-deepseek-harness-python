@@ -415,7 +415,8 @@ class TestSessionFork(WebApiTest):
             "sessionId": session_id, "atSeq": user["seq"]}))
         child = self.api.store.get(value["sessionId"])
         self.assertIsNotNone(child)
-        self.assertGreaterEqual(child.meta["seedLength"], user["seq"] + 1)
+        self.assertIs(child.is_seeded, True)
+        self.assertGreaterEqual(child.inherited_event_count, user["seq"] + 1)
 
     def test_fork_no_completed_turn(self):
         session_id = self._value(self._create())["sessionId"]
@@ -434,8 +435,9 @@ class TestSessionFork(WebApiTest):
         child = self.api.store.get(value["sessionId"])
         self.assertIsNotNone(child)
         self.assertEqual(child.meta["parentSession"], session_id)
-        self.assertGreaterEqual(child.meta["seedLength"],
-                               len(self.api.store.get(session_id).events))
+        self.assertIs(child.is_seeded, True)
+        self.assertGreaterEqual(child.inherited_event_count,
+                                len(self.api.store.get(session_id).events))
 
     def test_fork_unknown_session(self):
         error = self._error(self.api.dispatch("session.fork", "rid",
@@ -620,31 +622,36 @@ class TestSessionPage(WebApiTest):
         self._create(session_id="session-h")
         self._append("session-h", "user/message", message={"id": "m1"})
         self._append("session-h", "assistant/message", message={"id": "m2"})
-        self._append("session-h", "assistant/message", message={"id": "m2r"},
-                     surface_op={"op": "replace", "start": 0, "end": 1},
-                     source_event_seqs=[0, 1])
+        # V2：assistant/message 内嵌流禁带 sourceEventSeqs，replace 以 user/message 演示
+        self._append("session-h", "user/message", message={"id": "m1r"},
+                     surface_op={"op": "replace", "start": 0, "end": 0},
+                     source_event_seqs=[0])
         last = self.api.store.get("session-h").seq - 1
         value = self._value(self.api.dispatch("session.page", "rid", {
             **self._address("session-h"), "throughSeq": last, "maxMessages": 1}))
         self.assertEqual([r["event"]["type"] for r in value["records"]],
-                         ["assistant/message", "assistant/message"])
+                         ["assistant/message", "user/message"])
         self.assertTrue(value["hasMore"])
 
-    def test_page_chunk_rows(self):
+    def test_page_plain_event_records(self):
+        # V2：chunk 行废止，assistant/chunk 不复存在（流内嵌 assistant/message），
+        # 分页恒为逐条原样事件 {"type": "event", "event": <解冻事件>}
         self._create(session_id="session-chunks")
         session = self.api.store.get("session-chunks")
-        for _ in range(3):
-            session.append("assistant/chunk", {
-                "turn": 1, "step": 1,
-                "chunk": {"type": "text-delta", "index": 0, "text": "ab"}})
+        for i in range(3):
+            session.append("assistant/message",
+                           {"message": {"id": f"m{i}"}}, surfaceOp="append")
         last = session.seq - 1
         value = self._value(self.api.dispatch("session.page", "rid", {
             **self._address("session-chunks"), "throughSeq": last}))
-        record = value["records"][0]
-        self.assertEqual(record["type"], "chunks")
-        self.assertEqual(record["event"]["type"], "chunkrow/text-chunks")
-        self.assertEqual(record["event"]["seq"], 0)
-        self.assertEqual(record["event"]["data"]["texts"], ["ab", "ab", "ab"])
+        self.assertEqual(len(value["records"]), 3)
+        for record, event in zip(value["records"], session.events):
+            self.assertEqual(record["type"], "event")
+            self.assertEqual(record["event"]["seq"], event["seq"])
+            self.assertEqual(record["event"]["type"], event["type"])
+        self.assertEqual(
+            [r["event"]["data"]["message"]["id"] for r in value["records"]],
+            ["m0", "m1", "m2"])
 
     def test_page_unknown_session(self):
         error = self._error(self.api.dispatch("session.page", "rid", {

@@ -236,7 +236,10 @@ def _collect_image_refs(content: Any) -> list[dict]:
 
 
 def _event_image_refs(event: Any) -> list[dict]:
-    """扫描单个事件各载体（content/message.content/inserted[].content/chunk.block）。"""
+    """扫描单个事件各载体（content/message.content/inserted[].content）。
+
+    V2：assistant/chunk 事件废止（块内嵌 assistant/message.content），chunk
+    载体扫描移除。"""
     if not isinstance(event, dict):
         return []
     data = event.get("data")
@@ -252,9 +255,6 @@ def _event_image_refs(event: Any) -> list[dict]:
         for message in inserted:
             if isinstance(message, dict):
                 refs.extend(_collect_image_refs(message.get("content")))
-    chunk = data.get("chunk")
-    if isinstance(chunk, dict) and chunk.get("type") == "block-end":
-        refs.extend(_collect_image_refs([chunk.get("block")]))
     return refs
 
 

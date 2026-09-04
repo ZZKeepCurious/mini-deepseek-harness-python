@@ -5,8 +5,9 @@
 状态机要点（与真实实现一致的契约）：
   * turn 打开于认领输入之前 —— "被拒绝的尝试"也会留下持久化记录
   * turn/step 编号从 1 起，每 turn 内 step 重置为 1（session/invariant.ts）
-  * step = 一次模型请求 + 它调用的工具；每个 chunk 落 assistant/chunk，
-    assistant/message 带 sourceEventSeqs 引用 chunk seq（模型可见 ⟺ 已记录）
+  * step = 一次模型请求 + 它调用的工具；正常完成落 assistant/message（V2：
+    完整流压缩内嵌 stream 字段）；失败/中止 attempt 落 assistant/attempt
+    （同样内嵌流，不留 surface message）——模型可见 ⟺ 已记录
   * 工具结果回灌后在同一 turn 内自动进入下一步（next-step 继续）
   * pre-step 拒绝 → turn 以 {kind:'blocked'} 结束；step/end 与 turn/end
     在 finally 中必定落日志（失败时 reason 为 {kind:'error'|'aborted'|...}）
@@ -20,7 +21,8 @@ status/mini-harness/asyncio-refactor-design.md）：
     AbortSignal）——cancel 不杀 driver，流桥/重试等待事件驱动退出、
     工具调度器排干 started + 未启动的按模型序补合成错误；取消时按流序
     定稿可安全落盘的前缀为 interrupted assistant/message（上游
-    interruptedBlocks：仅 text/reasoning，丢一切 tool-call）。
+    interruptedBlocks：仅 text/reasoning，丢一切 tool-call），无可见内容
+    则落 assistant/attempt。
   * start_driver() 切换到事件驱动模式：followup/steer 只入队 + 线程安全
     唤醒（_request_wake → call_soon_threadsafe），回合由 _drive 在事件
     循环上执行。
@@ -46,7 +48,8 @@ DEFAULT_MAX_STEPS = 50
 from ..dsh_scope import scope_target
 from ..scope import Context
 from ..system_prompt import join_context_sections, render_context_sections, render_prompt
-from ...llm import BlockAssembler, LlmAdapter, LlmFailure, StreamAborted
+from ...llm import LlmAdapter, LlmFailure, StreamAborted
+from .assistant_stream import AssistantStreamAttempt
 from .inbox import Inbox
 from .resident_loop import run_on_resident
 from .runtime_context import RuntimeContextProjection
@@ -193,6 +196,7 @@ class AgentLoop:
         # turn/end 闭一秒之后 nextTurn +1，尾部未闭合回合则停在当前号。
         self._turn = _replayed_next_turn(self.session) - 1
         self._step = 0     # 当前已打开的 step 编号（1 起，每 turn 重置）
+        self._assistant_attempt_counter = 0   # Agent 生命周期内 attempt 计数（attemptId）
         self._turn_end: dict | None = None
         self._step_signal: ToolExec | None = None   # 阶段 7：当前 step 的共享取消信号
         # 协作式取消事件（asyncio.Event，_open_turn 每轮新建）：cancel 置位，
@@ -859,29 +863,39 @@ class AgentLoop:
         （cancel 置位 → 流桥抛 StreamAborted 或循环提前 break）时先按流序
         定稿可安全落盘的前缀（interruptedBlocks：text/reasoning，丢一切
         tool-call），回合再以 cancel 置的 aborted 闭合；失败 attempt
-        （LlmFailure / finish-error 路径）永不参与定稿。
+        （LlmFailure / finish-error 路径）落 `assistant/attempt`（V2：内嵌
+        完整流，不留 surface message）。正常完成落 `assistant/message`，
+        同样内嵌 `stream: AssistantStreamRecord[]`（替代旧版逐 chunk 落盘 +
+        sourceEventSeqs 引用）。
         """
         while True:
             messages = self._derive_history()
-            # 流式：逐 chunk 落 assistant/chunk，块组装，finish 时落 assistant/message
-            assembler = BlockAssembler()
-            chunk_seqs: list[int] = []
+            live = AssistantStreamAttempt(
+                self.session.session_id, self._assistant_attempt_counter,
+                self._turn, self._step)
+            self._assistant_attempt_counter += 1
+            settled = False
             try:
                 stream = self.adapter.stream(
                     messages, self._tool_definitions(), self._abort_proxy)
+                live.start()
                 async for chunk in stream:
-                    ev = self.session.append("assistant/chunk", {
-                        "turn": self._turn, "step": self._step, "chunk": chunk,
-                    })
-                    chunk_seqs.append(ev["seq"])
-                    assembler.push(chunk)
+                    live.push(chunk)
                     if self._cancelled:
                         break
             except StreamAborted:
-                # 协作式取消：定稿前缀后返回空调用列表，turn 以 aborted 闭合
-                self._finalize_interrupted_prefix(assembler, chunk_seqs)
+                # 协作式取消：定稿前缀后返回空调用列表（无可见内容则落 attempt）
+                self._finalize_interrupted_prefix(live)
                 return []
             except LlmFailure as e:
+                # 失败 attempt 落 assistant/attempt（内嵌流），再走 request-error
+                if not settled:
+                    live.settle("assistant/attempt",
+                                lambda: self.session.append("assistant/attempt", {
+                                    "turn": self._turn, "step": self._step,
+                                    "stream": live.stream,
+                                })["seq"])
+                    settled = True
                 action = await self.ctx.awaterfall("agent/request-error", {
                     "agent": self,
                     "turn": self._turn,
@@ -897,17 +911,18 @@ class AgentLoop:
                     continue
                 raise
             if self._cancelled:
-                self._finalize_interrupted_prefix(assembler, chunk_seqs)
-                return []   # 非桥接适配器提前 break 的取消出口
+                # 非桥接适配器提前 break 的取消出口
+                self._finalize_interrupted_prefix(live)
+                return []
 
-            if assembler.finish is None:
-                assembler.finish = {"kind": "stop"}
-            if assembler.finish["kind"] == "max-tokens":
+            # finish 缺省 {kind: 'stop'}（上游 assembler.finish getter 缺省展开）
+            finish = live.finish or {"kind": "stop"}
+            if finish["kind"] == "max-tokens":
                 self._turn_end = {"kind": "max-tokens"}   # max-tokens 粘滞
             # 对齐上游：finish {kind:'error'|'aborted', failure} 是带内失败路径，
-            # 与异常路径同走 agent/request-error waterfall（失败 attempt 不落日志）
-            if assembler.finish["kind"] in ("error", "aborted"):
-                failure = assembler.finish.get("failure") or {}
+            # 落 assistant/attempt（内嵌流）后走 request-error waterfall
+            if finish["kind"] in ("error", "aborted"):
+                failure = finish.get("failure") or {}
                 exc = LlmFailure(
                     failure.get("code", "UNKNOWN"),
                     failure.get("message", "模型流在 finish 处失败"),
@@ -915,6 +930,13 @@ class AgentLoop:
                     provider_retry_after_ms=failure.get("providerRetryAfterMs"),
                     request_id=failure.get("requestId"),
                 )
+                if not settled:
+                    live.settle("assistant/attempt",
+                                lambda: self.session.append("assistant/attempt", {
+                                    "turn": self._turn, "step": self._step,
+                                    "stream": live.stream,
+                                })["seq"])
+                    settled = True
                 action = await self.ctx.awaterfall("agent/request-error", {
                     "agent": self,
                     "turn": self._turn,
@@ -929,44 +951,60 @@ class AgentLoop:
                 if isinstance(action, dict) and action.get("kind") == "retry":
                     continue
                 raise exc
+
             # assistant/message 的 source 对齐上游 {kind:'model', provider, model}
-            assistant_message = assembler.message({
+            assistant_message = create_message("assistant", live.blocks(), {
                 "kind": "model",
                 "provider": self.adapter.provider,
                 "model": getattr(self.adapter, "model", None),
             })
-            self.session.append("assistant/message", {
+            message_data: dict[str, Any] = {
                 "turn": self._turn, "step": self._step, "message": assistant_message,
-                **({"usage": assembler.usage} if assembler.usage is not None else {}),
-            }, surfaceOp="append", sourceEventSeqs=chunk_seqs)
+                "stream": live.stream,
+            }
+            if live.usage is not None:
+                message_data["usage"] = live.usage
+            live.settle("assistant/message",
+                        lambda: self.session.append("assistant/message", message_data,
+                                                    surfaceOp="append")["seq"])
 
             return [
                 b for b in assistant_message["content"] if b.get("type") == "tool-call"
             ]
 
-    def _finalize_interrupted_prefix(self, assembler: BlockAssembler,
-                                     chunk_seqs: list[int]) -> None:
+    def _finalize_interrupted_prefix(self, live: AssistantStreamAttempt) -> None:
         """取消时定稿流前缀为 interrupted assistant/message（上游 agent.ts
-        catch 路径：interruptedBlocks 非空才落，interrupted:true + usage）。
+        catch 路径：interruptedBlocks 非空才落 message，否则落
+        assistant/attempt）。
 
         source 经消息工厂补 kind:'model'（与正常完成路径同形状）；
-        surfaceOp append + sourceEventSeqs 引用本 attempt 已落盘的 chunk seq。
+        surfaceOp append + 内嵌 stream（V2）。
         """
         if not self._cancelled:
             return
-        content = assembler.interrupted_blocks()
+        content = live.interrupted_blocks()
         if not content:
+            # 无可见内容：落 assistant/attempt（内嵌流，不留 surface message）
+            live.settle("assistant/attempt",
+                        lambda: self.session.append("assistant/attempt", {
+                            "turn": self._turn, "step": self._step,
+                            "stream": live.stream,
+                        })["seq"])
             return
         message = create_message("assistant", content, {
             "kind": "model",
             "provider": self.adapter.provider,
             "model": getattr(self.adapter, "model", None),
         })
-        self.session.append("assistant/message", {
+        message_data: dict[str, Any] = {
             "turn": self._turn, "step": self._step, "message": message,
-            "interrupted": True,
-            **({"usage": assembler.usage} if assembler.usage is not None else {}),
-        }, surfaceOp="append", sourceEventSeqs=chunk_seqs)
+            "interrupted": True, "stream": live.stream,
+        }
+        if live.usage is not None:
+            message_data["usage"] = live.usage
+        live.settle("assistant/message",
+                    lambda: self.session.append("assistant/message", message_data,
+                                                surfaceOp="append")["seq"])
 
     async def _execute_tools_async(self, tool_calls: list[dict]) -> bool:
         """并行调度器（exclusive 屏障 + 有界滚动池 + 模型序提交）。

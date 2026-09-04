@@ -15,18 +15,22 @@ def ev(type_, data, seq, time):
 
 
 def simple_turn_events():
-    """单文本回合：turn/start → user → assistant → step → turn/end。"""
+    """单文本回合：turn/start → user → assistant(内嵌 stream) → step → turn/end。
+
+    V2：assistant/chunk 事件废止；TTFT 观测取内嵌 stream 首记录时间。
+    """
     return [
         ev("turn/start", {"turn": 1}, 1, 1000),
         ev("step/start", {"turn": 1, "step": 1}, 2, 1005),
         ev("user/message", {"turn": 1, "step": 1,
                             "content": [{"type": "text", "text": "你好"}]}, 3, 1006),
-        ev("assistant/chunk", {"turn": 1, "step": 1,
-                               "chunk": {"kind": "block-start"}}, 4, 1020),
         ev("assistant/message", {"turn": 1, "step": 1, "message": {
-            "content": [{"type": "text", "text": "你好，我是助手。"}]}}, 5, 1100),
-        ev("step/end", {"turn": 1, "step": 1}, 6, 1105),
-        ev("turn/end", {"turn": 1, "reason": {"kind": "completed"}}, 7, 1110),
+            "content": [{"type": "text", "text": "你好，我是助手。"}]},
+            "stream": [{"type": "chunk", "time": 1020,
+                        "chunk": {"type": "block-start", "index": 0,
+                                  "blockType": "text"}}]}, 4, 1100),
+        ev("step/end", {"turn": 1, "step": 1}, 5, 1105),
+        ev("turn/end", {"turn": 1, "reason": {"kind": "completed"}}, 6, 1110),
     ]
 
 

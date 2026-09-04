@@ -58,17 +58,19 @@ class TestLoop(unittest.TestCase):
         self.assertEqual(types[-1], "turn/end")
         self.assertIn("step/start", types)
         self.assertIn("step/end", types)
-        # 模型可见 ⟺ 已记录：chunk 与请求配置都落日志
-        self.assertIn("assistant/chunk", types)
+        # 模型可见 ⟺ 已记录：流内嵌 assistant/message（V2），请求配置落日志
+        self.assertIn("assistant/message", types)
         self.assertIn("request/header", types)
         self.assertEqual(session.events[-1]["data"]["reason"], {"kind": "completed"})
 
-    def test_assistant_message_cites_chunk_seqs(self):
+    def test_assistant_message_embeds_stream(self):
         session, loop, _ = _make_env()
         loop.followup("你好")
         am = [e for e in session.events if e["type"] == "assistant/message"][0]
-        chunk_seqs = [e["seq"] for e in session.events if e["type"] == "assistant/chunk"]
-        self.assertEqual(am["sourceEventSeqs"], tuple(chunk_seqs))
+        # V2：完整模型流压缩内嵌 stream；sourceEventSeqs 引用废止
+        self.assertIn("stream", am["data"])
+        self.assertGreater(len(am["data"]["stream"]), 0)
+        self.assertNotIn("sourceEventSeqs", am)
 
     def test_tool_call_roundtrip(self):
         session, loop, adapter = _make_env(
@@ -290,12 +292,15 @@ class TestRequestEnvelope(unittest.TestCase):
     def test_surface_replacement_begins_distinct_series(self):
         # A5（上游 agent.ts:502-515）：header 未变但 surface 发生过位置替换 →
         # request/header reason='series'（显式新消息系列边界）。
+        # V2：assistant/message 内嵌流不能携带 sourceEventSeqs，替换走
+        # user/message 压缩检查点（compaction/region.py 同款）。
         session, loop, _ = _make_env()
         loop.followup("第一句")
         a_msg = next(e for e in reversed(session.events) if e["type"] == "assistant/message")
         session.append(
-            "assistant/message",
-            {"message": create_message("assistant", [text_block("压缩摘要")])},
+            "user/message",
+            create_message("user", [text_block("压缩摘要")],
+                           {"kind": "plugin", "plugin": "compact", "compactionId": "c1"}),
             surfaceOp={"op": "replace", "start": a_msg["seq"], "end": a_msg["seq"]},
             sourceEventSeqs=[a_msg["seq"]],
         )
@@ -313,8 +318,9 @@ class TestRequestEnvelope(unittest.TestCase):
         adapter.model = "other"   # 改变请求 header（provider/model 含 model）
         a_msg = next(e for e in reversed(session.events) if e["type"] == "assistant/message")
         session.append(
-            "assistant/message",
-            {"message": create_message("assistant", [text_block("压缩摘要")])},
+            "user/message",
+            create_message("user", [text_block("压缩摘要")],
+                           {"kind": "plugin", "plugin": "compact", "compactionId": "c1"}),
             surfaceOp={"op": "replace", "start": a_msg["seq"], "end": a_msg["seq"]},
             sourceEventSeqs=[a_msg["seq"]],
         )
@@ -459,8 +465,8 @@ class CancelPrefixFinalizeTest(unittest.TestCase):
         # source 经消息工厂补 kind:'model'（与正常完成路径同形状）
         self.assertEqual(data["message"]["source"],
                          {"kind": "model", "provider": "fake", "model": "fake"})
-        chunk_seqs = [e["seq"] for e in session.events if e["type"] == "assistant/chunk"]
-        self.assertEqual(ev["sourceEventSeqs"], tuple(chunk_seqs))
+        # V2：可定稿前缀连同压缩内嵌 stream 落盘（sourceEventSeqs 引用废止）
+        self.assertGreater(len(data["stream"]), 0)
         end = [e for e in session.events if e["type"] == "turn/end"][-1]
         self.assertEqual(end["data"]["reason"]["kind"], "aborted")
 
@@ -535,9 +541,10 @@ class CancelPrefixFinalizeTest(unittest.TestCase):
         end = [e for e in session.events if e["type"] == "turn/end"][-1]
         self.assertEqual(end["data"]["reason"]["kind"], "aborted")
 
-    def test_retry_discards_failed_attempt_and_cites_own_chunks(self):
-        # 重试成功后唯一的 assistant/message 只引用成功 attempt 的 chunks，
-        # 无 interrupted 标记（失败 attempt 的 chunks 留在日志但不被引用）
+    def test_retry_discards_failed_attempt_and_embeds_own_stream(self):
+        # 重试成功后唯一的 assistant/message 内嵌成功 attempt 的流，无
+        # interrupted 标记；失败 attempt 落 assistant/attempt（内嵌自己的流，
+        # V2：不留 surface message，也不被成功消息引用）
         failed = [
             StreamChunk("block-start", index=0, blockType="text"),
             StreamChunk("text-delta", index=0, text="即将失败"),
@@ -558,9 +565,11 @@ class CancelPrefixFinalizeTest(unittest.TestCase):
         data = self._payload(msgs[0])
         self.assertNotIn("interrupted", data)
         self.assertEqual(data["message"]["content"], [{"type": "text", "text": "最终答案"}])
-        all_chunk_seqs = [e["seq"] for e in session.events if e["type"] == "assistant/chunk"]
-        self.assertEqual(len(all_chunk_seqs), 7)   # 失败 attempt 3 + 成功 attempt 4
-        self.assertEqual(msgs[0]["sourceEventSeqs"], tuple(all_chunk_seqs[3:]))
+        # 失败 attempt 3 chunk + 成功 attempt 4 chunk；各自内嵌、互不引用
+        attempts = [e for e in session.events if e["type"] == "assistant/attempt"]
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(len(attempts[0]["data"]["stream"]), 3)
+        self.assertEqual(len(data["stream"]), 4)
 
     def test_interrupted_blocks_filters_whitespace_and_unknown_open(self):
         # assembler 单元契约：空白 text / 未知类型 open 块不保留（不可见面）

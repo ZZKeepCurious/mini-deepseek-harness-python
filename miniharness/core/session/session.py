@@ -17,19 +17,47 @@ from .types import KNOWN_TYPES, SURFACE_TYPES
 __all__ = ["Session"]
 
 
+def _json_deep_equal(a: Any, b: Any) -> bool:
+    """JSON 值域深比较（null/bool/num/str、数组、普通对象；兼容冻结结构）。"""
+    from types import MappingProxyType
+    if isinstance(a, MappingProxyType):
+        a = dict(a)
+    if isinstance(b, MappingProxyType):
+        b = dict(b)
+    if type(a) is not type(b) and not (
+        (isinstance(a, (dict, MappingProxyType)) and isinstance(b, (dict, MappingProxyType)))
+        or (isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)))
+    ):
+        return False
+    if isinstance(a, (dict, MappingProxyType)) and isinstance(b, (dict, MappingProxyType)):
+        if set(a.keys()) != set(b.keys()):
+            return False
+        return all(_json_deep_equal(a[k], b[k]) for k in a)
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        if len(a) != len(b):
+            return False
+        return all(_json_deep_equal(x, y) for x, y in zip(a, b))
+    return a == b
+
+
 class Session:
     """追加式事件日志：唯一事实来源。构造时可带 seed（恢复/回放历史）与 meta。
 
     meta 是会话的持久化头部元数据（上游 Session.header 的 mini 子集：
-    parentSession / origin / delegationDepth / seedLength / cwd），冷恢复与
+    parentSession / origin / delegationDepth / isSeeded / cwd），冷恢复与
     子代理继承用；普通会话缺省为空 dict。
+
+    inherited_event_count：fork 继承前缀长度（对齐上游 Session.inheritedEventCount）。
+    seeded session 必须有 seed 且 inherited_event_count > 0；
+    unseeded session 的 inherited_event_count 恒为 0。
 
     on_append 是 store 发布钩子（SessionStore.enter 注入）：正常 append 落盘后
     回调（上游 index.ts 的 session/event 派发），构造 seed 回放不触发。
     """
 
     def __init__(self, session_id: str, seed: list | None = None, created_at: int | None = None,
-                 meta: dict | None = None, on_append: Callable[[dict[str, Any]], None] | None = None):
+                 meta: dict | None = None, on_append: Callable[[dict[str, Any]], None] | None = None,
+                 inherited_event_count: int | None = None, mode: str = "snapshot"):
         self.session_id = session_id
         self.created_at = created_at or now_ms()
         self.meta = dict(meta) if meta else {}
@@ -37,8 +65,57 @@ class Session:
         self._replace_count = 0
         self._on_append = on_append
 
+        # 对齐上游 isSeeded + inheritedEventCount 语义（rc.1）
+        self._is_seeded: bool = self.meta.get("isSeeded", False)
+        if inherited_event_count is not None:
+            self._inherited_event_count = inherited_event_count
+        elif seed and self._is_seeded:
+            # seeded session 默认 inherited = seed 长度
+            self._inherited_event_count = len(seed)
+        else:
+            self._inherited_event_count = 0
+
+        # 上游构造不变量（V2 index.ts constructor）：seeded 允许显式空前缀
+        # （[] 是合法 seed，仅缺失/None 拒绝；inheritedEventCount 可为 0）
+        if self._is_seeded and seed is None:
+            raise ValueError("seeded session requires an explicit constructor seed")
+        if self._is_seeded and self._inherited_event_count < 0:
+            raise ValueError("seeded session requires a non-negative inherited event count")
+        if not self._is_seeded and self._inherited_event_count != 0:
+            raise ValueError("unseeded session inherited event count must be 0")
+
         if seed:
             self._replay_seed(seed)
+
+        # inherited_event_count 不得超过日志长度
+        if self._inherited_event_count > len(self._events):
+            raise ValueError(
+                f"session inherited event count {self._inherited_event_count} "
+                f"exceeds its event log length {len(self._events)}"
+            )
+        # V2: seeded snapshot 的 seed 必须恰好等于继承前缀（上游 index.ts
+        # 'seeded session constructor seed must equal its inherited prefix'）
+        if mode == "snapshot" and self._is_seeded and self._inherited_event_count != len(self._events):
+            raise ValueError("seeded session constructor seed must equal its inherited prefix")
+
+        # V2 end-seed marker（上游 index.ts constructor）：snapshot 的 seeded 子会话
+        # 恒在继承切割点带 {inherited:true}；restore / unseeded 走普通 {} 边界
+        # （上游 types.ts 'session/end-seed': { inherited?: true }——仅可选 true，
+        # resume 标记不带 inherited 键；空 seed 同样补记——上游 at(-1) 为
+        # undefined ≠ end-seed → 追加）。
+        # 直接落 _events（构造期未注册 store，不走 on_append，上游该 marker 是
+        # constructor 内部 append，store 发布在会话完整接线后才发生）。
+        if seed is not None:
+            if mode == "snapshot" and self._is_seeded:
+                marker_data: dict[str, Any] = {"inherited": True}
+            elif not self._events or self._events[-1]["type"] != "session/end-seed":
+                marker_data = {}
+            else:
+                marker_data = None
+            if marker_data is not None:
+                marker = deep_freeze({"type": "session/end-seed", "seq": self.seq,
+                                      "time": now_ms(), "data": marker_data})
+                self._events.append(marker)
 
     @property
     def seq(self) -> int:
@@ -46,8 +123,18 @@ class Session:
 
     @property
     def events(self) -> tuple[dict[str, Any], ...]:
-        """只读视图：外部永远拿不到可变的内部列表。"""
+        """完整事件视图（含继承前缀）。保留向后兼容；新代码用 snapshot_events()。"""
         return tuple(self._events)
+
+    @property
+    def is_seeded(self) -> bool:
+        """是否为 fork 子会话（对齐上游 SessionHeader.isSeeded）。"""
+        return self._is_seeded
+
+    @property
+    def inherited_event_count(self) -> int:
+        """fork 继承前缀长度（对齐上游 Session.inheritedEventCount）。"""
+        return self._inherited_event_count
 
     @property
     def replace_generation(self) -> int:
@@ -57,6 +144,29 @@ class Session:
         "surface 是否真的前进过"。
         """
         return self._replace_count
+
+    def snapshot_events(self, from_: int | None = None, to_: int | None = None) -> tuple[dict[str, Any], ...]:
+        """半开区间事件快照（对齐上游 Session.snapshotEvents(from?, to?)）。
+
+        from_ 缺省 = 0，to_ 缺省 = self.seq。
+        """
+        start = from_ if from_ is not None else 0
+        end = to_ if to_ is not None else len(self._events)
+        return tuple(self._events[start:end])
+
+    def event_at(self, seq: int) -> dict[str, Any]:
+        """按 seq 查找单条事件（对齐上游 Session.eventAt(seq)）。"""
+        if seq < 0 or seq >= len(self._events):
+            raise IndexError(f"event seq {seq} out of range [0, {len(self._events)})")
+        return self._events[seq]
+
+    def own_events(self) -> tuple[dict[str, Any], ...]:
+        """仅本会话自有事件（跳过继承前缀，对齐上游 Session.ownEvents()）。"""
+        return tuple(self._events[self._inherited_event_count:])
+
+    def is_own_seq(self, seq: int) -> bool:
+        """判断 seq 是否属于本会话自有范围（对齐上游 Session.isOwnSeq(seq)）。"""
+        return self._inherited_event_count <= seq < len(self._events)
 
     def request_header(self) -> dict | None:
         """最近一次 request/header 的 header 对象（上游 session.ts requestHeader()）。
@@ -131,7 +241,16 @@ class Session:
         sourceEventSeqs 血统 / tool-result 重写规则，fail-closed）。
         """
         for i, ev in enumerate(seed):
-            if not isinstance(ev, (dict, MappingProxyType)) or ev.get("seq") != i:
+            seq = ev.get("seq")
+            # rc.1: seq 必须是安全整数且严格等序递增（拒绝 -0.0 之类浮点别名——
+            # 对齐上游 walkJsonValue 对 -0 的 Object.is 拒收：-0 与 0 相等但
+            # 不能充当无符号日志游标 seq == log.length）。
+            if (
+                not isinstance(ev, (dict, MappingProxyType))
+                or not isinstance(seq, int)
+                or isinstance(seq, bool)
+                or seq != i
+            ):
                 raise ValueError(f"seed 事件 seq 必须从 0 连续，第 {i} 条不符")
             etype = ev.get("type")
             ign = ev.get("ignorable")
@@ -164,8 +283,44 @@ class Session:
                     raise ValueError(f"非 surface 事件 {etype} 不允许携带 surfaceOp/sourceEventSeqs")
             if not is_json_safe(thaw(ev)):
                 raise TypeError(f"seed 事件必须可无损 JSON 序列化: {ev!r}")
+            # V2: assistant/message 与 assistant/attempt 内嵌 stream，须在 restore
+            # 边界做展开验证（上游 assertCurrentAssistantStream）
+            if etype in ("assistant/message", "assistant/attempt"):
+                self._assert_current_assistant_stream(ev, i)
             self._events.append(deep_freeze(ev))
-        if not seed or self._events[-1]["type"] != "session/end-seed":
-            # time 取当前时钟（上游 append 一律 Date.now()，end-seed 不复用 last_time）
-            marker = deep_freeze({"type": "session/end-seed", "seq": self.seq, "time": now_ms(), "data": {}})
-            self._events.append(marker)
+
+    def _assert_current_assistant_stream(self, ev: dict, index: int) -> None:
+        """V2 seed 边界验证：内嵌 stream 必须能还原且与 message 冗余字段一致。
+
+        上游 index.ts assertCurrentAssistantStream：expand → 逐 chunk 喂
+        BlockAssembler → 对 assistant/message 比对 message.content（interrupted
+        时用 interruptedBlocks）/ usage / source.replayState。assistant/attempt
+        或空流只做还原验证。
+        """
+        from ...llm import BlockAssembler, expand_assistant_stream
+        data = ev.get("data") or {}
+        try:
+            timed = expand_assistant_stream(data.get("stream") or [])
+            assembler = BlockAssembler()
+            for member in timed:
+                assembler.push(member.chunk)
+        except Exception as e:
+            raise ValueError(
+                f"seed {ev['type']} at index {index} has an invalid embedded stream: {e}")
+        if ev["type"] == "assistant/attempt" or not timed:
+            return
+        message = data.get("message") or {}
+        if data.get("interrupted") is True:
+            expected_content = assembler.interrupted_blocks()
+        else:
+            expected_content = assembler.blocks
+        if not _json_deep_equal(message.get("content"), expected_content):
+            raise ValueError(
+                f"seed assistant/message at index {index} content disagrees with its embedded stream")
+        if not _json_deep_equal(data.get("usage"), assembler.usage):
+            raise ValueError(
+                f"seed assistant/message at index {index} usage disagrees with its embedded stream")
+        source = message.get("source") or {}
+        if not _json_deep_equal(source.get("replayState"), assembler.replay_state):
+            raise ValueError(
+                f"seed assistant/message at index {index} replay state disagrees with its embedded stream")

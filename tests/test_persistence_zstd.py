@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
-"""zstd 拼接帧容器 + StorageRecord 打包行持久化验收。
+"""zstd 拼接帧容器 + 一行一事件 JSONL 持久化验收（V2 载体）。
 
 对齐上游：
 - packages/session/session-persistence-jsonl/src/zstd.spec.ts / zstd.compat.spec.ts
   （帧容器：拼接帧、截断前缀恢复、结构拒绝）
-- packages/core/session/src/chunk-rows.ts（MIN_RUN 打包、行信封、fail-closed 校验）
 - format.ts 目录布局与响亮拒绝（encodingMismatch / legacyLayout / 版本拒读）
+- V2 载体：一行一事件；chunk 行与 StorageRecord 打包层随 assistant/chunk 一并
+  废止（流内嵌 assistant/message；上游仅 v0→v1 迁移 codec 保留打包，mini 从未有过）
 
 运行：python -m unittest tests.test_persistence_zstd
 """
@@ -18,7 +19,6 @@ from pathlib import Path
 import zstandard
 
 from miniharness.core.session import Session
-from miniharness.core.session.chunk_rows import MIN_RUN
 from miniharness.core.session.persistence import (
     SESSION_FORMAT_VERSION,
     JsonlPersistence,
@@ -26,7 +26,6 @@ from miniharness.core.session.persistence import (
     _log_path,
     balanced_after_replay,
     decode_segment,
-    decode_storage_record,
     encode_segment,
     project_key,
     repair_and_replay,
@@ -42,16 +41,14 @@ from miniharness.core.session.zstd_frames import (
 )
 
 
-def _chunk(i, kind="text-delta", text=None):
+def _user_msg(i, text=None):
+    """V2 surface 事件（assistant/chunk 已废止）：事件载体用 user/message。"""
     return {
-        "type": "assistant/chunk",
+        "type": "user/message",
         "seq": i,
         "time": 1000 + i,
-        "data": {
-            "turn": 1,
-            "step": 1,
-            "chunk": {"type": kind, "index": 0, "text": text if text is not None else f"t{i}"},
-        },
+        "data": {"content": [{"type": "text", "text": text if text is not None else f"t{i}"}]},
+        "surfaceOp": "append",
     }
 
 
@@ -106,95 +103,6 @@ class TestFrameContainer(unittest.TestCase):
             decompress_zstd_frame(bytes(frame))
 
 
-class TestStorageRecordPacking(unittest.TestCase):
-    def _persist(self, root, events, pack=True):
-        p = JsonlPersistence(root / ("pack" if pack else "raw"), pack_chunks=pack)
-        for e in events:
-            p.append("s1", e)
-        p.flush()
-        return [json.loads(l) for l in p.read_raw("s1").strip().split("\n")[1:]]
-
-    def test_run_of_min_run_packed_into_row(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            rows = self._persist(Path(tmp), [_chunk(i) for i in range(MIN_RUN)])
-            self.assertEqual(len(rows), 1)
-            row = rows[0]
-            self.assertEqual(row["type"], "text-chunks")
-            data = row["data"]
-            self.assertEqual(data["dt"], [1] * (MIN_RUN - 1))  # 相邻 time 差
-            self.assertEqual(data["texts"], ["t0", "t1", "t2"])
-
-    def test_short_run_stays_verbatim(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            rows = self._persist(Path(tmp), [_chunk(i) for i in range(MIN_RUN - 1)])
-            self.assertEqual([r["type"] for r in rows], ["assistant/chunk"] * (MIN_RUN - 1))
-
-    def test_mixed_event_breaks_run(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            events = [_chunk(0), _chunk(1), _plain(2), _chunk(3), _chunk(4)]
-            rows = self._persist(Path(tmp), events)
-            types = [r["type"] for r in rows]
-            self.assertIn("assistant/chunk", types)
-            self.assertNotIn("text-chunks", types)
-
-    def test_tool_call_delta_rows_carry_id_and_first_name(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            events = [
-                {
-                    "type": "assistant/chunk",
-                    "seq": i,
-                    "time": 10 * i,
-                    "data": {
-                        "turn": 2,
-                        "step": 1,
-                        "index": 0,
-                        **({"chunk": {"type": "tool-call-delta", "index": 0, "id": "call_1",
-                                      "argumentsDelta": part}} if True else {}),
-                        **({"name": "bash"} if i == 0 else {}),
-                    },
-                }
-                for i, part in enumerate(['{"cmd', '": "ls"}'])
-            ]
-            # tool-call-delta 在 mini 的 chunk 形状里走 data.chunk；name 属于首行 chunk 外层？
-            # 直接以 chunk_rows.classify 的白名单为准构造：
-            from miniharness.core.session.chunk_rows import classify
-            self.assertIsNone(classify(events[0]))  # 形状不符 → 不打包，退回逐条
-            rows = self._persist(Path(tmp), events)
-            self.assertEqual([r["type"] for r in rows], ["assistant/chunk"] * 2)
-
-    def test_roundtrip_through_load_equals_original(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            events = [_chunk(i) for i in range(7)] + [_plain(7)]
-            p = JsonlPersistence(root / "z")
-            for e in events:
-                p.append("s1", e)
-            p.flush()
-            self.assertEqual(p.load("s1"), events)
-
-    def test_seq_gap_prevents_packing(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            events = [_chunk(0), _chunk(1), _chunk(5)]
-            rows = self._persist(Path(tmp), events)
-            self.assertEqual([r["type"] for r in rows], ["assistant/chunk"] * 3)
-
-    def test_decode_storage_record_roundtrip_and_validation(self):
-        events = [_chunk(i) for i in range(4)]
-        p = JsonlPersistence(Path(tempfile.mkdtemp()) / "z")
-        for e in events:
-            p.append("s1", e)
-        p.flush()
-        line = p.read_raw("s1").strip().split("\n")[1]
-        record = json.loads(line)
-        expanded = decode_storage_record(record)
-        self.assertEqual(expanded, events[:4])
-        broken = dict(record)
-        del broken["data"]["dt"]  # 已知标签但行体缺字段 → fail-closed
-        with self.assertRaises(ValueError) as ctx:
-            decode_storage_record(broken)
-        self.assertIn("malformed", str(ctx.exception))
-
-
 class TestJsonlCarrierLayout(unittest.TestCase):
     def test_default_compression_is_zstd_with_frame_header(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -242,6 +150,30 @@ class TestJsonlCarrierLayout(unittest.TestCase):
             lines = path.read_text(encoding="utf-8").splitlines()
             self.assertEqual(json.loads(lines[0])["type"], "session")
 
+    def test_roundtrip_through_load_equals_original(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            events = [_user_msg(i) for i in range(7)] + [_plain(7)]
+            p = JsonlPersistence(root / "z")
+            for e in events:
+                p.append("s1", e)
+            p.flush()
+            self.assertEqual(p.load("s1"), events)
+
+    def test_seq_gap_rejected_on_load(self):
+        """读路径 seq 连续性校验：提交区断档响亮拒绝（fail-closed）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            p = JsonlPersistence(Path(tmp))
+            p.append("s1", {"type": "turn/start", "seq": 0, "time": 1, "data": {"turn": 1}})
+            p.append("s1", {"type": "user/message", "seq": 1, "time": 2,
+                            "data": {}, "surfaceOp": "append"})
+            p.append("s1", {"type": "turn/end", "seq": 3, "time": 3,
+                            "data": {"turn": 1, "reason": {"kind": "stop"}}})
+            p.flush()
+            with self.assertRaises(ValueError) as ctx:
+                p.load("s1")
+            self.assertIn("seq gap in committed region at line 3", str(ctx.exception))
+
     def test_encoding_mismatch_rejected_loudly(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -270,8 +202,8 @@ class TestJsonlCarrierLayout(unittest.TestCase):
             # 同一根内伪造第二个项目目录里的同 id 头帧
             other = root / project_key("/w2") / encode_segment("dup")
             other.mkdir(parents=True)
-            header = {"type": "session", "version": 0, "id": "dup", "createdAt": 1,
-                      "delegationDepth": 0, "cwd": "/w2"}
+            header = {"type": "session", "version": SESSION_FORMAT_VERSION, "id": "dup",
+                      "createdAt": 1, "delegationDepth": 0, "cwd": "/w2"}
             (other / "session.jsonl.zstd").write_bytes(
                 compress_zstd_frame((json.dumps(header) + "\n").encode("utf-8")))
             with self.assertRaises(ValueError) as ctx:
@@ -305,8 +237,8 @@ class TestJsonlCarrierLayout(unittest.TestCase):
 
     def test_version_refusal_newer_and_older(self):
         for version, fragment in (
-            (99, "but this harness reads only v0"),
-            (-1, "older than the supported v0"),
+            (99, "but this harness reads only v2"),
+            (-1, "older than the supported v2"),
         ):
             with tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp) / "v"
@@ -328,10 +260,10 @@ class TestJsonlCarrierLayout(unittest.TestCase):
             p = JsonlPersistence(root / "z")
             p.declare("s1", {"cwd": str(root)})
             for i in range(6):
-                p.append("s1", _chunk(i))
+                p.append("s1", _user_msg(i))
             p.flush()
             for i in range(6, 12):
-                p.append("s1", _chunk(i))
+                p.append("s1", _user_msg(i))
             p.flush()
             path = p.path_of("s1")
             buf = path.read_bytes()
@@ -345,7 +277,7 @@ class TestJsonlCarrierLayout(unittest.TestCase):
             repair_and_replay(JsonlPersistence(root / "z"), "s1", Session("s1"))
             self.assertTrue(balanced_after_replay(JsonlPersistence(root / "z"), "s1"))
             back = JsonlPersistence(root / "z").load("s1")
-            self.assertEqual(back[:6], [_chunk(i) for i in range(6)])
+            self.assertEqual(back[:6], [_user_msg(i) for i in range(6)])
 
 
 class TestDirectoryLayout(unittest.TestCase):
@@ -388,7 +320,7 @@ class TestUpstreamInterop(unittest.TestCase):
 
     def test_stream_compressed_frames_decode(self):
         """无内容大小字段的帧头必须可解（one-shot API 会拒收）。"""
-        payload = b'{"type":"session","version":0}\n{"type":"turn/start"}\n'
+        payload = b'{"type":"session","version":2}\n{"type":"turn/start"}\n'
         frame = _stream_compress_frame(payload)
         with self.assertRaises(zstandard.ZstdError):
             zstandard.ZstdDecompressor().decompress(frame)  # one-shot 拒收，证明前提成立

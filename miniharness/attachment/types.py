@@ -1,17 +1,21 @@
-"""attachment 领域：不可变二进制附件（图片）的类型与常量。
+"""attachment 领域：不可变二进制附件（图片 + verbatim 文件）的类型与常量。
 
-对应 dsh 真实源码：packages/attachment/attachment/src/types.ts（rc.2 已核实，
-alpha.1 仅改 ImageRequestPolicy.maxBytes 语义）。
+对应 dsh 真实源码：packages/attachment/attachment/src/types.ts（alpha.1 已核实）。
 
 与上游一致：
   * ImageAttachmentRef：{attachmentId, mediaType, bytes, width, height,
     name?, originalDimensions?}——attachmentId 是不透明存储标识（规范化字节
     的 sha256 内容寻址），绝不是文件系统路径；originalDimensions 只在规范
     化缩小时出现（EXIF 定向后的输入尺寸）；
+  * FileAttachmentRef（alpha.1 新增）：{attachmentId, name, bytes}——
+    verbatim 存储文件（不规范化），attachmentId = 原样字节 sha256；
   * ImageMediaType：image/png | image/jpeg | image/webp | image/gif；
   * ImageAttachmentLimits：maxImageBytes / maxImagesPerMessage /
     maxMessageImageBytes / maxImagePixels / maxImageDimension / mediaTypes；
   * SaveImageAttachment：{data, mediaType, name?}；
+  * SaveFileAttachment：{data, name?}（alpha.1 新增，字节原样提交）；
+  * SaveFileStreamAttachment：{data, signal?, name?}（alpha.1 新增，分块
+    迭代提交，实现不得整文件驻留内存）；
   * StoredImageAttachment：{ref, data}；
   * ImageRequestPolicy：{maxPixels, maxBytes}——按精确模型路由解析的请求图
     策略；alpha.1 起 maxBytes 是编码字节目标（阶梯每个质量都超限时保留最小
@@ -26,6 +30,7 @@ alpha.1 仅改 ImageRequestPolicy.maxBytes 语义）。
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Iterable
 
 __all__ = [
     "DEFAULT_MAX_IMAGE_BYTES",
@@ -36,13 +41,17 @@ __all__ = [
     "IMAGE_MEDIA_TYPES",
     "AttachmentId",
     "Dimensions",
+    "EncodedFileAttachment",
     "EncodedImageAttachment",
+    "FileAttachmentRef",
     "ImageAttachmentLimits",
     "ImageAttachmentRef",
     "ImageMediaType",
     "ImageRequestPolicy",
     "ImageVariantId",
     "RequestImageAttachment",
+    "SaveFileAttachment",
+    "SaveFileStreamAttachment",
     "SaveImageAttachment",
 ]
 
@@ -128,6 +137,54 @@ class SaveImageAttachment:
 
     data: bytes
     mediaType: str
+    name: str | None = None
+
+
+@dataclass(frozen=True)
+class FileAttachmentRef:
+    """一个 verbatim 存储文件的持久引用（上游 FileAttachmentRef，alpha.1）。
+
+    文件按字节原样存储、无规范化；attachmentId 是那些字节的 sha256 内容寻址。
+    """
+
+    attachmentId: AttachmentId
+    name: str
+    bytes: int
+
+    def to_dict(self) -> dict:
+        return {"attachmentId": str(self.attachmentId), "name": self.name,
+                "bytes": self.bytes}
+
+
+@dataclass(frozen=True)
+class EncodedFileAttachment:
+    """随 wire 请求而来的 base64 文件上传（上游 EncodedFileAttachment）。
+
+    空文件是合法的零字节载荷（受理时接受空串，与图片不同）。
+    """
+
+    data: str
+    name: str | None = None
+
+
+@dataclass(frozen=True)
+class SaveFileAttachment:
+    """verbatim 持久化一个文件的请求（上游 SaveFileAttachment）。"""
+
+    data: bytes
+    name: str | None = None
+
+
+@dataclass(frozen=True)
+class SaveFileStreamAttachment:
+    """从有界字节块 verbatim 持久化一个文件的请求（上游 SaveFileStreamAttachment）。
+
+    data 是按序的精确字节块迭代（mini 同步载体：Iterable[bytes]，上游为
+    AsyncIterable）；实现必须施加背压、不得整文件驻留内存。
+    """
+
+    data: "Iterable[bytes]"
+    signal: object | None = None
     name: str | None = None
 
 

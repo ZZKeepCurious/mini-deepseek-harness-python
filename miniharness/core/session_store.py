@@ -115,6 +115,8 @@ class SessionStore(Service):
 
         与 enter + announce 配对（复合创建方把三者折进一个事务）；只调 prepare 的
         调用方拿到的会话不在店内，append 不触发 session/event。
+
+        options：{seed?, meta?, inheritedEventCount?}。
         """
         options = options or {}
         meta = dict(options.get("meta") or {})
@@ -129,7 +131,9 @@ class SessionStore(Service):
         if id in self._store:
             raise RuntimeError(f'session "{id}" already exists')
         created_at = meta.pop("createdAt", None)
-        return Session(id, seed=options.get("seed"), created_at=created_at, meta=meta)
+        inherited_event_count = options.get("inheritedEventCount")
+        return Session(id, seed=options.get("seed"), created_at=created_at,
+                       meta=meta, inherited_event_count=inherited_event_count)
 
     def enter(self, session: Session, owner_ctx: "Context | None" = None) -> Any:
         """把 prepare 好的会话装进店内：安装 append 发布钩子 + 登记条目。返回 detach 幂等 disposer。
@@ -214,7 +218,8 @@ class SessionStore(Service):
 
         boundary 是包含性的源事件 seq；缺省取源当前最后一条。所选切片可以停在
         回合间事件，但不能停在一个打开的回合内。子会话 meta 继承源 cwd、
-        parentSession=源 id、seedLength=seed 长度（上游 fork 同款）。
+        parentSession=源 id、isSeeded=true（V2：seed=继承前缀，切点带
+        {inherited:true} end-seed 标记；上游 fork 同款）。
         """
         if child_session_id is not None and self.get(child_session_id) is not None:
             raise SessionForkError(
@@ -227,7 +232,7 @@ class SessionStore(Service):
         if live_source.meta.get("cwd") is not None:
             meta["cwd"] = live_source.meta["cwd"]
         meta["parentSession"] = live_source.session_id
-        meta["seedLength"] = len(seed)
+        meta["isSeeded"] = True
         return self.create(child_session_id, {"seed": seed, "meta": meta})
 
     def _resolve_fork_source(self, source: Session | str) -> Session:
@@ -296,7 +301,9 @@ class SessionStore(Service):
         for key in ("parentSession", "agentPreset"):
             if key in meta and not isinstance(meta[key], str):
                 raise RuntimeError(f"session meta {key} must be a string")
-        for key in ("seedLength", "delegationDepth", "createdAt"):
+        if "isSeeded" in meta and not isinstance(meta["isSeeded"], bool):
+            raise RuntimeError("session meta isSeeded must be a boolean")
+        for key in ("delegationDepth", "createdAt"):
             if key in meta and (not isinstance(meta[key], int) or isinstance(meta[key], bool)
                                 or meta[key] < 0):
                 raise RuntimeError(f"session meta {key} must be a non-negative integer")

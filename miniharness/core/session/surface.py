@@ -64,13 +64,17 @@ def assert_provenance(type_: str, source_event_seqs: Any, seq: int,
                       shadowed_seqs: list[int]) -> None:
     """校验 sourceEventSeqs 血统（上游 surface.ts assertProvenance）。
 
-    数组非空（assistant/message 除外）、元素非负安全整数、无重复、全部早于
-    事件 seq；replace 操作必须覆盖全部被遮蔽 surface 节点。
+    数组非空、元素非负安全整数、无重复、全部早于事件 seq；replace 操作必须
+    覆盖全部被遮蔽 surface 节点。V2：`assistant/message` 内嵌其源流，**禁止**
+    携带 sourceEventSeqs（上游 assertProvenance 首段）。
 
     输入可能是存储态区间编码（上游 seq-ranges.ts），先 decode 展开为内存态
     列表（对齐上游 persistence 读路径 expandProvenanceFromStorage 后再
     assert 的语义）；decode 完成形状校验（非负 / [start,end] / end>=start）。
     """
+    if type_ == "assistant/message" and source_event_seqs is not None:
+        raise ValueError(
+            "assistant/message embeds its source stream and cannot carry sourceEventSeqs")
     if source_event_seqs is None:
         if shadowed_seqs:
             raise ValueError(
@@ -79,8 +83,8 @@ def assert_provenance(type_: str, source_event_seqs: Any, seq: int,
             )
         return
     sources = decode_seq_ranges(source_event_seqs)
-    if len(sources) == 0 and type_ != "assistant/message":
-        raise ValueError("sourceEventSeqs must not be empty except on assistant/message")
+    if len(sources) == 0:
+        raise ValueError("sourceEventSeqs must not be empty")
     seen: set[int] = set()
     non_earlier = None
     for source in sources:

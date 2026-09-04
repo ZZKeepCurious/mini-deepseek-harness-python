@@ -166,9 +166,10 @@ class TestSessionExport(_PersistCase):
 
     def test_descendant_without_stored_artifact_is_missing_500(self):
         # 后代仅在 live store（无事件、无持久化）→ 无制品 → 整档失败（对照上游
-        # 后代 readRaw 缺失 → errored stream）
+        # 后代 readRaw 缺失 → errored stream）。无 seed 构造：V2 的显式空 seed
+        # 会携带 end-seed 标记事件，不再是无事件会话。
         _write_jsonl(self.persistence, "session-root")
-        live = Session("child-missing", seed=[], meta={"parentSession": "session-root"})
+        live = Session("child-missing", meta={"parentSession": "session-root"})
         store = _MemoryStore([live])
         ctx = _fake_ctx(sessions=store, persistence=self.persistence)
         result = build_session_export(ctx, "session-root", True)

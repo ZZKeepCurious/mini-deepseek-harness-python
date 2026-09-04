@@ -124,8 +124,8 @@ class TestLifecycle(unittest.TestCase):
             store.create("s1", {"meta": {"cwd": "relative"}})
         with self.assertRaisesRegex(RuntimeError, "subagent"):
             store.create("s1", {"meta": {"origin": "user"}})
-        with self.assertRaisesRegex(RuntimeError, "non-negative"):
-            store.create("s1", {"meta": {"seedLength": -1}})
+        with self.assertRaisesRegex(RuntimeError, "isSeeded must be a boolean"):
+            store.create("s1", {"meta": {"isSeeded": "yes"}})
         with self.assertRaisesRegex(RuntimeError, "string"):
             store.create("s1", {"meta": {"parentSession": 42}})
 
@@ -212,10 +212,12 @@ class TestFork(unittest.TestCase):
         ctx, store, parent = self._forked_source()
         child = store.fork(parent, child_session_id="c")
         self.assertEqual(child.meta["parentSession"], "p")
-        self.assertEqual(child.meta["seedLength"], len(parent.events))
+        self.assertIs(child.is_seeded, True)
+        self.assertEqual(child.inherited_event_count, len(parent.events))
         # 子会话 = 父日志回放 + 自动补记的 session/end-seed 标记
         self.assertEqual(list(child.events[:-1]), list(parent.events))
         self.assertEqual(child.events[-1]["type"], "session/end-seed")
+        self.assertEqual(child.events[-1]["data"], {"inherited": True})
         self.assertEqual(child.session_id, "c")
 
     def test_fork_by_id(self):
@@ -228,14 +230,20 @@ class TestFork(unittest.TestCase):
         ctx, store = _fresh_store()
         parent = store.create("p")
         child = store.fork(parent)
-        self.assertEqual(list(child.events), [])
-        self.assertEqual(child.meta["seedLength"], 0)
+        # V2：空源 fork = 显式空 seed + isSeeded，构造器恒补 {inherited:true} 标记
+        self.assertIs(child.is_seeded, True)
+        self.assertEqual(child.inherited_event_count, 0)
+        self.assertEqual(len(child.events), 1)
+        self.assertEqual(child.events[0]["type"], "session/end-seed")
+        self.assertEqual(child.events[0]["data"], {"inherited": True})
 
     def test_fork_specific_boundary(self):
         ctx, store, parent = self._forked_source()
         child = store.fork(parent, boundary=2, child_session_id="c")
-        self.assertEqual(child.meta["seedLength"], 3)  # slice(0, 3) = seq 0..2
+        self.assertIs(child.is_seeded, True)
+        self.assertEqual(child.inherited_event_count, 3)  # slice(0, 3) = seq 0..2
         self.assertEqual(len(child.events), 4)  # 3 条回放 + 自动 end-seed 标记
+        self.assertEqual(child.events[-1]["data"], {"inherited": True})
 
     def test_fork_not_found(self):
         ctx, store = _fresh_store()

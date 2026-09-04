@@ -309,7 +309,11 @@ class TestContinuationManager(unittest.TestCase):
         self.assertEqual(info["meta"]["origin"], "subagent")
         self.assertEqual(info["meta"]["delegationDepth"], 1)
         self.assertEqual(info["meta"]["label"], "研")
-        self.assertEqual([e["type"] for e in info["events"]], ["subagent/descriptor"])
+        # V2：显式空 seed 的子会话携带 {} end-seed 标记（上游 constructor：
+        # seed !== undefined 且日志末尾非 end-seed → 补记；不带 inherited 键）
+        self.assertEqual([e["type"] for e in info["events"]],
+                         ["session/end-seed", "subagent/descriptor"])
+        self.assertEqual(info["events"][0]["data"], {})
         self.assertEqual(mgr.activations, {})
 
     def test_send_message_settles_and_wakes_idle_parent(self):
@@ -514,7 +518,7 @@ class TestContinuationManager(unittest.TestCase):
         self.assertIn("subagent-report", sources)
         quiet = [e for e in self.parent.session.events if e["type"] == "user/message"
                  and e["data"]["source"]["kind"] == "subagent-report"]
-        self.assertEqual(quiet[-1]["data"]["source"]["form"], "background-report")
+        self.assertEqual(quiet[-1]["data"]["source"]["form"], "relay")
 
     def test_list_children(self):
         mgr = self._manager()

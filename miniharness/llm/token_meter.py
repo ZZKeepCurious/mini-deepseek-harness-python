@@ -26,6 +26,7 @@ from types import MappingProxyType
 from typing import Any
 
 from ..core.session import SURFACE_TYPES, derive_event_message, thaw
+from .assistant_stream import expand_assistant_stream
 from .protocol import BlockAssembler
 
 __all__ = ["BLOCK_OVERHEAD", "CHARS_PER_TOKEN", "ROLE_OVERHEAD", "TokenMeter",
@@ -257,26 +258,17 @@ class TokenMeter:
         state["anchor"] = next_anchor
 
     def _estimate_provider_assistant(self, session, ev: dict, durable_event_tokens: int) -> int:
-        """按 sourceEventSeqs 重装 provider 原始输出并定价（usage 锚的替代面）。"""
-        source_seqs = ev.get("sourceEventSeqs")
-        if source_seqs is None:
+        """按内嵌 stream 重装 provider 原始输出并定价（usage 锚的替代面）。
+
+        V2：流内嵌 assistant/message（sourceEventSeqs 引用废止）；无流时退回
+        durable 事件面定价。stream 是冻结 mappingproxy，expand 已兼容。
+        """
+        stream = ev["data"].get("stream")
+        if not stream:
             return durable_event_tokens
         assembler = BlockAssembler()
-        seen = set()
-        events = session.events
-        for seq in source_seqs:
-            if seq >= ev["seq"]:
-                raise ValueError(f"token meter: assistant/message at seq {ev['seq']} 引用后续 seq {seq}")
-            if seq in seen:
-                raise ValueError(f"token meter: assistant/message at seq {ev['seq']} 重复引用 seq {seq}")
-            seen.add(seq)
-            source = events[seq]
-            if source["type"] != "assistant/chunk":
-                raise ValueError(f"token meter: assistant/message at seq {ev['seq']} 引用非 chunk seq {seq}")
-            if (source["data"].get("turn") != ev["data"].get("turn")
-                    or source["data"].get("step") != ev["data"].get("step")):
-                raise ValueError(f"token meter: assistant/message at seq {ev['seq']} 引用了别的 step 的 chunk")
-            assembler.push(source["data"]["chunk"])
+        for member in expand_assistant_stream(stream):
+            assembler.push(member.chunk)
         blocks = assembler.blocks
         return 0 if not blocks else estimate_content(blocks) + ROLE_OVERHEAD
 

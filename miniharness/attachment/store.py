@@ -33,6 +33,7 @@ import uuid
 
 from .error import (
     ATTACHMENT_CORRUPT,
+    ATTACHMENT_FILES_UNSUPPORTED,
     ATTACHMENT_NOT_FOUND,
     ATTACHMENT_PROJECTION_UNSUPPORTED,
     ATTACHMENT_READ_FAILED,
@@ -57,10 +58,14 @@ from .types import (
     DEFAULT_MAX_MESSAGE_IMAGE_BYTES,
     AttachmentId,
     Dimensions,
+    EncodedFileAttachment,
+    FileAttachmentRef,
     ImageAttachmentLimits,
     ImageAttachmentRef,
     ImageRequestPolicy,
     RequestImageAttachment,
+    SaveFileAttachment,
+    SaveFileStreamAttachment,
     SaveImageAttachment,
     StoredImageAttachment,
 )
@@ -338,8 +343,10 @@ class AttachmentStore:
     """不可变二进制附件服务（上游 AttachmentStore seam 的 mini 载体）。
 
     以鸭子类型承载（上游为 cordis Service）；实现提供 image_limits 属性与
-    save_images / save_image / read_image / read_image_request。mini 保持与
-    上游同名方法。
+    save_images / save_image / read_image / read_image_request；alpha.1 起
+    另有 verbatim 文件族 save_file / save_file_stream / read_file_stream /
+    file_host_path（不支持的后端保留基类拒绝）与 admit_prompt_content /
+    admit_encoded_file / is_attachment_error。mini 保持与上游同名方法。
     """
 
     image_limits: ImageAttachmentLimits = DEFAULT_IMAGE_LIMITS
@@ -358,6 +365,79 @@ class AttachmentStore:
             "The mounted attachment provider cannot derive model-request images.",
             ATTACHMENT_PROJECTION_UNSUPPORTED,
         )
+
+    # ---------- prompt 内容受理（上游 admitPromptContent，alpha.1 移入 seam） ----------
+
+    def admit_prompt_content(self, content: list) -> list:
+        """受理一个 Host prompt，把每个上传图片替换为其持久引用。
+
+        text 与持久 file 引用（`{'type':'file','attachment':FileAttachmentRef}`
+        形态）原样按序穿透；无 image 部分的 prompt 不发生任何存储操作。
+        上游签名收 `AttachmentAdmissionPart[]`（file 部分已经
+        resolvePromptFileReceipts 解析过 receipt）。
+        """
+        from .admission import admit_encoded_images
+
+        if all(part.get("type") != "image" for part in content
+               if isinstance(part, dict)):
+            return [dict(part) for part in content]
+        images = [part for part in content
+                  if isinstance(part, dict) and part.get("type") == "image"]
+        refs = admit_encoded_images(self, [
+            EncodedImageAttachment(mediaType=p["mediaType"], data=p["data"],
+                                   **({"name": p["name"]} if p.get("name") is not None else {}))
+            for p in images
+        ])
+        out: list = []
+        next_ref = 0
+        for part in content:
+            ptype = part.get("type") if isinstance(part, dict) else None
+            if ptype == "image":
+                out.append({"type": "image", "attachment": refs[next_ref].to_dict()})
+                next_ref += 1
+            else:
+                out.append(dict(part))
+        return out
+
+    def admit_encoded_file(self, input_: "EncodedFileAttachment") -> "FileAttachmentRef":
+        """解码并 verbatim 持久化一个 canonical base64 文件上传（上游同款）。"""
+        from .admission import admit_encoded_file
+
+        return admit_encoded_file(self, input_)
+
+    def is_attachment_error(self, error: object) -> bool:
+        """按稳定 code 判定失败是否属于本附件能力（上游 isAttachmentError）。"""
+        from .error import is_attachment_error
+
+        return is_attachment_error(error)
+
+    # ---------- verbatim 文件族（不支持的后端保留基类拒绝，上游同款） ----------
+
+    def save_file(self, input_: "SaveFileAttachment") -> "FileAttachmentRef":
+        """verbatim 持久化一个文件；挂载的后端不支持时拒绝。"""
+        raise AttachmentError(
+            "The mounted attachment provider cannot store verbatim files.",
+            ATTACHMENT_FILES_UNSUPPORTED,
+        )
+
+    def save_file_stream(self, input_: "SaveFileStreamAttachment") -> "FileAttachmentRef":
+        """从有界字节块 verbatim 持久化一个文件；不支持的后端拒绝。"""
+        raise AttachmentError(
+            "The mounted attachment provider cannot stream verbatim files.",
+            ATTACHMENT_FILES_UNSUPPORTED,
+        )
+
+    def read_file_stream(self, ref: "FileAttachmentRef"):
+        """按有界块读取并验证一个 verbatim 文件；不支持的后端拒绝。"""
+        raise AttachmentError(
+            "The mounted attachment provider cannot read verbatim files.",
+            ATTACHMENT_FILES_UNSUPPORTED,
+        )
+        yield  # pragma: no cover - 生成器标记，使函数体惰性求值
+
+    def file_host_path(self, ref: "FileAttachmentRef") -> str | None:
+        """verbatim 文件对象在宿主文件系统中的绝对路径；非宿主文件后端 None。"""
+        return None
 
     def _validate_image_batch(self, inputs: list[SaveImageAttachment]) -> None:
         """批量门：任何成员提交前的共享入口（上游 validateImageBatch）。"""
@@ -441,6 +521,30 @@ class LocalAttachmentStore(AttachmentStore):
     ) -> RequestImageAttachment:
         stored = self.read_image(ref)
         return read_request_image_file(self.root, stored, policy)
+
+    # ---------- verbatim 文件族（attachment-local file-store，alpha.1） ----------
+    # file_store → store 单向依赖（上游同向：file-store.ts import store.ts），
+    # 本侧方法体内延迟导入避免模块环。
+
+    def save_file(self, input_: SaveFileAttachment) -> FileAttachmentRef:
+        from .file_store import save_file_verbatim
+
+        return save_file_verbatim(self.root, input_)
+
+    def save_file_stream(self, input_: SaveFileStreamAttachment) -> FileAttachmentRef:
+        from .file_store import save_file_stream_verbatim
+
+        return save_file_stream_verbatim(self.root, input_)
+
+    def read_file_stream(self, ref: FileAttachmentRef):
+        from .file_store import read_file_stream_verbatim
+
+        return read_file_stream_verbatim(self.root, ref)
+
+    def file_host_path(self, ref: FileAttachmentRef) -> str | None:
+        from .file_store import stored_file_path
+
+        return stored_file_path(self.root, ref)
 
     def variant_id_for(
         self, ref: ImageAttachmentRef, policy: ImageRequestPolicy

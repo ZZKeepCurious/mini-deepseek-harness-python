@@ -405,8 +405,10 @@ class LoopRetryTest(unittest.TestCase):
         self.assertEqual(len(headers), 1)   # 重试不重复落 header
         started = next(e for e in events if e["type"] == "llm/retry-started")["data"]
         self.assertEqual(started["retryId"], retry["retryId"])
+        # V2：失败 attempt 先落 assistant/attempt（上游 settle 先于 waterfall），
+        # llm/retry 先于重试成功产出的 assistant/message
         self.assertLess(next(e for e in events if e["type"] == "llm/retry")["seq"],
-                        next(e for e in events if e["type"] == "assistant/chunk")["seq"])
+                        next(e for e in events if e["type"] == "assistant/message")["seq"])
 
     def test_max_retries_exhausted_turn_error(self):
         adapter = FlakyAdapter(fail_times=99)

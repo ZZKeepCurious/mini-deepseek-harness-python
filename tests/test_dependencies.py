@@ -184,6 +184,11 @@ class ImportDirectionTest(unittest.TestCase):
                     # vendored 部件（上游 vendor/hmr 直接建在 cordis 之上），
                     # 复用 Service/fiber 基座，与 core.dsh_scope 同理落 L0
                     continue
+                if src_unit == "core.session" and dst_unit == "llm":
+                    # §5 显式例外（单方向）：V2 会话格式的 seed 边界流验证依赖
+                    # BlockAssembler/expand_assistant_stream（上游 dsh-session
+                    # 同样 import 自 dsh-llm，packages/core/session/src/index.ts:15）
+                    continue
                 if dst_layer >= src_layer:
                     violations.append(
                         f"{module_name}: L{src_layer} 导入 {dst}（L{dst_layer}，违反 §5 规则 1）"

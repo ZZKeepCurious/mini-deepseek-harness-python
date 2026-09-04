@@ -24,7 +24,7 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 | Capability | Upstream counterpart |
 |---|---|
 | Event-sourced session (envelope `{type,seq,time,data}`, 1-based turn/step, deep-freeze, `derive_messages`, interrupted repair) | `packages/core/session` |
-| Durable storage (JSONL / SQLite, zstd concatenated-frame container + StorageRecord packing by default, `root/--<projectKey>--/<encoded-id>/session.jsonl[.zstd]` layout, header + `SESSION_FORMAT_VERSION=0` bidirectional refusal, loud encoding/layout mismatches, flush barrier, crash recovery) | `packages/session/session-persistence` |
+| Durable storage (JSONL / SQLite, zstd concatenated-frame container with one event per line by default, `root/--<projectKey>--/<encoded-id>/session.jsonl[.zstd]` layout, header + `SESSION_FORMAT_VERSION=2` bidirectional refusal, loud encoding/layout mismatches, flush barrier, crash recovery) | `packages/session/session-persistence` |
 | Plugin event bus (emit / waterfall / parallel / serial, scopes, dependency-driven activation, epoch reload via HMR service + `watch_user_patches`) | `vendor/cordis` + `vendor/hmr` + `core/scope` + `core/hmr` |
 | Config schema engine (full schemastery port: 17 resolvers, meta clone, toString/toJSON/i18n/simplify, `~standard` protocol face) | `vendor/schemastery/src/index.ts` |
 | Tool registry + execution pipeline (schema validation, pre/execute/post, timeout) | `packages/core/tools` |
@@ -108,7 +108,6 @@ mini-deepseek-harness-python/
 │   ├── core/                # upstream packages/core
 │   │   ├── session/         # types / json / message / invariant / repair / surface / session
 │   │   │   ├── persistence.py
-│   │   │   ├── chunk_rows.py
 │   │   │   └── zstd_frames.py
 │   │   ├── scope.py         # Context / PluginManager
 │   │   ├── tools.py         # tool registry + execution pipeline

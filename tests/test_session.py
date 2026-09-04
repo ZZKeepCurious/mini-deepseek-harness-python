@@ -14,6 +14,28 @@ from miniharness.core.session import (
     tool_result_block,
     turn_balance,
 )
+from miniharness.llm import AssistantStreamAccumulator, BlockAssembler
+
+
+def _embedded_assistant_data(text: str) -> dict:
+    """构造 V2 自洽的 assistant/message data：message.content 与内嵌 stream
+    逐块一致（seed 恢复边界 assertCurrentAssistantStream 校验三事实）。"""
+    accumulator = AssistantStreamAccumulator()
+    assembler = BlockAssembler()
+    chunks = [
+        {"type": "block-start", "index": 0, "blockType": "text"},
+        {"type": "text-delta", "index": 0, "text": text},
+        {"type": "block-end", "index": 0, "block": {"type": "text", "text": text}},
+        {"type": "finish", "reason": {"kind": "stop"}},
+    ]
+    for time, chunk in enumerate(chunks, start=1):
+        accumulator.push_chunk_time(time, chunk)
+        assembler.push(chunk)
+    return {
+        "turn": 1, "step": 1,
+        "message": create_message("assistant", assembler.blocks, {"kind": "model"}),
+        "stream": accumulator.snapshot(),
+    }
 
 
 class TestSession(unittest.TestCase):
@@ -72,11 +94,13 @@ class TestSession(unittest.TestCase):
         s.append("assistant/message", {
             "message": create_message("assistant", [text_block("很长的一段旧回答")]),
         }, surfaceOp="append")
-        s.append("assistant/message", {
-            "message": create_message("assistant", [text_block("压缩后的摘要")]),
-        }, surfaceOp={"op": "replace", "start": 1, "end": 1}, sourceEventSeqs=[1])
+        # V2：assistant/message 内嵌源流、不可携带 sourceEventSeqs；压缩检查点
+        # 改由 user/message 承载（上游 compaction region.ts 检查点形状）
+        s.append("user/message", create_message("user", [text_block("压缩后的摘要")]),
+                 surfaceOp={"op": "replace", "start": 1, "end": 1}, sourceEventSeqs=[1])
         msgs = derive_messages(s.events)
         self.assertEqual(len(msgs), 2)
+        self.assertEqual([m["role"] for m in msgs], ["user", "user"])
         self.assertEqual(dict(msgs[-1]["content"][0]), {"type": "text", "text": "压缩后的摘要"})
 
     def test_derive_empty_assistant_dropped(self):
@@ -173,6 +197,12 @@ class TestSession(unittest.TestCase):
         with self.assertRaises(ValueError):
             Session("s2", seed=bad)
 
+    def test_seed_seq_rejects_negative_zero_float(self):
+        # rc.1: seq 必须是整数严谨等序；-0.0 与 0 相等但非法
+        bad = [{"type": "turn/start", "seq": -0.0, "time": 1, "data": {"turn": 1}}]
+        with self.assertRaises(ValueError):
+            Session("s2", seed=bad)
+
     def test_thaw_descends_fresh_lists_holding_frozen_items(self):
         # 冻结结构 list→tuple、dict→mappingproxy；但实时代码会在冻结值外层套
         # 新建 list（web 流把 splice 的 inserted 重投影进新 items 数组），
@@ -211,43 +241,39 @@ class TestSurfaceValidation(unittest.TestCase):
         s.append("assistant/message", {
             "message": create_message("assistant", [text_block("a")]),
         }, surfaceOp="append")
+        # V2：assistant/message 禁带 sourceEventSeqs，血统校验改经 user/message
         # sourceEventSeqs 未覆盖被遮蔽的 seq 0
         with self.assertRaises(ValueError):
-            s.append("assistant/message", {
-                "message": create_message("assistant", [text_block("sum")]),
-            }, surfaceOp={"op": "replace", "start": 0, "end": 1}, sourceEventSeqs=[1])
+            s.append("user/message", create_message("user", [text_block("sum")]),
+                     surfaceOp={"op": "replace", "start": 0, "end": 1}, sourceEventSeqs=[1])
 
     def test_replace_source_event_seqs_earlier_required(self):
         s = self._session()
         with self.assertRaises(ValueError):
-            s.append("assistant/message", {
-                "message": create_message("assistant", [text_block("sum")]),
-            }, surfaceOp={"op": "replace", "start": 0, "end": 0},
-                sourceEventSeqs=[0, 3])  # seq 3 >= 当前 seq 2
+            s.append("user/message", create_message("user", [text_block("sum")]),
+                     surfaceOp={"op": "replace", "start": 0, "end": 0},
+                     sourceEventSeqs=[0, 3])  # seq 3 >= 当前 seq 1
 
     def test_replace_source_event_seqs_duplicate_rejected(self):
         s = self._session()
         with self.assertRaises(ValueError):
-            s.append("assistant/message", {
-                "message": create_message("assistant", [text_block("sum")]),
-            }, surfaceOp={"op": "replace", "start": 0, "end": 0},
-                sourceEventSeqs=[0, 0])
+            s.append("user/message", create_message("user", [text_block("sum")]),
+                     surfaceOp={"op": "replace", "start": 0, "end": 0},
+                     sourceEventSeqs=[0, 0])
 
     def test_replace_op_must_be_exact_three_keys(self):
         s = self._session()
         with self.assertRaises(ValueError):
-            s.append("assistant/message", {
-                "message": create_message("assistant", [text_block("sum")]),
-            }, surfaceOp={"op": "replace", "start": 0, "end": 0, "extra": 1},
-                sourceEventSeqs=[0])
+            s.append("user/message", create_message("user", [text_block("sum")]),
+                     surfaceOp={"op": "replace", "start": 0, "end": 0, "extra": 1},
+                     sourceEventSeqs=[0])
 
     def test_replace_op_negative_seq_rejected(self):
         s = self._session()
         with self.assertRaises(ValueError):
-            s.append("assistant/message", {
-                "message": create_message("assistant", [text_block("sum")]),
-            }, surfaceOp={"op": "replace", "start": -1, "end": 0},
-                sourceEventSeqs=[0])
+            s.append("user/message", create_message("user", [text_block("sum")]),
+                     surfaceOp={"op": "replace", "start": -1, "end": 0},
+                     sourceEventSeqs=[0])
 
     def test_nonsurface_with_source_event_seqs_rejected(self):
         s = self._session()
@@ -339,12 +365,18 @@ class TestSurfaceValidation(unittest.TestCase):
             Session("sv4", seed=seed)
 
     def test_seed_accepts_valid_provenance(self):
+        # V2：assistant/message 内嵌 stream、不带 sourceEventSeqs（seed 边界
+        # assertCurrentAssistantStream 三事实校验通过）；有效血统改由
+        # user/message 检查点承载（上游 surface.ts assertProvenance V2）
         seed = [
             {"type": "user/message", "seq": 0, "time": 1,
              "data": create_message("user", [text_block("hi")]),
              "surfaceOp": "append"},
             {"type": "assistant/message", "seq": 1, "time": 1,
-             "data": {"message": create_message("assistant", [text_block("sum")])},
+             "data": _embedded_assistant_data("sum"),
+             "surfaceOp": "append"},
+            {"type": "user/message", "seq": 2, "time": 1,
+             "data": create_message("user", [text_block("压缩后的摘要")]),
              "surfaceOp": {"op": "replace", "start": 0, "end": 0},
              "sourceEventSeqs": [0]},
         ]

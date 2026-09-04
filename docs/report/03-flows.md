@@ -39,8 +39,8 @@ sequenceDiagram
     D->>S: user/message [durable]
     D->>D: deriveMessages() 派生模型历史
     D->>LLM: agent/request (waterfall) → llm/stream
-    LLM-->>D: StreamChunk 流（assistant/chunk*）
-    D->>S: assistant/message [durable]
+    LLM-->>D: StreamChunk 流（增量在 attempt 内累积）
+    D->>S: assistant/message [durable]（内嵌压缩流）
     D->>T: tool/call → 工具执行管线 [durable]
     T-->>D: tool/result [durable]
     D->>S: step/end [durable]
@@ -66,7 +66,7 @@ sequenceDiagram
 6. **reject 分支**：被 reject 或空 enter → 不产生任何 step，直接 `turn/end`（零 step 关闭）。
 7. **进入 step 分支**：`step/start` → `user/message` 落盘 → `deriveMessages()` 现算模型历史。
 8. `D→LLM: agent/request (waterfall) → llm/stream`：模型请求经扩展口；`LLM→D` 流式返回 `StreamChunk*`。
-9. `D→S: assistant/message [durable]`：流式结果合并落盘；如含 tool-call 则 `D→T: tool/call` 进入工具管线（§5.2），`T→D` 回 `tool/result`。
+9. `D→S: assistant/message [durable]`：流式结果以压缩流内嵌落盘；如含 tool-call 则 `D→T: tool/call` 进入工具管线（§5.2），`T→D` 回 `tool/result`。
 10. `D→S: step/end [durable]`：本 step 收尾。
 11. **还有未偿之责？** 还有工具请求或 next-step 输入 → 回到第 4 步再次 claim；无 → `agent/turn-stopping (serial)` 让关闭期可观察。
 12. `D→S: turn/end [durable]` + `A→A: status: idle`：turn 关闭、括号平衡，agent 回到 idle。
@@ -141,7 +141,7 @@ flowchart TD
 
 常规做法是"每次变化立刻写库"；dsh 把持久化做成订阅者，异步成批写入。四个要点：
 
-- **扩展口**：`ctx.sessionPersistence` 抽象（locate / create / append / 逻辑 load/inspect / 物理后缀读）+ 两个可互换后端：**JSONL**（每会话一个文件，支持 packed chunk 行）与 **SQLite**（多会话一库，单调 `SCHEMA_VERSION`）。
+- **扩展口**：`ctx.sessionPersistence` 抽象（locate / create / append / 逻辑 load/inspect / 物理后缀读）+ 两个可互换后端：**JSONL**（每会话一个文件，zstd 拼接帧容器一行一事件）与 **SQLite**（多会话一库，单调 `SCHEMA_VERSION`）。
 - **flush 检查点**：`session/event` 是同步通知，持久化插件先复制事件再异步成批写入；`session/flush` 是等待的并行栅栏，用于认领下一个普通 turn 前的排序与错误观察点。
 - **格式拒绝，不迁移**：版本落后 = "升级 harness"；版本超前 = "使用更新的 harness 打开"。未知事件类型除非带 `ignorable: true` 标记否则拒绝加载（防止静默丢事件改变后续解读；alpha.2 起支持 `ignorable` 豁免——写方显式标 `ignorable` 的纯信息记录可放行）。
 - **崩溃恢复**：关闭孤儿 turn（合成 `interrupted`），只作用于冷会话；活会话 `load` 等待权威内存快照持久化。
@@ -154,7 +154,7 @@ flowchart LR
   EVT["session/event 同步广播"]
   P["持久化插件：先复制事件"]
   Q["异步成批写入队列"]
-  J["JSONL 后端&lt;br/&gt;每会话一个文件 · packed chunk 行"]
+  J["JSONL 后端&lt;br/&gt;每会话一个文件 · zstd 帧容器一行一事件"]
   QL["SQLite 后端&lt;br/&gt;多会话一库 · 单调 SCHEMA_VERSION"]
   F["session/flush 并行栅栏&lt;br/&gt;下一 turn 前等待 + 错误观察点"]
   NEXT["认领下一个普通 turn"]
@@ -194,16 +194,16 @@ sequenceDiagram
   loop 流式
     API-->>AD: data: text / reasoning / tool-call delta
     AD-->>D: StreamChunk：block-start / text-delta / reasoning-delta / tool-call-delta / block-end
-    D->>S: assistant/chunk [durable]
+    D->>D: 增量压缩进 attempt 流（无逐块落盘）
   end
   API-->>AD: usage（必须在 finish 之前）
   API-->>AD: finish（之后不再有值）
-  AD-->>D: 收尾并落 assistant/message
+  AD-->>D: 收尾并内嵌压缩流
   D->>S: assistant/message [durable]
 ```
 
 !!! example "示例走查（一次带思考的流式回合）"
-    driver 每次请求都经 thunk 重读 `ctx.settings` 与 `ctx.credentials`（配置只存 `apiKeyEnv` 引用，绝无明文）→ 适配器 `fetch` 官方 SSE 端点 → 逐块翻译成统一 `StreamChunk`：`block-start` → `reasoning-delta`* → `text-delta`* → `tool-call-delta` → `block-end`（携带完整块）→ `usage` → `finish`。每次 delta 同步落 `assistant/chunk`，最后合并成一条 `assistant/message`。键过期与余额不足两条错误路径统一收口为 `LlmFailure`，上下文溢出编码 `CONTEXT_WINDOW_EXCEEDED`。
+    driver 每次请求都经 thunk 重读 `ctx.settings` 与 `ctx.credentials`（配置只存 `apiKeyEnv` 引用，绝无明文）→ 适配器 `fetch` 官方 SSE 端点 → 逐块翻译成统一 `StreamChunk`：`block-start` → `reasoning-delta`* → `text-delta`* → `tool-call-delta` → `block-end`（携带完整块）→ `usage` → `finish`。delta 增量在 attempt 的压缩流内累积，随最终 `assistant/message` 一次性内嵌落盘（失败 attempt 落 `assistant/attempt`）。键过期与余额不足两条错误路径统一收口为 `LlmFailure`，上下文溢出编码 `CONTEXT_WINDOW_EXCEEDED`。
 
 ### 5.5 启动与组合（profile / bundle / patch 层）
 

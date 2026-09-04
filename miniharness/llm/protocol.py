@@ -219,9 +219,19 @@ class BlockAssembler:
         self.blocks: list[dict] = []
         self.usage: dict | None = None
         self.finish: dict | None = None
+        self._replay_state: dict | None = None
         self._order: list[int] = []         # index 首次出现序（上游 order）
         self._open: dict[int, dict] = {}    # 未闭合块：{blockType, text?}
         self._closed: dict[int, dict] = {}  # index → 已闭合块
+
+    @property
+    def replay_state(self) -> dict | None:
+        """finish chunk 携带的 ReplayEnvelope（上游 assembler.replayState）。
+
+        mini 流载体无重放双半，finish 恒不带 replayState → 恒 None；保留属性以
+        对齐 V2 assertCurrentAssistantStream 的 source.replayState 比对。
+        """
+        return self._replay_state
 
     def _mark_seen(self, index: int) -> None:
         if index not in self._open and index not in self._closed:
@@ -256,6 +266,7 @@ class BlockAssembler:
             self.usage = chunk["usage"]
         elif kind == "finish":
             self.finish = chunk["reason"]
+            self._replay_state = chunk.get("replayState")
 
     def message(self, source: dict | None = None) -> dict:
         blocks = self.blocks

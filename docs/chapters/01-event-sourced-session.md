@@ -82,7 +82,7 @@ flowchart LR
 ```python
 KNOWN_TYPES = frozenset({
     "turn/start", "turn/end", "step/start", "step/end",
-    "user/message", "assistant/message", "assistant/chunk",
+    "user/message", "assistant/message", "assistant/attempt",
     "tool/call", "tool/result",
 })
 
@@ -91,7 +91,7 @@ SURFACE_TYPES = frozenset({"user/message", "assistant/message", "tool/result"})
 
 `KNOWN_TYPES` 是"仓库级硬规则"：日志里只允许出现这些类型。后面写插件加新事件时，改的就是这个集合（加类型）再加上投影规则（步骤 4）。用 `frozenset` 是为了防止运行中不小心改掉它。
 
-`SURFACE_TYPES` 是三种"会产生消息"的事件，单独拎出来是因为它们携带 `surfaceOp`（`append` 或 `replace`），直接决定历史投影怎么排、压缩时怎么替换。其余事件（turn/step 括号、chunk、tool/call）不产生消息，投影时会跳过。
+`SURFACE_TYPES` 是三种"会产生消息"的事件，单独拎出来是因为它们携带 `surfaceOp`（`append` 或 `replace`），直接决定历史投影怎么排、压缩时怎么替换。其余事件（turn/step 括号、attempt、tool/call）不产生消息，投影时会跳过。
 
 ### 步骤 2：先解决"坏事件"问题——无损 JSON 强制 + 深度冻结
 
@@ -191,7 +191,7 @@ def derive_messages(events) -> list[dict[str, str]]:
             else:
                 content = f"[工具 {ev.get('name')} 结果] {ev.get('content')}"
             _apply_surface(messages, "tool", content, ev.get("surfaceOp", "append"))
-        # turn/* step/* assistant/chunk tool/call 不参与投影
+        # turn/* step/* assistant/attempt tool/call 不参与投影
     return messages
 
 

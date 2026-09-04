@@ -43,8 +43,7 @@ from ..attachment.types import (
 )
 from ..core.agent_loop.agent import AgentLoop
 from ..core.scope import Context
-from ..core.session import Session, thaw
-from ..core.session.chunk_rows import pack_chunk_runs
+from ..core.session import SESSION_FORMAT_VERSION, Session, thaw
 from ..core.session.message import create_message, image_block, text_block
 from ..core.session.surface import derive_event_message
 from ..core.session_store import SessionStore
@@ -862,11 +861,6 @@ class WebApi:
                 found = self._image_in_blocks(inserted.get("content"), attachment_id)
                 if found is not None:
                     return found
-        chunk = data.get("chunk") or {}
-        if event.get("type") == "assistant/chunk" and chunk.get("type") == "block-end":
-            block = chunk.get("block")
-            if isinstance(block, Mapping):
-                return self._image_in_block(block, attachment_id)
         return None
 
     def _image_in_blocks(self, content: Any, attachment_id: str) -> ImageAttachmentRef | None:
@@ -932,7 +926,7 @@ class WebApi:
         while cut < len(events) and events[cut].get("type") != "turn/start":
             cut += 1
         child_id = f"session-{uuid.uuid4()}"
-        meta: dict[str, Any] = {"parentSession": source.session_id, "seedLength": cut}
+        meta: dict[str, Any] = {"parentSession": source.session_id, "isSeeded": True}
         if source.meta.get("cwd") is not None:
             meta["cwd"] = source.meta["cwd"]
         if source.meta.get("agentPreset") is not None:
@@ -1006,20 +1000,12 @@ class WebApi:
         return list(events[cut:end]), cut > 0
 
     def _page_records(self, events) -> list[dict]:
-        """records 条目：ChunkRow 打包串折 chunkrow 条目，其余事件原样（history.ts 同款）。
+        """records 条目：全部原样事件（上游 history.ts pageRecords = entryFor）。
 
-        日志事件是冻结的 mappingproxy/tuple，先解冻再打包（classify 与 JSON
-        序列化都需要普通 dict）。"""
-        records = []
-        for row in pack_chunk_runs([thaw(event) for event in events]):
-            rtype = row.get("type")
-            if rtype in ("text-chunks", "reasoning-chunks", "tool-call-chunks"):
-                records.append({"type": "chunks",
-                                "event": {"type": f"chunkrow/{rtype}", "seq": row["seq0"],
-                                          "time": row["time0"], "data": row["data"]}})
-            else:
-                records.append({"type": "event", "event": row})
-        return records
+        V2 废止 chunk 行（assistant/chunk 不复存在，流内嵌 assistant/message），
+        ChunkRow 打包层随之移除；日志事件是冻结的 mappingproxy/tuple，
+        解冻为普通 dict 供 JSON 序列化。"""
+        return [{"type": "event", "event": thaw(event)} for event in events]
 
     # ---------- 流订阅工厂 ----------
 
@@ -1075,5 +1061,26 @@ class WebApi:
 
     @staticmethod
     def _wire_header(session: Session) -> dict:
-        return {"id": session.session_id, "meta": dict(session.meta),
-                "createdAt": session.created_at}
+        """SessionWireHeader（上游 history.ts wireHeader：{...header} 平铺直转）。
+
+        alpha.1：isSeeded 布尔回归 wire（rc.1 的 seedLength 翻译废止）；
+        inheritedEventCount 不上 wire（仅持久化 header 携带）。
+        """
+        meta = session.meta
+        header: dict[str, Any] = {
+            "version": SESSION_FORMAT_VERSION,
+            "id": session.session_id,
+            "createdAt": session.created_at,
+            "isSeeded": session.is_seeded,
+        }
+        if meta.get("cwd") is not None:
+            header["cwd"] = meta["cwd"]
+        if meta.get("parentSession") is not None:
+            header["parentSession"] = meta["parentSession"]
+        if meta.get("origin") is not None:
+            header["origin"] = meta["origin"]
+        if meta.get("delegationDepth") is not None:
+            header["delegationDepth"] = meta["delegationDepth"]
+        if meta.get("agentPreset") is not None:
+            header["agentPreset"] = meta["agentPreset"]
+        return header

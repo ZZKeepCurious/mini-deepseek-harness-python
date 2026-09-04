@@ -794,11 +794,13 @@ class TestForkChannel(unittest.TestCase):
         out = child.run("写个函数")
         self.assertIn("子任务完成", out)
         child_events = child._loop.session.events
-        # 无 seed 时 Session 不补 end-seed 标记；输入先落 agent/inbox/spliced，
+        # V2：空 seed（[]）构造同样补记 end-seed 边界标记（{}，不带 inherited 键
+        # ——上游 types.ts 仅允许可选 true），输入先落其后的 agent/inbox/spliced，
         # 回合从随后的 turn/start 起
-        self.assertEqual(child_events[0]["type"], "agent/inbox/spliced")
+        self.assertEqual(child_events[0]["type"], "session/end-seed")
+        self.assertEqual(child_events[0]["data"], {})
+        self.assertEqual(child_events[1]["type"], "agent/inbox/spliced")
         self.assertIn("turn/start", [e["type"] for e in child_events])
-        self.assertNotIn("session/end-seed", [e["type"] for e in child_events])
 
 
 class TestAcpChannel(unittest.TestCase):

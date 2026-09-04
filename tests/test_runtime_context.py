@@ -31,10 +31,13 @@ def _owned(text: str) -> dict:
 
 
 def _prune_over(session: Session, seq: int, summary: str) -> None:
-    """压缩式 replace：以一条 assistant 摘要消息遮蔽 seq 所在节点。"""
+    """压缩式 replace：以一条 user 检查点消息遮蔽 seq 所在节点（V2：压缩
+    检查点是 user/message——assistant/message 内嵌流、禁带 sourceEventSeqs；
+    检查点 source 非 runtime-context owned，不影响快照追踪）。"""
     session.append(
-        "assistant/message",
-        {"message": create_message("assistant", [text_block(summary)])},
+        "user/message",
+        create_message("user", [text_block(summary)],
+                       {"kind": "plugin", "plugin": "compact"}),
         surfaceOp={"op": "replace", "start": seq, "end": seq},
         sourceEventSeqs=[seq],
     )

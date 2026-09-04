@@ -9,19 +9,22 @@
   * ImageAdmissionErrorCode 是调用方可纠正的受理失败集合；
   * is_image_admission_error 判定错误是否属于可纠正集合。
 
-上游错误码全集（error.ts，rc.2）：
+上游错误码全集（error.ts，alpha.1）：
   * 可纠正（image admission）：TOO_MANY_IMAGES / IMAGES_TOO_LARGE /
     UNSUPPORTED_IMAGE_TYPE / INVALID_IMAGE_BASE64 / INVALID_IMAGE /
     IMAGE_TYPE_MISMATCH / IMAGE_TOO_LARGE / IMAGE_TOO_MANY_PIXELS /
     IMAGE_DIMENSION_TOO_LARGE；
-  * 存储/投影：INVALID_ATTACHMENT_REF / ATTACHMENT_CORRUPT /
+  * 存储/投影：INVALID_FILE_BASE64（alpha.1 新增，文件编码）/
+    INVALID_ATTACHMENT_REF / ATTACHMENT_CORRUPT /
     ATTACHMENT_WRITE_FAILED / ATTACHMENT_NOT_FOUND / ATTACHMENT_READ_FAILED /
-    ATTACHMENT_PROJECTION_UNSUPPORTED。
+    ATTACHMENT_PROJECTION_UNSUPPORTED / ATTACHMENT_FILES_UNSUPPORTED
+    （alpha.1 新增，后端不支持 verbatim 文件存储）。
 """
 from __future__ import annotations
 
 __all__ = [
     "ATTACHMENT_CORRUPT",
+    "ATTACHMENT_FILES_UNSUPPORTED",
     "ATTACHMENT_NOT_FOUND",
     "ATTACHMENT_PROJECTION_UNSUPPORTED",
     "ATTACHMENT_READ_FAILED",
@@ -31,12 +34,15 @@ __all__ = [
     "IMAGE_TOO_MANY_PIXELS",
     "IMAGES_TOO_LARGE",
     "INVALID_ATTACHMENT_REF",
+    "INVALID_FILE_BASE64",
     "INVALID_IMAGE",
     "INVALID_IMAGE_BASE64",
     "IMAGE_TYPE_MISMATCH",
+    "ATTACHMENT_ERROR_CODES",
     "AttachmentError",
     "TOO_MANY_IMAGES",
     "UNSUPPORTED_IMAGE_TYPE",
+    "is_attachment_error",
     "is_image_admission_error",
 ]
 
@@ -64,11 +70,26 @@ IMAGE_TOO_LARGE = "IMAGE_TOO_LARGE"
 IMAGE_TOO_MANY_PIXELS = "IMAGE_TOO_MANY_PIXELS"
 IMAGE_DIMENSION_TOO_LARGE = "IMAGE_DIMENSION_TOO_LARGE"
 INVALID_ATTACHMENT_REF = "INVALID_ATTACHMENT_REF"
+INVALID_FILE_BASE64 = "INVALID_FILE_BASE64"
 ATTACHMENT_CORRUPT = "ATTACHMENT_CORRUPT"
 ATTACHMENT_WRITE_FAILED = "ATTACHMENT_WRITE_FAILED"
 ATTACHMENT_NOT_FOUND = "ATTACHMENT_NOT_FOUND"
 ATTACHMENT_READ_FAILED = "ATTACHMENT_READ_FAILED"
 ATTACHMENT_PROJECTION_UNSUPPORTED = "ATTACHMENT_PROJECTION_UNSUPPORTED"
+ATTACHMENT_FILES_UNSUPPORTED = "ATTACHMENT_FILES_UNSUPPORTED"
+
+# 稳定附件失败码全集（上游 ATTACHMENT_ERROR_CODES；协议错误路由用）
+ATTACHMENT_ERROR_CODES: frozenset[str] = frozenset({
+    *IMAGE_ADMISSION_ERROR_CODES,
+    INVALID_FILE_BASE64,
+    INVALID_ATTACHMENT_REF,
+    ATTACHMENT_CORRUPT,
+    ATTACHMENT_WRITE_FAILED,
+    ATTACHMENT_NOT_FOUND,
+    ATTACHMENT_READ_FAILED,
+    ATTACHMENT_PROJECTION_UNSUPPORTED,
+    ATTACHMENT_FILES_UNSUPPORTED,
+})
 
 
 class AttachmentError(Exception):
@@ -83,6 +104,18 @@ class AttachmentError(Exception):
         self.message = message
         self.code = code
         self.name = "AttachmentError"
+
+
+def is_attachment_error(error: object) -> bool:
+    """是否属于本附件能力的稳定失败（上游 isAttachmentError）。
+
+    仅按 code 成员判定（上游按运行时成员集合判定，跨包/跨重复安装兼容形状）。
+    """
+    return (
+        isinstance(error, AttachmentError)
+        and isinstance(error.code, str)
+        and error.code in ATTACHMENT_ERROR_CODES
+    )
 
 
 def is_image_admission_error(error: object) -> bool:

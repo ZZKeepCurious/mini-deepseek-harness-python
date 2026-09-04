@@ -40,8 +40,7 @@ class TrajectoryNode:
 |---|---|
 | `turn/start` | 开新 turn 节点 + 登记 turn 摘要框架（turn 摘要**由 turn/start 驱动**，不是由消息推断） |
 | `user/message` | `'user'` 节点（text 块拼接） |
-| `assistant/chunk` | 只观测 TTFT（不产生节点） |
-| `assistant/message` | `'assistant'` 节点（text 块） |
+| `assistant/message` | `'assistant'` 节点（text 块）；TTFT 取内嵌流首条记录时间 |
 | `tool/call` | `'tool-call'` 节点（callId）——**权威节点**，assistant 消息里的 tool-call 块不重复展开 |
 | `tool/result` | `'tool-result'` 节点，按 callId 挂为 tool-call 的子节点（父子树） |
 | `request/header` | 进 `requests` 元数据（model/provider/reason） |
@@ -49,7 +48,7 @@ class TrajectoryNode:
 
 产出 `TrajectorySnapshot`：`nodes`（有序层级列表）、`turns`（每 turn 摘要：user_texts / assistant_texts / tool_calls / ttft_ms / 起止）、`requests`、`partial`（末尾有未闭合 turn = 崩溃尾部）。
 
-TTFT 语义：turn/start 到该 turn 首个 `assistant/chunk` 的时间差（上游 Overview 的 TTFT 两色投影即基于此）。
+TTFT 语义：turn/start 到该 turn 首条 `assistant/message` 内嵌流首条记录时间的时间差（上游 Overview 的 TTFT 两色投影即基于此）。
 
 ## 10.3 消费端：三个只读视图
 
@@ -75,7 +74,7 @@ fold_events_json(events)   # {"partial":…, "turns":[…], "requests":[…]}
 2. **turn 摘要由 turn/start 驱动**：`first_seq` 过滤掉 turn/start 后不产生 turn 摘要（消息节点仍在）。
 3. **tool-call 节点唯一**：只来自 `tool/call` 事件；`tool/result` 按 callId 挂为子节点（父子树）。
 4. **崩溃尾部 = partial**：末尾仍有未闭合 turn 时 `partial=True`，duration 为 None。
-5. **TTFT**：turn/start 到首个 assistant/chunk 的时间差；无 chunk 则为 None。
+5. **TTFT**：turn/start 到该 turn 首条 `assistant/message` 内嵌流首条记录时间的时间差；无内嵌流则为 None。
 
 验证：`python -m unittest tests.test_trajectory -v`；真实 loop 回合折叠也覆盖（`TestFoldFromRealLoop`）。
 

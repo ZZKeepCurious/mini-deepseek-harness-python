@@ -33,14 +33,16 @@ def validate_event(type_, data, surfaceOp, sourceEventSeqs) -> dict:
     if sourceEventSeqs is not None:
         # 非 surface 事件禁止携带 sourceEventSeqs（surface_op_of 已拦 surfaceOp，
         # 这里对称拦 sourceEventSeqs——上游 surfaceOpOf 一并处理两字段）。
-        # sourceEventSeqs 可携带存储态区间编码（上游 seq-ranges.ts encodeSeqRanges），
-        # 此处先 decode 展开为内存态严格递增列表再存储；decode 即完成形状校验
-        # （非负安全整数 / [start,end] 对 / end>=start / 越界，fail-closed）。
+        # V2：assistant/message 内嵌其源流，禁止 sourceEventSeqs（上游
+        # assertProvenance 首段）。
+        if type_ == "assistant/message":
+            raise ValueError(
+                "assistant/message embeds its source stream and cannot carry sourceEventSeqs")
         if op is None:
             raise ValueError(f"非 surface 事件 {type_} 不允许携带 sourceEventSeqs")
         decoded = decode_seq_ranges(sourceEventSeqs)
-        if len(decoded) == 0 and type_ != "assistant/message":
-            raise ValueError("sourceEventSeqs must not be empty except on assistant/message")
+        if len(decoded) == 0:
+            raise ValueError("sourceEventSeqs must not be empty")
     payload: dict = {"type": type_, "data": data if data is not None else {}}
     if op is not None:
         payload["surfaceOp"] = surfaceOp

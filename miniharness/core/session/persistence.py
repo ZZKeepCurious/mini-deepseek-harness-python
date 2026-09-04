@@ -1,7 +1,7 @@
 """第 5 章：会话持久化 —— JSONL / SQLite 双后端 + 崩溃恢复。
 
 对应 dsh 真实源码：packages/session/session-persistence(-jsonl)、
-packages/core/session/src/chunk-rows.ts、session-persistence-jsonl/src/{format,zstd}.ts。
+packages/session/session-format/src/{format,zstd}.ts。
 
 硬性规定：
   1. append 先复制事件、异步成批写入；flush 是"等待的栅栏"
@@ -11,9 +11,8 @@ packages/core/session/src/chunk-rows.ts、session-persistence-jsonl/src/{format,
   3. 物理载体默认 zstd 拼接帧容器：每个耐久批次一条独立可解码、带校验和的
      帧（后缀 .jsonl.zstd）；compression='none' 退回明文 .jsonl。两种编码
      的根目录互斥共存——发现对立编码制品即响亮拒绝，不猜测不迁移
-  4. 存储记录层：写入默认把连续 assistant/chunk 增量串打包为
-     text-chunks/reasoning-chunks/tool-call-chunks 行（packChunks=true）；
-     读取无条件兼容两种布局（读回逐字节还原原事件）
+  4. V2：一行一事件（chunk 行与 StorageRecord 打包层随 assistant/chunk
+     一并废止，流内嵌 assistant/message；上游仅 v0→v1 迁移 codec 保留打包）
   5. torn 尾部：明文残行忽略并截断修复；zstd 残帧先前缀恢复完整记录、
      再把恢复事件连同 closers 经 commit_repair 持久化（截断点 = 残帧起点，
      对齐上游 commitRepair(truncateTo, recoveredEvents, closers)）
@@ -44,7 +43,6 @@ from . import (
     thaw,
     turn_balance,
 )
-from .chunk_rows import decode_storage_record, pack_chunk_runs
 from .json import now_ms
 from .seq_ranges import decode_seq_ranges, encode_seq_ranges
 from .zstd_frames import (
@@ -215,17 +213,24 @@ def _log_path(root: Path, cwd: str | None, session_id: str, compression: str | N
 
 
 def _to_header_line(header: dict) -> dict:
-    """构造 header 行对象（上游 toHeaderLine）：type 标签居首、
-    delegationDepth 必填（缺省补 0）、可选字段缺席即省略（绝不 null）。"""
+    """构造 header 行对象（上游 toHeaderLine，rc.1 schema）：type 标签居首、
+    delegationDepth 必填（缺省补 0）、isSeeded boolean 必填、
+    可选字段缺席即省略（绝不 null）。
+
+    rc.1 变更：seedLength 移除，改用 isSeeded: boolean；wire form 的
+    seedLength 由 wireHeader() 在 follow snapshot 时翻译。
+    """
     line: dict[str, Any] = {
         "type": "session",
         "version": header["version"],
         "id": header["id"],
         "createdAt": header["createdAt"],
     }
-    for optional in ("cwd", "parentSession", "seedLength", "origin", "agentPreset"):
+    for optional in ("cwd", "parentSession", "origin", "agentPreset"):
         if optional in header:
             line[optional] = header[optional]
+    # rc.1: isSeeded 必填 boolean（缺省 false）
+    line["isSeeded"] = bool(header.get("isSeeded", False))
     line["delegationDepth"] = header.get("delegationDepth", 0)
     # mini 扩展 meta 键（label 等）随行携带；上游解析守卫容忍未知额外键。
     for key, value in header.items():
@@ -247,7 +252,10 @@ def _is_number(value: Any) -> bool:
 
 
 def _is_header_line(value: Any) -> bool:
-    """类型守卫：解析出的首行是形状完好的 session header（上游 isHeaderLine）。"""
+    """类型守卫：解析出的首行是形状完好的 session header（rc.1 schema）。
+
+    rc.1 变更：拒绝 seedLength 字段；要求 isSeeded 为 boolean。
+    """
     if not isinstance(value, dict) or value.get("type") != "session":
         return False
     if not _is_number(value.get("version")):
@@ -266,14 +274,31 @@ def _is_header_line(value: Any) -> bool:
     preset = value.get("agentPreset")
     if preset is not None and not isinstance(preset, str):
         return False
+    # rc.1: 拒绝 seedLength（已废弃字段）
+    if "seedLength" in value:
+        return False
+    # rc.1: isSeeded 必须是 boolean
+    is_seeded = value.get("isSeeded")
+    if is_seeded is not None and not isinstance(is_seeded, bool):
+        return False
     return True
 
 
 def _from_header_line(line: dict) -> dict:
-    """header 行还原为扁平 header；退役政策基线字段响亮拒绝。"""
+    """header 行还原为扁平 header；退役政策基线字段响亮拒绝。
+
+    rc.1 兼容：旧版 seedLength 自动翻译为 isSeeded + inheritedEventCount（仅读路径）。
+    """
     if "sandboxMode" in line or "approvalPolicy" in line:
         raise ValueError("session header uses retired policy baseline fields")
-    return line
+    result = dict(line)
+    # rc.1 兼容迁移：seedLength → isSeeded + inheritedEventCount
+    if "seedLength" in result:
+        seed_len = result.pop("seedLength")
+        if "isSeeded" not in result:
+            result["isSeeded"] = seed_len is not None and seed_len > 0
+        # inheritedEventCount 由 meta 层传递，不落 header 行
+    return result
 
 
 def _parse_header_line_object(parsed: Any) -> dict:
@@ -369,10 +394,7 @@ class SessionLogScanner:
     def _consume_event_line(self, line: bytes, end_byte: int) -> None:
         self.event_line += 1
         try:
-            decoded = [
-                _decode_storage_event(event)
-                for event in decode_storage_record(json.loads(line.decode("utf-8")))
-            ]
+            decoded = [_decode_storage_event(json.loads(line.decode("utf-8")))]
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
             if self.issue is None:
                 self.issue = ValueError(
@@ -386,7 +408,10 @@ class SessionLogScanner:
         row_start = len(self.events)
         for event in decoded:
             expected = len(self.events)
-            if event.get("seq") != expected:
+            seq = event.get("seq")
+            # rc.1: seq 必须是安全整数且严格等序（拒绝 -0.0 之类浮点别名——
+            # 对齐上游 walkJsonValue 对 -0 的 Object.is 拒收）。
+            if not isinstance(seq, int) or isinstance(seq, bool) or seq != expected:
                 del self.events[row_start:]
                 self.issue = ValueError(
                     f"corrupt session log: seq gap in committed region at line "
@@ -470,7 +495,7 @@ class JsonlPersistence(SessionPersistence):
     布局）同样拒绝（legacyLayout），绝不静默迁移。
     """
 
-    def __init__(self, root: Path, compression: str = "zstd", pack_chunks: bool = True):
+    def __init__(self, root: Path, compression: str = "zstd"):
         if compression not in _JSONL_COMPRESSIONS:
             raise ValueError(
                 f"compression must be one of {_JSONL_COMPRESSIONS}, got {compression!r}"
@@ -478,7 +503,6 @@ class JsonlPersistence(SessionPersistence):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.compression = compression
-        self.pack_chunks = pack_chunks
         self._pending: dict[str, list[dict]] = {}
         self._created: set[str] = set()
         # session_id -> 用于布局的 cwd（declare/append 时登记，缺省 ""）
@@ -600,10 +624,8 @@ class JsonlPersistence(SessionPersistence):
         )
 
     def _encode_event_batch(self, events: list[dict]) -> bytes | str:
-        """一个耐久批次按配置编码：zstd 帧（打包行在序列化前完成）或明文。"""
-        body = self._encode_lines(
-            pack_chunk_runs(events) if self.pack_chunks else events
-        )
+        """一个耐久批次按配置编码：zstd 帧或明文（V2 一行一事件，无打包）。"""
+        body = self._encode_lines(events)
         if self.compression == "zstd":
             return compress_zstd_frame(body)
         return body
@@ -1144,8 +1166,13 @@ def repair_and_replay(persistence: SessionPersistence, session_id: str, session:
     修复结果持久化：对齐上游 commitRepair(meta, tornMarker, closers) —— 截断在
     读路径已即时落盘，此处把「从 torn 尾恢复的完整事件 + 合成 closers」一并
     追加落盘。已平衡的日志返回空 closers，二次加载幂等。
+
+    rc.1：从 header meta 中提取 inheritedEventCount 并传入 Session 构造。
+    V2：恢复路径以 mode="restore" 构造（对齐上游 restore 边界语义：end-seed
+    marker 已随日志持久化，不再推导）。
     """
     prepared = persistence.read_prepared(session_id)
+    meta = prepared.get("meta") or {}
     raw = load_events_checked(prepared["events"])
     closers = repair_interrupted_turn(raw)
     recovered = prepared["recovered_events"]
@@ -1153,7 +1180,11 @@ def repair_and_replay(persistence: SessionPersistence, session_id: str, session:
         persistence.commit_repair(session_id, closers, recovered=recovered)
     repaired = raw + closers
     if repaired:
-        session = Session(session_id, seed=repaired, created_at=session.created_at)
+        # rc.1: 从 meta 读 inheritedEventCount（fork 子会话在 meta 中携带）
+        inherited_event_count = meta.get("inheritedEventCount", 0)
+        session = Session(session_id, seed=repaired, created_at=session.created_at,
+                          meta=meta, inherited_event_count=inherited_event_count,
+                          mode="restore")
     return session
 
 

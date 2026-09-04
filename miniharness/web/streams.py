@@ -162,6 +162,8 @@ class GatewayStreams:
             header["parentSessionId"] = meta["parentSession"]
         if meta.get("origin") is not None:
             header["origin"] = meta["origin"]
+        # alpha.1：wire header isSeeded 布尔（seedLength 翻译废止）
+        header["isSeeded"] = session.is_seeded
         return header
 
     @staticmethod

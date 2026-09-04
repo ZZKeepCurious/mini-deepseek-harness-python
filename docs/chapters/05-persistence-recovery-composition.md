@@ -7,11 +7,11 @@
 !!! warning "早期简化形态"
     本章代码为**教学简化形态**，与当前实现存在以下差异（学习时以当前实现为准，见 00-setup §0.5 简化表）：
 
-    - **JSONL 片段**：实现每文件 header 行 + 事件行，`SESSION_FORMAT_VERSION = 0` 不符即拒读（fail-closed）；torn 尾部的**截断发生在读路径**——`read_prepared` / `_load_checked` 识别 torn 后即调 `_truncate_to` 落盘截断（`core/session/persistence.py:846,874`），随后 `commit_repair` 只**追加** recovered 事件 + closers 并 fsync（`core/session/persistence.py:965`，对齐上游 commitRepair）。
+    - **JSONL 片段**：实现每文件 header 行 + 事件行，`SESSION_FORMAT_VERSION = 2` 不符即拒读（fail-closed）；torn 尾部的**截断发生在读路径**——`read_prepared` / `_load_checked` 识别 torn 后即调 `_truncate_to` 落盘截断（`core/session/persistence.py:846,874`），随后 `commit_repair` 只**追加** recovered 事件 + closers 并 fsync（`core/session/persistence.py:965`，对齐上游 commitRepair）。
     - **`repair_and_replay`**：本章为逐条 `append` 重放；实现为 seed 回放——从 `session/end-seed` 标记重放，且修复合成的 closers 经 `commit_repair` 持久化落盘（`core/session/persistence.py`，基类接口 + JSONL 后端实现）。
     - **`turn/end` reason**：本章差异表写 `reason = "interrupted"` 字符串；实现为对象 `{kind:'interrupted'}`（配合 `repair_interrupted_turn` 合成 closers，见第 1 章横幅）。
     - **崩溃演示**：本章 §5.2"kill 进程"实为手动构造未闭合回合来模拟崩溃尾部，非真实 kill（`tests/test_persistence_boot.py` 可复核）。
-    - **简化载体**：配置为 YAML（pyyaml 硬依赖承载）+ `!!js` 仅 `process.env.<NAME>` 子集。JSONL 载体**已对齐上游默认形态**（2026-08-25）：zstd 拼接帧容器 + StorageRecord 打包行 + format.ts 目录布局（`root/--<projectKey(cwd)>--/<encodeSegment(id)>/session.jsonl[.zstd]`，编码互斥/遗留布局响亮拒绝），见 `chunk_rows.py`/`zstd_frames.py` 与 `tests/test_persistence_zstd.py`。
+    - **简化载体**：配置为 YAML（pyyaml 硬依赖承载）+ `!!js` 仅 `process.env.<NAME>` 子集。JSONL 载体**已对齐上游默认形态**：zstd 拼接帧容器 + 一行一事件（V2，模型流内嵌 `assistant/message`）+ format.ts 目录布局（`root/--<projectKey(cwd)>--/<encodeSegment(id)>/session.jsonl[.zstd]`，编码互斥/遗留布局响亮拒绝），见 `zstd_frames.py` 与 `tests/test_persistence_zstd.py`。
 
 ## 5.1 这一章要做什么
 
@@ -279,14 +279,14 @@ python -m unittest tests.test_persistence_boot -v
 ## 5.7 检查点练习
 
 1. **活会话恢复**：真实 dsh 里"活会话 load 等待权威内存快照持久化"。实现一个 `wait_for_flush(session)`：新事件 append 后 `flush()` 必须立即执行一次（栅栏），写测试验证。
-2. **打包行手写**：`chunk_rows.py` 已实现 StorageRecord 打包（真实形态）。练习：构造 5 条连续 `assistant/chunk`，断言落盘为 1 行 `*-chunks` 存储行且 `load()` 往返相等；再删掉行内 `dt` 字段，断言 fail-closed 拒读。
+2. **流记录损坏拒读**：构造带内嵌 `stream` 的 `assistant/message` 事件并落盘，把流里一条 run 记录改成非法形状（如删掉 `type` 字段），断言 `load()` fail-closed 拒读；恢复合法记录后，断言 `expand_assistant_stream` 往返还原。
 3. **多补丁层叠**：写 3 个 patch 文件依次应用，断言最后一层覆盖前面的（对应 profile/home/overlay 层叠）。
 
 ## 5.8 回到 dsh：真实源码对照
 
 打开 `deepseek-harness/packages/session/session-persistence`：
 
-- 双后端真实实现（JSONL packed chunk、SQLite SCHEMA_VERSION 单调演进）
+- 双后端真实实现（JSONL zstd 帧容器一行一事件、SQLite SCHEMA_VERSION 单调演进）
 - `session/flush` 事件的真实语义：等待的并行栅栏
 - `docs/subsystems/persistence.md` 的"格式拒绝，不迁移"原则
 
@@ -294,10 +294,10 @@ python -m unittest tests.test_persistence_boot -v
 
 | 细节 | 真实 dsh | 我们的简化 |
 |---|---|---|
-| JSONL 存储 | 默认 checksum + Zstandard 拼接帧容器（可选原始行） | **已对齐**：默认 zstd 帧容器 + 打包行，明文模式可配（本章教学代码仍为明文逐行） |
+| JSONL 存储 | 默认 checksum + Zstandard 拼接帧容器（可选原始行） | **已对齐**：默认 zstd 帧容器 + 一行一事件（V2），明文模式可配（本章教学代码仍为明文逐行） |
 | SQLite 列 | `(session_id, seq, type, time, data, source_event_seqs, surface_op)` | `(session_id, seq, type, data)` |
 | `time` 字段 | 每个事件 epoch 毫秒 | 无 |
-| `sourceEventSeqs` | `assistant/message` 精确引用组成它的 `assistant/chunk` seqs（含显式空列表） | 无（因为不落 chunk） |
+| `sourceEventSeqs` | `assistant/message` 内嵌流且不能携带 `sourceEventSeqs`（fail-closed 拒绝）；其余 surface 事件可带非空引用 | 无（教学投影为扁平字符串） |
 | `session/seed` + `firstLiveSeq` | 构造种子事件，标记可回放起点 | 无 |
 | 活会话 load | 等权威内存快照持久化后才允许加载 | 未实现（检查点练习 1 的方向） |
 | `locate(meta)` | 多会话按元数据定位 | 无 |

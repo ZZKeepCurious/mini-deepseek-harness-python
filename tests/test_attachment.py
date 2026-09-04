@@ -22,15 +22,20 @@ from miniharness.attachment import (
     IMAGES_TOO_LARGE,
     IMAGE_TYPE_MISMATCH,
     INVALID_ATTACHMENT_REF,
+    INVALID_FILE_BASE64,
     INVALID_IMAGE,
     INVALID_IMAGE_BASE64,
     TOO_MANY_IMAGES,
     UNSUPPORTED_IMAGE_TYPE,
     AttachmentError,
     AttachmentStore,
+    EncodedFileAttachment,
+    FileAttachmentRef,
     ImageAttachmentRef,
     ImageRequestPolicy,
     LocalAttachmentStore,
+    SaveFileAttachment,
+    SaveFileStreamAttachment,
     SaveImageAttachment,
     encoded_alpha_is_compatible,
 )
@@ -201,6 +206,37 @@ class TestAdmitEncodedImages(unittest.TestCase):
         with self.assertRaises(AttachmentError) as cm:
             admit_encoded_images(self.store, [self._encoded(padded)])
         self.assertEqual(cm.exception.code, INVALID_IMAGE_BASE64)
+
+
+class TestAdmitPromptContent(unittest.TestCase):
+    """子代理 prompt 内容图像拒绝门（align 上游 subagent/control.ts admitPromptContent）。"""
+
+    def test_non_image_blocks_pass_through_in_order(self):
+        from miniharness.attachment import admit_prompt_content
+        blocks = [{"type": "text", "text": "a"}, {"type": "tool-result", "content": "x"}]
+        self.assertEqual(admit_prompt_content("child-1", blocks), blocks)
+
+    def test_image_block_refused(self):
+        from miniharness.attachment import SubagentImageUnsupportedError, admit_prompt_content
+        with self.assertRaises(SubagentImageUnsupportedError) as cm:
+            admit_prompt_content("child-1", [{"type": "text", "text": "a"},
+                                             {"type": "image", "image": "base64..."}])
+        # alpha.1：码统一 subagent/attachment-invalid
+        self.assertEqual(cm.exception.code, "subagent/attachment-invalid")
+        self.assertEqual(cm.exception.child_session_id, "child-1")
+
+    def test_file_part_refused(self):
+        from miniharness.attachment import SubagentFileUnsupportedError, admit_prompt_content
+        with self.assertRaises(SubagentFileUnsupportedError) as cm:
+            admit_prompt_content("child-1", [{"type": "text", "text": "a"},
+                                             {"type": "file", "receiptId": "r1"}])
+        self.assertEqual(cm.exception.code, "subagent/attachment-invalid")
+        self.assertEqual(cm.exception.reason, "SUBAGENT_FILE_UNSUPPORTED")
+        self.assertEqual(cm.exception.child_session_id, "child-1")
+
+    def test_text_only_str_trivially_accepted(self):
+        from miniharness.attachment import admit_prompt_content
+        self.assertEqual(admit_prompt_content("c", []), [])
 
 
 class TestRequestImage(unittest.TestCase):
@@ -461,6 +497,120 @@ class TestLocalAttachmentStore(unittest.TestCase):
             os.listdir(objects_dir) if os.path.isdir(objects_dir) else []
         )
         self.assertEqual(refs_before, refs_after)
+
+
+class TestFileAttachment(unittest.TestCase):
+    """verbatim 文件附件（alpha.1 file-store）：叶名清洗、内容寻址存取、
+    去重、流式提交、wire 受理、seam 缺省拒绝与完整性验证。"""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="mini-attachment-test-")
+        self.store = LocalAttachmentStore(root=self._tmp)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_leaf_name_sanitization(self):
+        from miniharness.attachment import file_leaf_name
+        # 双分隔符路径成分剥离 + Windows 禁用字符换 _ + 设备名前缀 + 空退化
+        self.assertEqual(file_leaf_name(r"C:\Users\bob\report?.txt"), "report_.txt")
+        self.assertEqual(file_leaf_name("/srv/data/a/b.bin"), "b.bin")
+        self.assertEqual(file_leaf_name("con"), "_con")
+        self.assertEqual(file_leaf_name("aux.txt"), "_aux.txt")
+        self.assertEqual(file_leaf_name(None), "file")
+        self.assertEqual(file_leaf_name(""), "file")
+        self.assertEqual(file_leaf_name(".."), "file")
+        self.assertEqual(file_leaf_name("  name  "), "name")
+
+    def test_save_read_roundtrip_and_host_path(self):
+        from miniharness.attachment import stored_file_path
+        ref = self.store.save_file(
+            SaveFileAttachment(data=b"file-bytes", name="doc (v2).txt"))
+        self.assertEqual(ref.bytes, 10)
+        self.assertTrue(ref.attachmentId.value.startswith("sha256:"))
+        path = self.store.file_host_path(ref)
+        self.assertEqual(path, stored_file_path(self._tmp, ref))
+        # 摘要目录 + 清洗显示名叶名（files/<sha2>/<sha>/<name>）
+        self.assertIn(os.path.join("files", ref.attachmentId.value[7:9],
+                                   ref.attachmentId.value[7:]), path)
+        self.assertTrue(path.endswith("doc (v2).txt"))
+        with open(path, "rb") as fh:
+            self.assertEqual(fh.read(), b"file-bytes")
+        self.assertEqual(b"".join(self.store.read_file_stream(ref)), b"file-bytes")
+
+    def test_content_addressed_dedup(self):
+        first = self.store.save_file(SaveFileAttachment(data=b"same", name="a.txt"))
+        second = self.store.save_file(SaveFileAttachment(data=b"same", name="b.bin"))
+        self.assertEqual(first.attachmentId, second.attachmentId)
+        # 别名路径不同（叶名不同），规范对象本体共享
+        self.assertNotEqual(self.store.file_host_path(first),
+                            self.store.file_host_path(second))
+
+    def test_stream_save_matches_verbatim(self):
+        streamed = self.store.save_file_stream(SaveFileStreamAttachment(
+            data=iter([b"chunk-", b"two"]), name="s.bin"))
+        direct = self.store.save_file(SaveFileAttachment(data=b"chunk-two", name="d.bin"))
+        self.assertEqual(streamed.attachmentId, direct.attachmentId)
+        self.assertEqual(b"".join(self.store.read_file_stream(streamed)), b"chunk-two")
+
+    def test_read_missing_object(self):
+        ref = self.store.save_file(SaveFileAttachment(data=b"x", name="x.bin"))
+        missing = SaveFileAttachment(data=b"y", name="y.bin")
+        never = self.store.save_file(missing)
+        os.unlink(self.store.file_host_path(never))
+        with self.assertRaises(AttachmentError) as cm:
+            list(self.store.read_file_stream(never))
+        self.assertEqual(cm.exception.code, ATTACHMENT_NOT_FOUND)
+        del ref
+
+    def test_integrity_verification(self):
+        ref = self.store.save_file(SaveFileAttachment(data=b"intact", name="i.bin"))
+        bad_bytes = FileAttachmentRef(
+            attachmentId=ref.attachmentId, name=ref.name, bytes=999)
+        with self.assertRaises(AttachmentError) as cm:
+            list(self.store.read_file_stream(bad_bytes))
+        self.assertEqual(cm.exception.code, ATTACHMENT_CORRUPT)
+
+    def test_admit_encoded_file_wire(self):
+        # 空文件是合法零字节载荷；canonical base64 校验后委托 verbatim 提交
+        empty = self.store.admit_encoded_file(EncodedFileAttachment(data=""))
+        self.assertEqual(empty.bytes, 0)
+        payload = base64.b64encode(b"wire-bytes").decode()
+        ref = self.store.admit_encoded_file(
+            EncodedFileAttachment(data=payload, name="w.bin"))
+        self.assertEqual(b"".join(self.store.read_file_stream(ref)), b"wire-bytes")
+        with self.assertRaises(AttachmentError) as cm:
+            self.store.admit_encoded_file(EncodedFileAttachment(
+                data=base64.b64encode(b"zz").decode() + "!", name="bad.bin"))
+        self.assertEqual(cm.exception.code, INVALID_FILE_BASE64)
+
+    def test_base_store_default_rejects_files(self):
+        class Bare(AttachmentStore):
+            pass
+        with self.assertRaises(AttachmentError) as cm:
+            Bare().save_file(SaveFileAttachment(data=b"x"))
+        self.assertEqual(cm.exception.code, "ATTACHMENT_FILES_UNSUPPORTED")
+        with self.assertRaises(AttachmentError) as cm:
+            list(Bare().read_file_stream(FileAttachmentRef(
+                attachmentId=empty_sha256_id(), name="f", bytes=0)))
+        self.assertEqual(cm.exception.code, "ATTACHMENT_FILES_UNSUPPORTED")
+
+    def test_is_attachment_error_membership(self):
+        from miniharness.attachment import is_attachment_error
+        class Bare(AttachmentStore):
+            pass
+        try:
+            Bare().save_file(SaveFileAttachment(data=b"x"))
+            self.fail("expected rejection")
+        except AttachmentError as error:
+            self.assertTrue(is_attachment_error(error))
+        self.assertFalse(is_attachment_error(RuntimeError("plain")))
+
+
+def empty_sha256_id():
+    from miniharness.attachment import AttachmentId
+    return AttachmentId("sha256:" + "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
 
 
 if __name__ == "__main__":

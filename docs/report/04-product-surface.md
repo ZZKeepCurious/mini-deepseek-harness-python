@@ -416,7 +416,7 @@ mini 简化（教学范围，须在文档中标注）：**agent registry + asser
 #### tokenMeter（`packages/llm/token-meter/`）
 
 - 无配置、**自身不产生任何会话事件**：对既有事件流做增量 fold（logRevision = consumedEvents），提供请求压力与表面定价两个快照（index.ts:60-98,116-147）；
-- 用量来源：`assistant/message.usage` + `assistant/chunk` 中 `chunk.type==='usage'` 的早样本（同一步早样本+最终样本，后者替换前者不重复计数，usage-projection.ts:74-123）；
+- 用量来源：`assistant/message.usage` + `assistant/message`/`assistant/attempt` 内嵌流展开出的 usage 样本（同一步早样本+最终样本，后者替换前者不重复计数，usage-projection.ts:82,116——每次 v2 Assistant 结算贡献其流内嵌的最后一个 usage 样本）；
 - 锚定/估算双路径：最新成功请求 usage 在其 canonical 信封与当前 request/header 一致且总数 ≥ 启发式锚价时复用（baseline.kind='usage'），否则估算（4 字符/token 等固定启发式，estimate.ts:12-19）。
 
 #### 后台作业（`packages/jobs/`：seam + jobs-local + tool-jobs）

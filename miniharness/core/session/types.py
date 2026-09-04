@@ -13,11 +13,11 @@ __all__ = [
     "TOOL_OUTCOME_UNKNOWN",
 ]
 
-SESSION_FORMAT_VERSION = 0
+SESSION_FORMAT_VERSION = 2
 
 KNOWN_TYPES = frozenset({
     "turn/start", "turn/end", "step/start", "step/end",
-    "user/message", "assistant/message", "assistant/chunk",
+    "user/message", "assistant/message", "assistant/attempt",
     "tool/call", "tool/result",
     # 请求信封（上游 agent-loop/src/agent.ts SessionEventMap，log-only 非
     # surface）：request/header 存 canonical 快照 {header:{config,

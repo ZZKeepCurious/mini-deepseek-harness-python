@@ -105,7 +105,8 @@ def fold_trajectory(events: list | tuple, first_seq: int = 0) -> TrajectorySnaps
       * turn/start 开新 turn 节点；turn/end 关闭（记录 ended_at）
       * user/message → 'user' 节点；assistant/message → 'assistant' 节点
         （文本来自 text 块；tool-call 块不并入消息文本，而是展开为子节点）
-      * assistant/chunk 只影响当前 step 的 TTFT 观测，不产生节点
+      * assistant/message 内嵌 stream 的首时间作为当前 step 的 TTFT 观测（V2：
+        assistant/chunk 废止，逐 chunk 事件不复存在）
       * tool/call → 'tool-call' 节点；tool/result 按 callId 挂为子节点
       * request/header → requests 元数据（model/provider/reason）
       * 末尾仍有未闭合 turn → partial=True
@@ -114,7 +115,7 @@ def fold_trajectory(events: list | tuple, first_seq: int = 0) -> TrajectorySnaps
     nodes: dict[str, TrajectoryNode] = {}
     node_list: list[TrajectoryNode] = []
     turn_open: TrajectoryNode | None = None
-    step_ttft: dict[int, int | None] = {}   # step -> 首个 assistant/chunk 的 time
+    step_ttft: dict[int, int | None] = {}   # step -> 首 stream 时间（TTFT 观测）
     by_turn: dict[int, dict] = {}
 
     node_ids: dict[str, int] = {}
@@ -123,6 +124,13 @@ def fold_trajectory(events: list | tuple, first_seq: int = 0) -> TrajectorySnaps
         n = node_ids.get(prefix, 0) + 1
         node_ids[prefix] = n
         return f"{prefix}-{n}"
+
+    def stream_first_time(stream) -> int | None:
+        """内嵌 stream 首记录时间（records 按投递序，首条即最早）。"""
+        if not stream:
+            return None
+        first = stream[0]
+        return first.get("time") if first.get("type") == "chunk" else first.get("time0")
 
     for ev in events:
         if ev["seq"] < first_seq:
@@ -147,11 +155,6 @@ def fold_trajectory(events: list | tuple, first_seq: int = 0) -> TrajectorySnaps
             node = TrajectoryNode(mkid("user"), "user", d.get("turn", 0), d.get("step", 0),
                                   ev["seq"], started_at=time, text=text)
             node_list.append(node)
-        elif t == "assistant/chunk":
-            chunk = d.get("chunk", {})
-            step = d.get("step", 0)
-            if step not in step_ttft:
-                step_ttft[step] = time
         elif t == "assistant/message":
             text = "".join(b.get("text", "") for b in d.get("message", {}).get("content", [])
                            if b.get("type") == "text" and b.get("text") is not None)
@@ -159,6 +162,9 @@ def fold_trajectory(events: list | tuple, first_seq: int = 0) -> TrajectorySnaps
                                   d.get("turn", 0), d.get("step", 0), ev["seq"],
                                   started_at=time, text=text)
             node_list.append(node)
+            step = d.get("step", 0)
+            if step not in step_ttft:
+                step_ttft[step] = stream_first_time(d.get("stream"))
         elif t == "tool/call":
             tc = TrajectoryNode(mkid("tool-call"), "tool-call",
                                 d.get("turn", 0), d.get("step", 0), ev["seq"],
@@ -217,16 +223,19 @@ def fold_trajectory(events: list | tuple, first_seq: int = 0) -> TrajectorySnaps
     for n in node_list:
         if n.kind == "turn":
             turn_start[n.turn] = n.started_at
-    # TTFT：每个 turn 内最早出现的 assistant/chunk 观测
+    # TTFT：每个 turn 内最早出现的内嵌 stream 首时间观测（V2）
     for ev_ in events:
         if ev_["seq"] < first_seq:
             continue
-        if ev_["type"] == "assistant/chunk":
+        if ev_["type"] == "assistant/message":
+            first = stream_first_time(ev_["data"].get("stream"))
+            if first is None:
+                continue
             d_ = by_turn.get(ev_["data"].get("turn", 0))
             if d_ is not None and d_["ttft_ms"] is None:
                 start = turn_start.get(ev_["data"].get("turn", 0))
                 if start is not None:
-                    d_["ttft_ms"] = ev_.get("time", 0) - start
+                    d_["ttft_ms"] = first - start
     snapshot.turns = [by_turn[k] for k in sorted(by_turn)]
     return snapshot
 

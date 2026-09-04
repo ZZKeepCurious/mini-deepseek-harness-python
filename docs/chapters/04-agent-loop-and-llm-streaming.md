@@ -10,9 +10,9 @@
     - **`FakeLlmAdapter` finish reason**：本章为字符串（`"stop"` / `"tool-calls"`）；实现为对象 `{"kind": "stop"}` / `{"kind": "tool-calls"}`（`llm/fake.py:58,70`）。
     - **`DeepSeekAdapter` SSE**：实现要求字面 `[DONE]` 必须出现（EOF 未到 `[DONE]` 抛 `STREAM_CLOSED`）、畸形 SSE 载荷抛 `MALFORMED_RESPONSE`、HTTP 错误映射完整（401/403→AUTH、quota 措辞→QUOTA、429→RATE_LIMIT、400 上下文→CONTEXT_WINDOW_EXCEEDED 否则 INVALID_REQUEST、≥500→SERVER、其余 `HTTP_<status>`）、`usage` 归一为 `TokenUsage`（`llm/deepseek.py`，见 `llm/protocol.py` 的 `StreamChunk` 判别字段 `type`）。本章的 `AUTH_ERROR`/`REQUEST_ERROR` 二元映射已过时。
     - **空响应**：本章 §4.4 声称"空响应未实现"与同章 §4.8/§4.9 自相矛盾——实现已产出 `EMPTY_RESPONSE` 错误且默认可重试（`llm/retry_policy.py` 白名单）。
-    - **loop 片段**：本章 `loop.py` 的 `_append` 方法、字符串 reason、扁平 `assistant/message` 形态均已过时；实现是 ContentBlock 消息对象 + 显式编号 + `request/header` 事件 + 每 chunk 落 `assistant/chunk`（`core/agent_loop/agent.py`）。
+    - **loop 片段**：本章 `loop.py` 的 `_append` 方法、字符串 reason、扁平 `assistant/message` 形态均已过时；实现是 ContentBlock 消息对象 + 显式编号 + `request/header` 事件 + 模型流压缩内嵌 `assistant/message`（失败 attempt 落 `assistant/attempt`）（`core/agent_loop/agent.py`）。
     - **重试接线**：真实调用入口必须挂载 `apply_retry_planner`（`llm/retry.py:298`），否则 `agent/request-error` 瀑布不生效（本章 §4.6 真实 API 示例为教学简化、未挂载；真实装配必须先挂）。
-    - **时序图**：完整时序含 `request/header` 事件与逐 chunk `assistant/chunk` 落盘（见 `core/agent_loop/agent.py` 的 requestHeaderLogged 语义）。
+    - **时序图**：完整时序含 `request/header` 事件与内嵌 `assistant/message` 的压缩流落盘（见 `core/agent_loop/agent.py` 的 requestHeaderLogged 语义）。
     - **stream 契约已 async 化**（httpx 异步传输）：实现签名为 `async def stream(self, messages, tools, signal=None)` 异步迭代（`llm/protocol.py`，httpx 原生 asyncio 传输，abort 置位即关闭连接、`_aiter_raced` 竞速抛 `StreamAborted`）；agent 循环为单一 async 驱动 + `followup`/`steer` 同步门面（经进程级常驻单事件循环驱动，`core/agent_loop/resident_loop.py`）；本章的同步 `def stream` 与同步泵形态已过时。
 
 ## 4.1 这一章要做什么
@@ -433,7 +433,7 @@ print([e["type"] for e in session.events])
 ## 4.7 检查点练习
 
 1. **加拒绝理由**：让 pre-step 的 reject 带 `reason`，reject 时把它写进 `turn/end` 的 `reason` 字段，并断言日志可审计。
-2. **chunk 落盘**：把 `assistant/chunk` 逐条 append（当前简化只落合并消息），再验证 `derive_messages` 不受 chunk 影响。
+2. **流内嵌往返**：构造 `assistant/message` 的内嵌 `stream` 记录，断言 `expand_assistant_stream` 能精确还原逐 chunk 序列（含每个 delta 边界与相对时间），且 `derive_messages` 不受流记录影响。
 3. **并发工具**：给 `_run_tool` 加 `is_concurrency_safe` 并行执行（线程），非安全工具串行——跑通测试。
 
 ## 4.8 回到 dsh：真实源码对照
@@ -501,9 +501,9 @@ loop 前调用 `apply_retry_planner(ctx)`（幂等，可重复调用）。
 对齐 allSettled）。已拆解后的迟到回调命中陈旧守卫直接返回（不再进入下游策略）。
 
 **接线语义**：重试是同 step 内重新发起模型请求——`messages` 不变（失败 attempt
-不产生任何消息事件，`derive_messages` 不受 `llm/retry` 影响）、`request/header`
-只落一次（上游仅在 header 变化时追加）、`assistant/message` 的 `sourceEventSeqs`
-只含成功 attempt 的 chunk。`LlmFailure` 扩展 `status` / `providerRetryAfterMs` /
+内嵌流落 `assistant/attempt`、不产生任何消息事件，`derive_messages` 不受
+`llm/retry` 影响）、`request/header` 只落一次（上游仅在 header 变化时追加）、
+`assistant/message` 内嵌成功 attempt 的压缩流且不带 `sourceEventSeqs`。`LlmFailure` 扩展 `status` / `providerRetryAfterMs` /
 `requestId`（`x-request-id` / `x-deepseek-request-id`）可选字段；socket 超时映射
 `TIMEOUT`（原本混在 `TRANSPORT` 里）。
 
