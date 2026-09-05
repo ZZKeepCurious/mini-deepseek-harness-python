@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..core.scope import Context
 from .api import WebApi
+from .auth import resolve_web_token
 from .server import create_app
 from .streams import GatewayStreams
 
@@ -74,22 +75,34 @@ def _resolve_bind(host: str | None, port: int | None) -> tuple[str, int]:
     return host, raw_port
 
 
-def build_app(adapter: Any, tools: Any, ctx: Context | None = None) -> FastAPI:
+def build_app(adapter: Any, tools: Any, ctx: Context | None = None,
+              token: str | None = None) -> FastAPI:
     """纯装配：上下文 + 适配器 + 工具 → 可挂载的 FastAPI 应用。
 
     返回前把 WebApi/GatewayStreams 挂到 root ctx（供测试/launcher 复用，
-    与 headless 的 ctx 装配对称）。
+    与 headless 的 ctx 装配对称）。token = 可选认证门（None 读
+    MINIHARNESS_WEB_TOKEN 环境变量，仍未配置 = 无门；见 web/auth.py）。
     """
     ctx = ctx or Context(name="web")
     api = WebApi(ctx, adapter, tools)
-    return create_app(api, api.gateway)
+    return create_app(api, api.gateway, token=token)
 
 
 def run_web(adapter: Any, tools: Any, ctx: Context | None = None,
-            host: str | None = None, port: int | None = None) -> None:
-    """构建应用并阻塞监听（`--profile web` 的进程级入口）。"""
+            host: str | None = None, port: int | None = None,
+            token: str | None = None) -> None:
+    """构建应用并阻塞监听（`--profile web` 的进程级入口）。
+
+    生产纪律：监听 `0.0.0.0`（非回环）时**必须**已配置 token（参数或
+    `MINIHARNESS_WEB_TOKEN`）——非回环裸听是安全实质风险，fail loud。
+    """
     import uvicorn
 
     host, port = _resolve_bind(host, port)
-    app = build_app(adapter, tools, ctx)
+    resolved_token = token if token is not None else resolve_web_token()
+    if host == "0.0.0.0" and not resolved_token:
+        raise ValueError(
+            "listening on 0.0.0.0 requires a web token "
+            "(pass token= or set MINIHARNESS_WEB_TOKEN)")
+    app = build_app(adapter, tools, ctx, token=resolved_token)
     uvicorn.run(app, host=host, port=port, log_level="info", **uvicorn_options())

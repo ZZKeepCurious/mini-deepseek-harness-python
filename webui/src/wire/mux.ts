@@ -1,17 +1,21 @@
 // RemoteStreamMuxConnection client for `/api/remote.mux` (single WebSocket
 // carrying all Remote streams). Wire contract (source:
 // miniharness/web/mux.py + stream_protocol.py, upstream packages/api/gateway):
-//   client → server: {type:'open', streamId, endpoint, payload} | {type:'cancel', ...}
-//   server → client: {type:'item', streamId, item} | {type:'error', streamId, error}
-//                    | {type:'end', streamId, ok, error?}
-// streamId is monotonic (backend allocates; client numbers its own opens).
+//   client → server: {type:'open', streamId, endpoint, payload} | {type:'cancel', streamId}
+//   server → client: {type:'item', streamId, value} | {type:'error', streamId, error}
+//                    | {type:'end', streamId}
+// item.value is always present (null is a legal wire value); error is terminal
+// (no trailing end frame). streamId is monotonic (backend allocates; client
+// numbers its own opens).
+
+import { webToken } from "./auth";
 
 export type MuxOpen = { type: "open"; streamId: number; endpoint: string; payload: unknown };
-export type MuxCancel = { type: "cancel"; streamId: number; endpoint: string; payload: unknown };
+export type MuxCancel = { type: "cancel"; streamId: number };
 
-export type MuxItem = { type: "item"; streamId: number; item: unknown };
+export type MuxItem = { type: "item"; streamId: number; value: unknown };
 export type MuxError = { type: "error"; streamId: number; error: { code?: string; message?: string } };
-export type MuxEnd = { type: "end"; streamId: number; ok: boolean; error?: unknown };
+export type MuxEnd = { type: "end"; streamId: number };
 
 export type MuxServerFrame = MuxItem | MuxError | MuxEnd;
 
@@ -56,7 +60,11 @@ export class RemoteMuxConnection {
 
   connect(): void {
     if (this.disposed) return;
-    const ws = new this.WebSocketImpl(this.url);
+    const token = webToken();
+    const url = token
+      ? `${this.url}${this.url.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`
+      : this.url;
+    const ws = new this.WebSocketImpl(url);
     this.ws = ws;
     ws.binaryType = "arraybuffer";
 
@@ -99,7 +107,7 @@ export class RemoteMuxConnection {
 
     const handler = (frame: MuxServerFrame): void => {
       if (frame.type === "item" && onItem) {
-        onItem((frame as MuxItem).item);
+        onItem(frame.value);
       }
       if (frame.type !== "item") {
         // error / end resolve any waiter; error/end are terminal-ish.
@@ -124,7 +132,7 @@ export class RemoteMuxConnection {
 
     return {
       streamId,
-      close: () => this.cancel(streamId, endpoint, payload),
+      close: () => this.cancel(streamId),
       next,
     };
   }
@@ -136,9 +144,9 @@ export class RemoteMuxConnection {
     this.ws.send(JSON.stringify(frame));
   }
 
-  private cancel(streamId: number, endpoint: string, payload: unknown): void {
+  private cancel(streamId: number): void {
     try {
-      this.send({ type: "cancel", streamId, endpoint, payload } satisfies MuxCancel);
+      this.send({ type: "cancel", streamId } satisfies MuxCancel);
     } catch {
       /* ignore if already closed */
     } finally {

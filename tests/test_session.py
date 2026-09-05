@@ -203,6 +203,24 @@ class TestSession(unittest.TestCase):
         with self.assertRaises(ValueError):
             Session("s2", seed=bad)
 
+    def test_seed_assistant_stream_missing_is_corrupt(self):
+        # V2: assistant/message 必须内嵌 stream；缺失 = 损坏制品（上游
+        # expandAssistantStream(undefined) 抛错同形；§2.22 读端严格性收口）
+        ev = {"type": "assistant/message", "seq": 0, "time": 1, "surfaceOp": "append",
+              "data": {"turn": 1, "step": 1, "message": {
+                  "id": "m1", "role": "assistant", "content": [],
+                  "source": {"kind": "model", "provider": "fake", "model": "fake"}}}}
+        with self.assertRaises(ValueError):
+            Session("s2", seed=[ev])
+
+    def test_seed_assistant_stream_empty_list_is_legal(self):
+        ev = {"type": "assistant/message", "seq": 0, "time": 1, "surfaceOp": "append",
+              "data": {"turn": 1, "step": 1, "stream": [], "message": {
+                  "id": "m1", "role": "assistant", "content": [],
+                  "source": {"kind": "model", "provider": "fake", "model": "fake"}}}}
+        s2 = Session("s2", seed=[ev])
+        self.assertEqual(s2.events[0]["type"], "assistant/message")
+
     def test_thaw_descends_fresh_lists_holding_frozen_items(self):
         # 冻结结构 list→tuple、dict→mappingproxy；但实时代码会在冻结值外层套
         # 新建 list（web 流把 splice 的 inserted 重投影进新 items 数组），

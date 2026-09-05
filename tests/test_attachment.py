@@ -447,6 +447,8 @@ class TestLocalAttachmentStore(unittest.TestCase):
         ref = self.store.save_image(_save(self.store))
         sha = str(ref.attachmentId).removeprefix("sha256:")
         path = os.path.join(self._tmp, "objects", sha[:2], sha)
+        # 发布后只读（0o400）：篡改前先清位（模拟真实篡改需写权限）
+        os.chmod(path, 0o644)
         with open(path, "wb") as fh:
             fh.write(b"corrupt!")
         with self.assertRaises(AttachmentError) as cm:
@@ -558,6 +560,8 @@ class TestFileAttachment(unittest.TestCase):
         ref = self.store.save_file(SaveFileAttachment(data=b"x", name="x.bin"))
         missing = SaveFileAttachment(data=b"y", name="y.bin")
         never = self.store.save_file(missing)
+        # 发布后只读（0o400）：删除前先清位（Windows 只读文件不可删）
+        os.chmod(self.store.file_host_path(never), 0o644)
         os.unlink(self.store.file_host_path(never))
         with self.assertRaises(AttachmentError) as cm:
             list(self.store.read_file_stream(never))
@@ -611,6 +615,82 @@ class TestFileAttachment(unittest.TestCase):
 def empty_sha256_id():
     from miniharness.attachment import AttachmentId
     return AttachmentId("sha256:" + "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+
+
+class TestPublishIntegrityAndSeams(unittest.TestCase):
+    """发布完整性（digest-verified EEXIST + chmod 0o400）与宿主路径 seam
+    （imageHostPath 契约缺省 None / local 覆盖）+ 结构化错误判定
+    （上游 isAttachmentError 按 code 形状跨包兼容，2026-09-05 收口批）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="mini-attachment-test-")
+        self.store = LocalAttachmentStore(root=self._tmp)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _object_path(self, sha_hex):
+        return os.path.join(self._tmp, "objects", sha_hex[:2], sha_hex)
+
+    def test_save_file_publishes_readonly_and_dedup_reverifies(self):
+        ref = self.store.save_file(SaveFileAttachment(data=b"bytes", name="a.txt"))
+        path = self.store.file_host_path(ref)
+        sha = ref.attachmentId.value[7:]
+        if os.name == "posix":
+            mode = os.stat(self._object_path(sha)).st_mode & 0o777
+            self.assertEqual(mode, 0o400)
+        # 同名重存命中别名 EEXIST：摘要一致 → 幂等成功
+        again = self.store.save_file(SaveFileAttachment(data=b"bytes", name="a.txt"))
+        self.assertEqual(again.attachmentId, ref.attachmentId)
+
+    def test_corrupted_alias_detected_on_dedup(self):
+        ref = self.store.save_file(SaveFileAttachment(data=b"good", name="a.txt"))
+        # 篡改既有别名字节（内容寻址只是概率性同内容，磁盘字节才是权威）；
+        # 先清只读位（发布后 0o400）
+        alias = self.store.file_host_path(ref)
+        os.chmod(alias, 0o644)
+        with open(alias, "wb") as fh:
+            fh.write(b"evil")
+        with self.assertRaises(AttachmentError) as cm:
+            self.store.save_file(SaveFileAttachment(data=b"good", name="a.txt"))
+        self.assertEqual(cm.exception.code, ATTACHMENT_CORRUPT)
+
+    def test_save_image_publishes_readonly(self):
+        ref = self.store.save_image(_save(self.store))
+        path = self.store.image_host_path(ref)
+        sha = ref.attachmentId.value[7:]
+        self.assertEqual(path, self._object_path(sha))
+        if os.name == "posix":
+            mode = os.stat(path).st_mode & 0o777
+            self.assertEqual(mode, 0o400)
+
+    def test_image_host_path_seam_contract(self):
+        # 契约缺省（非宿主文件后端）= None（上游基类 void ref → undefined，
+        # 不做引用校验）；local 覆盖 = normalized 路径 + 引用校验
+        self.assertIsNone(AttachmentStore().image_host_path(
+            ImageAttachmentRef(attachmentId="sha256:" + "0" * 64,
+                               mediaType="image/png", bytes=1, width=1, height=1)))
+        ref = self.store.save_image(_save(self.store))
+        self.assertTrue(self.store.image_host_path(ref).startswith(self._tmp))
+        with self.assertRaises(AttachmentError) as cm:
+            self.store.image_host_path(ImageAttachmentRef(
+                attachmentId="sha256:zz", mediaType="image/png", bytes=1,
+                width=1, height=1))
+        self.assertEqual(cm.exception.code, INVALID_ATTACHMENT_REF)
+
+    def test_is_attachment_error_is_structural(self):
+        from miniharness.attachment import is_attachment_error, is_image_admission_error
+        # duck-typed 跨包形状（非 AttachmentError 实例）按 code 识别
+        class Foreign:
+            code = "ATTACHMENT_CORRUPT"
+        self.assertTrue(is_attachment_error(Foreign()))
+        self.assertTrue(is_attachment_error(AttachmentError("x", ATTACHMENT_CORRUPT)))
+        self.assertFalse(is_attachment_error(type("F2", (), {"code": "NOT_A_CODE"})()))
+        self.assertFalse(is_attachment_error(ValueError("plain")))
+        self.assertTrue(is_image_admission_error(
+            type("F3", (), {"code": "TOO_MANY_IMAGES"})()))
+        self.assertFalse(is_image_admission_error(Foreign))
 
 
 if __name__ == "__main__":

@@ -265,12 +265,17 @@ def commit_prepared_image_file(
                         "Stored attachment failed integrity verification.",
                         ATTACHMENT_CORRUPT,
                     )
+        # 先丢弃 staging 名再置只读：Windows 在硬链接间共享只读属性、置位后
+        # 任一名字都无法 unlink（上游 publishStagedObject 同序）
+        os.unlink(temporary)
+        # 发布后置只读（上游 chmod 0o400；去重路径同样恢复只读位；Windows
+        # 退化为只读属性位）
+        os.chmod(target, 0o400)
         # 目标条目刷持久 + 关闭并发建桶窗口，引用才允许到达会话检查点；
         # 去重路径同样重复两次 fsync（可能先于对方到达其持久化边界观察到
         # 对方的 link）
         _sync_directory(bucket)
         _sync_directory(os.path.join(root, "objects"))
-        os.unlink(temporary)
     except AttachmentError:
         raise
     except OSError as error:
@@ -439,6 +444,12 @@ class AttachmentStore:
         """verbatim 文件对象在宿主文件系统中的绝对路径；非宿主文件后端 None。"""
         return None
 
+    def image_host_path(self, ref: "ImageAttachmentRef") -> str | None:
+        """规范化图片对象在宿主文件系统中的绝对路径；非宿主文件后端 None
+        （上游 store 契约 imageHostPath 缺省 undefined，宿主位置只暴露给
+        受信任的同进程消费方做执行世界映射，不写持久历史）。"""
+        return None
+
     def _validate_image_batch(self, inputs: list[SaveImageAttachment]) -> None:
         """批量门：任何成员提交前的共享入口（上游 validateImageBatch）。"""
         limits = self.image_limits
@@ -545,6 +556,9 @@ class LocalAttachmentStore(AttachmentStore):
         from .file_store import stored_file_path
 
         return stored_file_path(self.root, ref)
+
+    def image_host_path(self, ref: ImageAttachmentRef) -> str:
+        return normalized_image_path(self.root, ref)
 
     def variant_id_for(
         self, ref: ImageAttachmentRef, policy: ImageRequestPolicy

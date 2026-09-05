@@ -37,6 +37,7 @@ from fastapi.responses import Response
 
 from ..core.session.json import thaw
 from .api import WebApi
+from .auth import TokenGateMiddleware, resolve_web_token
 from .downloads import build_session_export, parse_export_query
 from .envelope import (
     parse_message,
@@ -91,15 +92,24 @@ def _unwrap_args(payload: Any, method: str) -> Any:
     return payload["args"]
 
 
-def create_app(api: WebApi, gateway: GatewayStreams) -> FastAPI:
+def create_app(api: WebApi, gateway: GatewayStreams,
+               token: str | None = None) -> FastAPI:
     """把 WebApi + GatewayStreams 装成 FastAPI 应用（供 launcher/uvicorn 挂载）。
 
     @param api - web 会话服务（unary 域处理）。
     @param gateway - Remote 方法面（$events + follow/control + 审批桥）。
+    @param token - 可选认证 token；None 时读 `MINIHARNESS_WEB_TOKEN` 环境变量，
+    仍未配置 = 无认证门（回环开发形态）。配置后 `/api/*`（unary + WS mux +
+    session.export）全域强制——对齐上游 `connection.requestRejection` 可插拔
+    拒绝面（WS 升级失败 = HTTP 401 响应后断开，`rejectRemoteStreamUpgrade`
+    同形；静态 SPA 不设门，浏览器从页面 URL `?token=` 携带）。
     @returns 可挂载的 FastAPI 实例。
     """
+    resolved_token = token if token is not None else resolve_web_token()
     app = FastAPI(title="mini-deepseek-harness web", docs_url=None, redoc_url=None,
                   openapi_url=None)
+    if resolved_token is not None:
+        app.add_middleware(TokenGateMiddleware, token=resolved_token)
 
     @app.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH",
                                                 "OPTIONS", "HEAD"])

@@ -299,8 +299,15 @@ class Session:
         """
         from ...llm import BlockAssembler, expand_assistant_stream
         data = ev.get("data") or {}
+        stream = data.get("stream")
+        if not isinstance(stream, (list, tuple)):
+            # V2 事件必须内嵌 stream（写端恒写；缺失 = 损坏/外来残缺制品）。
+            # 上游 expandAssistantStream(undefined) 同样抛错（for..of undefined）。
+            # seed 事件多为冻结态（list→tuple），两种载体都要放行。
+            raise ValueError(
+                f"seed {ev['type']} at index {index} has no embedded stream")
         try:
-            timed = expand_assistant_stream(data.get("stream") or [])
+            timed = expand_assistant_stream(stream)
             assembler = BlockAssembler()
             for member in timed:
                 assembler.push(member.chunk)

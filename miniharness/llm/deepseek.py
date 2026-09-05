@@ -504,7 +504,10 @@ class DeepSeekAdapter(LlmAdapter):
             yield StreamChunk("block-end", index=idx, block=reasoning_block(reasonings[idx]))
         for idx, slot in sorted(pending.items()):
             emitted = True
-            call_id = slot["id"] or f"call_{idx}"
+            # 缺 identity 的 close 兜底：空串 stand-in（上游 closeBlock 的
+            # `block.callId ?? ''` / `block.name ?? ''`；合成占位 id 属 mini
+            # 旧发明，随 §2.21 acceptIdentity 批对齐移除）
+            call_id = slot["id"] or ""
             name = slot["name"] or ""
             yield StreamChunk("block-start", index=idx, blockType="tool-call")
             yield StreamChunk("tool-call-delta", index=idx, id=call_id,

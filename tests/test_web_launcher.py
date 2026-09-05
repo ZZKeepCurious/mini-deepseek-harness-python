@@ -4,6 +4,7 @@
 Ping + 连续 2 周期无 Pong 判死（上游 MAX_MISSED_HEARTBEATS=2 → terminate；
 mini 映射 ws_ping_interval=2 / ws_ping_timeout=4）。
 """
+import os
 import unittest
 from unittest import mock
 
@@ -60,6 +61,18 @@ class RunWebHeartbeatTest(unittest.TestCase):
         kwargs = run.call_args.kwargs
         self.assertEqual(kwargs["ws_ping_interval"], WS_HEARTBEAT_INTERVAL)
         self.assertEqual(kwargs["ws_ping_timeout"], WS_HEARTBEAT_TIMEOUT)
+
+    def test_run_web_requires_token_on_all_interfaces(self):
+        # 生产纪律：0.0.0.0 无 token → fail loud（web/auth.py 部署契约）
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MINIHARNESS_WEB_TOKEN", None)
+            with self.assertRaises(ValueError):
+                run_web(FakeLlmAdapter(), None, host="0.0.0.0", port=0)
+
+    def test_run_web_all_interfaces_with_token(self):
+        with mock.patch("uvicorn.run") as run:
+            run_web(FakeLlmAdapter(), None, host="0.0.0.0", port=0, token="t")
+        self.assertEqual(run.call_count, 1)
 
 
 if __name__ == "__main__":

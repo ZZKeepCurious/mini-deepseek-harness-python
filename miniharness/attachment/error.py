@@ -109,22 +109,18 @@ class AttachmentError(Exception):
 def is_attachment_error(error: object) -> bool:
     """是否属于本附件能力的稳定失败（上游 isAttachmentError）。
 
-    仅按 code 成员判定（上游按运行时成员集合判定，跨包/跨重复安装兼容形状）。
+    结构化判定（``code`` 成员 + 运行时码集成员资格），**不查类型层级**——
+    上游按 Error + code 形状跨包/跨重复安装兼容；isinstance 会在 duck-typed
+    跨包形状上漏判。
     """
-    return (
-        isinstance(error, AttachmentError)
-        and isinstance(error.code, str)
-        and error.code in ATTACHMENT_ERROR_CODES
-    )
+    code = getattr(error, "code", None)
+    return isinstance(code, str) and code in ATTACHMENT_ERROR_CODES
 
 
 def is_image_admission_error(error: object) -> bool:
     """是否属于调用方可纠正的图片受理失败（上游 isImageAdmissionError）。
 
-    仅按 code 成员判定（上游按运行时成员集合判定，跨包兼容形状）。
+    结构化判定同上：只认 code 成员 + 可纠正码集，不查类型层级。
     """
-    return (
-        isinstance(error, AttachmentError)
-        and isinstance(error.code, str)
-        and error.code in IMAGE_ADMISSION_ERROR_CODES
-    )
+    code = getattr(error, "code", None)
+    return isinstance(code, str) and code in IMAGE_ADMISSION_ERROR_CODES

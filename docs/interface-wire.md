@@ -16,10 +16,30 @@
 
 | 通道 | 载体 | 覆盖范围 | 载体状态码 |
 |---|---|---|---|
-| unary RPC | `POST /api/<endpoint>` | `session.*` 14 个 unary 端点 + `$events/result` 特判 | 404 / 415 / 400 / 500 / 200 |
-| Remote 流 | `WS /api/remote.mux` | `$events` + `session.follow` + `session.control` 全部长期流 | WS 关闭码 1003 / 1008 / 1011 |
-| 会话导出 | `GET /api/session.export` | 会话日志 zip 下载 | 200 / 400 / 404 / 501 / 500 |
+| unary RPC | `POST /api/<endpoint>` | `session.*` 14 个 unary 端点 + `$events/result` 特判 | 401* / 404 / 415 / 400 / 500 / 200 |
+| Remote 流 | `WS /api/remote.mux` | `$events` + `session.follow` + `session.control` 全部长期流 | HTTP 401*（升级拒绝）/ WS 关闭码 1003 / 1008 / 1011 |
+| 会话导出 | `GET /api/session.export` | 会话日志 zip 下载 | 401* / 200 / 400 / 404 / 501 / 500 |
 | SPA 静态 | `GET`/`HEAD /{path}`（非 `/api/`） | `webui/dist/` 或 `web/static/` 产物承载 | 403 / 200 / 404 / 405 |
+
+`*` 401 仅在配置了认证 token 时出现（见 §7.1）；未配置 token = 无门（回环开发形态）。
+
+### 7.1 认证门（可选 token，`web/auth.py`）
+
+上游以可插拔的 `connection.requestRejection(req)` 决定 WS 升级拒绝（返回 401/403 →
+`rejectRemoteStreamUpgrade` 写 `HTTP/1.1 401 Unauthorized` 后销毁 socket）。mini 的等价物
+= **可选 token 门**：未配置（缺省）→ 无门；配置 `MINIHARNESS_WEB_TOKEN`（或
+`create_app(token=)` / `run_web(token=)`）后：
+
+- **覆盖面**：`/api/*` 全域（unary POST、`$events/result`、WS mux 升级、`session.export`）；
+  SPA 静态不设门（浏览器从页面 URL 携带 token 调 API）。
+- **token 载体**（任一命中即可）：`Authorization: Bearer <token>` 头；`?token=<token>`
+  查询参数（浏览器原生 WebSocket 无法设头，webui 从页面 URL `?token=` 读取：unary 走
+  Bearer 头、WS 追加到 mux URL——`webui/src/wire/auth.ts`）。
+- **拒绝形态**：http → `401 {"error":"unauthorized"}`；WS 升级 → 经 ASGI
+  `websocket.http.response.*` 写 HTTP 401 响应后 `websocket.close(1008)`（与上游
+  `rejectRemoteStreamUpgrade` 同形，uvicorn 支持）。比较为常数时间。
+- **部署纪律**：`run_web` 监听 `0.0.0.0` 时**必须**已配置 token，否则启动即
+  `ValueError`（非回环裸听 fail loud）。
 
 ### unary 载体状态码语义（`web/server.py`）
 

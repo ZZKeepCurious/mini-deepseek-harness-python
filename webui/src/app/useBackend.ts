@@ -83,7 +83,7 @@ export function useBackend(): UseBackend {
       for (;;) {
         const frame = await stream.next();
         if (frame.type === "item") {
-          const item = (frame as { item: unknown }).item as { type?: string };
+          const item = (frame as { value: unknown }).value as { type?: string };
           if (item?.type === "snapshot") {
             const snap = item as unknown as {
               records: { type: "event"; event: EventEnvelope }[];
@@ -115,7 +115,7 @@ export function useBackend(): UseBackend {
       for (;;) {
         const frame = await stream.next();
         if (frame.type === "item") {
-          const item = (frame as { item: unknown }).item as {
+          const item = frame.value as {
             type?: string;
             value?: { queues?: Record<string, unknown[]>; jobs?: Record<string, unknown[]> };
             sessionId?: string;
@@ -175,7 +175,7 @@ export function useBackend(): UseBackend {
       for (;;) {
         const frame = await es.next();
         if (frame.type === "item") {
-          events.push((frame as { item: unknown }).item as never);
+          events.push(frame.value as never);
         } else if (frame.type === "end" || frame.type === "error") {
           return;
         }

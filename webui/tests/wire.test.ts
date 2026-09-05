@@ -10,6 +10,7 @@ import {
   RemoteEventClient,
   TrajectoryBuffer,
   applyControlFrame,
+  resetWebTokenCache,
 } from "../src/wire";
 
 // ---------- two-envelope RPC ----------
@@ -72,6 +73,46 @@ describe("rpc: two-envelope unary", () => {
     });
     await rpc("session/page", {}, { fetchImpl, uuid: () => "fixed" });
   });
+
+  it("sends no auth header without a page token", async () => {
+    resetWebTokenCache();
+    const fetchImpl = vi.fn(async (_url, init) => {
+      const headers = new Headers((init as RequestInit).headers);
+      expect(headers.get("authorization")).toBeNull();
+      return new Response(
+        JSON.stringify({
+          type: "server-response",
+          rpcId: "x",
+          result: { ok: true, value: {} },
+        }),
+        { status: 200 }
+      );
+    });
+    await rpc("session/list", {}, { fetchImpl });
+  });
+
+  it("sends Authorization Bearer from the page token", async () => {
+    vi.stubGlobal("location", { search: "?token=secret" } as Location);
+    resetWebTokenCache();
+    try {
+      const fetchImpl = vi.fn(async (_url, init) => {
+        const headers = new Headers((init as RequestInit).headers);
+        expect(headers.get("authorization")).toBe("Bearer secret");
+        return new Response(
+          JSON.stringify({
+            type: "server-response",
+            rpcId: "x",
+            result: { ok: true, value: {} },
+          }),
+          { status: 200 }
+        );
+      });
+      await rpc("session/list", {}, { fetchImpl });
+    } finally {
+      vi.unstubAllGlobals();
+      resetWebTokenCache();
+    }
+  });
 });
 
 // ---------- remote.mux ----------
@@ -129,10 +170,45 @@ describe("RemoteMuxConnection", () => {
     expect(parsed.endpoint).toBe("session.follow");
     expect(parsed.streamId).toBe(handle.streamId);
 
-    sock.serverSend({ type: "item", streamId: handle.streamId, item: { type: "snapshot", records: [] } });
+    sock.serverSend({ type: "item", streamId: handle.streamId, value: { type: "snapshot", records: [] } });
     const frame = await first;
     expect(frame.type).toBe("item");
-    expect((frame as { item: { records: unknown[] } }).item.records).toEqual([]);
+    expect((frame as { value: { records: unknown[] } }).value.records).toEqual([]);
+  });
+
+  it("sends cancel frames shaped exactly {type,streamId} and reads item.value", async () => {
+    const conn = new RemoteMuxConnection({
+      url: "/api/remote.mux",
+      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket,
+    });
+    conn.connect();
+    const sock = FakeWebSocket.instances[0];
+    sock.open();
+
+    const handle = conn.openStream("session.follow", { args: {} });
+    void Promise.resolve();
+    sock.sent.length = 0;
+    handle.close();
+    const cancel = JSON.parse(sock.sent[0]) as { type: string; streamId: number };
+    expect(cancel).toEqual({ type: "cancel", streamId: handle.streamId });
+  });
+
+  it("appends the page token to the mux URL", () => {
+    vi.stubGlobal("location", { search: "?token=abc" } as Location);
+    resetWebTokenCache();
+    try {
+      const conn = new RemoteMuxConnection({
+        url: "/api/remote.mux",
+        WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket,
+      });
+      conn.connect();
+      expect(FakeWebSocket.instances[FakeWebSocket.instances.length - 1].url).toBe(
+        "/api/remote.mux?token=abc"
+      );
+    } finally {
+      vi.unstubAllGlobals();
+      resetWebTokenCache();
+    }
   });
 
   it("resolves error frames and supports cancel", async () => {

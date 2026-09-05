@@ -155,6 +155,14 @@ class ToolCallIdentityTest(unittest.TestCase):
         out = _run([_tool_chunk(call_id='call_1', arguments='{}'), '', DONE, ''])
         self.assertEqual(_tool_block(out)['name'], '')
 
+    def test_missing_id_close_falls_back_empty_string(self):
+        # 全程无 id → closeBlock 空串 stand-in（translate.ts:90 `callId ?? ''`；
+        # mini 旧版合成 call_{idx} 占位，随 §2.22 F5 对齐移除）
+        out = _run([_tool_chunk(name='ping', arguments='{}'), '', DONE, ''])
+        block = _tool_block(out)
+        self.assertEqual(block['id'], '')
+        self.assertEqual(block['name'], 'ping')
+
     def test_usage_maps_total_tokens_and_cache(self):
         # 上游 mapUsage（translate.ts）：totalTokens = prompt+completion（权威
         # 聚合），cacheRead 取 prompt_tokens_details.cached_tokens，reasoning 取

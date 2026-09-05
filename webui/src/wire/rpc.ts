@@ -6,6 +6,7 @@
 // besides carrier-level 400/404/415). Source: miniharness/web/{envelope,server}.py.
 
 import type { ClientRequest, RpcError, ServerResponse } from "./types";
+import { webToken } from "./auth";
 
 export class RpcFailure extends Error {
   readonly code: string;
@@ -54,9 +55,13 @@ export async function rpc<T = unknown>(
     payload: wrapArgs(payload),
   };
 
+  const token = webToken();
   const res = await fetchImpl(`${base}/api/${method}`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+    },
     body: JSON.stringify(body),
   });
 

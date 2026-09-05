@@ -128,7 +128,8 @@ def _publish_object(root: str, object_path: str, write, sha256: str) -> None:
         try:
             os.link(temporary, object_path)
         except FileExistsError:
-            # 已有对象按同摘要发布：复验既有字节（store.py 去重路径同款）
+            # 已有对象按同摘要发布：复验既有字节（上游 publishImmutableObject 的
+            # digest-verified EEXIST 去重）
             digest = hashlib.sha256()
             with open(object_path, "rb") as existing:
                 for chunk in iter(lambda: existing.read(1 << 16), b""):
@@ -138,9 +139,12 @@ def _publish_object(root: str, object_path: str, write, sha256: str) -> None:
                     "Stored attachment failed integrity verification.",
                     ATTACHMENT_CORRUPT,
                 )
+        # 先丢弃 staging 名再置只读（Windows 硬链接共享只读位，置位后无法
+        # unlink；上游 publishStagedObject 同序）
+        os.unlink(temporary)
+        os.chmod(object_path, 0o400)
         _sync_directory(bucket)
         _sync_directory(os.path.dirname(bucket))
-        os.unlink(temporary)
     except AttachmentError:
         raise
     except OSError as error:
@@ -165,8 +169,19 @@ def _publish_alias(root: str, object_path: str, alias_path: str,
     try:
         os.link(object_path, alias_path)
     except FileExistsError:
-        # 别名已存在：内容寻址保证同摘要同内容，无需重验
-        pass
+        # 别名已存在：复验既有别名指向的字节与预期摘要一致（上游
+        # publishImmutableAlias 的 digest-verified EEXIST；内容寻址只是
+        # 概率性同内容，磁盘上的字节才是权威）
+        digest = hashlib.sha256()
+        with open(alias_path, "rb") as existing:
+            for chunk in iter(lambda: existing.read(1 << 16), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != sha256:
+            raise AttachmentError(
+                "Stored attachment failed integrity verification.",
+                ATTACHMENT_CORRUPT,
+            )
+    os.chmod(alias_path, 0o400)
     _sync_directory(alias_bucket)
 
 
