@@ -66,7 +66,7 @@ flowchart LR
 | 子 agent | `ctx.subagents` | in-process / fork / ACP / Codex / Claude Code / dsh-sdk | `subagent` 等 |
 | Web | `ctx.web` | search / fetch | `web_search` 等 |
 | Skills | `ctx.skills` | local | `skill` 目录/加载工具 |
-| 持久化 | `ctx.sessionPersistence` | JSONL / SQLite | —（订阅 `session/event`） |
+| 持久化 | `ctx.sessionPersistence` | JSONL（`session-persistence-jsonl`；released 旧格式经相邻迁移链读入） | —（订阅 `session/event`） |
 | 审批/交互 | `ctx.approval` / `ctx.userQuestions`（`ask()` API） | — | —（`tools/pre-execute` 拦截） |
 | 凭据 | `ctx.credentials` | env-over-.env | —（按操作解析） |
 | 设置 | `ctx.settings` | file 后端 | —（配置热更新） |
@@ -81,7 +81,7 @@ flowchart LR
 flowchart LR
   subgraph SEAM["能力扩展口 = 三角色缺一不可"]
     D["Service Definition&lt;br/&gt;ctx.llm / ctx.fs / ctx.shell / ctx.sandbox&lt;br/&gt;ctx.subagents / ctx.skills / ctx.sessionPersistence ..."]
-    P["Service Provider&lt;br/&gt;llm-deepseek / local / pwsh / sandbox-local&lt;br/&gt;in-process / fork / ACP / JSONL / SQLite ..."]
+    P["Service Provider&lt;br/&gt;llm-deepseek / local / pwsh / sandbox-local&lt;br/&gt;in-process / fork / ACP / JSONL ..."]
     C["Consumer（模型面向工具）&lt;br/&gt;bash / terminal / read_file / edit&lt;br/&gt;web_search / subagent / skill ..."]
   end
   subgraph WORLD["共享执行世界 —— Provider 联动迁移"]
@@ -142,12 +142,12 @@ flowchart LR
 
 | 面 | 包组（包数） | 职责 |
 |---|---|---|
-| **Web GUI 宿主端** | `packages/host`（8） | 共享 API 网关 `ctx.apiProxy`（apiproxy）+ HTTP 路由载体 `ctx.webServer`（webserver）+ SPA 静态托管 + 目录选择扩展口 `ctx.directoryPicker` + 插件清单远程接口。配套 `docs/subsystems/web-server.md`、workspace.md |
-| **Web GUI 浏览器端** | `packages/client`（40） | 浏览器 shell（web）、对象层（runtime：ConnectionController→SessionManager→Session，React-free）、**slot 组合系统**（`ctx.slots.register`，声明式 UI 扩展点）、connection（浏览器↔宿主 RPC/SSE）、30+ 个 `ui-*` 功能插件（会话、工具调用树、子 agent、goal、job、权限、计划、模型选择等）。纪律：组件只见四份 props 派生数据，业务数据永远在对象层，UI 从不写 session 日志 |
+| **Web GUI 宿主端** | `packages/host`（8） | HTTP 路由载体 `ctx.webServer`（webserver）+ SPA 静态托管（frontend-static）+ 目录选择扩展口 `ctx.directoryPicker` + 插件清单远程接口（plugin-inventory）。演进：共享 API 网关 `ctx.apiProxy`（apiproxy）已在 alpha.1 删除，web 载体职责收敛到 `packages/api/gateway`（WS mux）+ `packages/api/session-controller`（typert 一元 RPC）。配套 `docs/subsystems/web-server.md`、workspace.md |
+| **Web GUI 浏览器端** | `packages/client`（40） | 浏览器 shell（web）、对象层（runtime：ConnectionController→SessionManager→Session，React-free）、**slot 组合系统**（`ctx.slots.register`，声明式 UI 扩展点）、connection（浏览器↔宿主 HTTP + WebSocket：POST 一元 RPC + `/api/remote.mux` 流）、30+ 个 `ui-*` 功能插件（会话、工具调用树、子 agent、goal、job、权限、计划、模型选择等）。纪律：组件只见四份 props 派生数据，业务数据永远在对象层，UI 从不写 session 日志 |
 | **远程 BFF / RPC** | `packages/api`（2）、`packages/typert`（4） | typert 从 Host 类型生成调用描述与 Client Remote 投影；gateway 实现 `ctx.typertGateway` 一元 RPC；remotes 拥有 Agent/Session 查找 BFF 策略。方向：remotes → gateway → connection → webserver。配套 `docs/subsystems/typert.md`、`docs/api-gateway.md` |
 | **跨进程 SDK** | `packages/sdk`（3） | JSON-RPC 协议栈：protocol（wire 协议定义）、client（TS 客户端）、server（stdio JSON-RPC 服务器插件）。Python 侧 `python/sdk` 是同协议的另一实现 |
 | **ACP / Hooks** | `packages/acp`（1）、`packages/hooks`（3） | acp = 仅自动化用途的 Agent Client Protocol 服务器；hooks = Claude Code / Codex hook 桥接（SessionStart、PreToolUse、PostToolUse、Stop）+ 共享 wire 协议库 |
-| **会话数据面** | `packages/session`（13）、`packages/session-query`（4） | 持久化扩展口 + JSONL/SQLite 后端 + 投影扩展口 + 标题 + 上报 + session-query（逻辑语料、lineage 血缘、事件关系、语义过滤、SQLite FTS 全文检索）。配套 docs/subsystems/persistence.md、session-projection.md、session-query.md |
+| **会话数据面** | `packages/session`（18）、`packages/session-query`（4） | 持久化扩展口 + JSONL 后端（`session-persistence-jsonl`）+ 相邻格式迁移链（`session-format` / `-catalog` / `-v0-to-v1` / `-v1-to-v2`）+ 投影扩展口 + 标题 + 上报 + session-query（逻辑语料、lineage 血缘、事件关系、语义过滤、SQLite FTS 全文检索）。配套 docs/subsystems/persistence.md、session-projection.md、session-query.md |
 | **协作与状态** | `packages/goal`、`schedule`、`feedback`、`plan`、`todo`、`context`、`guard`、`identity`、`storage`、`workspace` | 同会话目标（goal）、定时跟进（schedule）、人类反馈（feedback）、计划模式（plan）、todo 工具、注入式上下文（context）、循环卫生守卫（guard：重复调用提醒 + tools/execute 超时执行器）、匿名身份、存储中心、工作区实体 |
 | **互操作与早期包** | `packages/mcp`（1）、`packages/e2b`（3）、`packages/extensions`（4） | mcp-client 把外部 MCP 服务器工具注册进 `ctx.tools`；e2b = 沙箱 POC（sandbox + FS/subprocess 适配器）；extensions = agent 自我修改（实时插件/服务检视 + 模型编写的插件挂载/卸载） |
 | **支撑基础设施** | `packages/boot`、`test-support`、`util`、`examples`、`runtime-diagnostics` | 共享 app-bin 启动胶水；dev/test 基础设施（testkits、invariants、replay、mock LLM、Loader smokes）；零依赖工具库（`Branded<B>`、home 路径、超时、保留期）；演示 bundle；运行时诊断/硬性规定注册表 |
@@ -206,9 +206,9 @@ flowchart LR
 1. **唯一数据源。**`Session` 是一条只追加、不修改的 `SessionEvent` 日志。模型的消息历史不是另外存出来的，而是每次用 `deriveMessages()` 从日志现算——回放也等于重新派生一遍。相比"内存一份、磁盘一份"的常规做法，没有第二份副本，就没有两份数据对不上的问题。
 2. **模型可见 ⟺ 已记录。**这是唯一数据源的直接推论：历史是派生视图，那么模型能看到的任何内容，都必须能从日志重建。反过来，想给模型加一种新输入，就必须先加一种新的 session 事件（扩展 `SessionEventMap`，再写"从日志渲染它"的代码）。
 3. **可合并扩展。**常规框架加事件类型往往要改核心包；dsh 用 TypeScript 的 `declare module` 声明合并，插件就能把新类型直接"塞"进 `SessionEventMap`——类型系统本身成了扩展点，这是相当少见的设计。
-4. **表面（surface）机制。**三种"产生消息"的事件（`user/message`、`assistant/message`、`tool/result`）都带 `surfaceOp`，取值 `append` 或 `replace`。投影时 `append` 按序排列，`replace` 整体替换旧的那一条。后面 5.2 节会看到，上下文压缩就是靠 `replace` 落地的——压缩不改日志，只追加一条替换事件。
+4. **表面（surface）机制。**三种"产生消息"的事件（`user/message`、`assistant/message`、`tool/result`）都带 `surfaceOp`，取值 `append` 或 `{op:'replace', start, end}`（区间遮蔽）。投影时 `append` 按序排列，`replace` 整体替换旧的那一段。后面 5.2 节会看到，上下文压缩就是靠 `replace` 落地的——压缩不改日志，只追加一条替换事件（检查点载体是 `user/message`，不是被替换的 assistant 消息）。
 5. **无损 JSON 强制。**`append()` 在写入源头做深度校验并冻结，序列化不了的东西（包括非有限浮点数）当场抛错。坏事件在源头就被拦住，进不了日志——日志里永远只有合法的数据。
-6. **崩溃恢复。**重载时发现 turn 没闭合（进程半路崩了），常规做法是截断或回滚；dsh 不这么做——大 turn 可能非常巨大，截断会丢内容。做法是合成一条 `turn/end { reason: interrupted }` 把括号补平衡：宁可标记"这次被打断了"，也不能悄悄丢掉已经发生过的事实。
+6. **崩溃恢复。**重载时发现 turn 没闭合（进程半路崩了），常规做法是截断或回滚；dsh 不这么做——大 turn 可能非常巨大，截断会丢内容。做法是合成一条 `turn/end { reason: {kind:'interrupted'} }` 把括号补平衡：宁可标记"这次被打断了"，也不能悄悄丢掉已经发生过的事实。
 
 </div>
 
@@ -221,11 +221,11 @@ flowchart LR
     E1["user/message · surfaceOp=append"]
     E2["assistant/message · append"]
     E3["tool/result · append"]
-    E4["assistant/message · surfaceOp=replace&lt;br/&gt;（压缩替换旧消息）"]
+    E4["user/message · surfaceOp=replace&lt;br/&gt;（压缩检查点替换旧消息区间）"]
   end
   PROJ["deriveMessages() 纯投影"]
   HIST["模型历史 messages（不另存副本）"]
-  PERS["JSONL / SQLite 持久化&lt;br/&gt;按 seq 顺序追加与回放"]
+  PERS["JSONL 持久化&lt;br/&gt;按 seq 顺序追加与回放"]
   NEWEV["新增模型可见输入&lt;br/&gt;= 新增 SessionEvent 类型"] -.约束.-> LOG
   LOG --> PROJ --> HIST
   LOG --> PERS
@@ -235,7 +235,7 @@ flowchart LR
 <p class="mermaid-note">读图顺序：日志永远是起点，投影和持久化都是它的下游，两者互不直接打交道。建议拿支笔，沿一条 user/message → assistant/message → tool/result 的路径把 seq 编号手推一遍，比盯着图看十遍有用。</p>
 
 !!! example "示例走查（surfaceOp=replace）"
-    常见的疑问是"replace 之后历史还完整吗"。走一遍就清楚了：上下文压力触发压缩后，日志尾部会追加一条 `assistant/message { surfaceOp: "replace", references: seq=3 }`——投影时它整体替换第 3 条旧消息，但日志本身只做追加，`seq` 依然连续。于是模型下一次请求看到的历史，永远是"从完整日志实时派生"的版本，绝不会读到过期快照。这也是"不另存"的用意所在：只要派生是纯函数，持久化和恢复就永远不用操心一致性问题。
+    常见的疑问是"replace 之后历史还完整吗"。走一遍就清楚了：上下文压力触发压缩后，日志会追加一条压缩检查点 `user/message`，其 `surfaceOp: {op:'replace', start, end}` 指向被摘要替换的消息区间——投影时它整体遮蔽该区间并替换为摘要，但日志本身只做追加，`seq` 依然连续。于是模型下一次请求看到的历史，永远是"从完整日志实时派生"的版本，绝不会读到过期快照。这也是"不另存"的用意所在：只要派生是纯函数，持久化和恢复就永远不用操心一致性问题。
 
 ### 4.3 能力扩展口三角色（产品可替换性的来源）
 

@@ -2,7 +2,7 @@
 
 > 本章回答一个问题：使用者怎么把 dsh 跑起来？前六章讲的是内核（会话、总线、工具、loop、持久化、扩展口），这一章讲的是外壳——所有能"启动一个 dsh 进程"的路径，以及它们各自把什么约定暴露给外部。
 >
-> 对应 dsh 真实源码：`apps/cli` + `packages/boot/app-boot` + `packages/bundle/{headless,web-app}` + `packages/{acp,sdk,hooks}`。mini 复现了 headless 一条（`miniharness/cli/headless.py`）与 web 的传输层（`miniharness/web/`，§7.5），其余入口在本章做系统解读并标注复现规划。
+> 对应 dsh 真实源码：`apps/cli` + `packages/boot/app-boot` + `packages/bundle/{headless,web-app}` + `packages/{acp,sdk,hooks}`。mini 复现了 headless（`miniharness/cli/headless.py`）、web 传输层（`miniharness/web/`，§7.5）、官方 SDK 协议最小子集与互操作（§7.6）与 ACP（§7.7）及 hooks 桥（§7.8），各入口现状以对应小节为准。
 
 ## 7.1 总览：一切入口都是 profile
 
@@ -148,7 +148,7 @@ hooks 的价值在于迁移成本：已经写好 Claude Code 钩子（安全策�
 
 ## 7.5 复现：web 传输层（`miniharness/web/`）
 
-> 对应 dsh 真实源码：`packages/client/connection`（两信封 RPC + HTTP 载体）+ `packages/api/gateway`（`stream-protocol.ts` + `stream-server.ts`：WS `/api/remote.mux` + `$events` 注册表）+ `packages/api/session-controller`（辅助 Agent 入口，Typert Remote `session/*`）+ `packages/api/remotes`（Remote 事件瀑布 + `$events/result`）+ `packages/host/frontend-static`（SPA 静态载体）。前端（`packages/bundle/web-app` + `packages/client`）以 vanilla SPA 简化复现（§7.5.4）。契约已于 2026-08-30 全面重组到 alpha.1 真实契约（`packages/host/apiproxy` 已在 alpha.1 删除，见 `status/mini-harness/migration-log.md` 步骤 66-70）。
+> 对应 dsh 真实源码：`packages/client/connection`（两信封 RPC + HTTP 载体）+ `packages/api/gateway`（`stream-protocol.ts` + `stream-server.ts`：WS `/api/remote.mux` + `$events` 注册表）+ `packages/api/session-controller`（Typert Remote `session/*`）+ `packages/api/remotes`（Remote 事件瀑布 + `$events/result`）+ `packages/host/frontend-static`（SPA 静态载体）。契约演进：上游曾以 `host/apiproxy` 的 HTTP+SSE 承载全部 web 面，alpha.1 起 apiproxy 删除、重组为「typert 一元 RPC + 单 WebSocket mux」，mini 全面跟随此形态。前端（`packages/bundle/web-app` + `packages/client`）mini 以独立 React 工程 `webui/` 承载产品面、vanilla SPA 作教学参照（§7.5.4）。
 >
 > 分层：`web/stream_protocol.py`（§7.5.1）→ `web/api.py`（§7.5.2）→ `web/mux.py` + `web/events.py` + `web/streams.py`（§7.5.3）→ `web/server.py` + `web/downloads.py` + `web/launcher.py`（§7.5.4）→ `web/approvals.py` + `web/frontend.py` + `web/static/`（§7.5.4）。
 
@@ -163,11 +163,11 @@ alpha.1 把通信收拢为**单一两信封协议**（对齐 `packages/client/co
 
 流式调用不再走 SSE 专属宿主流，而是 WebSocket `/api/remote.mux` 上的一套**Remote 流帧协议**（`stream_protocol.py`，对齐 `stream-protocol.ts`）：
 
-- 客户端 → 服务端：`open`（`{streamId, endpoint, payload, referrer?}`）、`cancel`（`{streamId, endpoint, payload, reason?}`）。
-- 服务端 → 客户端：`item`（`{streamId, item}`）、`error`（`{streamId, error:{code,message?}}`）、`end`（`{streamId, ok, error?}`）。
+- 客户端 → 服务端：`open`（恰 `{streamId, endpoint, payload}`）、`cancel`（恰 `{streamId}`）。
+- 服务端 → 客户端：`item`（`{type:'item', streamId, value}`，**value 恒在**——null 是合法 wire 值，`JSON.stringify` 会丢 undefined 故 mini 显式补 null）、`error`（`{type:'error', streamId, error:{code, message, details}}`，**error 帧即终态、不再补 end**）、`end`（`{type:'end', streamId}`，纯终态帧——上游早期 `{ok, error?}` 形状已收敛为「独立 error 帧 + 纯 end」，失败路径不发 end）。
 - 网关内部端点 `$events`（宿主→客户端事件线）与 `$events/result`（客户端→宿主把事件传回宿主）——`open_stream("$events")` 一旦打开即返回 `ready`，宿主 `api-session/*` 事件线逐帧转发；`$events/result` 是 unary 结算帧（`parse_remote_event_result_payload`），供 waterfall 审批等异步通道回投结果。
 
-`server_request`/`server_response`/`rpc_result_ok/error` 等构造器对齐上游；错误投影链：`TypertRemoteFailure`/`TypertLookupFailure` 保留 `failure.cancelled`（`{code:'gateway/cancelled'}`）或 `{code:'gateway/internal'}`。互操作锚点：`tests/test_web_stream_protocol.py` 逐项断言 open/cancel/item/error/end 全形与 `$events/result` payload 判定（含**无损 JSON 判定**）。
+信封构造器（`client_request`/`server_response`/`rpc_result_ok/error`/`rpc_error`）对齐上游 `packages/client/connection`；传输层兜底错误投影 `transport_error` → `{code:'gateway/cancelled'}`（abort 语义）或 `{code:'gateway/internal'}`。互操作锚点：`tests/test_web_stream_protocol.py` 逐项断言 open/cancel/item/error/end 全形与 `$events/result` payload 判定（含**无损 JSON 判定**）。
 
 ### 7.5.2 会话服务：unary 方法（`web/api.py`）
 
@@ -197,7 +197,7 @@ alpha.1 把通信收拢为**单一两信封协议**（对齐 `packages/client/co
   - `session.control`：首帧 baseline `{queues, jobs, projections}`，之后 queue/jobs/projection 替换帧（对齐 `control.ts:67-124`）。
   - 未知 endpoint → 抛 `RemoteStreamError`。
 
-**session/queue 快照**：`agent/inbox/spliced` 广播点观察到的是 **pre-splice** inbox（`Inbox._mutate` 先落日志后改内存、emit 同步），快照把 splice 的 `start/removedCount/inserted` **重投影**到 pre-splice 列表上（对齐 api-proxy.ts:1300-1323 `queueItems`）；placement 三态：next-turn→`queued`、next-step 且 `source.kind=='user'`→`steering`、其余→`context`。
+**session/queue 快照**：`agent/inbox/spliced` 广播点观察到的是 **pre-splice** inbox（`Inbox._mutate` 先落日志后改内存、emit 同步），快照把 splice 的 `start/removedCount/inserted` **重投影**到 pre-splice 列表上（对齐 `packages/api/session-controller/src/control.ts` queueItems）；placement 三态：next-turn→`queued`、next-step 且 `source.kind=='user'`→`steering`、其余→`context`。
 
 ### 7.5.4 HTTP/WS 载体 + 审批桥 + 静态服务 + 浏览器前端（`web/server.py` + `web/downloads.py` + `web/launcher.py` + `web/approvals.py` + `web/frontend.py` + `web/static/`）
 
@@ -216,7 +216,7 @@ alpha.1 把通信收拢为**单一两信封协议**（对齐 `packages/client/co
 **产品化前端（`webui/`，仓库顶层独立 React+TS+Vite 工程，推荐）**：会话列表/新建（`session.list`/`session.create`）、Trajectory 折叠（选中会话 `session.follow` 拉 snapshot + 按 seq 去重增量）、审批面板（`$events` waterfall → Allow once / Reject → `$events/result` 结算，outcome∈APPROVAL_OUTCOMES 之外 fail-closed）、队列/作业面板（`session.control` baseline+替换帧）。开发期 Vite dev server 把 `/api` 与 `/api/remote.mux` 代理到本地 Python 后端（`vite.config.ts`）；生产期 `vite build` → `MINIHARNESS_WEBUI_DIST=webui/dist` 让后端静态服务承载。`src/wire/` 是纯 TS 契约客户端（无 UI 依赖，vitest 单测 mock fetch/WS），`src/app/` 是 React 编排，`src/ui/` 是无状态展示组件。
 **教学参照（`web/static/`）**：vanilla SPA（index.html + app.js + style.css，无构建步），消费的是 alpha.1 已删除的旧 SSE wire（`events.mux`/`respond`/`host.describe`），对新后端不工作——仅作历史/教学说明，不实跑。
 
-**教学简化（须标注）**：心跳 = transport 级（`ws_ping_interval=2 / ws_ping_timeout=4`，对齐上游 gateway heartbeat：缺省 2s Ping + 连续 2 周期无 Pong terminate，`web/launcher.py` `uvicorn_options`）；`$events`/`follow`/`control` 无 `since` 恢复游标（重连重拉全量）；载荷 schema 校验在 `WebApi` 内做（上游先过 zod）；session 日志事件是 mappingproxy/tuple 冻结形态（`core/session/json.py` `deep_freeze`），序列化前经 `thaw` 还原；前端产品化工程 `webui/` 走新 wire 但不整体移植上游 `packages/client` 40 个 UI 模块——无 slot 组合；Overview 时间线/虚拟化/搜索已按上游概念补入 webui Trajectory（置**Overview 折叠跳转 + 虚拟化窗口 + 全文搜索**，2026-09-02 R5，见 verified-diffs §2.17），`since` 游标则与后端 wire 一致（上游 alpha.1 本无该字段，verified-diffs §3.4）；`web/static/` vanilla SPA 是旧 wire 教学参照（不实跑）。回归测试：`tests/test_web_{stream_protocol,events,mux,streams,approvals,server,export,frontend}.py`（真实 uvicorn + httpx/websockets）+ `webui/` 的 vitest（wire 层 + trajectory 模型/搜索/组件，`pnpm test` / `pnpm typecheck` / `pnpm build`）。
+**教学简化（须标注）**：心跳 = transport 级（`ws_ping_interval=2 / ws_ping_timeout=4`，对齐上游 gateway heartbeat：缺省 2s Ping + 连续 2 周期无 Pong terminate，`web/launcher.py` `uvicorn_options`）；`$events`/`follow`/`control` 无 `since` 恢复游标（重连重拉全量）；载荷 schema 校验在 `WebApi` 内做（上游先过 zod）；session 日志事件是 mappingproxy/tuple 冻结形态（`core/session/json.py` `deep_freeze`），序列化前经 `thaw` 还原；前端产品化工程 `webui/` 走新 wire 但不整体移植上游 `packages/client` 40 个 UI 模块——无 slot 组合；Overview 时间线/虚拟化/搜索已按上游概念补入 webui Trajectory（Overview 折叠跳转 + 虚拟化窗口 + 全文搜索，见 verified-diffs §2.17），`since` 游标则与后端 wire 一致（上游 alpha.1 本无该字段，verified-diffs §3.4）；`web/static/` vanilla SPA 是旧 wire 教学参照（不实跑）。回归测试：`tests/test_web_{stream_protocol,events,mux,streams,approvals,server,export,frontend}.py`（真实 uvicorn + httpx/websockets）+ `webui/` 的 vitest（wire 层 + trajectory 模型/搜索/组件，`pnpm test` / `pnpm typecheck` / `pnpm build`）。
 
 运行方式：
 
@@ -225,7 +225,7 @@ python -m miniharness.cli --profile web          # 走启动器（缺 key → ad
 MINIHARNESS_WEB_PORT=8000 python -m miniharness --profile web
 ```
 
-依赖是可选 extra：`pip install "miniharness[web]"`（fastapi + uvicorn）；测试 `tests/test_web_server.py`（真实 uvicorn 线程 + httpx——SSE 增量读依赖真实 HTTP 传输，TestClient 会缓冲响应体）。
+依赖是可选 extra：`pip install "miniharness[web]"`（fastapi + uvicorn + websockets）；测试 `tests/test_web_server.py` 用真实 uvicorn 线程 + httpx/websockets——WS mux 流式与跨线程唤醒依赖真实 transport，TestClient 的进程内缓冲无法覆盖。
 
 ## 7.6 复现：JSON-RPC 信封最小子集（`miniharness/protocol/sdk.py`）
 
@@ -283,8 +283,8 @@ mini 的同步近似：上游是字节流 + async，mini 是"行馈送 + 内存�
 
 ### 7.7.1 握手与会话
 
-- `initialize` → `agentInfo.name == 'deepseek-harness-acp'`、`promptCapabilities.image` 按 worker 实际能力**条件声明**（`supports_acp_image_prompts(attachment, adapter)`：附件服务在场且 adapter 声明 image 输入模态时置 `true`，否则 `false`）、`audio`/`embeddedContext` 恒 `false`、`authMethods: []`——本桥承诺 text / resource_link，并在能力具备时受理 image；
-- `new_session`：cwd 必须绝对路径；`additionalDirectories` 非空拒绝；`mcpServers` 非空拒绝；mint sessionId；
+- `initialize` → `agentInfo.name == 'deepseek-harness-acp'`、`promptCapabilities.image` 按 worker 实际能力**条件声明**（`supports_acp_image_prompts(attachment, adapter)`：附件服务在场且 adapter 声明 image 输入模态时置 `true`，否则 `false`）、`audio`/`embeddedContext` 恒 `false`、`authMethods: []`、`sessionCapabilities:{close, list, resume}`（mini 不宣称 mcpCapabilities.http）——本桥承诺 text / resource_link，并在能力具备时受理 image；
+- `new_session` / `resume`（selectionFor 恢复路由）/ `list`（keyset 分页）/ `close`：cwd 必须绝对路径；`additionalDirectories` 非空拒绝；`mcpServers` 非空拒绝；mint sessionId；
 - `cancel`：未知 session **no-op**，已知 session 取消 agent。
 
 ### 7.7.2 prompt 的结算语义
@@ -395,7 +395,7 @@ matches_matcher(None, "Bash", "codex")                # True：match-all 哨兵
 
 | 入口 | 对谁说话 | 载体 | mini 对应 |
 |---|---|---|---|
-| `dsh --profile web` | 人（浏览器） | HTTP + 浏览器客户端 | （观察清单） |
+| `dsh --profile web` | 人（浏览器） | HTTP + 浏览器客户端 | `miniharness/web/`（两信封 unary + WS mux + `webui/` React 前端，§7.5） |
 | `dsh --profile headless "task"` | 人（shell 一次性任务） | 进程（stdout/退出码） | `miniharness/cli/headless.py` |
 | `dsh --profile <自定义>` | 组合层自定义 | 任意 | （可经 boot/patch 扩展） |
 | ACP 服务器 | 自动化程序 | stdio JSON-RPC | `miniharness/protocol/acp.py`（握手/会话/prompt/取消/审批桥） |

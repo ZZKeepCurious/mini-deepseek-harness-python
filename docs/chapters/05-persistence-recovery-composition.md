@@ -11,13 +11,13 @@
     - **`repair_and_replay`**：本章为逐条 `append` 重放；实现为 seed 回放——从 `session/end-seed` 标记重放，且修复合成的 closers 经 `commit_repair` 持久化落盘（`core/session/persistence.py`，基类接口 + JSONL 后端实现）。
     - **`turn/end` reason**：本章差异表写 `reason = "interrupted"` 字符串；实现为对象 `{kind:'interrupted'}`（配合 `repair_interrupted_turn` 合成 closers，见第 1 章横幅）。
     - **崩溃演示**：本章 §5.2"kill 进程"实为手动构造未闭合回合来模拟崩溃尾部，非真实 kill（`tests/test_persistence_boot.py` 可复核）。
-    - **简化载体**：配置为 YAML（pyyaml 硬依赖承载）+ `!!js` 仅 `process.env.<NAME>` 子集。JSONL 载体**已对齐上游默认形态**：zstd 拼接帧容器 + 一行一事件（V2，模型流内嵌 `assistant/message`）+ format.ts 目录布局（`root/--<projectKey(cwd)>--/<encodeSegment(id)>/session.jsonl[.zstd]`，编码互斥/遗留布局响亮拒绝），见 `zstd_frames.py` 与 `tests/test_persistence_zstd.py`。
+    - **简化载体**：配置为 YAML（pyyaml 硬依赖承载）+ `!!js` 仅 `process.env.<NAME>` 子集。JSONL 载体**已对齐上游默认形态**：zstd 拼接帧容器 + 一行一事件（V2，模型流内嵌 `assistant/message`）+ format.ts 目录布局（`root/--<projectKey(cwd)>--/<encodeSegment(id)>/session.v2.jsonl[.zstd]`——generation 版本化文件名，v0 旧名 `session.jsonl` 保留拒读；编码互斥/遗留布局响亮拒绝），见 `zstd_frames.py` 与 `tests/test_persistence_zstd.py`。
 
 ## 5.1 这一章要做什么
 
 前四章的 `Session` 都在内存里，进程一退什么都没了。这一章解决两件事：
 
-1. **持久化**：`SessionPersistence` 扩展口 + JSONL / SQLite 双后端（可互换），以及围绕它的一整套纪律：`flush` 栅栏、fail-closed 加载、`interrupted` 崩溃修复。
+1. **持久化**：`SessionPersistence` 扩展口 + 一整套纪律：`flush` 栅栏、fail-closed 加载、`interrupted` 崩溃修复。上游当前基线（alpha.1）的持久化后端只有 JSONL 一种（`session-persistence-jsonl`）；本章为演示「扩展口可换实现」，教学 artifact 额外给了一个 SQLite 第二后端（教学扩展，非上游对齐物——上游的 SQLite 只在 `session-query` 检索域使用）。
 2. **组合加载**：`boot()` 把配置、补丁、插件串成一次启动：加载配置 → 按 id 打补丁 → 依赖驱动激活 → 断言全部就绪。
 
 本章的验收是端到端的：**kill 一个进行中的回合再重启，日志平衡、可继续对话**。`python -m miniharness.demo` 演示的就是这个。
@@ -295,10 +295,10 @@ python -m unittest tests.test_persistence_boot -v
 | 细节 | 真实 dsh | 我们的简化 |
 |---|---|---|
 | JSONL 存储 | 默认 checksum + Zstandard 拼接帧容器（可选原始行） | **已对齐**：默认 zstd 帧容器 + 一行一事件（V2），明文模式可配（本章教学代码仍为明文逐行） |
-| SQLite 列 | `(session_id, seq, type, time, data, source_event_seqs, surface_op)` | `(session_id, seq, type, data)` |
-| `time` 字段 | 每个事件 epoch 毫秒 | 无 |
+| SQLite 后端 | 上游 alpha.1 **无 SQLite 持久化后端**（唯一后端是 JSONL；SQLite 仅用于 session-query 检索域） | 教学扩展：本章 SQLite 第二后端仅演示扩展口可换实现，非上游对齐物 |
+| `time` 字段 | 每个事件 epoch 毫秒 | 教学 SQLite 后端无（JSONL 后端已对齐） |
 | `sourceEventSeqs` | `assistant/message` 内嵌流且不能携带 `sourceEventSeqs`（fail-closed 拒绝）；其余 surface 事件可带非空引用 | 无（教学投影为扁平字符串） |
-| `session/seed` + `firstLiveSeq` | 构造种子事件，标记可回放起点 | 无 |
+| 可回放起点 | `session/end-seed` marker：fork 子会话恒 `{inherited:true}`、restore/普通 seed 补 `{}`；`inherited_cut` 由最后一个 marker 的 seq 派生（seeded 无 marker / unseeded 有 marker 双向 corrupt） | **已对齐**（`persistence.py inherited_cut`） |
 | 活会话 load | 等权威内存快照持久化后才允许加载 | 未实现（检查点练习 1 的方向） |
 | `locate(meta)` | 多会话按元数据定位 | 无 |
 

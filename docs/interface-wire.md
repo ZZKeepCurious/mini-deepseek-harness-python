@@ -3,7 +3,7 @@
 > 定位：这是 `mini-deepseek-harness` 前后端的**唯一耦合面**——`miniharness/web/` 传输层对
 > 前端发布的所有接口契约（信封、帧、错误语义）。产品化前端（仓库顶层 `webui/`）与任何第三方
 > 客户端只依赖本契约，禁止 import Python 内部。正文与当前实现逐条对应；契约本质上对齐上游
-> `dsh-v0.1.2-alpha.1`（`packages/client/connection` + `packages/api/gateway` +
+> `dsh-v0.1.3-alpha.1`（`packages/client/connection` + `packages/api/gateway` +
 > `packages/api/session-controller` + `packages/api/remotes` + `host/frontend-static`），
 > mini 侧保留简化的差异项在 `status/mini-harness/verified-diffs.md` §3.4 登记。
 >
@@ -142,19 +142,23 @@ subagent/catalog-diagnostic subagent/unauthorized
 
 ```json
 {"type": "snapshot",
- "header": {"sessionId": "...", "cwd": "...?", "parentSessionId": "...?", "origin": "...?"},
+ "header": {"version": 2, "id": "...", "createdAt": ..., "isSeeded": false,
+            "cwd": "...?", "parentSession": "...?", "origin": "...?",
+            "delegationDepth": ...?, "agentPreset": "...?"},
  "cursor": <seq>,
- "records": [<事件信封>...],
+ "records": [{"type": "event", "event": <事件信封>}...],
  "hasMore": <bool>,
- "projections": {}}
+ "projections": {"asOfSeq": <seq>, "values": {}}}
 ```
 
-  事件信封统一形态 `{type, seq, time, data}`（`seq` 0 基严格递增：`seq == 追加前
-  日志长度`，对齐上游 EventLog `seq: this.log.length` 后 push；首事件 seq=0）。
-  `maxMessages` 溢出时只取尾段并置 `hasMore=true`；`cursor` = 日志条数 = 下一条
-  活体帧应达 `seq`。
-- 续帧：`{"type":"event", "event": <事件信封>}`，首条活体帧 `event.seq == snapshot.cursor`，
-  其后 `event.seq` 严格递增；客户端按 seq 去重拼接（webui `TrajectoryBuffer`）。
+  header 是平铺 `SessionWireHeader`（`api.py _wire_header`，上游 history.ts wireHeader：
+  `seedLength` 曾短暂引入、同 tag 即回退为 `isSeeded` boolean）；records 严格
+  `{type:'event', event}` 包装（V2 起不再有 chunkrow 打包 record）。事件信封统一形态
+  `{type, seq, time, data}`（`seq` 0 基严格递增：`seq == 追加前日志长度`，对齐上游
+  EventLog `seq: this.log.length` 后 push；首事件 seq=0）。`maxMessages` 溢出时只取尾段
+  并置 `hasMore=true`；`cursor` = 最后一条已提交事件 seq（0 基 inclusive，空日志 -1）。
+- 续帧：`{"type":"event", "event": <事件信封>}`，活体帧从 `snapshot.cursor + 1` 起、
+  `event.seq` 严格递增；客户端按 seq 去重拼接（webui `TrajectoryBuffer`）。
 - 错误：`gateway/arguments-invalid` / `session/not-found`（未知会话）。
 - 已核实（对齐交付，见 §4.4）：上游 wire **无 `since` 字段**——`follow`/`control` 每次
   (重)连 = 重开流重投完整 `snapshot`/`baseline`，客户端按 seq 去重即 gap-free；mini 同款，
@@ -170,13 +174,17 @@ subagent/catalog-diagnostic subagent/unauthorized
 {"type": "baseline",
  "value": {"queues": {"<sessionId>": [<queue item>...]},
            "jobs":   {"<sessionId>": [<job row>...]},
-           "projections": {}}}
+           "projections": {"<sessionId>": {"asOfSeq": <seq>, "values": {}}}}}
 ```
+
+  control baseline 的 queues/jobs/projections 覆盖**全部 live 会话**（空会话也各放一条
+  空块）。
 
 - 续帧（替换语义）：`{"type":"queue", "sessionId": "...", "items":[...]}`（inbox 拼接时）、
   `{"type":"jobs", "sessionId": "...", "jobs":[...]}`（作业变更时）、会话 dispose →
   `{"type":"queue", "sessionId": "...", "items":[]}`。
-- queue item：`{id, placement: "queued"|"steering"|"context", message: {id, content:[...]}}`；
+- queue item：`{id, placement: "queued"|"steering"|"context", message: {id, content:[...]}}`
+  （user source 的 item 另带可选 `rpcId`，对应上游 promptRpcId）；
   job row 键：`id / kind / label / status / startedAt / detail / finishedAt`（存在才带）。
 
 ### 4.3 `$events`（远程事件流，`web/events.py`）
@@ -269,8 +277,9 @@ outcome 归一（`APPROVAL_OUTCOMES = {allowed-once, rejected, cancelled, unavai
 - query：`sessionId`（必须）、`includeDescendants`（`true`/`false`/缺省，其余 400）。
 - 状态码链：200 / 400 / 404（缺根）/ 501（后端不支持）/ 500；响应头
   `Content-Disposition: attachment; filename="dsh-session-<safe>.zip"`。
-- zip 条目序：根 `session.jsonl` → 后代 `subagents/<safe-id>/session.jsonl`（parentSession BFS
-  + seen-set 去重）→ 媒体 `media/<attachmentId>.<ext>`；压缩等级 0-9。
+- zip 条目序：根制品以**逐字原始文件名**入档（`session.v2.jsonl[.zstd]`，generation 版本化
+  文件名，压缩 0/none 时为 `session.jsonl`）→ 后代 `subagents/<safe-id>/<同名制品>`
+  （parentSession BFS + seen-set 去重）→ 媒体 `media/<attachmentId>.<ext>`；压缩等级 0-9。
 - 错误正文统一私有外壳（`session log export failed to prepare the stored artifact`），不泄路径细节。
 
 ## 9. 错误语义速查

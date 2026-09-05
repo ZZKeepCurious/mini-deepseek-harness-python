@@ -85,7 +85,7 @@ bin.ts → args 解析（--profile/--patch/--dump-config，task 为位置参数�
 
 | 入口 | 形态 | 协议/载体 | 说明 |
 |---|---|---|---|
-| web surface | 浏览器 GUI | HTTP + SSE（`host/apiproxy`）+ JSON-RPC 会话协议（`core/session-jsonrpc`） | 完整产品体验：Trajectory、审批、命令、配置等 |
+| web surface | 浏览器 GUI | HTTP + WebSocket（`packages/api/gateway`：POST 一元 RPC `/api/<endpoint>` + WS `/api/remote.mux` 流）| 完整产品体验：Trajectory、审批、命令、配置等。演进：早期为 `host/apiproxy` 的 HTTP+SSE 载体（apiproxy 已在 alpha.1 删除，重组为 gateway WS mux + typert 一元 RPC） |
 | headless | CLI 一次性任务 | `packages/bundle/headless` | stdout 最后一条非空 assistant 文本；退出码按 turn/end reason；**不支持会话恢复**（见议题 7） |
 | ACP 协议 | 自动化客户端协议 | `packages/acp/acp`（stdio JSON-RPC） | 机器到 agent 的规范接口（会话/审批/工具调用） |
 | SDK 协议 | 官方 SDK | `packages/sdk/protocol` | Python/TS 官方客户端，全会话操控 |
@@ -105,7 +105,7 @@ headless 一次性任务入口（`miniharness/cli/headless.py` + `cli/main.py`�
 
 协议入口最小子集：JSON-RPC 信封（`miniharness/protocol/sdk.py`，07 章 §7.6）、ACP（`miniharness/protocol/acp.py`，07 章 §7.7）、hooks 桥（`miniharness/protocol/hooks.py`，07 章 §7.8）。
 
-web 传输层（`miniharness/web/`，07 章 §7.5）：两信封 RPC（`client-request`/`server-response`，`server.py` 严格 `{args}` 解包）、WebApi unary 会话服务（`api.py`：list/search/create/selectModel/modelCatalog/…/page unary）、Remote 流 wire（`stream_protocol.py`，单条 `/api/remote.mux` WebSocket 承载 open/cancel/item/end/error 帧 + `$events/result` unary 结算）、`$events` 注册表（`events.py`：ready 首帧 + api-session/* 转发 + waterfall）、`session.follow`/`session.control` 流（`streams.py`，follow=snapshot{header,cursor,records,hasMore,projections}+逐帧、control=baseline{queues,jobs,projections}+替换帧）、审批桥（`approvals.py`：async tools/ask 闸门 ↔ `$events` waterfall 经 result 结算 + `approval/asked|decided` 审计）、会话导出下载（`downloads.py`：`GET /api/session.export`，root + 子代理后代 + 被引用媒体 zip，200/400/404/501/500 状态码链，错误走私有信封外壳）、FastAPI 载体（`server.py`，对齐 gateway `stream-server.ts`/`handler.ts` 状态码链 + frontend-static 契约）、`--profile web` 启动器（`launcher.py` + `cli/main.py`）。契约层已全量对齐 alpha.1 真实契约（上游 React 客户端指向 mini 后端可工作）。**浏览器前端二形态**：产品化 `webui/`（仓库顶层独立 React+TS+Vite 工程，只依赖 wire 契约：会话列表/新建、Trajectory（虚拟化窗口 + Overview 折叠跳转 + 全文 search，2026-09-02 R5 闭合）、审批瀑布、队列/作业；`vite build` 产物经 `MINIHARNESS_WEBUI_DIST` 由后端静态承载）+ `web/static/` vanilla SPA（旧 SSE wire 教学参照，不对新后端工作）。
+web 传输层（`miniharness/web/`，07 章 §7.5）：两信封 RPC（`client-request`/`server-response`，`server.py` 严格 `{args}` 解包）、WebApi unary 会话服务（`api.py`：list/search/create/selectModel/modelCatalog/…/page unary）、Remote 流 wire（`stream_protocol.py`，单条 `/api/remote.mux` WebSocket 承载 open/cancel/item/end/error 帧 + `$events/result` unary 结算）、`$events` 注册表（`events.py`：ready 首帧 + api-session/* 转发 + waterfall）、`session.follow`/`session.control` 流（`streams.py`，follow=snapshot{header,cursor,records,hasMore,projections}+逐帧、control=baseline{queues,jobs,projections}+替换帧）、审批桥（`approvals.py`：async tools/ask 闸门 ↔ `$events` waterfall 经 result 结算 + `approval/asked|decided` 审计）、会话导出下载（`downloads.py`：`GET /api/session.export`，root + 子代理后代 + 被引用媒体 zip，200/400/404/501/500 状态码链，错误走私有信封外壳）、FastAPI 载体（`server.py`，对齐 gateway `stream-server.ts` 状态码链 + client/connection 一元信封 + frontend-static 契约）、`--profile web` 启动器（`launcher.py` + `cli/main.py`）。契约层已全量对齐 alpha.1 真实契约（上游 React 客户端指向 mini 后端可工作）。**浏览器前端二形态**：产品化 `webui/`（仓库顶层独立 React+TS+Vite 工程，只依赖 wire 契约：会话列表/新建、Trajectory（虚拟化窗口 + Overview 折叠跳转 + 全文 search）、审批瀑布、队列/作业；`vite build` 产物经 `MINIHARNESS_WEBUI_DIST` 由后端静态承载）+ `web/static/` vanilla SPA（旧 SSE wire 教学参照，不对新后端工作）。
 
 异步化与并行工具执行（`miniharness/core/agent_loop/tool_calls.py` + core/scope async 变体 + `execution_mode` 分类器，手册 12 章）——屏障/滚动池/模型序提交/取消排干与上游 `agent-loop/src/tool-calls.ts` 逐条对齐。
 
@@ -128,7 +128,7 @@ Trajectory 是 **web 专属**的"Agent 的 DevTools"：一个按 turn 组织的�
 数据流：
 会话日志（唯一数据源）
   → session.page RPC（throughSeq/beforeSeq/maxMessages 游标向前分页，按 append-origin 消息边界切页）
-  → ConversationNodeAssembler 折叠（conversation-assembler.ts:133-150）
+  → ConversationNodeAssembler 折叠（`packages/client/ui-conversation/src/client/conversation/assembler.ts`）
       · 折叠窗口 = 当前滚动区间的节点
       · 每个 target（user/assistant/tool/steering…）用独立 definition 物化
   → TrajectorySnapshot = { eventNodes, eventLocations, requests, callSchemas, partial, runningCalls }
@@ -140,7 +140,7 @@ Trajectory 是 **web 专属**的"Agent 的 DevTools"：一个按 turn 组织的�
 
 1. **会话日志**：唯一数据源，Trajectory 只读它，不维护独立数据。
 2. **session.page RPC**：按 `throughSeq`/`beforeSeq` 游标向前分页拉取日志切片，页边界取 **append-origin 消息边界**（保证折叠窗口内消息完整，不劈裂一条消息）。
-3. **ConversationNodeAssembler 折叠**（conversation-assembler.ts:133-150）：把原始事件折叠成可检查记录。折叠窗口 = 当前滚动区间的节点；每个 target（user / assistant / tool / steering…）用**独立 definition**（`match/update/finalNode` 纯函数）物化成自己的记录形状。
+3. **ConversationNodeAssembler 折叠**（`packages/client/ui-conversation/src/client/conversation/assembler.ts`）：把原始事件折叠成可检查记录。折叠窗口 = 当前滚动区间的节点；每个 target（user / assistant / tool / steering…）用**独立 definition**（`match/update/finalNode` 纯函数）物化成自己的记录形状。
 4. **TrajectorySnapshot**（trajectory-contract.ts:60-68）：折叠的成品——由 `eventNodes`（节点表）、`eventLocations`（节点↔事件序号映射）、`requests`、`callSchemas`、`partial`（崩溃未闭合尾部标记）、`runningCalls`（在飞工具调用）六块组成。
 5. **渲染 + 虚拟化**：只挂载可见行窗口（阈值 100 行）+ overscan 12，长会话翻页加载，避免一次性渲染整条日志。
 
@@ -156,7 +156,7 @@ Trajectory 是 **web 专属**的"Agent 的 DevTools"：一个按 turn 组织的�
 ### 3.3 源码证据
 
 - `packages/client/ui-trajectory/README.md:5` —— Trajectory 定义（turn 组织的可检查回放）
-- `packages/client/runtime/src/client/sessions/conversation-assembler.ts:133-150` —— 折叠窗口与 per-target 物化
+- `packages/client/ui-conversation/src/client/conversation/assembler.ts` —— 折叠窗口与 per-target 物化
 - `packages/client/ui-trajectory/src/client/trajectory-contract.ts:60-68` —— TrajectorySnapshot 结构
 - `packages/client/ui-trajectory/src/client/trajectory-*-definition.ts` —— 纯函数折叠定义（match/update/finalNode）
 - `packages/client/ui-trajectory/src/client/trajectory-search-index.ts` —— 浏览器内增量搜索索引
@@ -167,8 +167,8 @@ Trajectory 是 **web 专属**的"Agent 的 DevTools"：一个按 turn 组织的�
 
 | 上游 | mini 现状 | 规划 |
 |---|---|---|
-| 折叠引擎（纯函数） | `client/trajectory.py`：turn/step 聚合 chunk→message→timing、callId 树、tool-call 节点只来自 `tool/call` 事件、崩溃尾部 partial 标记、纯函数（手册 10 章） | turn 摘要为教学扩展（上游 trajectory-contract 无 turns 摘要） |
-| 虚拟化 / Overview / 搜索 | `client/trajectory.py` 为终端纯函数引擎（R5 在浏览器前端落地） | ✅ 浏览器前端 `webui/` 已实现（2026-09-02 R5）：Trajectory 虚拟化窗口 + Overview 折叠跳转 + 全文 search（`webui/src/trajectory/{model,search}.ts`，纯前端零契约改动）；`client/trajectory.py` 保持终端渲染不变 |
+| 折叠引擎（纯函数） | `client/trajectory.py`：turn/step 聚合 message 内嵌流（V2 stream）→timing、callId 树、tool-call 节点只来自 `tool/call` 事件、崩溃尾部 partial 标记、纯函数（手册 10 章） | turn 摘要为教学扩展（上游 trajectory-contract 无 turns 摘要） |
+| 虚拟化 / Overview / 搜索 | `client/trajectory.py` 为终端纯函数引擎（虚拟化/搜索在浏览器前端落地） | ✅ 浏览器前端 `webui/` 已实现：Trajectory 虚拟化窗口 + Overview 折叠跳转 + 全文 search（`webui/src/trajectory/{model,search}.ts`，纯前端零契约改动）；`client/trajectory.py` 保持终端渲染不变 |
 
 ## 议题 4：Agent 干预面
 
@@ -216,7 +216,7 @@ mini loop（`core/agent_loop/agent.py`）已复现完整干预面：`followup` +
 
 ### 5.1 产品体验
 
-当模型调用需要人类点头的操作（危险命令、写文件、删除等）时，web 面板弹出 **Reject / Allow once** 两个按钮（`packages/client/ui-conversation/src/client/skeleton/ApprovalPanel.tsx:57-83`）。**没有"永远允许"**：每次授权只作用于被询问的那一个动作，下一次调用必须重新 ask。无人值守时可用 `never` 策略确定性拒绝，或由 ACP 机器应答（只给一次性 allow-once/reject-once 两个选项）。
+当模型调用需要人类点头的操作（危险命令、写文件、删除等）时，web 面板弹出 **Reject / Allow once** 两个按钮（`packages/client/ui-approval/src/client/ApprovalPanel.tsx`）。**没有"永远允许"**：每次授权只作用于被询问的那一个动作，下一次调用必须重新 ask。无人值守时可用 `never` 策略确定性拒绝，或由 ACP 机器应答（只给一次性 allow-once/reject-once 两个选项）。
 
 !!! warning "词汇澄清"
     现仓库词汇是 `ApprovalOutcome` / `ApprovalPolicy` / `PreToolDecision`，不存在 `PermissionStatus`、`approvalContext` 等旧符号；且"allowed-once 豁免下一次"不存在——README 已知限制清单明示无 allow-always、无记忆规则、无撤销、无授权存储（`packages/interaction/user-approval/README.md:60`）。
@@ -248,7 +248,7 @@ tools/pre-execute 瀑布（core/tools）→ 返回 {kind:'ask'}（PreToolDecisio
 - `packages/interaction/user-approval/README.md:5,59-62` —— 一次性 seam 总述；仅 open turn 有效；无内置 answerer
 - `packages/interaction/user-approval/src/index.ts:34-72,94,112-118,257-344` —— 事件声明、策略、fold、request/decide 全流程
 - `packages/core/tools/src/index.ts:588-591,1475-1481,1689-1729` —— PreToolDecision 与 serviceAsk 映射
-- `packages/host/apiproxy/src/api-proxy.ts:1407-1488` 与 `packages/host/apiproxy/src/api/approvals.ts:17-21` —— web 通道与应答 payload 约束
+- `packages/api/remotes/src/{remote-events,types}.ts` —— web 通道 waterfall 与应答 payload 约束（早期 apiproxy 时代的 `api-proxy.ts:1407-1488` / `api/approvals.ts` 已随 apiproxy 删除，职责移入 api/gateway + api/remotes）
 - `packages/acp/acp/src/index.ts:215-229` —— ACP 一次性机器选项
 - `packages/bundle/base/cordis.patch.yml:188-205` —— 部署级 permission 配置
 - `docs/subsystems/approval.md:21,33,86-88` —— fail-closed 语义与审计 log-only
@@ -313,7 +313,7 @@ sidebar 搜索 → ctx.sessions.search（runtime manager.ts:518-527）→ RPC se
   声明式路径：config agents[].resumeSessionId（与 sessionId 互斥，index.ts:270-373）
 ```
 
-- **分页语义**（session-controller/src/index.ts session.page，原 api-proxy.ts:282-313 已随 apiproxy 删除）：`beforeSeq` 缺省=尾页；从尾部倒着数 maxMessages 个 **append-origin 消息**（user/assistant message 且 isAppendSurfaceEvent）；replacement 拷贝不占配额；同一消息的 chunk/tool 事件经 `sourceEventSeqs` 分组，**绝不在消息中段切页**；`compaction/summary` 与其 replacement 同页；
+- **分页语义**（session-controller/src/index.ts session.page，原 api-proxy.ts:282-313 已随 apiproxy 删除）：`beforeSeq` 缺省=尾页；从尾部倒着数 maxMessages 个 **append-origin 消息**（user/assistant message 且 isAppendSurfaceEvent）；replacement 拷贝不占配额；派生事件经 `sourceEventSeqs` 归并到所属消息（如 `tool/result` 引其 `tool/call`；V2 起 assistant 消息内嵌流自带边界、禁带 `sourceEventSeqs`），**绝不在消息中段切页**；`compaction/summary` 与其 replacement 同页；
 - **全文检索是 opt-in**：session-query 家族（服务定义 + SQLite FTS5 实现，`packages/session-query/`）索引六类事件（user/message、assistant/message、tool/call name+arguments、tool/result content+error、todo/write、turn/end reason）；结构性事件不产生文档（extraction.ts:13-42）；shipped bundle 默认 `openAt: never`（SQLite 永不打开，搜索抛 `SESSION_QUERY_SEARCH_DISABLED`），此时 sidebar 退化为本地子串匹配（bundle/base/cordis.patch.yml:109-121）；
 - **读历史从不 resume 或发布 Agent**（packages/api/session-controller/src/index.ts）——两条路径刻意分离；
 - **headless 无 --session**：startup.ts:31-56 只解析 task 位置参数；headless.spec.ts:90 的 resume 桩直接 reject 证明从不调用。
@@ -395,7 +395,7 @@ mini 简化（教学范围，须在文档中标注）：canonical value + `Tool.
 - **人类命令**（command-goal）：`/goal [<objective>|clear|edit <objective>|pause|resume]`，文案逐字对齐（show / create / edit / pause / resume / clear / 错误提示）。
 - **装配序**（示例 `examples/plan_goal_demo.py`）：`install_system_prompt` → `install_commands` → `install_plan_mode` → `install_plan_review` → `install_goals` → `register_goal_tools` → `install_goal_driver` → `install_goal_commands`。
 
-mini 简化（教学范围，须在文档中标注）：**agent registry + assertLive 已闭合（2026-09-01 R4）**——`core/agents.py` AgentRegistry + install_agents，goal `_prepare_mutation`（全公共方法必经）顶部 `assert_live_agent(agent)`；**canonical value + `Tool.render` 已闭合（2026-09-01 R1）**——goal 三工具 execute 返回结构化 canonical 输出、`render=` 承担模型可见文案（不再直接返回模型可见文本）；无 Typert remote 边界（remoteExport* 未复现）；driver 模式已对齐上游事件驱动续跑（`agent/status` idle + `goal/changed` → 自动排下一轮），同步门面保留 `continue_rounds` pull 式契约；无 competingQueued 竞争护栏（armed 目标在任意 idle 都会续跑，不区分是否刚有人类提示）；无 reserved attempt 集与 deferred wrapup 摘要注入（同步模型下 reservation 只在排队→pre-step 间存活，driver 模式延长到回合结束 idle）；权威判定用"当前 step 在 goal 轮次中"近似（authority.kind==='goal-round'，completionAuthority 模块未复现）。
+mini 简化（教学范围，须在文档中标注）：**agent registry + assertLive 已闭合**——`core/agents.py` AgentRegistry + install_agents，goal `_prepare_mutation`（全公共方法必经）顶部 `assert_live_agent(agent)`；**canonical value + `Tool.render` 已闭合**——goal 三工具 execute 返回结构化 canonical 输出、`render=` 承担模型可见文案（不再直接返回模型可见文本）；无 Typert remote 边界（remoteExport* 未复现）；driver 模式已对齐上游事件驱动续跑（`agent/status` idle + `goal/changed` → 自动排下一轮），同步门面保留 `continue_rounds` pull 式契约；无 competingQueued 竞争护栏（armed 目标在任意 idle 都会续跑，不区分是否刚有人类提示）；无 reserved attempt 集与 deferred wrapup 摘要注入（同步模型下 reservation 只在排队→pre-step 间存活，driver 模式延长到回合结束 idle）；权威判定用"当前 step 在 goal 轮次中"近似（authority.kind==='goal-round'，completionAuthority 模块未复现）。
 
 ## 议题 9：上下文压缩与后台作业
 
@@ -450,7 +450,7 @@ mini 简化（教学范围，须在文档中标注）：**agent registry + asser
 
 mini 已实现 token 计量与压缩最小版（`llm/token_meter.py` + `compaction/`，装配在 demo/headless/ACP/SDK 入口）：TokenMeter 增量 fold + usage 折入锚（estimateHeader 按 system/tools 启发式定价且 config 不计价）；BasicCompactionEngine 的 pre-step 压力检查（阈值取 adapter.contextWindow，缺省返回 None 而非抛 TargetPressureConfigError）与 request-error overflow 减容（仅 surface.replaceGeneration 前进才 retry，上限 maxOverflowRetries，成功/回合结束边界惰性复位）；事务 compaction/start→前缀重放摘要→user/message 检查点（surfaceOp replace + sourceEventSeqs）→compaction/end，任何失败恰好补一次带 error 的 compaction/end。简化标注：摘要前缀重放无 KV cache 语义、崩溃孤儿锁检出即 busy 拒绝（对齐上游 assertCompactionInactive，上游同样无自动恢复）。toolResultPruner 可选阶段（`compaction/tool_result_pruner.py`）与 `_log_result` 经 `ctx.logger` 路由已对齐上游（见 P0-2 / P0-3）。
 
-mini 已实现后台作业（`jobs/`，进程内注册表 + 三工具 + 完成 notice，装配在 demo/headless/session_cmds/ACP/SDK 入口）：`LocalJobRegistry` 提供 `ctx.jobs` 服务（start/list/get/read/kill/wait、onJobDone/onJobsChanged、attachController），id 为 `<kind>-N`，owned 作业按会话 id 栅栏、unowned 对任何调用方开放，结算 first-wins 且 waiters/kill/终态 read 置 reported 抑制 notice，`maxConcurrentJobsPerOwner` 默认 10（按精确 owner / unowned 桶计 running+stopping），owner 销毁时 cancel 在飞作业 + 限时排干 + 删除（teardown cancel 抛错 force-fail 只改记录）。模型侧 `job_output`（默认非阻塞读流式增量 / wait 有界、响应以 `[status: ...]` 结尾）、`job_list`（`<id> [<kind>] <status> — <label>`）、`job_kill`（requested / already-finished）；完成 notice 按 `completionDelivery` wakeup（idle owner 开 turn，预算 maxConsecutiveWakes=3，user 输入认领恢复）或 quiet（一律 inject），输出与 notice 按 `outputLimitBytes` 做 UTF-8 字节封顶，模型可见输出再经工具层 `finalizeContent` 兜底二次封顶（job_output/job_kill 保 `[status: ...]` 行，`[output truncated]` / `[result truncated]` 截断标记对齐上游 finalizeTaskContent）。与上游一致：**无 `job/*` 会话事件**、不新增事件类型。简化标注：**agent registry + assertLive 已闭合（2026-09-01 R4）**——`core/agents.py` AgentRegistry + install_agents + assert_live_agent，注册点 `AgentLoop.publish()`，jobs `_assert_access`/goal `_prepare_mutation` 接线（controller/监听器另按 scope 分层：`registry.py` `_layers = ScopedLayers(...)` + `chain_layers(scope_of(owner))`，对齐上游 P1-4a 作用域化分层）；**wake 预算载体已闭合（2026-09-02 R2）**——user 输入认领恢复改经安装 ctx 订阅 `agent/inbox/claimed`（仅 `source.kind=='user'` 恢复，对齐 tool-jobs `spendWakes.delete(agent)`）+ `agent/disposed` 防泄漏，AgentLoop 删 `on_inbox_claimed` 零参钩子；**teardown 排干为事件驱动**——逐任务等待 `settled` 事件（`registry.py:431-436`，对齐上游 `await Promise.all(settled)`，非限时轮询）；**canonical value + native renderer 分离已闭合**（`jobs/tools.py` execute 返回结构化结果、`render=` 承担模型可见文本，对齐上游 output.render）；**finalizeContent 载体**——上游经 `outputLimits` WeakMap（pre-execute prepend 捕获）取上限，mini 每次现查（等价回退路径，无 policy 时行为一致）；`run_in_background` 触发入口已经模型侧 `subagent` 工具复现（见下）。
+mini 已实现后台作业（`jobs/`，进程内注册表 + 三工具 + 完成 notice，装配在 demo/headless/session_cmds/ACP/SDK 入口）：`LocalJobRegistry` 提供 `ctx.jobs` 服务（start/list/get/read/kill/wait、onJobDone/onJobsChanged、attachController），id 为 `<kind>-N`，owned 作业按会话 id 栅栏、unowned 对任何调用方开放，结算 first-wins 且 waiters/kill/终态 read 置 reported 抑制 notice，`maxConcurrentJobsPerOwner` 默认 10（按精确 owner / unowned 桶计 running+stopping），owner 销毁时 cancel 在飞作业 + 限时排干 + 删除（teardown cancel 抛错 force-fail 只改记录）。模型侧 `job_output`（默认非阻塞读流式增量 / wait 有界、响应以 `[status: ...]` 结尾）、`job_list`（`<id> [<kind>] <status> — <label>`）、`job_kill`（requested / already-finished）；完成 notice 按 `completionDelivery` wakeup（idle owner 开 turn，预算 maxConsecutiveWakes=3，user 输入认领恢复）或 quiet（一律 inject），输出与 notice 按 `outputLimitBytes` 做 UTF-8 字节封顶，模型可见输出再经工具层 `finalizeContent` 兜底二次封顶（job_output/job_kill 保 `[status: ...]` 行，`[output truncated]` / `[result truncated]` 截断标记对齐上游 finalizeTaskContent）。与上游一致：**无 `job/*` 会话事件**、不新增事件类型。简化标注：**agent registry + assertLive 已闭合**——`core/agents.py` AgentRegistry + install_agents + assert_live_agent，注册点 `AgentLoop.publish()`，jobs `_assert_access`/goal `_prepare_mutation` 接线（controller/监听器另按 scope 分层：`registry.py` `_layers = ScopedLayers(...)` + `chain_layers(scope_of(owner))`，对齐上游 P1-4a 作用域化分层）；**wake 预算载体已闭合**——user 输入认领恢复改经安装 ctx 订阅 `agent/inbox/claimed`（仅 `source.kind=='user'` 恢复，对齐 tool-jobs `spendWakes.delete(agent)`）+ `agent/disposed` 防泄漏，AgentLoop 删 `on_inbox_claimed` 零参钩子；**teardown 排干为事件驱动**——逐任务等待 `settled` 事件（`registry.py:431-436`，对齐上游 `await Promise.all(settled)`，非限时轮询）；**canonical value + native renderer 分离已闭合**（`jobs/tools.py` execute 返回结构化结果、`render=` 承担模型可见文本，对齐上游 output.render）；**finalizeContent 载体**——上游经 `outputLimits` WeakMap（pre-execute prepend 捕获）取上限，mini 每次现查（等价回退路径，无 policy 时行为一致）；`run_in_background` 触发入口已经模型侧 `subagent` 工具复现（见下）。
 
 mini 已实现可继续子代理全链路（`seams/subagent/`：descriptor + continuation + 委托工具 `subagent` + 控制工具三件套 + report 工具，装配在 demo/headless/session_cmds 入口）：durable 子会话（header meta + 描述符事件先落盘）+ 冷恢复（inspect → authorizeLineage → fold descriptor → 重建组合）+ 双路径执行（父有 driver → 投递即返回 message id、Activation 跨回合驻留、watchSettlement 结算；无 driver → 同步 pump 门面）；生命周期事件 `subagent/start`/`subagent/end`（runId 配对、SubagentRunInfo/RunEndInfo payload、逐监听器收容派发、经委托父 scope 载体的 scoped dispatch——打标监听器按载波键或其祖先接纳、未打标全局接纳，无标号父退化祖先链派发）；命名 provider 注册表（`register_provider` 登记按模型重建适配器的入口，disposer 注销即发布 `subagent/provider-removed` 边且幂等；解析时注册表优先、回落缺省工厂）；DRAINING 准入截止（manager 级 `drain()` 与 scoped `drain_descendants(parents)`：精确在世根过滤、closingScopes 成员=根+后代世系、child-first 强制结算、聚合错误;`assert_admitting` 接入 start/send 准入边界，拒绝措辞逐字对齐）；终局折叠 `foldConsumedWork` + `epochStopReason`（stepped/claimed 记账、droppedUnrun→aborted）；sendWaking/admitWaking 所有权记账（accepted 窗口、waiting/settled 判定顺序）；interrupt 授权矩阵（user/ancestor authority、stale 调用方防探针、缺席目标接受性 no-op）；嵌套续跑（exec.agent 为授权与所有权主体，孙代结算通知投 durable 直属父，`list_descendants` 沿 parentSession 链 BFS）；finishDisposal 顺序（cancel top-down → flushFinalState best-effort → capture → 拆除 → notifySettlement → releaseOwnership → end 边）。模型侧 `subagent` 工具对齐 tool-subagent 契约（文案/canonical+render/路由逐字，`run_in_background` 触发入口接入 jobs producer）。简化标注：invariant 运行时校验不适用（上游 per-provider invariant 分包架构）、同步模式结算投递走非唤醒 next-step。
 

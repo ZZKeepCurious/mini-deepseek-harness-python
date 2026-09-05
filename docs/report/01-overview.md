@@ -26,7 +26,7 @@
 </div>
 
 !!! info "当前状态"
-    **当前状态**：developer preview（`0.1.1-rc.2`），MIT 协议。演进策略是"地基优先，不做兼容垫片"：后端拒绝旧磁盘格式；SQLite 使用单调 `SCHEMA_VERSION`；会话格式版本保持 `SESSION_FORMAT_VERSION`。学习时不必顾虑历史包袱——你看到的就是当前唯一事实。（报告初稿写于 `0.1.0-rc.7`，行文中的行号/版式可能滞后于 `0.1.1-rc.2`，涉及量化处已按当前基线校正。）
+    **当前状态**：developer preview（对齐上游 `dsh-v0.1.3-alpha.1`），MIT 协议。演进策略是"地基优先"：会话格式版本保持 `SESSION_FORMAT_VERSION`，**released 旧版本经相邻迁移链读入**（`session-format-v0-to-v1` / `-v1-to-v2` + `session-format-catalog`：读路径 decode→migrate→encodeCurrent，写后继 generation、不动旧代），仅未发布/未知版本双向 fail loud；`session-query` 检索域 SQLite 使用单调 `SCHEMA_VERSION`。学习时不必顾虑历史包袱——你看到的就是当前唯一事实。（报告初稿写于 `0.1.0-rc.7`，行文中的行号/版式可能滞后，涉及量化处已按当前基线校正。）
 
 ## 2. 分层架构
 
@@ -36,7 +36,7 @@
 |---|---|---|---|
 | **应用层** | `apps/cli`、`apps/web` | CLI bin（`dsh`）与 Web GUI | CLI 源码经 `node --import tsx/esm` 启动；bin 是"瘦自执行组合" |
 | **组合层** | `packages/bundle`、`preset`、`examples` | profile / bundle / preset 三种组合原语 | bundle = 可分发补丁层；preset = 会话级 agent 组合；覆盖所有运行形态 |
-| **能力层** | `packages/<group>/<pkg>` | 50 个包组、227 个包级 package.json（workspace glob `packages/*/*`），全部能力扩展口 | 每包遵循 Service Definition / Provider / Consumer 三段式 |
+| **能力层** | `packages/<group>/<pkg>` | 50 个包组、255 个包级 package.json（workspace glob `packages/*/*`），全部能力扩展口 | 每包遵循 Service Definition / Provider / Consumer 三段式 |
 | **框架层** | `vendor/` | vendored Cordis + 生态（cosmokit、schemastery、loader、include、hmr 等） | 全部改名 `@deepseek-ai/*`；18 项本地修改有详单与测试 |
 | **外部 SDK** | `python/`、`packages/sdk` | Python SDK 与 TypeScript JSON-RPC SDK，跨进程驱动运行时 | 协议：stdio 换行分隔 JSON-RPC；Python 侧有官方 `deepseek_harness` 包 |
 
@@ -53,7 +53,7 @@ flowchart TD
     B2["bundle 可分发补丁层"]
     B3["preset 会话级 agent 组合"]
   end
-  subgraph L3["能力层 · 50 包组 / 227 包 · 全部为能力扩展口"]
+  subgraph L3["能力层 · 50 包组 / 255 包 · 全部为能力扩展口"]
     C1["core：session / tools / agent / agent-loop"]
     C2["llm 适配 · shell · fs · sandbox"]
     C3["subagents · web · skills · persistence"]

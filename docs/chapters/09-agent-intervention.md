@@ -18,6 +18,8 @@
 | `whenIdle()` | — | 整机 quiescence：无活跃 driver 且无 maintenance 才 resolve | — |
 | `runMaintenance(task)` | — | true idle 下执行非回合维护（如 compactNow） | 无会话事件 |
 
+> 防混淆：这里有两套「唤醒」词汇。`Agent.send(…, wakeup)` 的 wakeup 是**通用投递布尔**（上游 rc.x 至今如此）；子代理 report 的投递词汇才是从 `'wakeup'` 改名而来的 `'quiet' | 'next-step'`（`reportDelivery`，见第 04 章 subagent 一节与 verified-diffs §2.4）——后者已废除 'wakeup' 值，前者没有。
+
 关键语义细节：
 
 1. **inbox 是唯一队列**：所有输入统一进 inbox，消息成为普通 FIFO turn——这就是为什么 `inject` 的"背景信息"会在下一次 `followup` 时一并进入日志（顺序保持）；（mini 真实实现为双队列：followup→next-turn、steer/inject→next-step，见 `core/agent_loop/inbox.py` 与 `agent/inbox/spliced` 事件；本节教学模型简化为单队列以便推演。）

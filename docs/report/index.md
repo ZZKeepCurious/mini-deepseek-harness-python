@@ -80,14 +80,14 @@ flowchart LR
 | `web 表面会话管理（上游无 CLI）` | `cli/session_cmds.py` | 07 | 04 议题 2 |
 | （工程化） | `.github/workflows/ci.yml + tests/test_real_api.py` | 00 | — |
 | `packages/client/connection + packages/api/gateway + packages/api/session-controller + packages/api/remotes + host/frontend-static + host/webserver` | `web/`（envelope + stream_protocol + mux + events + streams + api + approvals + server + frontend + launcher） | 07 §7.5 | 04 议题 2 |
-| `packages/host/apiproxy/session-export.ts + api/downloads.*` | `web/downloads.py` | 07 §7.5 | — |
+| `packages/session-query/session-log-export（导出域）+ api/session-controller（端点契约面）` | `web/downloads.py` | 07 §7.5 | — |
 | `packages/bundle/web-app` + `packages/client` | `webui/`（产品化 React+TS+Vite 独立工程，只依赖 wire 契约）+ `web/static/`（vanilla SPA 教学参照，旧 SSE wire 不对新后端工作） | 07 §7.5.4 | 04 议题 2 |
 | `packages/skill/（skill + skill-filesystem + tool-skill + skill-badge）` | `skills/`（registry + filesystem + tool_skill） | 13 | 04 议题 10 |
 | `vendor/schemastery/src/index.ts` | `core/schema.py` | 15 | — |
 | `packages/core/scope（dsh-scope 协议原语）` | `core/dsh_scope.py` | 14 | 02 §4.5 |
 | `vendor/hmr + packages/boot/app-boot（watchUserPatches）` | `core/hmr.py + boot/boot.py（watch_user_patches）` | 02 | 02 §4.1 |
 | `packages/core/session（SessionStore 服务层）` | `core/session_store.py` | — | 04 议题 7 |
-| `packages/attachment/（attachment + attachment-local）` | `attachment/`（types + error + image + store） | 07 §7.7 | — |
+| `packages/attachment/（attachment + attachment-local）` | `attachment/`（types + error + image + store + file_store——verbatim 文件附件对应上游 alpha.1 新增面） | 07 §7.7 | — |
 | `packages/token-meter` | `llm/token_meter.py` | — | 04 议题 9 |
 | `packages/compaction/（compaction-basic + compaction-tool-result-pruner）` | `compaction/`（config + region + summarizer + engine + tool_result_pruner） | — | 04 议题 9 |
 | `packages/jobs/（jobs-local + tool-jobs）` | `jobs/`（types + registry + tools） | — | 04 议题 9 |

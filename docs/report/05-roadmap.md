@@ -21,7 +21,7 @@
 | **P1 建立图景** | 知道系统有哪些部件、如何连接 | README.md → docs/architecture.md → packages/README.md → docs/cordis-primer.md | 画出你自己的分层图 + ctx 服务地图 | 能讲清"为什么替换 Provider 能换掉整个产品" |
 | **P2 跑起来** | 可运行、可观察 | docs/development.md；apps/cli/README | `pnpm install` → `pnpm run build` → `pnpm dsh --profile headless "task"`；`pnpm dsh --profile web --dump-config` 观察组合树；`pnpm mock:llm` 无 key 跑通 | 能解释 `--dump-config` 输出的每一层来源 |
 | **P3 核心循环** | 完全掌握 turn/step 状态机 | docs/subsystems/session.md、core.md；docs/agent-lifecycle.md | 读 `packages/core/agent-loop/src` 主 driver；在代码里为 6 个核心包各写一段职责注释 | 能手绘完整 turn/step 时序（含 reject、request-error、turn-stopping 分支） |
-| **P4 事件溯源** | 掌握唯一数据源与持久化 | docs/subsystems/persistence.md、docs/persistence-catalog.md；读 `packages/session/session-persistence` 双后端源码 | 手动构造一个 JSONL 会话文件并写脚本回放 `deriveMessages()` 的等价逻辑 | 能解释 `interrupted` turn 与 surface replace 的语义 |
+| **P4 事件溯源** | 掌握唯一数据源与持久化 | docs/subsystems/persistence.md、docs/persistence-catalog.md；读 `packages/session/session-persistence`（JSONL 单后端）+ `session-format-*`（相邻迁移链）源码 | 手动构造一个 JSONL 会话文件并写脚本回放 `deriveMessages()` 的等价逻辑 | 能解释 `interrupted` turn 与 surface replace 的语义 |
 | **P5 Cordis 深入** | 理解插件框架本体 | docs/cordis-tutorial/（动手教程）→ `vendor/cordis/src` 的 fiber/context/events；vendor/README.md 本地修改清单 | 读 18 项本地修改，挑 3 项（fiber 生命周期加固、include patch 语义、事务性协调）对应到测试文件 | 能解释"注册=可逆副作用"与 waterfall 短路语义 |
 | **P6 动手写插件 + 横向扩展口** | 从读者变成作者 | docs/cookbook/adding-a-tool.md、adding-a-package.md、adding-an-llm-adapter.md | 写一个最小工具插件并在 preset 中挂载；用 `agent/pre-step` 拦截一次请求；用 `tools/pre-execute` 加权限策略 | 插件能被 `--dump-config` 显示且行为可测 |
 
@@ -55,7 +55,7 @@
 | turn/step 状态机（agent-loop） | `asyncio.Task` 状态机（idle/running） | turn 打开于认领前；"零 step turn"也须持久化 |
 | 流式 StreamChunk 协议 | dataclass + `AsyncIterator[StreamChunk]` | usage 在 finish 前；tool 参数保持原始 JSON 字符串 |
 | 作用域化注册（per-agent ctx） | 每 agent 一个注册表实例，父子链式查找（继承/遮蔽） | 作用域注册卸载即回滚；restrict 过滤继承工具 |
-| JSONL / SQLite 持久化 + 崩溃恢复 | **zstd 拼接帧容器**（`.jsonl.zstd`）+ 一行一事件（`compression='none'` 退回明文 `.jsonl`）+ SQLite 元数据后端；启动回放时合成 `interrupted` turn（`commit_repair` 追加 closers），torn 尾部读路径截断 | seq 连续；未知事件类型拒绝加载（fail-closed，`ignorable: true` 豁免放行）；`SESSION_FORMAT_VERSION = 2` 双向拒读 |
+| JSONL 持久化 + 崩溃恢复 | **zstd 拼接帧容器** + 一行一事件 + generation 文件名 `session.v2.jsonl[.zstd]`（`compression='none'` 退回明文 `.jsonl`）；启动回放时合成 `interrupted` turn（`commit_repair` 追加 closers），torn 尾部读路径截断；released 旧格式经相邻迁移链（v0→v1→v2）读入 | seq 连续；未知事件类型拒绝加载（fail-closed，`ignorable: true` 豁免放行）；`SESSION_FORMAT_VERSION = 2` 双向拒读 |
 | 组合层（bundle / patch） | YAML 配置 + 按 id 的整段覆盖 + insert 列表 | 补丁算法单一实现，导出纯函数，禁止复制粘贴 |
 
 ### 7.3 迷你复现项目清单（MiniHarness，用 Python）
@@ -128,7 +128,7 @@
 
 <span class="tag t-amber">进阶</span> <span class="tag t-green">2 天</span>
 
-- JSONL 与 SQLite 双后端；`flush` 批量写 + 崩溃合成 `interrupted` turn。
+- JSONL 单后端（zstd 帧 + generation 文件名）；`flush` 批量写 + 崩溃合成 `interrupted` turn。
 - YAML 配置 → 按 id 覆盖补丁 → 组装工具集与 Prompt 分节。
 - 回放：重启后从日志重建历史并继续对话（resume）。
 
@@ -207,7 +207,7 @@
   <li>能解释"模型可见 ⟺ 已记录"并知道为何新增模型可见输入要加 session 事件</li>
   <li>能解释 waterfall 的 `next()` 语义与四种派发模式</li>
   <li>能说清能力扩展口三角色为什么缺一不可</li>
-  <li>能说清 JSONL/SQLite 双后端 + 崩溃恢复 `interrupted` turn</li>
+  <li>能说清 JSONL 单后端 + 崩溃恢复 `interrupted` turn</li>
   <li>能用 `--dump-config` 读懂实际组合树</li>
   <li>写过至少一个挂载进 preset 的最小插件</li>
   <li>用 Python 完成 ①–④ 迷你复现并跑通端到端回合</li>

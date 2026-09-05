@@ -288,7 +288,7 @@ python -m unittest tests.test_bus tests.test_fiber -v
 打开 `deepseek-harness/vendor/cordis/src`：
 
 - `context.ts` + `reflect.ts`：`provide`/`get`/`set`/`isolate`/`effect`/`dispose` 的完整实现——`effect` 的 execute 形态、注册先于执行、`disposeAfter(waitForSetup())` 重入保护、按隔离标签键控的全局 store、`notify` 的标签过滤，我们逐条对齐
-- `fiber.ts`：fiber 状态机、`internal/status`、`internal/plugin`、`_setEpoch` 依赖重载、`inertia` 在途转换、`_unload` 的 `Promise.all` 并发拆解——2.2 的 fiber 语义都从这里来（mini 已对齐装载半边与依赖驱动注册表，epoch 热重载经 hmr 与 `watch_user_patches` 路径闭合；SessionStore 经 2026-08-29 §3.2 结构对齐——`SessionStore(Service)` 构造 `super(ctx, "sessions")` 即经 ctx.provide 自动登记、随拥有 fiber 注销，与上游 `extends Service` 同构）
+- `fiber.ts`：fiber 状态机、`internal/status`、`internal/plugin`、`_setEpoch` 依赖重载、`inertia` 在途转换、`_unload` 的 `Promise.all` 并发拆解——2.2 的 fiber 语义都从这里来（mini 已对齐装载半边与依赖驱动注册表，epoch 热重载经 hmr 与 `watch_user_patches` 路径闭合；SessionStore 与上游同构为 `Service` 子类——构造 `super(ctx, "sessions")` 即经 ctx.provide 自动登记、随拥有 fiber 注销）
 - `events.ts`：四种派发模式的异步版本
 - `vendor/README.md`：18 项本地加固清单——挑 3 项读，体会"框架被 vendored 且可审计"意味着什么：不依赖 npm 供应链，代码就躺在仓库里，任何人都能审计每一行。
 

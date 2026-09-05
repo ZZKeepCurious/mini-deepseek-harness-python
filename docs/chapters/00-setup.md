@@ -1,10 +1,10 @@
 ﻿# 第 00 章：环境准备
 
-> 目标：把 MiniHarness 跑起来，知道代码在哪里、测试怎么跑、每个文件对应什么。读完整本手册不装 Node.js、不装 TypeScript；必需的 pip 包有四个基础件：SSE 传输用的 `httpx`、跨进程锁用的 `filelock`、文件观察用的 `watchdog`、YAML 配置用的 `pyyaml`。
+> 目标：把 MiniHarness 跑起来，知道代码在哪里、测试怎么跑、每个文件对应什么。读完整本手册不装 Node.js、不装 TypeScript；必需的 pip 基础件有六个：SSE 传输用的 `httpx`、跨进程锁用的 `filelock`、文件观察用的 `watchdog`、YAML 配置用的 `pyyaml`、持久化帧容器用的 `zstandard`、图片管线用的 `pillow`。
 
 ## 0.1 前置知识
 
-- Python 3.10+。核心实现以标准库为骨架：`unittest`、`json`、`sqlite3`、`threading`、`dataclasses`、`asyncio`；成熟开源库优先补齐关键能力——`httpx`（SSE 传输）、`filelock`（跨进程锁）、`watchdog`（文件观察），无语义等价库处才手写。
+- Python 3.10+。核心实现以标准库为骨架：`unittest`、`json`、`sqlite3`、`threading`、`dataclasses`、`asyncio`；成熟开源库优先补齐关键能力——`httpx`（SSE 传输 + Web 出站）、`filelock`（跨进程锁）、`watchdog`（文件观察）、`zstandard`（持久化帧容器）、`pillow`（附件图片管线），无语义等价库处才手写。
 - 基本的事件 / 回调 / 上下文概念。
 - 了解一个 Agent 回合的 wire 形状：`user message → assistant（可能带 tool call）→ tool result → assistant`。
 

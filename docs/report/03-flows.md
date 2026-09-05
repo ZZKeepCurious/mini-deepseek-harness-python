@@ -90,7 +90,7 @@ flowchart TD
   DEN["denied&lt;br/&gt;工具体被跳过"]
   G["注册的单调守卫&lt;br/&gt;只能减权 · 乱序无法撤销"]
   EX["tools/execute waterfall&lt;br/&gt;超时 / 重试 / 度量（around-dispatch）"]
-  BODY["工具 execute() 体&lt;br/&gt;自有事件：todo/write · fs/observed · tool/ptc-dispatch"]
+  BODY["工具 execute() 体&lt;br/&gt;自有事件：todo/write · tool/code-dispatch"]
   POST["tools/post-execute waterfall&lt;br/&gt;accept / replace / block(+feedback)"]
   NORM["注册表外层规范化&lt;br/&gt;snapshot 异常 → isError"]
   FIN["finalizeContent&lt;br/&gt;最后一个内容只读硬性规定"]
@@ -117,7 +117,7 @@ flowchart TD
 ```
 
 !!! example "示例走查（一次 bash 调用）"
-    模型流式返回 `tool-call(bash)` → 先落 `tool/call` 事件，UI 挂起卡片 → `pre-execute` 权限插件返回 allow → 单调守卫（30s 超时 wrapper 挂在 `execute` 上）→ 工具体执行 → `post-execute` 接受结果 → 注册表规范化（异常统一 `isError`）→ `tools/result` 通知冻结结果 → 落 `tool/result`，UI 渲染完成卡片。全程参数只物化一次并深度冻结，任何一步抛错都不会让回合中断。
+    模型流式返回 `tool-call(bash)` → 先落 `tool/call` 事件，UI 挂起卡片 → `pre-execute` 权限插件返回 allow → 单调守卫（工具在 `ToolDefinition` 声明 `timeoutMs` 才由 `tools/execute` wrapper 设限，内置 `bash/read/write/edit` 不声明、无注册表级默认超时）→ 工具体执行 → `post-execute` 接受结果 → 注册表规范化（异常统一 `isError`）→ `tools/result` 通知冻结结果 → 落 `tool/result`，UI 渲染完成卡片。全程参数只物化一次并深度冻结，任何一步抛错都不会让回合中断。
 
 - 参数在策略前一次性**无损 JSON 物化并冻结**；结果 `value` 是执行局部的，持久层只存 `content`/`error`/`meta`。
 - 工具可声明 `isConcurrencySafe` 加入并行组；否则 `exclusive` 形成串行屏障；`timeoutMs` 由 `tools/execute` wrapper 强制，绝不发给模型。
@@ -129,7 +129,7 @@ flowchart TD
 2. **PRE `pre-execute` waterfall**（hooks / 权限 / 沙箱）：`allow` → 前进；`deny` → 直接 **DEN**；`ask` → **ASK**（`ctx.approval` 一次性询问；absent / unanswerable → 当 deny）。
 3. **ASK** 结果：`allowed-once` → 前进；拒绝 / 取消 → **DEN**（工具体被跳过，回合不中断）。
 4. **G 注册的单调守卫**：只能减权、乱序无法撤销；`allow` → 前进，`deny` → **DEN**。
-5. **EX `execute` waterfall**（超时 / 重试 / 度量，around-dispatch）→ **BODY 工具本体**（自有事件：todo/write、fs/observed、tool/ptc-dispatch）。
+5. **EX `execute` waterfall**（超时 / 重试 / 度量，around-dispatch）→ **BODY 工具本体**（自有事件：todo/write、tool/code-dispatch——PTC dispatch 的 durable 事件；`tools/ptc-dispatch-log` 是 waterfall 钩子名而非会话事件）。
 6. **POST `post-execute` waterfall**：`accept` / `replace` / `block(+feedback)`。
 7. **NORM 注册表外层规范化**：任何 snapshot 阶段异常统一转 `isError`。
 8. **FIN `finalizeContent`**：最后一个内容只读（硬性规定），不可再被后置编辑。
@@ -141,12 +141,12 @@ flowchart TD
 
 常规做法是"每次变化立刻写库"；dsh 把持久化做成订阅者，异步成批写入。四个要点：
 
-- **扩展口**：`ctx.sessionPersistence` 抽象（locate / create / append / 逻辑 load/inspect / 物理后缀读）+ 两个可互换后端：**JSONL**（每会话一个文件，zstd 拼接帧容器一行一事件）与 **SQLite**（多会话一库，单调 `SCHEMA_VERSION`）。
+- **扩展口**：`ctx.sessionPersistence` 抽象（locate / create / append / 逻辑 load/inspect / 物理后缀读）。上游当前基线的持久化后端只有 **JSONL**（每会话一个文件，zstd 拼接帧容器一行一事件，generation 版本化文件名 `session.v2.jsonl[.zstd]`）；SQLite 在上游只用于 session-query 检索域（FTS）。
 - **flush 检查点**：`session/event` 是同步通知，持久化插件先复制事件再异步成批写入；`session/flush` 是等待的并行栅栏，用于认领下一个普通 turn 前的排序与错误观察点。
-- **格式拒绝，不迁移**：版本落后 = "升级 harness"；版本超前 = "使用更新的 harness 打开"。未知事件类型除非带 `ignorable: true` 标记否则拒绝加载（防止静默丢事件改变后续解读；alpha.2 起支持 `ignorable` 豁免——写方显式标 `ignorable` 的纯信息记录可放行）。
+- **格式演进：released 版本相邻迁移**：`session-format-catalog` 挂接 v0→v1→v2 迁移链——读路径 `decodeRecoverableArtifact → migrate → encodeCurrent`，把旧 generation 迁移发布为后继 `session.v2.jsonl`（不可变源文件保留）；仅未发布/未知版本双向 fail loud（"升级 harness"）。未知事件类型除非带 `ignorable: true` 标记否则拒绝加载（防止静默丢事件改变后续解读；alpha.2 起支持 `ignorable` 豁免——写方显式标 `ignorable` 的纯信息记录可放行）。
 - **崩溃恢复**：关闭孤儿 turn（合成 `interrupted`），只作用于冷会话；活会话 `load` 等待权威内存快照持久化。
 
-<p class="fig-cap">图 13：会话持久化——双后端、flush 栅栏与崩溃恢复</p>
+<p class="fig-cap">图 13：会话持久化——JSONL 后端、flush 栅栏与崩溃恢复</p>
 
 ```mermaid
 flowchart LR
@@ -155,22 +155,19 @@ flowchart LR
   P["持久化插件：先复制事件"]
   Q["异步成批写入队列"]
   J["JSONL 后端&lt;br/&gt;每会话一个文件 · zstd 帧容器一行一事件"]
-  QL["SQLite 后端&lt;br/&gt;多会话一库 · 单调 SCHEMA_VERSION"]
   F["session/flush 并行栅栏&lt;br/&gt;下一 turn 前等待 + 错误观察点"]
   NEXT["认领下一个普通 turn"]
-  LOAD["load()：未知事件类型 fail-closed&lt;br/&gt;版本落后 / 超前 = 拒绝，不迁移"]
+  LOAD["load()：未知事件类型 fail-closed&lt;br/&gt;released 旧版经相邻迁移；未知版本拒绝"]
   INT["崩溃恢复&lt;br/&gt;合成 turn/end interrupted&lt;br/&gt;保持括号平衡"]
   S --> EVT --> P --> Q
   Q --> J
-  Q --> QL
   J --> F
-  QL --> F
   F --> NEXT
   LOAD -.冷会话重载.-> INT
 ```
 
 !!! example "示例走查（进程崩溃）"
-    `turn/start` 已落库但 `turn/end` 未及写入时进程被杀 → 重启后 JSONL/SQLite 后端的 `load()` 发现括号不平衡 → 不截断日志，而是追加合成 `turn/end { reason: "interrupted" }` → 会话回到可继续状态。若日志里混入未知事件类型，则整体拒绝加载——宁可不打开，也不能静默丢事件改变后续解读。
+    `turn/start` 已落库但 `turn/end` 未及写入时进程被杀 → 重启后 JSONL 后端的 `load()` 发现括号不平衡 → 不截断日志，而是追加合成 `turn/end { reason: {kind:'interrupted'} }` → 会话回到可继续状态。若日志里混入未知事件类型，则整体拒绝加载——宁可不打开，也不能静默丢事件改变后续解读。
 
 ### 5.4 LLM 流式适配扩展口
 

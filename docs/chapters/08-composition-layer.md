@@ -49,10 +49,10 @@ loader 的 include 展开（上游由 `@deepseek-ai/cordis-plugin-include` 实�
 
 ## 8.3 mini 复现：preset roster 与挂载
 
-mini 组合层支持 YAML（`boot/composition.py`，pyyaml 硬依赖承载）；preset 清单用 JSON 承载（载体简化，契约对齐）。目录结构：
+mini 组合层支持 YAML（`boot/composition.py`，pyyaml 硬依赖承载）；preset 清单用 JSON 承载（载体简化，契约对齐）。roster 已对齐上游 alpha.1 的**多根分层**：`shipped root`（随包分发的内置 preset，system trust、authoring 只读）→ 配置 roots → `harness-home`（user），同 id **first-root-wins**（对齐上游 discoverPresets 的 resolvedRoots 顺序）；清单文件双读（`preset.json` 或上游形态 `agent.cordis.yml` 经 `translate_cordis_composition` 翻译）。本章演示以仓库自带目录为例：
 
 ```
-miniharness/preset/
+miniharness/preset/               # shipped root（system trust）
 ├── standard/preset.json    # 标准模式：8 工具 + 运行时上下文
 └── minimal/preset.json     # 极简模式：2 工具 + fixed-prompt（complete: true）
 ```
@@ -108,11 +108,11 @@ class PresetRoster:
                     id=child.name, name=child.name, description="", order=0,
                     broken=f"the composition is unloadable: {error}")
                 continue
-            presets[p.id] = p          # 同名 id 直接覆盖（无 fail-loud，载体差异，见 §8.4 注）
+            presets[p.id] = p          # 跨 root 同名 id first-root-wins（对齐上游 discoverPresets resolvedRoots 顺序）
         return presets
 ```
 
-`ids()` 按 `order` 排序返回名单；`resolve(preset_id)` 未知 id → `KeyError`（fail loud）。新增一个 preset = 新建一个目录，roster 代码一行不改。
+`ids()` 按 `order` 排序返回名单；`resolve(preset_id)` 未知 id → `KeyError`（fail loud）。已开 sessions 的 preset 选择在会话开始（首 turn/start）后锁定（`PresetLockedError`）。新增一个 preset = 新建一个目录，roster 代码一行不改。
 
 ### 8.3.3 挂载：只在 agent 作用域开视图
 
@@ -153,7 +153,7 @@ loop = AgentLoop(session, adapter, view, ctx,
 
 ## 8.4 硬性规定（被测试钉住）
 
-1. **roster = 目录列表**：发现 = 扫描目录，新增 preset 不碰代码。注（载体差异）：同名 id 在 `_scan` 里被**静默覆盖**（无 fail-loud，`presets.py:148`）；占位 broken 行的 `broken` 字段使该 preset 在**挂载期**被拒（`Preset.mount` 先检查 `self.broken` 再挂载）。
+1. **roster = 多根目录列表**：发现 = 依序扫描 shipped → 配置 roots → harness-home，跨 root 同名 id **first-root-wins**（对齐上游 discoverPresets 的 resolvedRoots；上游早期为单一目录静默覆盖，alpha.1 起演进为分层制）；新增 preset 不碰代码。占位 broken 行的 `broken` 字段使该 preset 在**挂载期**被拒（`Preset.mount` 先检查 `self.broken` 再挂载）。
 2. **挂载只开视图**：host 注册表不变，agent 作用域只看到 preset 声明的工具。
 3. **host 缺工具 fail loud**：preset 声明了 host 没有的工具 → `RuntimeError`。
 4. **进程级冲突拒绝挂载**：`provides` 命中 host 已有服务 → `RuntimeError`，而不是覆盖。
