@@ -45,20 +45,6 @@ def v1_user(seq, time, text):
               surfaceOp="append")
 
 
-def chunk_run(seq0, time0, turn=1, step=1, text="hello"):
-    """一个完整 text 块的 chunk 事件段（block-start/delta/block-end）+ finish。"""
-    return [
-        ev(seq0, time0, "assistant/chunk", {"turn": turn, "step": step,
-           "chunk": {"type": "block-start", "index": 0, "blockType": "text"}}),
-        ev(seq0 + 1, time0 + 2, "assistant/chunk", {"turn": turn, "step": step,
-           "chunk": {"type": "text-delta", "index": 0, "text": text}}),
-        ev(seq0 + 2, time0 + 4, "assistant/chunk", {"turn": turn, "step": step,
-           "chunk": {"type": "block-end", "index": 0, "block": text_block(text)}}),
-        ev(seq0 + 3, time0 + 6, "assistant/chunk", {"turn": turn, "step": step,
-           "chunk": {"type": "finish", "reason": {"kind": "stop"}}}),
-    ]
-
-
 def v1_assistant_message(seq, time, text, sources, **extra):
     data = {"turn": 1, "step": 1,
             "message": {"id": f"am{seq}", "role": "assistant",
@@ -180,10 +166,14 @@ class GenerationEnsureTest(unittest.TestCase):
         events = [
             v1_user(0, 100, "hi"),
             ev(1, 101, "turn/start", {"turn": 1}),
-            *chunk_run(2, 110),
-            v1_assistant_message(6, 130, "hello", sources=[2, 3, 4, 5]),
-            ev(7, 131, "step/end", {"turn": 1, "step": 1}),
-            ev(8, 132, "turn/end", {"turn": 1, "reason": {"kind": "completed"}}),
+            ev(2, 102, "step/start", {"turn": 1, "step": 1}),
+            ev(3, 110, "assistant/chunk", {"turn": 1, "step": 1,
+               "chunk": {"type": "text-delta", "index": 0, "text": "hello"}}),
+            ev(4, 120, "assistant/chunk", {"turn": 1, "step": 1,
+               "chunk": {"type": "finish", "reason": {"kind": "stop"}}}),
+            v1_assistant_message(5, 130, "hello", sources=[3, 4]),
+            ev(6, 131, "step/end", {"turn": 1, "step": 1}),
+            ev(7, 132, "turn/end", {"turn": 1, "reason": {"kind": "completed"}}),
         ]
         with TemporaryDirectory() as tmp:
             root, session_dir = self._layout(tmp, events)
@@ -245,10 +235,14 @@ class GenerationEnsureTest(unittest.TestCase):
         events = [
             v1_user(0, 100, "hi"),
             ev(1, 101, "turn/start", {"turn": 1}),
-            *chunk_run(2, 110),
-            v1_assistant_message(6, 130, "hello", sources=[2, 3, 4, 5]),
-            ev(7, 131, "step/end", {"turn": 1, "step": 1}),
-            ev(8, 132, "turn/end", {"turn": 1, "reason": {"kind": "completed"}}),
+            ev(2, 102, "step/start", {"turn": 1, "step": 1}),
+            ev(3, 110, "assistant/chunk", {"turn": 1, "step": 1,
+               "chunk": {"type": "text-delta", "index": 0, "text": "hello"}}),
+            ev(4, 120, "assistant/chunk", {"turn": 1, "step": 1,
+               "chunk": {"type": "finish", "reason": {"kind": "stop"}}}),
+            v1_assistant_message(5, 130, "hello", sources=[3, 4]),
+            ev(6, 131, "step/end", {"turn": 1, "step": 1}),
+            ev(7, 132, "turn/end", {"turn": 1, "reason": {"kind": "completed"}}),
         ]
         with TemporaryDirectory() as tmp:
             root, session_dir = self._layout(tmp, events)
@@ -264,106 +258,115 @@ class GenerationEnsureTest(unittest.TestCase):
 
 class V1ToV2MigrationTest(unittest.TestCase):
     def test_interleaved_success_stream_dense_remap(self):
-        """上游 migration.spec 交错成功流向量：chunk 消费、message 5→3、
+        """上游 migration.spec :36-105 交错成功流向量：chunk 消费、message 5→3、
         command/done 引用重映射。"""
         events = [
-            v1_user(0, 100, "hi"),
-            ev(1, 101, "turn/start", {"turn": 1}),
+            ev(0, 100, "turn/start", {"turn": 1}),
+            ev(1, 101, "step/start", {"turn": 1, "step": 1}),
             ev(2, 110, "assistant/chunk", {"turn": 1, "step": 1,
-               "chunk": {"type": "block-start", "index": 0, "blockType": "text"}}),
-            ev(3, 111, "feedback/record", {"text": "nice"}),
-            ev(4, 115, "assistant/chunk", {"turn": 1, "step": 1,
                "chunk": {"type": "text-delta", "index": 0, "text": "hello"}}),
-            ev(5, 118, "assistant/chunk", {"turn": 1, "step": 1,
-               "chunk": {"type": "block-end", "index": 0, "block": text_block("hello")}}),
-            ev(6, 120, "assistant/chunk", {"turn": 1, "step": 1,
+            ev(3, 111, "feedback/record", {"text": "interleaved"}),
+            ev(4, 120, "assistant/chunk", {"turn": 1, "step": 1,
                "chunk": {"type": "finish", "reason": {"kind": "stop"}}}),
-            v1_assistant_message(7, 130, "hello", sources=[2, 4, 5, 6]),
-            ev(8, 131, "command/run", {"commandId": "c1", "name": "bash",
-                                       "source": {"kind": "model"}}),
-            ev(9, 132, "command/done", {"commandId": "c1", "kind": "success",
-                                        "sourceEventSeq": 7}),
+            v1_assistant_message(5, 121, "hello", sources=[2, 4]),
+            ev(6, 122, "step/end", {"turn": 1, "step": 1}),
+            ev(7, 123, "turn/end", {"turn": 1, "reason": {"kind": "completed"}}),
+            ev(8, 124, "command/run", {"commandId": "c1", "name": "inspect",
+                                       "source": {"kind": "user"}}),
+            ev(9, 125, "command/done", {"commandId": "c1", "kind": "success",
+                                        "sourceEventSeq": 5}),
         ]
         target = migrate_v1_v2(events)
         self.assertEqual(target["inherited_event_count"], 0)
         self.assertEqual([e["type"] for e in target["events"]],
-                         ["user/message", "turn/start", "feedback/record",
-                          "assistant/message", "command/run", "command/done"])
+                         ["turn/start", "step/start", "feedback/record",
+                          "assistant/message", "step/end", "turn/end",
+                          "command/run", "command/done"])
         message = target["events"][3]
         self.assertEqual(message["seq"], 3)
         self.assertNotIn("sourceEventSeqs", message)
         records = message["data"]["stream"]
-        self.assertEqual([r["type"] for r in records],
-                         ["chunk", "text-chunks", "chunk", "chunk"])
-        self.assertEqual(target["events"][5]["data"]["sourceEventSeq"], 3)
+        self.assertEqual(records, [
+            {"type": "text-chunks", "time0": 110, "index": 0, "dt": [],
+             "texts": ["hello"]},
+            {"type": "chunk", "time": 120,
+             "chunk": {"type": "finish", "reason": {"kind": "stop"}}},
+        ])
+        self.assertEqual(target["events"][7]["data"]["sourceEventSeq"], 3)
 
     def test_failed_attempt_becomes_assistant_attempt(self):
-        """上游 :107-154：finish error 流 → assistant/attempt 落最后 chunk
-        seq/time，不造 message。"""
+        """上游 migration.spec :107-154：finish error 流 → assistant/attempt 落最后
+        chunk seq/time，不造 message。"""
+        failure = {"message": "provider failed", "code": "PROVIDER_ERROR"}
         events = [
-            v1_user(0, 100, "hi"),
-            ev(1, 101, "turn/start", {"turn": 1}),
+            ev(0, 100, "turn/start", {"turn": 1}),
+            ev(1, 101, "step/start", {"turn": 1, "step": 1}),
             ev(2, 110, "assistant/chunk", {"turn": 1, "step": 1,
-               "chunk": {"type": "block-start", "index": 0, "blockType": "text"}}),
-            ev(3, 115, "assistant/chunk", {"turn": 1, "step": 1,
                "chunk": {"type": "text-delta", "index": 0, "text": "partial"}}),
-            ev(4, 120, "assistant/chunk", {"turn": 1, "step": 1,
+            ev(3, 120, "assistant/chunk", {"turn": 1, "step": 1,
                "chunk": {"type": "finish", "reason": {"kind": "error",
-                                                      "failure": {"message": "boom",
-                                                                  "code": "SERVER"}}}}),
-            ev(5, 121, "turn/end", {"turn": 1, "reason": {"kind": "error",
-                                                          "error": {"message": "boom",
-                                                                    "code": "SERVER"}}}),
+                                                      "failure": failure}}}),
+            ev(4, 121, "step/end", {"turn": 1, "step": 1}),
+            ev(5, 122, "turn/end", {"turn": 1, "reason": {"kind": "error",
+                                                          "error": failure}}),
         ]
         target = migrate_v1_v2(events)
         attempt = next(e for e in target["events"] if e["type"] == "assistant/attempt")
-        self.assertEqual(attempt["seq"], 2)  # 密集化后的新 index（原 4 → 2）
+        self.assertEqual(attempt["seq"], 2)  # 密集化后的新 index（原 3 → 2）
         self.assertEqual(attempt["time"], 120)
         self.assertEqual(attempt["data"]["turn"], 1)
-        records = attempt["data"]["stream"]
-        self.assertEqual(records[-1]["type"], "chunk")
-        self.assertEqual(records[-1]["chunk"]["type"], "finish")
+        self.assertEqual(attempt["data"]["stream"], [
+            {"type": "text-chunks", "time0": 110, "index": 0, "dt": [],
+             "texts": ["partial"]},
+            {"type": "chunk", "time": 120,
+             "chunk": {"type": "finish", "reason": {"kind": "error",
+                                                    "failure": failure}}},
+        ])
         self.assertNotIn("assistant/message", [e["type"] for e in target["events"]])
 
     def test_retry_seals_first_attempt(self):
-        """上游 :156-226：llm/retry + retry-started 封口第一组；失败前缀成
-        attempt（finish 缺席也不造 message）；重试 attempt 被消息认领。"""
+        """上游 :156-226：request/header + llm/retry + retry-started 封口第一组；
+        失败前缀成 attempt（finish 缺席也不造 message）；重试 attempt 被消息认领。"""
         events = [
-            v1_user(0, 100, "hi"),
-            ev(1, 101, "turn/start", {"turn": 1}),
-            ev(2, 110, "assistant/chunk", {"turn": 1, "step": 1,
-               "chunk": {"type": "block-start", "index": 0, "blockType": "text"}}),
-            ev(3, 112, "assistant/chunk", {"turn": 1, "step": 1,
-               "chunk": {"type": "text-delta", "index": 0, "text": "half"}}),
-            ev(4, 113, "llm/retry", {"retryId": "r1", "turn": 1, "step": 1,
+            ev(0, 100, "turn/start", {"turn": 1}),
+            ev(1, 101, "step/start", {"turn": 1, "step": 1}),
+            ev(2, 102, "request/header", {"header": {"config": {"provider": "fake",
+                                                                "model": "fake"}},
+                                          "reason": "initial"}),
+            ev(3, 110, "assistant/chunk", {"turn": 1, "step": 1,
+               "chunk": {"type": "text-delta", "index": 0, "text": "partial"}}),
+            ev(4, 120, "llm/retry", {"retryId": "r1", "turn": 1, "step": 1,
                "provider": "fake", "mode": "normal", "policyKey": "default",
-               "retry": 1, "delayMs": 0,
-               "failure": {"message": "boom", "code": "SERVER"},
-               "maxRetries": 5}),
-            ev(5, 114, "llm/retry-started", {"retryId": "r1", "turn": 1,
+               "retry": 1, "maxRetries": 1, "delayMs": 0,
+               "failure": {"message": "retry", "code": "SERVER"}}),
+            ev(5, 121, "llm/retry-started", {"retryId": "r1", "turn": 1,
                                              "step": 1, "retry": 1}),
-            ev(6, 120, "assistant/chunk", {"turn": 1, "step": 1,
-               "chunk": {"type": "block-start", "index": 0, "blockType": "text"}}),
-            ev(7, 122, "assistant/chunk", {"turn": 1, "step": 1,
-               "chunk": {"type": "text-delta", "index": 0, "text": "full"}}),
-            ev(8, 124, "assistant/chunk", {"turn": 1, "step": 1,
-               "chunk": {"type": "block-end", "index": 0, "block": text_block("full")}}),
-            ev(9, 126, "assistant/chunk", {"turn": 1, "step": 1,
+            ev(6, 130, "assistant/chunk", {"turn": 1, "step": 1,
+               "chunk": {"type": "text-delta", "index": 0, "text": "hello"}}),
+            ev(7, 140, "assistant/chunk", {"turn": 1, "step": 1,
                "chunk": {"type": "finish", "reason": {"kind": "stop"}}}),
-            v1_assistant_message(10, 130, "full", sources=[6, 7, 8, 9]),
+            v1_assistant_message(8, 141, "hello", sources=[6, 7]),
+            ev(9, 142, "step/end", {"turn": 1, "step": 1}),
+            ev(10, 143, "turn/end", {"turn": 1, "reason": {"kind": "completed"}}),
         ]
         target = migrate_v1_v2(events)
         attempts = [e for e in target["events"] if e["type"] == "assistant/attempt"]
         messages = [e for e in target["events"] if e["type"] == "assistant/message"]
         self.assertEqual(len(attempts), 1)
         # 第一 attempt：两条 delta 归并为一条 text-chunks record
-        self.assertEqual(attempts[0]["data"]["stream"][0]["type"], "chunk")
-        self.assertEqual(attempts[0]["data"]["stream"][1]["texts"], ["half"])
+        self.assertEqual(attempts[0]["data"]["stream"], [
+            {"type": "text-chunks", "time0": 110, "index": 0, "dt": [],
+             "texts": ["partial"]},
+        ])
         self.assertEqual(len(messages), 1)
-        self.assertEqual([r["type"] for r in messages[0]["data"]["stream"]],
-                         ["chunk", "text-chunks", "chunk", "chunk"])
+        self.assertEqual(messages[0]["data"]["stream"], [
+            {"type": "text-chunks", "time0": 130, "index": 0, "dt": [],
+             "texts": ["hello"]},
+            {"type": "chunk", "time": 140,
+             "chunk": {"type": "finish", "reason": {"kind": "stop"}}},
+        ])
         self.assertEqual(messages[0]["data"]["message"]["content"],
-                         [text_block("full")])
+                         [text_block("hello")])
 
     def test_seeded_marker_moves_and_retags(self):
         """上游 :228-271 向量：cut 7→5、marker 落新 index 5、data 重打标、
@@ -410,16 +413,26 @@ class V1ToV2MigrationTest(unittest.TestCase):
 
     def test_consumed_chunk_reference_refused(self):
         """上游 :357-397：引用指向已消费 chunk seq → 拒，绝不重定向。"""
+        failure = {"message": "failed", "code": "UNKNOWN"}
         events = [
             ev(0, 100, "turn/start", {"turn": 1}),
-            ev(1, 101, "assistant/chunk", {"turn": 1, "step": 1,
-               "chunk": {"type": "text-delta", "index": 0, "text": "x"}}),
-            ev(2, 102, "command/done", {"commandId": "c", "kind": "success",
-                                        "sourceEventSeq": 1}),
+            ev(1, 101, "step/start", {"turn": 1, "step": 1}),
+            ev(2, 110, "assistant/chunk", {"turn": 1, "step": 1,
+               "chunk": {"type": "text-delta", "index": 0, "text": "partial"}}),
+            ev(3, 120, "assistant/chunk", {"turn": 1, "step": 1,
+               "chunk": {"type": "finish", "reason": {"kind": "error",
+                                                      "failure": failure}}}),
+            ev(4, 121, "step/end", {"turn": 1, "step": 1}),
+            ev(5, 122, "turn/end", {"turn": 1, "reason": {"kind": "error",
+                                                          "error": failure}}),
+            ev(6, 123, "command/run", {"commandId": "c", "name": "inspect",
+                                       "source": {"kind": "user"}}),
+            ev(7, 124, "command/done", {"commandId": "c", "kind": "success",
+                                        "sourceEventSeq": 3}),
         ]
         with self.assertRaises(SessionFormatUnsupportedMigrationError) as ctx:
             migrate_v1_v2(events)
-        self.assertIn("targets consumed assistant/chunk 1", str(ctx.exception))
+        self.assertIn("targets consumed assistant/chunk 3", str(ctx.exception))
 
     def test_unknown_type_refused_even_ignorable(self):
         """上游 :399-418：封闭词表——未知事件即使 ignorable 也拒。"""
@@ -431,26 +444,26 @@ class V1ToV2MigrationTest(unittest.TestCase):
     def test_uncited_unclaimed_group_refused_and_empty_sources_legal(self):
         """上游 :420-476：同坐标存在未认领组时无引用 message 拒；显式 [] 合法
         （legacy 空流 message → stream: []）。"""
-        base = [
-            ev(1, 110, "assistant/chunk", {"turn": 1, "step": 1,
-               "chunk": {"type": "text-delta", "index": 0, "text": "x"}}),
+        refused = [
+            ev(0, 1, "turn/start", {"turn": 1}),
+            ev(1, 2, "step/start", {"turn": 1, "step": 1}),
+            ev(2, 3, "assistant/chunk", {"turn": 1, "step": 1,
+               "chunk": {"type": "text-delta", "index": 0, "text": "hello"}}),
+            ev(3, 4, "assistant/chunk", {"turn": 1, "step": 1,
+               "chunk": {"type": "finish", "reason": {"kind": "stop"}}}),
+            v1_assistant_message(4, 5, "hello", sources=None),
+            ev(5, 6, "step/end", {"turn": 1, "step": 1}),
+            ev(6, 7, "turn/end", {"turn": 1, "reason": {"kind": "completed"}}),
         ]
         with self.assertRaises(SessionFormatUnsupportedMigrationError) as ctx:
-            migrate_v1_v2([
-                ev(0, 100, "user/message", {"id": "m0", "role": "user",
-                   "content": [text_block("hi")], "source": {"kind": "user"}},
-                   surfaceOp="append"),
-                *base,
-                v1_assistant_message(2, 130, "orphan", sources=None),
-            ])
+            migrate_v1_v2(refused)
         self.assertIn("does not cite its complete v1 chunk attempt", str(ctx.exception))
         target = migrate_v1_v2([
-            v1_user(0, 100, "hi"),
-            ev(1, 130, "assistant/message", {"turn": 1, "step": 1,
-               "message": {"id": "am", "role": "assistant", "content": [],
-                           "source": {"kind": "model", "provider": "fake",
-                                      "model": "fake"}}},
-               surfaceOp="append", sourceEventSeqs=[]),
+            ev(0, 1, "turn/start", {"turn": 1}),
+            ev(1, 2, "step/start", {"turn": 1, "step": 1}),
+            v1_assistant_message(2, 3, "hello", sources=[]),
+            ev(3, 4, "step/end", {"turn": 1, "step": 1}),
+            ev(4, 5, "turn/end", {"turn": 1, "reason": {"kind": "completed"}}),
         ])
         message = next(e for e in target["events"] if e["type"] == "assistant/message")
         self.assertEqual(message["data"]["stream"], [])
@@ -482,23 +495,24 @@ class V1ToV2MigrationTest(unittest.TestCase):
 
     def test_cross_turn_groups_isolated(self):
         """上游 :736-763：连续两 turn 各一个 finish-error chunk → 恰两个 attempt。"""
+        failure = {"message": "failed", "code": "UNKNOWN"}
         events = [
-            ev(0, 100, "turn/start", {"turn": 1}),
-            ev(1, 110, "assistant/chunk", {"turn": 1, "step": 1,
+            ev(0, 1, "turn/start", {"turn": 1}),
+            ev(1, 2, "step/start", {"turn": 1, "step": 1}),
+            ev(2, 3, "assistant/chunk", {"turn": 1, "step": 1,
                "chunk": {"type": "finish", "reason": {"kind": "error",
-                                                      "failure": {"message": "a",
-                                                                  "code": "SERVER"}}}}),
-            ev(2, 111, "turn/end", {"turn": 1, "reason": {"kind": "error",
-                                                          "error": {"message": "a",
-                                                                    "code": "SERVER"}}}),
-            ev(3, 200, "turn/start", {"turn": 2}),
-            ev(4, 210, "assistant/chunk", {"turn": 2, "step": 1,
+                                                      "failure": failure}}}),
+            ev(3, 4, "step/end", {"turn": 1, "step": 1}),
+            ev(4, 5, "turn/end", {"turn": 1, "reason": {"kind": "error",
+                                                        "error": failure}}),
+            ev(5, 6, "turn/start", {"turn": 2}),
+            ev(6, 7, "step/start", {"turn": 2, "step": 1}),
+            ev(7, 8, "assistant/chunk", {"turn": 2, "step": 1,
                "chunk": {"type": "finish", "reason": {"kind": "error",
-                                                      "failure": {"message": "b",
-                                                                  "code": "SERVER"}}}}),
-            ev(5, 211, "turn/end", {"turn": 2, "reason": {"kind": "error",
-                                                          "error": {"message": "b",
-                                                                    "code": "SERVER"}}}),
+                                                      "failure": failure}}}),
+            ev(8, 9, "step/end", {"turn": 2, "step": 1}),
+            ev(9, 10, "turn/end", {"turn": 2, "reason": {"kind": "error",
+                                                         "error": failure}}),
         ]
         target = migrate_v1_v2(events)
         attempts = [e for e in target["events"] if e["type"] == "assistant/attempt"]
@@ -509,51 +523,70 @@ class V1ToV2MigrationTest(unittest.TestCase):
 
 class V0ToV1MigrationTest(unittest.TestCase):
     def test_flat_messages_wrapped_with_legacy_ids(self):
+        """上游 legacy.spec :21-66：flat user/assistant/tool-result 补 legacy id；
+        替换 tool/result 继承被替换表面首节点 id。"""
         events = [
-            ev(0, 100, "user/message", {"content": [text_block("hi")],
-                                        "source": {"kind": "user"}},
+            ev(0, 1, "turn/start", {"turn": 1}),
+            ev(1, 2, "user/message", {"content": [text_block("hi")],
+                                      "source": {"kind": "user"}},
                surfaceOp="append"),
-            ev(1, 101, "assistant/message", {"turn": 1, "step": 1,
-               "content": [text_block("ok")],
-               "provenance": {"provider": "fake", "model": "fake"}}),
-            ev(2, 102, "tool/result", {"turn": 1, "step": 1, "callId": "c1",
-               "content": "out", "isError": False}, surfaceOp="append"),
+            ev(2, 3, "step/start", {"turn": 1, "step": 1}),
+            ev(3, 4, "assistant/message", {"turn": 1, "step": 1,
+               "content": [{"type": "tool-call", "id": "call-1", "name": "read",
+                            "arguments": "{}"}],
+               "provenance": {"provider": "mock", "model": "mock"}},
+               surfaceOp="append"),
+            ev(4, 5, "tool/call", {"turn": 1, "step": 1, "callId": "call-1",
+                                   "name": "read", "arguments": "{}"}),
+            ev(5, 6, "tool/result", {"turn": 1, "step": 1, "callId": "call-1",
+               "content": [text_block("full")], "isError": False},
+               sourceEventSeqs=[4], surfaceOp="append"),
+            ev(6, 7, "tool/result", {"turn": 1, "step": 1, "callId": "call-1",
+               "content": [text_block("pruned")], "isError": False},
+               sourceEventSeqs=[5], surfaceOp={"op": "replace", "start": 5, "end": 5}),
+            ev(7, 8, "step/end", {"turn": 1, "step": 1}),
+            ev(8, 9, "turn/end", {"turn": 1, "reason": {"kind": "completed"}}),
         ]
         target = V0_TO_V1["migrate"](artifact_v1(
-            [dict(e, seq=i) for i, e in enumerate(events)], inherited=0) |
+            events, inherited=0) |
             {"header": {**artifact_v1([])["header"], "version": 0}})
-        user = target["events"][0]
-        self.assertEqual(user["data"]["id"], "legacy-message:s-v1:0")
+        user = target["events"][1]
+        self.assertEqual(user["data"]["id"], "legacy-message:s-v1:1")
         self.assertEqual(user["data"]["role"], "user")
-        assistant = target["events"][1]
-        self.assertEqual(assistant["data"]["message"]["id"], "legacy-message:s-v1:1")
+        assistant = target["events"][3]
+        self.assertEqual(assistant["data"]["message"]["id"], "legacy-message:s-v1:3")
         self.assertEqual(assistant["data"]["message"]["source"]["kind"], "model")
-        result = target["events"][2]
-        self.assertEqual(result["data"]["message"]["id"], "legacy-message:s-v1:2")
+        result = target["events"][5]
+        self.assertEqual(result["data"]["message"]["id"], "legacy-message:s-v1:5")
         self.assertEqual(result["data"]["message"]["content"],
-                         [{"type": "tool-result", "toolCallId": "c1",
-                           "content": "out", "isError": False}])
+                         [{"type": "tool-result", "toolCallId": "call-1",
+                           "content": [text_block("full")], "isError": False}])
+        self.assertEqual(target["events"][6]["data"]["message"]["id"],
+                         "legacy-message:s-v1:5")
 
     def test_turn_end_reason_conversion_table(self):
         cases = [
-            ({"kind": "aborted", "step": 1},
-             {"kind": "aborted", "step": 1, "reason": {"kind": "legacy"}}),
+            ({"kind": "completed"},
+             {"kind": "completed"}),
+            ({"kind": "aborted"},
+             {"kind": "aborted", "reason": {"kind": "legacy"}}),
             ({"kind": "disposed"},
              {"kind": "aborted", "reason": {"kind": "disposed"}}),
             ({"kind": "error", "step": 2,
               "failure": {"message": "boom", "code": "SERVER"}},
-             {"kind": "error", "step": 2,
-              "error": {"message": "boom", "code": "SERVER"}}),
+             {"kind": "error", "error": {"message": "boom", "code": "SERVER"}}),
             ({"kind": "error", "step": 2, "message": "bad"},
-             {"kind": "error", "step": 2,
-              "error": {"message": "bad", "code": "UNKNOWN"}}),
+             {"kind": "error", "error": {"message": "bad", "code": "UNKNOWN"}}),
         ]
         for index, (source_reason, expected) in enumerate(cases):
-            events = [ev(0, 100, "turn/end", {"turn": 1, "reason": source_reason})]
+            events = [
+                ev(0, 100, "turn/start", {"turn": 1}),
+                ev(1, 100, "turn/end", {"turn": 1, "reason": source_reason}),
+            ]
             target = V0_TO_V1["migrate"](artifact_v1(
                 events, inherited=0) | {"header": {**artifact_v1([])["header"],
                                                    "version": 0}})
-            self.assertEqual(target["events"][0]["data"]["reason"], expected, index)
+            self.assertEqual(target["events"][1]["data"]["reason"], expected, index)
 
     def test_retired_types_refused(self):
         for etype, data in (
@@ -577,20 +610,24 @@ class V0ToV1MigrationTest(unittest.TestCase):
     def test_replacement_tool_result_inherits_replaced_message_id(self):
         """上游 legacy.spec：替换 tool/result 继承被替换表面首节点消息 id。"""
         events = [
-            ev(0, 100, "assistant/message", {"turn": 1, "step": 1,
+            ev(0, 100, "turn/start", {"turn": 1}),
+            ev(1, 101, "step/start", {"turn": 1, "step": 1}),
+            ev(2, 102, "assistant/message", {"turn": 1, "step": 1,
                "message": {"id": "am0", "role": "assistant",
                            "content": [text_block("first")],
                            "source": {"kind": "model", "provider": "fake",
                                       "model": "fake"}}},
                surfaceOp="append"),
-            ev(1, 101, "tool/result", {"turn": 1, "step": 1, "callId": "c1",
-               "content": "out", "isError": False},
-               surfaceOp={"op": "replace", "start": 0, "end": 0}),
+            ev(3, 103, "tool/result", {"turn": 1, "step": 1, "callId": "c1",
+               "content": [text_block("out")], "isError": False},
+               sourceEventSeqs=[2], surfaceOp={"op": "replace", "start": 2, "end": 2}),
+            ev(4, 104, "step/end", {"turn": 1, "step": 1}),
+            ev(5, 105, "turn/end", {"turn": 1, "reason": {"kind": "completed"}}),
         ]
         target = V0_TO_V1["migrate"](artifact_v1(events, inherited=0)
                                      | {"header": {**artifact_v1([])["header"],
                                                    "version": 0}})
-        self.assertEqual(target["events"][1]["data"]["message"]["id"], "am0")
+        self.assertEqual(target["events"][3]["data"]["message"]["id"], "am0")
 
 
 class HeaderTranslationTest(unittest.TestCase):

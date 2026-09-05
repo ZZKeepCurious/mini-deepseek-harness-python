@@ -30,6 +30,7 @@ from .released import (
     fail,
     is_json_object,
 )
+from .types import KNOWN_TYPES
 
 __all__ = [
     "CURRENT_GENERATION_VERSION",
@@ -296,13 +297,13 @@ def _validate_staged_current(path: Path, compression: str, expected_bytes: bytes
 
 
 def _assert_current_generation(parsed: dict) -> None:
-    """v2 物理件 → 迁移产物 restore 校验（Phase A 组合防线，§2.24 登记）：
+    """v2 物理件 → 迁移产物 restore 校验（上游 restoreReleasedV2Artifact，§2.24/§2.21）：
 
-    ① released v2 词表面（51 型）+ surface/provenance scoped 规则；② marker/cut
-    双向一致性（`inherited_cut`）；③ assistant/message|attempt 的现行 stream 三事实
-    cross-check（content / usage / replayState——与 `Session._replay_seed` 同款）。
-    不走 `Session(seed=...)` 全量 restore：mini KNOWN_TYPES 是 30/51 子集，released
-    域外来型（feedback/record 等）会被它拒读；全量语义接入属 Phase B。
+    header 闭集 + 事件信封（field 方言）+ 时间/密集 + marker/cut 双向一致性 +
+    安装门（KNOWN_TYPES 外非 ignorable 类型拒读）。已知词表 = mini 现行可安装集
+    （上游 restore 传入当前 Session 包已知类型同语义）；target 全量语义面（payload +
+    内嵌流三事实）属于迁移/编码路径（validate_v2.assert_released_v2_artifact），load
+    只做信封级（上游 load 策略同款）。
     """
     from .json import thaw  # noqa: PLC0415
     from .persistence import (  # noqa: PLC0415
@@ -311,61 +312,16 @@ def _assert_current_generation(parsed: dict) -> None:
         _is_header_line,
         inherited_cut,
     )
-    from .released import (  # noqa: PLC0415
-        RELEASED_V2_EVENT_TYPES,
-        assert_scoped_v1_artifact,
-    )
+    from .released import restore_released_v2_artifact  # noqa: PLC0415
     header_value = parsed["header"]
     if not _is_header_line(header_value):
         raise fail("staged session generation header is not a current v2 header")
     meta = _from_header_line(dict(header_value))
     events = [_decode_storage_event(thaw(row)) for row in parsed["rows"]]
-    for index, event in enumerate(events):
-        if event.get("seq") != index:
-            raise fail("staged session generation rows are not dense")
-        if event["type"] not in RELEASED_V2_EVENT_TYPES:
-            raise fail(
-                f'staged session generation row {index} has unknown event type '
-                f'"{event["type"]}"')
     cut = inherited_cut(meta, events)
     artifact = {"header": {k: v for k, v in dict(header_value).items() if k != "type"},
                 "inherited_event_count": cut, "events": events}
-    assert_scoped_v1_artifact(artifact, forbid_assistant_provenance=True)
-    # ③ stream 三事实 cross-check（现行 v2 语义；空流跳过——上游同款）
-    from ...llm.assistant_stream import expand_assistant_stream  # noqa: PLC0415
-    from ...llm.protocol import BlockAssembler  # noqa: PLC0415
-    from .session import _json_deep_equal  # noqa: PLC0415
-    for event in events:
-        if event["type"] not in ("assistant/message", "assistant/attempt"):
-            continue
-        data = event["data"]
-        try:
-            timed = expand_assistant_stream(list(data["stream"]))
-            assembler = BlockAssembler()
-            for member in timed:
-                assembler.push(member.chunk)
-        except Exception as error:  # noqa: BLE001
-            raise fail(
-                f"staged {event['type']} at index {event['seq']} has an invalid "
-                f"embedded stream: {error}") from error
-        if event["type"] == "assistant/attempt" or not timed:
-            continue
-        message = data.get("message") or {}
-        expected = assembler.interrupted_blocks() if data.get("interrupted") is True \
-            else assembler.blocks
-        if not _json_deep_equal(message.get("content"), expected):
-            raise fail(
-                f"staged assistant/message at index {event['seq']} content disagrees "
-                "with its embedded stream")
-        if not _json_deep_equal(data.get("usage"), assembler.usage):
-            raise fail(
-                f"staged assistant/message at index {event['seq']} usage disagrees "
-                "with its embedded stream")
-        source = message.get("source") or {}
-        if not _json_deep_equal(source.get("replayState"), assembler.replay_state):
-            raise fail(
-                f"staged assistant/message at index {event['seq']} replay state "
-                "disagrees with its embedded stream")
+    restore_released_v2_artifact(artifact, KNOWN_TYPES)
 
 
 def ensure_generation_current(

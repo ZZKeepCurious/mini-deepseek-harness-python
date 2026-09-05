@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import json
 import math
 from typing import Any
 
@@ -22,7 +23,9 @@ __all__ = [
     "exact_keys",
     "fail",
     "is_json_object",
+    "js_stringify",
     "lossless_json",
+    "released_v0_record",
     "safe_integer",
     "snapshot_json",
     "unsupported",
@@ -70,6 +73,11 @@ def is_json_object(value: Any) -> bool:
     return isinstance(value, dict)
 
 
+def js_stringify(value: Any) -> str:
+    """TS `JSON.stringify` 等价（紧凑分隔符、不转义非 ASCII、无缩进）。"""
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
 def lossless_json(value: Any, label: str = "Session value") -> Any:
     """无损 JSON 值：拒 NaN/Infinity/非 JSON 标量容器（上游 snapshotSessionFormatJson
     的检查半边；冻结半边由只读约定替代）。"""
@@ -113,19 +121,42 @@ def deep_equal(a: Any, b: Any) -> bool:
     return False
 
 
+def released_v0_record(value: Any, label: str) -> dict:
+    """非 null 非数组对象（上游 releasedV0Record）。"""
+    if not is_json_object(value):
+        raise fail(f"{label} must be a JSON object")
+    return value
+
+
 def exact_keys(value: Any, required: tuple[str, ...] | list[str], optional: tuple[str, ...] | list[str],
-               label: str, member: str = "member") -> None:
-    """键闭集断言。member 措辞随调用方方言：v0/v1 用 ``member``、v2 codec/validation
-    用 ``field``（上游三套措辞并存，逐字保留）。"""
+               label: str, member: str = "member", quote: bool = True,
+               missing_first: bool = False) -> None:
+    """键闭集断言。措辞随调用方方言逐字保留（上游三套并存）：
+    v0/v1 payload 用 ``member``（带引号）；v2 用 ``field``（无引号，`quote=False`）。
+
+    检查顺序两个来源都保留：v0→v1 exactKeys 先 unexpected 后 missing
+    （validation-helpers.ts:29-32）；v2 exactKeys 先 missing 后 unexpected
+    （validation.ts:203-206），靠 `missing_first` 对齐。"""
     if not is_json_object(value):
         raise fail(f"{label} must be a JSON object")
     allowed = set(required) | set(optional)
+    if missing_first:
+        for key in required:
+            if key not in value:
+                if quote:
+                    raise fail(f'{label} lacks required {member} "{key}"')
+                raise fail(f"{label} lacks required {member} {key}")
     for key in value:
         if key not in allowed:
-            raise fail(f'{label} has unexpected {member} "{key}"')
-    for key in required:
-        if key not in value:
-            raise fail(f'{label} lacks required {member} "{key}"')
+            if quote:
+                raise fail(f'{label} has unexpected {member} "{key}"')
+            raise fail(f"{label} has unexpected {member} {key}")
+    if not missing_first:
+        for key in required:
+            if key not in value:
+                if quote:
+                    raise fail(f'{label} lacks required {member} "{key}"')
+                raise fail(f"{label} lacks required {member} {key}")
 
 
 class SessionFormatError(Exception):

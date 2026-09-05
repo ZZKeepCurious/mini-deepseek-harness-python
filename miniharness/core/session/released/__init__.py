@@ -5,10 +5,10 @@
   * `packages/session/session-format-v0-to-v1/src/*`（共享 codec + legacy 归一化迁移）；
   * `packages/session/session-format-v1-to-v2/src/*`（chunk 流内嵌 + attempt 迁移）。
 
-Phase A 范围（design-generation-migration.md）：转换语义与迁移自身不变量逐字对齐；
-51 类型逐字段 payload 语义与跨事件关系状态机（上游深度校验层）**不移植**——
-病态输入由「迁移不变量 + 迁移产物过现行 v2 restore 全量校验」双防线兜底，
-登记为 verified-diffs §2.24 显式简化。
+Phase B（2026-09-05）：v0/v1 深度校验层落地——51 类型逐字段 payload 语义
+（payload_validation.py）+ 跨事件关系状态机（relationships.py）+ 真实 artifact 编排
+（validate.py），消息措辞逐字对齐上游；v0/v1 codec 与 v0→v1 迁移换用真实校验器。
+v2 校验（validate_v2.py，含内嵌流 BlockAssembler 复核）与 v1→v2 迁移接续同批。
 """
 from .helpers import (
     SAFE_INT_MAX,
@@ -38,9 +38,22 @@ from .codec import (
     decode_released_header,
 )
 from .validate import (
+    assert_released_event_payload,
+    assert_released_session_format_header,
     assert_released_surface_metadata,
-    assert_scoped_v1_artifact,
-    scoped_v1_source_check,
+    assert_released_v1_artifact,
+    assert_released_v1_header,
+    assert_released_v1_physical_artifact,
+    assert_released_v0_source_artifact,
+    assert_normalized_released_v0_artifact,
+    restore_released_v1_artifact,
+)
+from .validate_v2 import (
+    RELEASED_V2_RELATIONSHIP_EXTENSIONS,
+    assert_released_v2_artifact,
+    assert_released_v2_header,
+    assert_released_v2_physical_artifact,
+    restore_released_v2_artifact,
 )
 from .migrate_v0_v1 import V0_TO_V1
 from .migrate_v1_to_v2 import V1_TO_V2
@@ -68,9 +81,20 @@ __all__ = [
     "RELEASED_V1_CODEC",
     "create_released_codec",
     "decode_released_header",
+    "assert_released_event_payload",
+    "assert_released_session_format_header",
     "assert_released_surface_metadata",
-    "assert_scoped_v1_artifact",
-    "scoped_v1_source_check",
+    "assert_released_v1_artifact",
+    "assert_released_v1_header",
+    "assert_released_v1_physical_artifact",
+    "assert_released_v0_source_artifact",
+    "assert_normalized_released_v0_artifact",
+    "restore_released_v1_artifact",
+    "RELEASED_V2_RELATIONSHIP_EXTENSIONS",
+    "assert_released_v2_artifact",
+    "assert_released_v2_header",
+    "assert_released_v2_physical_artifact",
+    "restore_released_v2_artifact",
     "V0_TO_V1",
     "V1_TO_V2",
     "SESSION_FORMAT_CATALOG",

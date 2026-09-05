@@ -320,7 +320,7 @@ class Session:
         if data.get("interrupted") is True:
             expected_content = assembler.interrupted_blocks()
         else:
-            expected_content = assembler.blocks
+            expected_content = assembler.blocks()
         if not _json_deep_equal(message.get("content"), expected_content):
             raise ValueError(
                 f"seed assistant/message at index {index} content disagrees with its embedded stream")

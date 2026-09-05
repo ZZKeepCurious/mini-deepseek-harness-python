@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from . import dispositions as _disp
 from .helpers import (
     SessionFormatError,
     count,
@@ -21,6 +20,11 @@ from .helpers import (
     fail,
     is_json_object,
     safe_integer,
+)
+from .validate import (
+    assert_released_session_format_header,
+    assert_released_v0_source_artifact,
+    assert_released_v1_physical_artifact,
 )
 from ..seq_ranges import decode_seq_ranges
 
@@ -37,11 +41,6 @@ _EVENT_REQUIRED = ("type", "seq", "time", "data")
 _EVENT_OPTIONAL = ("ignorable", "sourceEventSeqs", "surfaceOp")
 _PHYSICAL_HEADER_REQUIRED = ("type", "version", "id", "createdAt", "delegationDepth")
 _PHYSICAL_HEADER_OPTIONAL = ("cwd", "parentSession", "seedLength", "origin", "agentPreset")
-_LOGICAL_HEADER_REQUIRED = ("version", "id", "createdAt", "isSeeded", "delegationDepth")
-_LOGICAL_HEADER_OPTIONAL = ("cwd", "parentSession", "origin", "agentPreset")
-
-#: v0 源中允许的 legacy 类型（migrate 归一化后不得再出现）。
-LEGACY_EVENT_TYPES = frozenset({"steering/message", "request/header-delta", "mode/set"})
 
 
 class PackedRowError(SessionFormatError):
@@ -53,36 +52,6 @@ def decode_released_header(header: Any) -> int:
     if not is_json_object(header):
         raise fail("corrupt session log: header is not a JSON object")
     return count(header.get("version"), "session log header version")
-
-
-def _assert_logical_header(header: dict, version: int, label: str) -> None:
-    """逻辑头闭集（上游 assertReleasedSessionFormatHeader）：cwd 绝对路径用
-    POSIX/Windows 双形态判定（与 mini 既有 header 键闭集同款）。"""
-    from pathlib import PurePosixPath, PureWindowsPath
-    exact_keys(header, _LOGICAL_HEADER_REQUIRED, _LOGICAL_HEADER_OPTIONAL, label)
-    if header.get("version") != version or isinstance(header.get("version"), bool):
-        raise fail(f"{label} must be format v{version}")
-    if not isinstance(header.get("id"), str):
-        raise fail(f"{label} id must be a string")
-    count(header.get("createdAt"), f"{label} createdAt")
-    if not isinstance(header.get("isSeeded"), bool):
-        raise fail(f"{label} isSeeded must be a boolean")
-    count(header.get("delegationDepth"), f"{label} delegationDepth")
-    cwd = header.get("cwd")
-    if cwd is not None:
-        if not isinstance(cwd, str):
-            raise fail(f"{label} cwd must be a string")
-        if not PurePosixPath(cwd).is_absolute() and not PureWindowsPath(cwd).is_absolute():
-            raise fail(f"{label} cwd must be absolute")
-    parent = header.get("parentSession")
-    if parent is not None and not isinstance(parent, str):
-        raise fail(f"{label} parentSession must be a string")
-    preset = header.get("agentPreset")
-    if preset is not None and not isinstance(preset, str):
-        raise fail(f"{label} agentPreset must be a string")
-    origin = header.get("origin")
-    if origin is not None and origin != "subagent":
-        raise fail(f'{label} origin must be "subagent"')
 
 
 def _decode_physical_header(value: Any, version: int) -> dict:
@@ -118,7 +87,7 @@ def _decode_physical_header(value: Any, version: int) -> dict:
             raise fail(f"{label} {key} must be a string")
     if "origin" in logical and logical["origin"] != "subagent":
         raise fail(f'{label} origin must be "subagent"')
-    _assert_logical_header(logical, version, f"released v{version} Session header")
+    assert_released_session_format_header(logical, version)
     return {"header": logical, "inherited_event_count": inherited}
 
 
@@ -261,41 +230,16 @@ def _scan_rows(rows: list[Any], version: int, recoverable: bool) -> list[dict]:
     return events
 
 
-def _assert_coordinates(
-    artifact: dict, version: int, known_types: frozenset[str],
-    allow_legacy: bool, refuse_unknown_even_ignorable: bool,
-) -> None:
-    """artifact 级坐标 + 封闭词表 + surface 元数据（scoped 深度校验见 §2.24 登记）。"""
-    from .validate import assert_released_surface_metadata
-    header = artifact["header"]
-    _assert_logical_header(header, version, f"released v{version} Session header")
-    inherited = count(artifact.get("inherited_event_count"), "Session inheritedEventCount")
-    events = artifact["events"]
-    if inherited > len(events):
-        raise fail("Session inheritedEventCount exceeds its event count")
-    if not header.get("isSeeded") and inherited != 0:
-        raise fail("unseeded Session inheritedEventCount must be 0")
-    for index, event in enumerate(events):
-        label = f"{event.get('type')} {index}"
-        exact_keys(event, _EVENT_REQUIRED, _EVENT_OPTIONAL, label)
-        if event["seq"] != index:
-            raise fail(f"{label} has non-dense seq")
-        safe_integer(event.get("time"), f"{label} time")
-        if event.get("ignorable") is not None and event.get("ignorable") is not True:
-            raise fail(f"{label} ignorable must be true when present")
-        etype = event["type"]
-        if etype not in known_types:
-            if refuse_unknown_even_ignorable or event.get("ignorable") is not True:
-                raise fail(f'format v{version} contains unknown event type "{etype}" at seq {index}')
-        assert_released_surface_metadata(event, index, version)
-    _ = allow_legacy
-
-
 def create_released_codec(version: int,
                           source_validator: Callable[[dict], None] | None = None) -> dict:
-    """v0/v1 共享 codec 工厂：decode_header / decode_artifact / decode_recoverable_artifact。"""
-    known = frozenset(_disp.RELEASED_V0_EVENT_DISPOSITIONS)
-    refuse_unknown = version == 0
+    """v0/v1 共享 codec 工厂：decode_header / decode_artifact / decode_recoverable_artifact。
+
+    制品级校验委托真实校验器：v0 源冻结（51 词表 + legacy 白名单）、v1 词表中立
+    （上游 assertReleasedV0SourceArtifact / assertReleasedV1PhysicalArtifact 逐字语义）。
+    """
+    validator = source_validator or (
+        assert_released_v0_source_artifact if version == 0 else assert_released_v1_physical_artifact
+    )
 
     def decode_header(header_value: Any) -> dict:
         return _decode_physical_header(header_value, version)["header"]
@@ -306,11 +250,7 @@ def create_released_codec(version: int,
         artifact = {"header": physical["header"],
                     "inherited_event_count": physical["inherited_event_count"],
                     "events": events}
-        if source_validator is not None:
-            source_validator(artifact)
-        else:
-            _assert_coordinates(artifact, version, known,
-                                allow_legacy=True, refuse_unknown_even_ignorable=refuse_unknown)
+        validator(artifact)
         return artifact
 
     def decode_recoverable_artifact(header_value: Any, row_values: list[Any]) -> dict:
@@ -319,8 +259,7 @@ def create_released_codec(version: int,
         artifact = {"header": physical["header"],
                     "inherited_event_count": physical["inherited_event_count"],
                     "events": events}
-        _assert_coordinates(artifact, version, known,
-                            allow_legacy=True, refuse_unknown_even_ignorable=refuse_unknown)
+        validator(artifact)
         return artifact
 
     return {
@@ -331,19 +270,5 @@ def create_released_codec(version: int,
     }
 
 
-def _assert_released_v0_source(artifact: dict) -> None:
-    """v0 源冻结校验：51 词表 + legacy 白名单（未知即使 ignorable 也拒）。"""
-    _assert_coordinates(artifact, 0,
-                        frozenset(_disp.RELEASED_V0_EVENT_DISPOSITIONS) | LEGACY_EVENT_TYPES,
-                        allow_legacy=True, refuse_unknown_even_ignorable=True)
-
-
-def _assert_released_v1_physical(artifact: dict) -> None:
-    """v1 词表中立物理解码：只查坐标 + 信封基座（未知类型/未知成员放行）。"""
-    _assert_coordinates(artifact, 1,
-                        frozenset(_disp.RELEASED_V0_EVENT_DISPOSITIONS),
-                        allow_legacy=True, refuse_unknown_even_ignorable=False)
-
-
-RELEASED_V0_CODEC = create_released_codec(0, _assert_released_v0_source)
-RELEASED_V1_CODEC = create_released_codec(1, _assert_released_v1_physical)
+RELEASED_V0_CODEC = create_released_codec(0, assert_released_v0_source_artifact)
+RELEASED_V1_CODEC = create_released_codec(1, assert_released_v1_physical_artifact)

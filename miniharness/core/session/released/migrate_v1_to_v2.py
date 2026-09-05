@@ -16,8 +16,9 @@ from __future__ import annotations
 from typing import Any
 
 from . import dispositions as _disp
-from .helpers import is_json_object, unsupported
-from .validate import assert_scoped_v1_artifact
+from .helpers import is_json_object, snapshot_json, unsupported
+from .validate import assert_released_v1_artifact, assert_released_v1_header
+from .validate_v2 import assert_released_v2_artifact
 
 __all__ = ["V1_TO_V2"]
 
@@ -179,6 +180,10 @@ def _map_list(values: list[Any], old_to_new: dict[int, int], label: str) -> list
 def _remap_references(event: dict, old_to_new: dict[int, int]) -> dict:
     """密集重映射：只改声明字段（信封 provenance / surfaceOp / 四类 payload 引用）。
 
+    label 逐字对齐上游 remapReferences（migration.ts:248-343）：sources /
+    surface start,end / sourceEventSeq / shadowedRange start,end / shadowedSeqs /
+    messageSeqs。
+
     `session/title-llm-request.messages` 的 framed 文本逐字节保真——嵌在文本里的旧
     seq 不重解释（目标校验以 preservedSourceTitleRequestText 跳过 framed 复核，
     Phase A 由现行 restore 承担）。
@@ -187,11 +192,11 @@ def _remap_references(event: dict, old_to_new: dict[int, int]) -> dict:
     seq = event["seq"]
     remapped = dict(event)
     if "sourceEventSeqs" in remapped:
-        label = f"{etype} {seq} sourceEventSeqs"
+        label = f"{etype} {seq} sources"
         remapped["sourceEventSeqs"] = _map_list(remapped["sourceEventSeqs"], old_to_new, label)
     surface_op = remapped.get("surfaceOp")
     if is_json_object(surface_op):
-        label = f"{etype} {seq} surfaceOp"
+        label = f"{etype} {seq} surface"
         remapped["surfaceOp"] = {
             "op": "replace",
             "start": _map_one(surface_op["start"], old_to_new, f"{label} start"),
@@ -202,7 +207,7 @@ def _remap_references(event: dict, old_to_new: dict[int, int]) -> dict:
         label = f"{etype} {seq} sourceEventSeq"
         data = {**data, "sourceEventSeq": _map_one(data["sourceEventSeq"], old_to_new, label)}
     elif etype in ("compaction/prune", "compaction/summary"):
-        label = f"{etype} {seq} shadowed"
+        label = f"{etype} {seq} shadowedRange"
         shadowed_range = dict(data.get("shadowedRange") or {})
         if shadowed_range:
             shadowed_range["start"] = _map_one(shadowed_range["start"], old_to_new,
@@ -211,7 +216,7 @@ def _remap_references(event: dict, old_to_new: dict[int, int]) -> dict:
         updates: dict[str, Any] = {"shadowedRange": shadowed_range}
         if "shadowedSeqs" in data:
             updates["shadowedSeqs"] = _map_list(data["shadowedSeqs"], old_to_new,
-                                                f"{label} shadowedSeqs")
+                                                f"{etype} {seq} shadowedSeqs")
         data = {**data, **updates}
     elif etype in ("session/title", "session/title-llm-request") and "messageSeqs" in data:
         label = f"{etype} {seq} messageSeqs"
@@ -221,8 +226,7 @@ def _remap_references(event: dict, old_to_new: dict[int, int]) -> dict:
 
 
 def _migrate_header_v1_v2(header: dict) -> dict:
-    if header.get("version") != 1:
-        raise unsupported("expected format v1 header")
+    assert_released_v1_header(header)
     return {**header, "version": 2}
 
 
@@ -231,8 +235,8 @@ def _migrate_v1_v2(artifact: dict) -> dict:
     header = artifact["header"]
     events = artifact["events"]
     old_cut = artifact["inherited_event_count"]
-    # ① scoped 源校验（allow-empty-assistant）
-    assert_scoped_v1_artifact(artifact)
+    # ① 源 v1 精确校验（上游 migrate：assertReleasedV1Artifact）
+    assert_released_v1_artifact(artifact)
     # ② 封闭词表：表外事件即使 ignorable 也拒
     for event in events:
         if event["type"] not in _disp.RELEASED_V0_EVENT_DISPOSITIONS:
@@ -282,8 +286,9 @@ def _migrate_v1_v2(artifact: dict) -> dict:
     target = {"header": _migrate_header_v1_v2(header),
               "inherited_event_count": new_cut,
               "events": target_events}
-    # ⑩ 目标 scoped 校验（forbid-assistant：provenance 已剥）
-    assert_scoped_v1_artifact(target, forbid_assistant_provenance=True)
+    # ⑩ 目标快照 + v2 精确校验（上游：snapshot released v1-to-v2 target → assertReleasedV2Artifact）
+    target = snapshot_json(target, "released v1-to-v2 target")
+    assert_released_v2_artifact(target)
     return target
 
 

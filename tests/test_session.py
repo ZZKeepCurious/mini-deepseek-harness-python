@@ -33,7 +33,7 @@ def _embedded_assistant_data(text: str) -> dict:
         assembler.push(chunk)
     return {
         "turn": 1, "step": 1,
-        "message": create_message("assistant", assembler.blocks, {"kind": "model"}),
+        "message": create_message("assistant", assembler.blocks(), {"kind": "model"}),
         "stream": accumulator.snapshot(),
     }
 

@@ -118,7 +118,7 @@ class AssistantStreamAttempt:
         return self._accumulator.snapshot()
 
     def blocks(self) -> list[dict]:
-        return self._assembler.blocks
+        return self._assembler.blocks()
 
     def interrupted_blocks(self) -> list[dict]:
         return self._assembler.interrupted_blocks()

@@ -269,7 +269,7 @@ class TokenMeter:
         assembler = BlockAssembler()
         for member in expand_assistant_stream(stream):
             assembler.push(member.chunk)
-        blocks = assembler.blocks
+        blocks = assembler.blocks()
         return 0 if not blocks else estimate_content(blocks) + ROLE_OVERHEAD
 
 

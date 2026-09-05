@@ -95,7 +95,7 @@ async def summarize_with_adapter(agent, config: dict, input_: dict) -> dict:
     async for chunk in adapter.stream(messages, input_.get("tools", [])):
         assembler.push(chunk)
     _raise_on_finish_error(assembler.finish)
-    summary = _summary_text(assembler.blocks)
+    summary = _summary_text(assembler.blocks())
     return {
         "summary": summary,
         "provider": getattr(adapter, "provider", ""),

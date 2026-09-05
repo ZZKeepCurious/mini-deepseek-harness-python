@@ -205,98 +205,162 @@ class LlmAdapter:
 
 
 class BlockAssembler:
-    """按 index 组装 ContentBlock（上游 assembler.ts 的简化版）。
+    """增量组装 ContentBlock，从一条 chunk 流构建 assistant 消息。
 
-    block-end 携带组装好的块，所以正常完成路径只收集闭合块与终态
-    （usage / finish）；流式 UI 可改为逐片转发 delta。同时按流序追踪
-    open 块的增量累积（上游 partials/order 同构），供取消时定稿前缀。
+    单一致组装算法（上游 assembler.ts 的 mini 载体，逐语义移植）：agent-loop 在
+    记录原始 chunk 的同时喂给它，流结束时读 `blocks()`/`message()`/`usage`/`finish`，
+    取消截断时读 `interrupted_blocks()`。
 
-    对齐上游 assembler.ts:136-148：finish.kind == 'max-tokens' 时过滤
-    tool-call 块（"cannot be executed safely"，未完成的调用不可执行）。
+    容忍纯 delta 协议（无 block-start/end）：已由 `block-end` 闭合的 index 再收到
+    delta 一律忽略（坏流不可增长内存或破坏已闭合块）。
+
+    对齐上游 assembler.ts：partials/order/ensure/assemble/assembled；`blocks()` 与
+    `replay_state` 共享同一个 keep/drop 判定（max-tokens 丢弃不可安全执行的
+    tool-call 块，replay 元数据的 per-block 条目随之裁剪）。
     """
 
     def __init__(self):
-        self.blocks: list[dict] = []
-        self.usage: dict | None = None
-        self.finish: dict | None = None
+        self._partials: dict[int, dict] = {}
+        self._order: list[int] = []
+        self._usage: dict | None = None
+        self._finish: dict | None = None
         self._replay_state: dict | None = None
-        self._order: list[int] = []         # index 首次出现序（上游 order）
-        self._open: dict[int, dict] = {}    # 未闭合块：{blockType, text?}
-        self._closed: dict[int, dict] = {}  # index → 已闭合块
 
-    @property
-    def replay_state(self) -> dict | None:
-        """finish chunk 携带的 ReplayEnvelope（上游 assembler.replayState）。
-
-        mini 流载体无重放双半，finish 恒不带 replayState → 恒 None；保留属性以
-        对齐 V2 assertCurrentAssistantStream 的 source.replayState 比对。
-        """
-        return self._replay_state
-
-    def _mark_seen(self, index: int) -> None:
-        if index not in self._open and index not in self._closed:
+    def _ensure(self, index: int, block_type: str) -> dict:
+        partial = self._partials.get(index)
+        if partial is None:
+            partial = {"blockType": block_type, "text": "", "toolCallArguments": ""}
+            self._partials[index] = partial
             self._order.append(index)
-
-    def _ensure_open(self, index: int, default_type: str) -> dict:
-        entry = self._open.get(index)
-        if entry is None:
-            self._mark_seen(index)
-            entry = {"blockType": default_type}
-            self._open[index] = entry
-        return entry
+        return partial
 
     def push(self, chunk: dict) -> None:
         kind = chunk["type"]
         if kind == "block-start":
-            self._mark_seen(chunk["index"])
-            self._open[chunk["index"]] = {"blockType": chunk.get("blockType")}
-        elif kind == "text-delta":
-            entry = self._ensure_open(chunk["index"], "text")
-            entry["text"] = entry.get("text", "") + chunk.get("text", "")
-        elif kind == "reasoning-delta":
-            entry = self._ensure_open(chunk["index"], "reasoning")
-            entry["text"] = entry.get("text", "") + chunk.get("text", "")
-        elif kind == "block-end":
-            self._mark_seen(chunk["index"])
-            self._open.pop(chunk["index"], None)
-            block = chunk["block"]
-            self.blocks.append(block)
-            self._closed[chunk["index"]] = block
-        elif kind == "usage":
-            self.usage = chunk["usage"]
-        elif kind == "finish":
-            self.finish = chunk["reason"]
+            if chunk["index"] not in self._partials:
+                self._order.append(chunk["index"])
+                self._partials[chunk["index"]] = {
+                    "blockType": chunk.get("blockType"), "text": "", "toolCallArguments": "",
+                }
+            return
+        if kind in ("text-delta", "reasoning-delta"):
+            partial = self._ensure(chunk["index"],
+                                   "text" if kind == "text-delta" else "reasoning")
+            if partial.get("block") is not None:
+                return
+            partial["text"] = partial.get("text", "") + chunk.get("text", "")
+            return
+        if kind == "tool-call-delta":
+            partial = self._ensure(chunk["index"], "tool-call")
+            if partial.get("block") is not None:
+                return
+            partial["toolCallId"] = chunk.get("id")
+            if chunk.get("name"):
+                partial["toolCallName"] = chunk["name"]
+            partial["toolCallArguments"] = partial.get("toolCallArguments", "") \
+                + chunk.get("argumentsDelta", "")
+            return
+        if kind == "block-end":
+            partial = self._ensure(chunk["index"], chunk["block"].get("type"))
+            if partial.get("block") is not None:
+                return
+            partial["block"] = chunk["block"]
+            return
+        if kind == "usage":
+            self._usage = chunk["usage"]
+            return
+        if kind == "finish":
+            self._finish = chunk["reason"]
             self._replay_state = chunk.get("replayState")
+            return
+        raise ValueError(f"unknown chunk type {kind!r}")
 
-    def message(self, source: dict | None = None) -> dict:
-        blocks = self.blocks
-        if self.finish is not None and self.finish.get("kind") == "max-tokens":
-            # 上游：max-tokens 下模型产出的 tool-call 不可安全执行，丢弃
-            blocks = [b for b in blocks if b.get("type") != "tool-call"]
-        return create_message("assistant", blocks, source or {"kind": "model"})
+    @property
+    def usage(self) -> dict | None:
+        """`usage` chunk 的用量；未到该 chunk 前为 None。"""
+        return self._usage
+
+    @property
+    def finish(self) -> dict:
+        """`finish` chunk 的 reason；流未带 finish 时缺省 `{kind: 'stop'}`。"""
+        return self._finish if self._finish is not None else {"kind": "stop"}
+
+    @property
+    def replay_state(self) -> dict | None:
+        """按 `blocks()` 同款 keep/drop 裁剪过的 ReplayEnvelope。
+
+        仅当 envelope 的 per-block 条目与发出的 blocks 对齐才返回；max-tokens 裁剪
+        时随 blocks 同步裁剪 per-block 条目，否则 None（条目缺失或与块数不符）。
+        """
+        return self._assembled()[1]
+
+    def _assemble(self, partial: dict, index: int) -> dict:
+        block = partial.get("block")
+        if block is not None:
+            return block
+        block_type = partial.get("blockType")
+        if block_type == "text":
+            return {"type": "text", "text": partial.get("text", "")}
+        if block_type == "reasoning":
+            return {"type": "reasoning", "text": partial.get("text", "")}
+        if block_type == "tool-call":
+            return {"type": "tool-call",
+                    "id": partial.get("toolCallId") or f"call-{index}",
+                    "name": partial.get("toolCallName") or "",
+                    "arguments": partial.get("toolCallArguments", "")}
+        raise ValueError(f'cannot assemble incomplete block of type "{block_type}"')
+
+    def _assembled(self) -> tuple[list[dict], dict | None]:
+        """shared keep/drop 判定：max-tokens 截断丢弃不可安全执行的 tool-call。
+
+        发出的 blocks 与 replay 元数据都由此结果派生，二者不可能分歧。
+        """
+        all_blocks = [self._assemble(self._partials[index], index) for index in self._order]
+        kept = None
+        if self.finish.get("kind") == "max-tokens":
+            kept = [block.get("type") != "tool-call" for block in all_blocks]
+        blocks = all_blocks if kept is None else [
+            block for position, block in enumerate(all_blocks) if kept[position]]
+        envelope = self._replay_state
+        if envelope is None or envelope.get("blocks") is None:
+            return blocks, envelope
+        entries = envelope["blocks"]
+        if len(entries) != len(all_blocks):
+            return blocks, None
+        if kept is None or len(blocks) == len(all_blocks):
+            return blocks, envelope
+        return blocks, {"response": envelope.get("response"),
+                        "blocks": [entry for position, entry in enumerate(entries)
+                                   if kept[position]]}
+
+    def blocks(self) -> list[dict]:
+        """按流序组装所有已见块。
+
+        每个已见 index 一个块，max-token 截断丢弃不可安全执行的 tool-call；open 块
+        从累积 delta 组装（未闭合的未知块类型原样透传其 blockType——不抛）。
+        """
+        return self._assembled()[0]
 
     def interrupted_blocks(self) -> list[dict]:
-        """被中断的流可安全定稿的前缀（上游 assembler.ts interruptedBlocks）。
+        """被中断流可安全定稿的前缀：闭合 + open 的非空白 text/reasoning，按流序。
 
-        按流序收集 closed/open 的 text/reasoning 块（open 块从累积增量装配）；
-        tool-call 一律丢弃——中断先于派发，保留一个未派发的调用需要伪造结果；
-        未知类型的 open 块同样丢弃；空白内容块不可见，不保留。
+        tool-call 一律丢弃（中断先于派发）；open 未知块同样丢弃。
         """
         kept: list[dict] = []
         for index in self._order:
-            entry = self._open.get(index)
-            if entry is not None:
-                block_type = entry.get("blockType")
-                if block_type not in ("text", "reasoning"):
-                    continue
-                text = entry.get("text", "")
-                block = (reasoning_block(text) if block_type == "reasoning"
-                         else {"type": "text", "text": text})
-            else:
-                block = self._closed.get(index)
-                if block is None or block.get("type") not in ("text", "reasoning"):
-                    continue
+            partial = self._partials[index]
+            block_type = partial.get("block", {}).get("type") if partial.get("block") is not None \
+                else partial.get("blockType")
+            if block_type not in ("text", "reasoning"):
+                continue
+            block = self._assemble(partial, index)
             if not isinstance(block.get("text"), str) or block["text"].strip() == "":
                 continue
             kept.append(block)
         return kept
+
+    def message(self, source: dict | None = None) -> dict:
+        blocks = self.blocks()
+        if self.finish.get("kind") == "max-tokens":
+            blocks = [b for b in blocks if b.get("type") != "tool-call"]
+        return create_message("assistant", blocks, source or {"kind": "model"})
