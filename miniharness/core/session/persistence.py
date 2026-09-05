@@ -43,8 +43,21 @@ from . import (
     thaw,
     turn_balance,
 )
+from .generation import (
+    CURRENT_GENERATION_VERSION,
+    JsonlGenerationNewerVersionError,
+    JsonlGenerationUnsupportedMigrationError,
+    ensure_generation_current,
+    generation_log_filename,
+    parse_generation_log_filename,
+    resolve_generation_in_directory,
+)
+from .released import RELEASED_V0_CODEC, RELEASED_V1_CODEC
 from .json import now_ms
 from .seq_ranges import decode_seq_ranges, encode_seq_ranges
+
+#: released 旧版 codec 索引（list_headers 的纯 header 翻译用）。
+RELEASED_CODECS = {0: RELEASED_V0_CODEC, 1: RELEASED_V1_CODEC}
 from .zstd_frames import (
     compress_zstd_frame,
     decode_frames,
@@ -682,23 +695,59 @@ class JsonlPersistence(SessionPersistence):
     # --- 定位 ---
 
     def _find(self, session_id: str) -> Path | None:
-        """跨全部项目目录按编码后的 id 子目录定位唯一物理日志（上游 findLog）。"""
+        """跨全部项目目录定位唯一会话目录的多代制品并**确保当前代**（上游
+        findLog → ensureCurrentLog）：目录内选最高 canonical generation；非当前代
+        先 migrate-on-open 发布后继 `session.v2.jsonl[.zstd]`（不可变源保留），
+        再返回当前代路径。"""
         self._ensure_root_encoding()
         matches: list[Path] = []
         for project in self._list_project_dirs():
             self._reject_legacy_flat_artifacts(project)
             session_dir = project / encode_segment(session_id)
-            opposite = session_dir / _generation_log_name(self._opposite_compression())
-            if opposite.exists():
-                raise self._encoding_mismatch(opposite)
-            candidate = session_dir / _generation_log_name(self.compression)
-            if candidate.exists():
-                matches.append(candidate)
+            if not session_dir.is_dir():
+                continue
+            resolved = resolve_generation_in_directory(session_dir, self.compression)
+            if resolved is None:
+                continue
+            path = self._ensure_generation_current(session_id, resolved)
+            matches.append(path)
         if len(matches) > 1:
             raise ValueError(
                 f'duplicate JSONL session id "{session_id}" appears in multiple project directories'
             )
         return matches[0] if matches else None
+
+    def _ensure_generation_current(self, session_id: str, resolved: dict) -> Path:
+        """选中代 ≠ 当前代时迁移发布后继（上游 ensureCurrentLog 的错误转写）。"""
+        source_path: Path = resolved["source_path"]
+        source_version: int = resolved["source_version"]
+        current_path: Path = resolved["current_path"]
+        if source_version == SESSION_FORMAT_VERSION:
+            return source_path
+        try:
+            result = ensure_generation_current(
+                source_path, source_version, current_path, self.compression,
+                validate_historical_header=lambda header: self._validate_generation_identity(
+                    session_id, header))
+        except JsonlGenerationNewerVersionError as error:
+            raise ValueError(
+                f'{session_format_version_refusal(error.stored_id, error.stored_version)} '
+                f"(raw log: {error})") from error
+        except JsonlGenerationUnsupportedMigrationError as error:
+            raise ValueError(
+                f"{error}; source v{error.from_version} artifact remains unchanged "
+                f"(raw log: {source_path})") from error
+        return Path(result["path"])
+
+    @staticmethod
+    def _validate_generation_identity(session_id: str, header: dict) -> None:
+        """迁移发布前的源身份校验（上游 validateSourceIdentity 的 mini 半边）。"""
+        header_id = header.get("id")
+        if header_id != session_id:
+            raise ValueError(
+                f'corrupt session log: requested id "{session_id}" does not match '
+                f'header id "{header_id}"'
+            )
 
     def _resolve(self, session_id: str, cwd: str | None) -> Path:
         """解析会话文件绝对路径：已定位缓存 → cwd 给定 → 记忆 → 扫描 → _no-cwd。
@@ -958,27 +1007,43 @@ class JsonlPersistence(SessionPersistence):
 
     def list_headers(self):
         """枚举有效唯一会话的 header（只读首行/首帧——列举的成本随会话数而非
-        全部日志总长伸缩）。"""
+        全部日志总长伸缩）。多代目录：读最高代 header；released 旧版经
+        `migrate_released_header` **纯翻译**（不触发迁移发布——上游 readHeader
+        classify 语义），未来版本响亮拒绝。"""
+        from .released import migrate_released_header  # noqa: PLC0415 - 延迟导入避免环
         self._ensure_root_encoding()
         headers = []
         ids: set[str] = set()
         for project in self._list_project_dirs():
             self._reject_legacy_flat_artifacts(project)
             for session_dir in self._list_session_dirs(project):
-                opposite = session_dir / _generation_log_name(self._opposite_compression())
-                if opposite.exists():
-                    raise self._encoding_mismatch(opposite)
-                path = session_dir / _generation_log_name(self.compression)
-                if not path.exists():
+                resolved = resolve_generation_in_directory(session_dir, self.compression)
+                if resolved is None:
                     continue
+                path: Path = resolved["source_path"]
                 first = self._read_first_line(path)
                 if first is None:
                     continue  # 空文件 / 半写的头帧
-                meta = _parse_header_meta(first)
-                if meta is None:
-                    continue  # 不是 session header
-                if meta["version"] != SESSION_FORMAT_VERSION:
+                try:
+                    raw_header = json.loads(first)
+                except ValueError:
                     continue
+                if not isinstance(raw_header, dict) or raw_header.get("type") != "session":
+                    continue  # 不是 session header
+                version = raw_header.get("version")
+                if version == SESSION_FORMAT_VERSION:
+                    meta = raw_header
+                elif isinstance(version, int) and not isinstance(version, bool) \
+                        and 0 <= version < SESSION_FORMAT_VERSION:
+                    translated = migrate_released_header(
+                        RELEASED_CODECS[version]["decode_header"](raw_header))
+                    meta = translated
+                else:
+                    raise ValueError(
+                        f'session artifact "{path}" uses log format v{version}, but this '
+                        f"harness reads only v{SESSION_FORMAT_VERSION}: the log was written "
+                        "by a newer harness — upgrade the harness to open it"
+                    )
                 if meta["id"] in ids:
                     raise ValueError(
                         f'duplicate JSONL session id "{meta["id"]}" appears in multiple '

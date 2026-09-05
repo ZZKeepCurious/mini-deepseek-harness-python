@@ -123,6 +123,20 @@ class JsonlPersistence(SessionPersistence):
 
 `append` 只进 `_pending` 队列，真正的写盘发生在 `flush`。这样一个回合里几十条事件可以一次批量写，不用每条都碰一次磁盘。每会话一个文件，`session_id` 里的路径分隔符做替换，防止目录穿越。
 
+#### 多代 generation 与相邻迁移（`generation.py` + `released/`，教学代码之外的对齐实现）
+
+实现层的目录布局是**分代**的：每会话目录下是 `session.v2.jsonl[.zstd]`（v2 = 当前代；v0 保留旧名 `session.jsonl`；canonical 名以外的临时/大写/前导零名不是代）。这带来两个读侧机制，都对着上游 `session-persistence-jsonl/src/generation.ts`：
+
+1. **选最高代**（`resolveGenerationInDirectory` 语义）：目录里同时存在多代制品时，读侧选数值最高的 canonical 代；发现对立编码的 canonical 名响亮拒绝（编码互斥，绝不静默迁移编码）。
+2. **migrate-on-open**（`ensureJsonlGenerationCurrent` 语义）：选中的代 ≠ 当前代时，先解码 → 走**相邻迁移链**（v0→v1→v2，`released/` 包）→ 编码 → 校验 staged → 原子发布后继 `session.v2.jsonl[.zstd]`；**不可变源文件原样保留**（迁移永不改写历史）。三个失败面各自有名有姓：未来版本（`JsonlGenerationNewerVersionError`——"升级 harness"）、格式边拒绝内容（`JsonlGenerationUnsupportedMigrationError`——源制品不动）、目标冲突（`JsonlGenerationTargetConflictError`——当前代文件名已被别的字节占用）。
+
+迁移链是**纯函数整件迁移**（上游 `session-format/src/chain.ts`）：逻辑件 `{header, inheritedEventCount, events}` 与物理解码分离，每条边只做 `fromVersion → fromVersion+1`。两条边的语义核心：
+
+- **v0→v1（legacy 归一化）**：flat 消息包装（`legacy-message:<sid>:<seq>` 合成 id）、`steering/message` 并入 `user/message`、`turn/end` reason 转换表（aborted 补 `reason:{kind:'legacy'}`、disposed→aborted、error.failure→error 记录）、`turn/start.trigger` 与 `request/header.messagePrefix` 丢弃、retired 类型（`request/header-delta`/`mode/set`/`reason:"fallback"`）拒迁。
+- **v1→v2（chunk 流内嵌）**：`assistant/chunk` 事件流按 `turn:step` 切成一次次 attempt（六种封口边界：finish 自封 / message 认领 / step-end / llm-retry / llm-retry-started / turn-end）——被 message 认领的流压成内嵌 `stream` 记录、未认领的以最后一条 chunk 的 seq/time 落成 `assistant/attempt`；fork 切点从 header 数值（`seedLength`）重导出为 end-seed marker（`{inherited:true}`，需要时合成），切进一个 attempt 中间直接拒绝；密集重映射只改声明字段，指向已消费 chunk 的引用拒绝且**绝不重定向**。
+
+与上游的载体差异（教学可读性优先，均登记）：压缩后缀 `.zstd`（上游 `.zst`）；发布用临时文件 + `os.replace`（单进程写手，上游为 link 独占 + win32 原生助手）；51 类型逐字段 payload 语义与跨事件关系状态机**未移植**——迁移自身的不变量检查 + 迁移产物过现行 v2 restore（含 stream 三事实比对）构成双防线，完整语义校验属后续工程。
+
 ### 步骤 3：SQLite 后端（单调 SCHEMA_VERSION）
 
 ```python
