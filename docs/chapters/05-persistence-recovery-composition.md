@@ -135,7 +135,7 @@ class JsonlPersistence(SessionPersistence):
 - **v0→v1（legacy 归一化）**：flat 消息包装（`legacy-message:<sid>:<seq>` 合成 id）、`steering/message` 并入 `user/message`、`turn/end` reason 转换表（aborted 补 `reason:{kind:'legacy'}`、disposed→aborted、error.failure→error 记录）、`turn/start.trigger` 与 `request/header.messagePrefix` 丢弃、retired 类型（`request/header-delta`/`mode/set`/`reason:"fallback"`）拒迁。
 - **v1→v2（chunk 流内嵌）**：`assistant/chunk` 事件流按 `turn:step` 切成一次次 attempt（六种封口边界：finish 自封 / message 认领 / step-end / llm-retry / llm-retry-started / turn-end）——被 message 认领的流压成内嵌 `stream` 记录、未认领的以最后一条 chunk 的 seq/time 落成 `assistant/attempt`；fork 切点从 header 数值（`seedLength`）重导出为 end-seed marker（`{inherited:true}`，需要时合成），切进一个 attempt 中间直接拒绝；密集重映射只改声明字段，指向已消费 chunk 的引用拒绝且**绝不重定向**。
 
-与上游的载体差异（教学可读性优先，均登记）：压缩后缀 `.zstd`（上游 `.zst`）；发布用临时文件 + `os.replace`（单进程写手，上游为 link 独占 + win32 原生助手）；51 类型逐字段 payload 语义与跨事件关系状态机**未移植**——迁移自身的不变量检查 + 迁移产物过现行 v2 restore（含 stream 三事实比对）构成双防线，完整语义校验属后续工程。
+与上游的载体差异（教学可读性优先，均登记）：压缩后缀 `.zstd`（上游 `.zst`）；发布用临时文件 + `os.replace`（单进程写手，上游为 link 独占 + win32 原生助手）。**深度校验层已按上游整件移植（F1 Phase B）**：`payload_validation.py` 做 51 类型逐字段 payload 语义，`relationships.py` 做跨事件关系状态机（含 v2 `assistant/attempt` step 门），`validate.py`/`validate_v2.py` 做 artifact 编排——迁移链切换成真实校验器：v0→v1 先逐事件过词表/disposition 门、落底再过终态 artifact 双重门，v1→v2 出参直接走 v2 目标校验（内嵌流三事实 cross-check——content/usage/replayState 与发出的 blocks 逐一对照、marker/cut 双向核对、restore＝信封级装载）。
 
 ### 步骤 3：SQLite 后端（单调 SCHEMA_VERSION）
 
