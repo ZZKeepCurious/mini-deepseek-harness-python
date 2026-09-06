@@ -1,6 +1,7 @@
 """composition.py：YAML 载体 / !!js 子集 / .env / 组合 dump 渲染。"""
 import json
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -184,6 +185,45 @@ class TestDotenv(unittest.TestCase):
                 load_dotenv_file(path, environ=env)
             # 拒绝发生在物化前：OK_KEY 也未写入
             self.assertEqual(env, {})
+
+    def test_home_layer_proxy_names_exempted(self):
+        # 上游 HOME_LAYER_PROXY_NAMES（index.ts:129/172-173）：harness-home
+        # 层 .env 允许设代理名（proxy 选路由、home 文件不随仓库走）；其它
+        # bootstrap 名照拒
+        from miniharness.boot.dotenv import HOME_LAYER_PROXY_NAMES
+        self.assertEqual(HOME_LAYER_PROXY_NAMES,
+                         {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"})
+        with tempfile.TemporaryDirectory() as home:
+            home_dir = Path(home)
+            dotenv = home_dir / ".env"
+            dotenv.write_text("OK_KEY=1\nHTTP_PROXY=http://localhost:8080\n", encoding="utf-8")
+            env = {}
+            load_dotenv_file(dotenv, environ=env, home=home_dir)
+            self.assertEqual(env["OK_KEY"], "1")
+            self.assertEqual(env["HTTP_PROXY"], "http://localhost:8080")
+
+    def test_home_layer_still_rejects_other_bootstrap_names(self):
+        with tempfile.TemporaryDirectory() as home:
+            home_dir = Path(home)
+            dotenv = home_dir / ".env"
+            dotenv.write_text("PATH=/evil\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, 'sets "PATH"'):
+                load_dotenv_file(dotenv, environ={}, home=home_dir)
+
+    def test_proxy_name_in_project_layer_rejected_with_home_remedy(self):
+        # 非 home 层的 .env（随 clone 而来的调用目录文件）继续拒绝代理名，
+        # 文案明说第二条出路（index.ts:174-177）
+        from miniharness.boot.dotenv import HOME_LAYER_PROXY_NAMES
+        with tempfile.TemporaryDirectory() as tmp:
+            with tempfile.TemporaryDirectory() as home:
+                home_dir = Path(home)
+                path = Path(tmp) / ".env"
+                path.write_text("NO_PROXY=*\n", encoding="utf-8")
+                with self.assertRaisesRegex(
+                        ValueError,
+                        rf'{re.escape(str(home_dir / ".env"))}, which does not '
+                        r"travel with a repository"):
+                    load_dotenv_file(path, environ={}, home=home_dir)
 
 
 class TestComposeAndDump(unittest.TestCase):

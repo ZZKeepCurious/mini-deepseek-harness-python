@@ -10,12 +10,24 @@ bootstrap-only 拒绝（is_bootstrap_only，对齐上游 index.ts:92-128）：
 如何触达网络。发现文件设置它们 → 整体拒绝（fail loud）。名单为上游全集
 的 Python 侧映射：进程/网络/VCS 名通用保留，Node 启动名换为 Python 对应物
 （PYTHONPATH/PYTHONSTARTUP/PYTHONHOME），前缀 DSH_/XDG_/DYLD_/BASH_FUNC_ 不变。
+
+home 层例外（上游 HOME_LAYER_PROXY_NAMES，index.ts:122-129）：代理名选择
+每条请求走的路线，harness-home 的 .env 是用户自己的、且 DSH_HOME 本身
+bootstrap-only 所以没有 .env 能搬移这个豁免；调用目录的 .env（随 clone
+而来）继续拒绝它们。同组的 CA/TLS 名改的是信任而非路线，全局保持拒绝。
+豁免判定在 load_dotenv_file（readEnvLayer 同款：dir 解析等于 home）里做，
+is_bootstrap_only 本身不含豁免。
 """
 from __future__ import annotations
 
 import re
 
-__all__ = ["BootstrapEnvNameError", "is_bootstrap_only", "parse_dotenv"]
+__all__ = [
+    "BootstrapEnvNameError",
+    "HOME_LAYER_PROXY_NAMES",
+    "is_bootstrap_only",
+    "parse_dotenv",
+]
 
 _POSIX_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -43,6 +55,12 @@ BOOTSTRAP_NAMES = frozenset({
 
 # 前缀名单（上游 BOOTSTRAP_PREFIXES）
 BOOTSTRAP_PREFIXES = ("DSH_", "XDG_", "DYLD_", "BASH_FUNC_")
+
+# 上游 HOME_LAYER_PROXY_NAMES（index.ts:129）：唯一允许 harness-home 层
+# .env 设置的 bootstrap 名。豁免判定见 load_dotenv_file（readEnvLayer 同款）。
+HOME_LAYER_PROXY_NAMES = frozenset({
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+})
 
 
 class BootstrapEnvNameError(ValueError):

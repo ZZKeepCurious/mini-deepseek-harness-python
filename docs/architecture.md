@@ -177,8 +177,8 @@ miniharness/
 | `goal/`（domain + service + prompt + driver + tools + commands） | `packages/goal/`（goal + goal-round-driver + tool-goal + command-goal） | Typert remote（上游命令由 human UI 表面派发，mini 用 `/goal` 命令承载）；`_prepare_mutation` 前置 `assert_live_agent`（R4 agent registry）；driver 模式事件驱动续跑（同步门面保留 `continue_rounds`）；权威判定近似；三工具 canonical value + render 已对齐（简化标注见模块 docstring） |
 | `skills/`（registry + filesystem + tool_skill） | `packages/skill/`（skill + skill-filesystem + tool-skill） | 无 chokidar watch、无 ctx.fs 适配；skill 工具 canonical value + render 已对齐（简化标注见模块 docstring） |
 | `boot/boot.py` | `packages/boot/app-boot` | `load_optional_patches`（缺文件→空层、坏文件 fail loud）+ `watch_user_patches`（对齐 app-boot watchUserPatches：经 HMR 服务 watch 用户补丁层→刷新重挂；上游经 Include entry.update() 事务性重挂，mini 无 Include 插件由宿主供 remount 回调） |
-| `boot/composition.py` | `packages/boot/app-boot` + `apps/cli/src/args.ts` | |
-| `boot/dotenv.py` | `packages/boot/app-boot`（loadEnv） | |
+| `boot/composition.py` | `packages/boot/app-boot` + `apps/cli/src/args.ts` | `load_dotenv_file` 对齐上游 readEnvLayer：ENOENT 静默/其它 warn/已存在不覆盖/bootstrap-only 物化前整体拒绝；`home=` 为 harness-home 时 HOME_LAYER_PROXY_NAMES（HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY）豁免、代理名错误文案明说 home `.env` 第二条出路（index.ts:174-177） |
+| `boot/dotenv.py` | `packages/boot/app-boot`（loadEnv） | bootstrap-only 名单/前缀对齐 BOOTSTRAP_NAMES/PREFIXES；HOME_LAYER_PROXY_NAMES 同款；豁免判定在 load_dotenv_file（同上游 readEnvLayer） |
 | `cli/main.py` | `apps/cli/src/args.ts` | |
 | `cli/headless.py` | `packages/bundle/headless` + `apps/cli` | |
 | `cli/default_tools.py` | 无 | 教学扩展（上游是工具插件注册） |

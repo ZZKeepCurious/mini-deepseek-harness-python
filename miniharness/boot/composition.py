@@ -28,7 +28,12 @@ from typing import Any, Callable
 
 import yaml
 
-from .dotenv import BootstrapEnvNameError, is_bootstrap_only, parse_dotenv
+from .dotenv import (
+    BootstrapEnvNameError,
+    HOME_LAYER_PROXY_NAMES,
+    is_bootstrap_only,
+    parse_dotenv,
+)
 
 __all__ = [
     "apply_patch",
@@ -155,11 +160,16 @@ def load_dotenv_file(
     warn: Callable[[str], None] | None = None,
     bin_name: str = "miniharness",
     environ: dict[str, str] | None = None,
+    home: str | Path | None = None,
 ) -> None:
     """.env 加载：缺失（ENOENT）静默；其它错误 warn；已存在的 key 不覆盖。
 
     bootstrap-only 名字在任何值物化前整体拒绝（上游 readEnvLayer
-    index.ts:153-162：解析一次、校验与物化用同一份条目）。"""
+    index.ts:153-162：解析一次、校验与物化用同一份条目）。home 为
+    harness-home（上游 resolveDshHome 后的绝对路径）；当本文件属于它时，
+    HOME_LAYER_PROXY_NAMES（HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY）
+    豁免拒绝（index.ts:122-129/172-173，代理名有第二条出路：home 的 .env
+    不随仓库走）、其它 bootstrap 名照拒。"""
     env = environ if environ is not None else os.environ
     try:
         raw = Path(path).read_text(encoding="utf-8")
@@ -170,14 +180,27 @@ def load_dotenv_file(
             warn(f"{bin_name}: failed to load .env: {e}")
         return
     values = parse_dotenv(raw)
+    is_home = home is not None and os.path.dirname(os.path.abspath(path)) == os.path.abspath(home)
     for key in values:
-        if is_bootstrap_only(key):
-            raise BootstrapEnvNameError(
-                f'{bin_name}: {path} sets "{key}", which only the launching '
-                "environment may set (it decides how this process starts, where "
-                "its code and instructions load from, or how it reaches the "
-                f"network); export {key} instead of putting it in a .env file"
+        if not is_bootstrap_only(key):
+            continue
+        proxy_name = key.upper() in HOME_LAYER_PROXY_NAMES
+        if is_home and proxy_name:
+            continue
+        # 代理名比其它 bootstrap 名多一条出路，文案要明说（index.ts:174-177）
+        if proxy_name:
+            remedy = (
+                f"export {key}, or put it in {os.path.join(home, '.env')}, "
+                "which does not travel with a repository"
             )
+        else:
+            remedy = f"export {key} instead of putting it in a .env file"
+        raise BootstrapEnvNameError(
+            f'{bin_name}: {path} sets "{key}", which only the launching '
+            "environment may set (it decides how this process starts, where "
+            "its code and instructions load from, or how it reaches the "
+            f"network); {remedy}"
+        )
     for key, value in values.items():
         env.setdefault(key, value)
 
