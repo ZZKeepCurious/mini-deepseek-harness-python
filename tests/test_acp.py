@@ -5,6 +5,7 @@ import tempfile
 import unittest
 
 from miniharness.attachment import LocalAttachmentStore
+from miniharness.core.session.persistence import JsonlPersistence
 from miniharness.llm import FakeLlmAdapter
 from miniharness.protocol.acp import (
     AcpRequestError,
@@ -319,6 +320,55 @@ class TestDeepSeekSerializeImageRejection(unittest.TestCase):
         with self.assertRaises(LlmFailure) as cm:
             serialize_messages([message])
         self.assertEqual(cm.exception.code, UNSUPPORTED_CONTENT)
+
+
+class TestAcpPersistence(unittest.TestCase):
+    """R8（2026-09-06）：提供 persistence 后端时，已关闭会话落盘，跨进程
+    重启后 list_sessions / resume_session 仍可见（event-sourced 恢复）。"""
+
+    def _make(self, root):
+        return AcpServer(adapter=FakeLlmAdapter(), persistence=JsonlPersistence(root))
+
+    def test_closed_session_persisted_and_resumable_across_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "sessions")
+            server = self._make(root)
+            session_id = server.new_session(_CWD)["sessionId"]
+            server.prompt(session_id, [{"type": "text", "text": "你好"}])
+            loop = server.sessions[session_id]["loop"]
+            server.close_session(session_id)
+            archived_events = list(loop.session.events)
+
+            # 重启：同一持久化根，新 server 实例
+            server2 = self._make(root)
+            listed = server2.list_sessions(_CWD)["sessions"]
+            self.assertEqual([s["sessionId"] for s in listed], [session_id])
+
+            resumed = server2.resume_session(session_id, _CWD)
+            self.assertIsInstance(resumed["configOptions"], list)
+            # 恢复后会话完整（历史事件 + 可继续 prompt）
+            self.assertGreaterEqual(
+                len(server2.sessions[session_id]["loop"].session.events),
+                len(archived_events))
+            result = server2.prompt(session_id, [{"type": "text", "text": "继续"}])
+            self.assertEqual(result["stopReason"], "end_turn")
+
+    def test_restart_without_persistence_not_resumable(self):
+        server = AcpServer(adapter=FakeLlmAdapter())
+        session_id = server.new_session(_CWD)["sessionId"]
+        server.close_session(session_id)
+        self.assertEqual([s["sessionId"] for s in server.list_sessions(_CWD)["sessions"]],
+                         [session_id])
+
+    def test_persisted_session_list_filters_by_cwd(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "sessions")
+            server = self._make(root)
+            sid = server.new_session(_CWD)["sessionId"]
+            server.close_session(sid)
+            server2 = self._make(root)
+            other = os.path.join(os.path.dirname(_CWD), "some-other-cwd")
+            self.assertEqual(server2.list_sessions(other)["sessions"], [])
 
 
 if __name__ == "__main__":

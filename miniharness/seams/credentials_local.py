@@ -83,6 +83,7 @@ from typing import Any
 from filelock import FileLock, Timeout
 
 from ..boot.dotenv import _is_posix_identifier, parse_dotenv
+from ..core.scope import Context, Service
 
 CREDENTIALS_FILENAME = ".credentials.json"
 DOTENV_FILENAME = ".env"
@@ -826,3 +827,53 @@ class LocalCredentialProvider:
     @property
     def filename(self) -> str:
         return self._filename
+
+
+class CredentialsService(Service):
+    """`ctx.credentials`：凭据记录半边的服务接线（P2-21 前置，2026-09-06）。
+
+    包装一个 {@link LocalCredentialProvider}，暴露记录读/写 API，并在记录
+    写入发生后发射 `credentials/record-updated`（key）事件——对齐上游
+    credentials Service Definition 的 `notifyRecordUpdated`（authorization
+    经它确认 flow 已在本 attempt 内 commit 记录）。mini 唯一记录写路径仍是
+    modifyRecord/deleteRecord 委托；refs 的 set/unset 是 reference 半边，
+    不触发本事件。构造即经 ctx.provide 登记，随拥有 fiber 注销。
+    """
+
+    provide = "credentials"
+
+    def __init__(self, ctx: Context, provider: LocalCredentialProvider | None = None):
+        self.provider: LocalCredentialProvider = provider or LocalCredentialProvider()
+        super().__init__(ctx, "credentials")
+
+    def read_record(self, key: str) -> dict | None:
+        return self.provider.read_record(key)
+
+    def describe_record(self, key: str) -> dict:
+        return self.provider.describe_record(key)
+
+    def list_records(self) -> list[dict]:
+        return self.provider.list_records()
+
+    def modify_record(self, key: str, mutate) -> dict | None:
+        """唯一记录写路径：写入成功（mutate 返回非 None）后发射
+        `credentials/record-updated`；拒绝（None）不写不通知。"""
+        result = self.provider.modify_record(key, mutate)
+        if result is not None:
+            self.ctx.emit("credentials/record-updated", key)
+        return result
+
+    def delete_record(self, key: str) -> None:
+        """删除一条已存在记录后发射 `credentials/record-updated`；不存在 no-op。"""
+        existed = self.provider.read_record(key) is not None
+        if existed:
+            self.provider.delete_record(key)
+            self.ctx.emit("credentials/record-updated", key)
+
+
+def install_credentials(ctx: Context, provider: LocalCredentialProvider | None = None) -> CredentialsService:
+    """装配 `ctx.credentials` 服务（构造即登记；重复装配返回既有实例）。"""
+    existing = ctx.get("credentials")
+    if existing is not None:
+        return existing
+    return CredentialsService(ctx, provider)

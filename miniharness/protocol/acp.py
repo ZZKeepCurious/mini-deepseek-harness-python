@@ -50,12 +50,15 @@ model-control.ts + updates.ts）：
     reject-once → 'rejected'，cancelled → 'cancelled'）；callId 缺失 → next()。
   * 错误码：invalid params / internal error（JSON-RPC -32602 / -32603）。
 
-载体简化：上游 async（whenIdle 等待 + stream 通知 + 磁盘持久化）；mini 同步
+载体简化：上游 async（whenIdle 等待 + stream 通知）；mini 同步
 ——prompt 直接跑完整回合后返回 stopReason，session/update 通知经订阅 session/event
 逐事件实时投影即时外发（并发逐块，非回合后批量；update_sink 提供时每条即写
-wire，否则收敛 server.updates batch 供 in-process 读取）；close 归档在
-内存（无磁盘持久化目录，恢复复用同一 Session 对象与装配 ctx、冷重建 loop；createdAt 取
-Session.created_at 的进程内时间戳）；模型选择为单一 adapter 路由——provider/
+wire，否则收敛 server.updates batch 供 in-process 读取）；close 归档默认
+内存（恢复复用同一 Session 对象与装配 ctx、冷重建 loop；createdAt 取
+Session.created_at 的进程内时间戳），构造传 `persistence=`（JsonlPersistence）即
+落盘归档（2026-09-06 R8：new_session declare + session/event append / session/flush
+flush、close flush、list 合并磁盘 headers、resume 非 live 经 repair_and_replay
+物化；磁盘写默认关闭——上游 closeSession 落盘同样由宿主装配持久化）；模型选择为单一 adapter 路由——provider/
 model 多选目录经可选的 adapter.models_catalog 教学扩展承载（上游为 llm 服务
 listProviders/listModels），reasoning 目录经可选的
 adapter.resolve_model_info()['reasoning'] 承载（内置适配器不声明 → 该选项
@@ -646,7 +649,8 @@ class AcpServer:
     def __init__(self, adapter: Any = None, provider: str | None = None,
                  model: str | None = None, attachment: Any = None,
                  session_list_page_size: int | None = None,
-                 update_sink: Callable[[str, dict], None] | None = None):
+                 update_sink: Callable[[str, dict], None] | None = None,
+                 persistence: Any = None):
         self._adapter = adapter or FakeLlmAdapter()
         # 初始路由：构造参数优先，缺省取 adapter 声明的路由（上游 AcpConfig
         # provider/model；mini 单一 adapter 即路由本体）
@@ -666,6 +670,14 @@ class AcpServer:
         self._answerer: Callable | None = None   # 审批决策注入（测试用）
         self._session_list_page_size = _resolve_session_list_page_size(
             session_list_page_size)
+        # 会话持久化后端（R8，2026-09-06）：提供时关闭会话归档落盘、跨进程
+        # 重启后 list/resume 仍可见；缺省 None 维持内存归档（教学/单进程形态）。
+        self._persistence = persistence
+        # 磁盘上存在、但本进程尚未实装为 live record 的会话（跨重启恢复池）：
+        # header 只读元数据，events 在 resume 时经 repair_and_replay 装载。
+        self._disk_headers: dict[str, dict] = {}
+        if persistence is not None:
+            self._load_disk_headers()
 
     def set_answerer(self, fn: Callable | None) -> None:
         """注入审批决策函数：request → 'allow-once' | 'reject-once' | 'cancelled'。"""
@@ -719,9 +731,14 @@ class AcpServer:
                                                   self._initial_selection)
         self._install_model_selection(ctx, record)
         self._install_update_stream(record)
+        if self._persistence is not None:
+            self._persistence.declare(
+                session_id, meta={"cwd": cwd}, created_at=record["session"].created_at, cwd=cwd)
+            self._install_persistence_hook(record)
         record["loop"] = self._activate(record)
         self._sessions[session_id] = record
         self._archived[session_id] = record
+        self._disk_headers.pop(session_id, None)
         return {"sessionId": session_id,
                 "configOptions": record["model_control"].options()}
 
@@ -753,6 +770,20 @@ class AcpServer:
                 "sessionId": record["session"].session_id,
                 "cwd": header_cwd,
                 "createdAt": record["session"].created_at,
+            })
+        # 磁盘恢复池：本进程未实装的已持久化会话（跨重启），与内存归档并集。
+        for session_id, disk in self._disk_headers.items():
+            if session_id in self._archived or session_id in self._sessions:
+                continue
+            header_cwd = disk.get("cwd")
+            if header_cwd is None or not os.path.isabs(header_cwd):
+                continue
+            if cwd is not None and not _same_directory(header_cwd, cwd):
+                continue
+            entries.append({
+                "sessionId": session_id,
+                "cwd": header_cwd,
+                "createdAt": disk.get("created_at"),
             })
         entries.sort(key=lambda e: (-e["createdAt"], _session_bytes(e["sessionId"])))
         if cursor_obj is not None:
@@ -797,7 +828,10 @@ class AcpServer:
             raise invalid_params(f"session is already active: {session_id}")
         record = self._archived.get(session_id)
         if record is None:
-            raise invalid_params(f"session is not resumable: {session_id}")
+            disk = self._disk_headers.get(session_id)
+            if disk is None:
+                raise invalid_params(f"session is not resumable: {session_id}")
+            record = self._materialize_disk_record(disk)
         if not _same_directory(record["cwd"], cwd):
             raise invalid_params(f"session cwd does not match: {cwd}")
         model_control = AcpModelControl(
@@ -840,6 +874,8 @@ class AcpServer:
         finally:
             if self._sessions.get(session_id) is record:
                 del self._sessions[session_id]
+        if self._persistence is not None:
+            self._persistence.flush()
         return {}
 
     def _scaffold(self, ctx: Context) -> ToolRegistry:
@@ -859,6 +895,75 @@ class AcpServer:
         register_skill_tools(reg, ctx.get("skills"))
         ctx._miniharness_acp_scaffolded = True
         return reg
+
+    # ---------- R8：会话持久化（2026-09-06） ----------
+    # 提供 persistence 后端时，已关闭会话语义落到磁盘的完整附加日志（events
+    # 逐条投影 + header），跨进程重启后 list_sessions/resume_session 仍可见
+    # （对齐上游 session-persistence 的 event-sourced 恢复；mini 同步单进程，
+    # 无 batch 延迟——append 即缓冲、close/flush 即落盘，缺省 None 维持内存归档）。
+
+    def _load_disk_headers(self) -> None:
+        """启动时枚举磁盘上已持久化、本进程尚未实装的会话恢复池。"""
+        for h in self._persistence.list_headers():
+            session_id = h.get("id")
+            if session_id is None or session_id in self._archived:
+                continue
+            self._disk_headers[session_id] = {
+                "id": session_id,
+                "meta": h.get("meta"),
+                "cwd": h.get("cwd"),
+                "created_at": h.get("created_at"),
+            }
+
+    def _install_persistence_hook(self, record: dict) -> None:
+        """每会话一次：订阅 session/event 投影事件到持久化日志、session/flush
+        flush 落盘（对齐上游 JsonlBackendTracker 的 LIVE 订阅——简化：fetch 前
+        逐条缓冲、close 即 flush，无 200ms 批延迟窗）。"""
+        if getattr(record["ctx"], "_miniharness_acp_persisted", False):
+            return
+        session_id = record["session"].session_id
+        cwd = record["cwd"]
+
+        def on_event(payload):
+            event = payload.get("event") if isinstance(payload, dict) else payload
+            if event is not None and getattr(event, "get", None) and event.get("type"):
+                self._persistence.append(session_id, event, cwd=cwd)
+
+        def on_flush(payload=None):
+            self._persistence.flush()
+
+        record["ctx"].on("session/event", on_event)
+        record["ctx"].on("session/flush", on_flush)
+        record["ctx"]._miniharness_acp_persisted = True
+
+    def _materialize_disk_record(self, disk: dict) -> dict:
+        """把跨重启磁盘会话恢复为可用的完整 record（接 resume 前段，未 activate）。"""
+        from ..core.session.persistence import repair_and_replay  # noqa: PLC0415 - 延迟导入避免环
+        session_id = disk["id"]
+        cwd = disk.get("cwd")
+        ctx = Context(name=f"acp:{session_id}")
+        record = {
+            "session": Session(session_id),
+            "cwd": cwd,
+            "ctx": ctx,
+            "reg": None,
+            "loop": None,
+            "model_control": None,
+            "selection": self._initial_selection,
+            "inflight": False,
+            "meter": TokenMeter(),
+        }
+        record["session"] = repair_and_replay(
+            self._persistence, session_id, record["session"])
+        record["reg"] = self._scaffold(ctx)
+        record["model_control"] = AcpModelControl(self._adapter,
+                                                  self._initial_selection)
+        self._install_model_selection(ctx, record)
+        self._install_update_stream(record)
+        self._install_persistence_hook(record)
+        self._archived[session_id] = record
+        self._disk_headers.pop(session_id, None)
+        return record
 
     def _install_model_selection(self, ctx: Context, record: dict) -> None:
         """每会话一次安装 agent/request 选择施加监听（resume 复用同一 ctx）。"""

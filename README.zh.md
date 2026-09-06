@@ -43,7 +43,7 @@
 | 启动器选项（`--patch`、`--dump-config` / `--dump-default-config`、只读组合导出） | `apps/cli/src/args.ts` |
 | 会话管理服务（`ctx.sessions`：create/prepare/enter/announce 生命周期、fork 五错误码、flush 检查点、`session/created|disposed|event|flush` 四事件） | `packages/core/session`（SessionStore） |
 | 会话管理 CLI（`miniharness sessions` 列表/恢复/删除；mini 教学扩展） | web 表面（上游） |
-| 能力扩展口（沙箱后端 + 策略服务 + bash 消费执行器（`ctx.sandboxPolicy` 决议 / `sandbox/mode` 日志覆盖 / `ctx.shell` confine 包裹三路归因）/ 凭据四层 + 记录（record）服务侧五件套 `read/describe/list/modify/delete_record`（`<scope>/<id>` 键语法、跨进程写锁 30s、modifyRecord 唯一写路径）/ 子 agent ACP+SDK+fork 三通道） | capability seams 文档 |
+| 能力扩展口（沙箱后端 + 策略服务 + bash 消费执行器（`ctx.sandboxPolicy` 决议 / `sandbox/mode` 日志覆盖 / `ctx.shell` confine 包裹三路归因）/ 凭据四层 + 记录（record）服务侧五件套 `read/describe/list/modify/delete_record`（`<scope>/<id>` 键语法、跨进程写锁 30s、modifyRecord 唯一写路径、`ctx.credentials` Service + `credentials/record-updated` 事件）/ **授权服务（`install_authorization(ctx)`：`registerFlow`/`list`/`describe`/`cancel`/`begin` + `authorization/settled` 事件，错误码闭集 DUPLICATE_FLOW/NO_FLOW/UNKNOWN_METHOD/ALREADY_IN_FLIGHT/NOT_COMMITTED/DECLINED，经 `credentials/record-updated` 记账 + `describe_record` 二次确认核验凭据提交）**/ 子 agent ACP+SDK+fork 三通道） | capability seams 文档 |
 | 可继续子代理（`start_continuable`/`send_message`（含初始 prompt）、durable 子会话 + 冷恢复、结算投递、异步事件驱动（A8：投递即返回 + watchSettlement + steer 批内合并 + 所有权记账 waiting/settled）、生命周期事件 `subagent/start`/`subagent/end`（runId 配对 + epochStopReason/foldConsumedWork 终局折叠 + 经委托父 scope 载体的 scoped dispatch）、命名 provider 注册表（`register_provider` → 注销发布 `subagent/provider-removed` 边）、DRAINING 准入截止（`drain`/`drain_descendants` + `assert_admitting`，拒绝措辞逐字）、interrupt 授权矩阵（user/ancestor authority + 缺席 no-op）、嵌套续跑（exec.agent 为授权主体，孙代结算通知投直属父）、模型侧委托工具 `subagent`（三段文案逐字、canonical value + `Tool.render`、`run_in_background` 路由）、`send_message`/`interrupt_agent`/`list_agents` 控制工具） | `packages/subagent`（subagent + subagent-in-process-driver + tool-subagent-control + tool-subagent-report） |
 | 预设 / Agent 干预 / 轨迹折叠 / 动态插件 / 审批 | `packages/preset` + `core/agent` + `interaction` |
 | 预设系统（shipped `system` 根 + 多根 first-root-wins roster、`project_preset`/`project_session_agent_preset` 投影、会话已开始即 `PresetLockedError`、shipped 预设对 authoring 只读、`agent.cordis.yml` → mini Preset 翻译；`miniharness presets list/show/select/delete` 是承载上游 web Remote 面的教学扩展 CLI） | `packages/preset`（agent-presets） |
@@ -138,7 +138,7 @@ mini-deepseek-harness-python/
 │   │   ├── default_tools.py # headless 默认工具集
 │   │   └── session_cmds.py  # 会话 list / resume / delete
 │   ├── protocol/            # acp / sdk / hooks 桥
-│   ├── seams/               # 沙箱 / 凭据 / 子 agent 扩展口（含 windows-acl 真内核执行器）
+│   ├── seams/               # 沙箱 / 凭据（含 CredentialsService）/ 授权 / 子 agent 扩展口（含 windows-acl 真内核执行器）
 │   ├── shell/               # ctx.shell bash 执行器族（本地直跑 + 沙箱包裹）
 │   ├── goal/  plan/  jobs/  skills/  commands/  attachment/
 │   ├── web/                 # apiproxy 子集：envelope / api / streams / approvals / server / downloads / frontend / launcher
