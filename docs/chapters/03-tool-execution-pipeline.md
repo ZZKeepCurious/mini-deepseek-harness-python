@@ -4,7 +4,7 @@
 > 前置：第 1、2 章。产出文件：`miniharness/core/tools.py` + `tests/test_tools.py`
 
 !!! warning "早期简化形态"
-    本章代码为**教学简化形态**，与当前实现存在以下差异（学习时以当前实现为准，见 00-setup §0.5 简化表）：
+    本章代码为**教学简化形态**，与当前实现存在以下差异（学习时以当前实现为准，见 00-setup §0.6 简化表）：
 
     - **管线拆分**：本章把整条管线写成单一 `run_pipeline`；当前实现拆成两段——`pipeline_policy`（schema 校验 → `tools/pre-execute` → `tools/ask` → `tools/guards`，返回拒绝结果或 `None`）与 `pipeline_body`（execute 超时 + post-execute）再加外层规范化两层（`miniharness/core/tools.py:255` `pipeline_policy`、`:331` `pipeline_body`、`:367` `run_pipeline`），并各有 async 变体（`pipeline_policy_async` / `run_pipeline_async`，供第 12 章并行调度器"pre 有序、body 重叠"使用）。
     - **决策字段名**：本章演示与下文 `PreToolDecision` 均用 `verdict`；实际与上游一致为 **`kind`**（`{kind:'allow'|'deny'|'ask'}`，`core/tools.py:266`）。

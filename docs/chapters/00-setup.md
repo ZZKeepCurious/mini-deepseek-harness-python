@@ -55,13 +55,31 @@ python -m miniharness.demo                  # 端到端演示（假模型 + 工�
 
 如果 `python` 不是 3.10+，用 `python3`。跑完 `demo` 会输出一个完整回合的日志，最后提示"演示完成"并给出临时目录路径——那是一个可回放的会话存档，第 5 章会解释它。
 
-## 0.4 三条学习纪律
+## 0.4 运行期环境变量速查
+
+MiniHarness 的启动行为全部经环境变量驱动，下面是完整清单（实现位置见 `docs/architecture.md` 映射表；前端 webui 变量见仓库顶层 `webui/README.md`）：
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `MINIHARNESS_HOME` | `~/.miniharness` | CLI 数据主目录：`--profile headless` 会话与 `miniharness sessions` 落在 `<HOME>/sessions`，用户预设落在 `<HOME>/.agent-presets`（`cli/headless.py`、`cli/session_cmds.py`、`preset/presets.py`） |
+| `MINIHARNESS_WEB_HOST` | `127.0.0.1` | `--profile web` 监听地址（`web/launcher.py`） |
+| `MINIHARNESS_WEB_PORT` | `0`（OS 分配） | `--profile web` 监听端口 |
+| `MINIHARNESS_WEB_TOKEN` | 空（无门） | 可选认证门：配置后 `/api/*` 全域强制、WS 升级拒绝写 HTTP 401；监听 `0.0.0.0` 无 token 启动即拒绝（web/auth.py，`docs/interface-wire.md` §7.1） |
+| `MINIHARNESS_WEBUI_DIST` | `web/static/`（教学 vanilla） | 静态服务前端根，指向 `webui/dist/` 即承载产品化前端（`web/frontend.py`） |
+| `MINIHARNESS_WEBUI_PROXY` | `http://127.0.0.1:8899` | 仅 webui 开发期：Vite dev server 的 `/api` 与 `/api/remote.mux` 代理目标（`webui/vite.config.ts`） |
+| `MINIHARNESS_MAX_STEPS` | `50` | Agent Loop 死循环守卫步数上限（第 4 章） |
+| `DEEPSEEK_API_KEY` | — | 真实 DeepSeek 适配器 / headless 凭据 |
+| `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | 可选，覆盖官方端点（兼容代理） |
+
+> Windows 控制台（GBK 代码页）查看 `presets` / `sessions` 输出的中文会乱码（数据本身是 UTF-8，未损坏）：设 `PYTHONIOENCODING=utf-8`（如 `set PYTHONIOENCODING=utf-8 && miniharness presets list`）即可正常显示。
+
+## 0.5 三条学习纪律
 
 1. **先跑测试，再读代码**。每个文件都配了验收测试，测试就是"始终成立的性质"清单。先看测试想验证什么，再去看实现，比顺着代码读效率高。
 2. **每章完成"检查点练习"**。练习都是 10~20 行的小改动，改完要么让测试通过，要么新增测试钉住你的行为。
 3. **每章末尾做"回到 dsh"对照**。打开真实仓库对应源码，只读关键 50 行，体会"约定一样、实现简化"在哪里。
 
-## 0.5 简化立场：与上游的差异
+## 0.6 简化立场：与上游的差异
 
 MiniHarness 是清晰的 Python 复现（以可复现、可学习为核心），但不是逐字节移植。下面是简化清单，每一条在对应章节都有详细说明。读手册前先扫一眼，避免在简化处花时间找"上游为什么没有"。
 

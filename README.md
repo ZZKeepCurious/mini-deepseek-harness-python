@@ -54,7 +54,7 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 | Async event bus, true parallel tools + barrier | `core/agent-loop` |
 | CI (GitHub Actions, Python 3.10~3.13, integration-tagged real-API tests) | — |
 
-The upstream browser frontend (`packages/client`, React monorepo) is not reproduced verbatim: its wire surface is fully aligned (an upstream client pointed at the mini backend works). Two consumer fronts ship: the productized `webui/` (repo-top standalone React + TypeScript + Vite project, depends only on the wire contract), plus `web/static/` as a vanilla SPA teaching reference only (old SSE wire, does not work against the current alpha.1 backend).
+The upstream browser frontend (`packages/client`, React monorepo) is not reproduced verbatim: its wire surface is fully aligned (an upstream client pointed at the mini backend works). Two consumer fronts ship: the productized `webui/` (repo-top standalone React + TypeScript + Vite project, depends only on the wire contract; build & run: [`webui/README.md`](webui/README.md)), plus `web/static/` as a vanilla SPA teaching reference only (old SSE wire, does not work against the current alpha.1 backend).
 
 ## Getting started
 
@@ -84,7 +84,12 @@ python -m miniharness.cli --dump-config
 
 # list / resume / delete persisted sessions
 python -m miniharness.cli sessions
+
+# agent presets: shipped system root + user presets (list/show/select/delete)
+python -m miniharness.cli presets list
 ```
+
+All CLI-written state lives under `MINIHARNESS_HOME` (default `~/.miniharness`): `--profile headless` sessions and `miniharness sessions` under `$MINIHARNESS_HOME/sessions`, user presets under `$MINIHARNESS_HOME/.agent-presets`. Point it elsewhere to relocate all durable state, e.g. `export MINIHARNESS_HOME=/data/miniharness`.
 
 ### Talk to the real DeepSeek API (optional)
 
@@ -97,7 +102,7 @@ python examples/real_api_demo.py
 
 ```sh
 pip install -e .
-miniharness
+miniharness            # equivalent to `python -m miniharness.cli` (same entry point)
 ```
 
 ## Project layout
