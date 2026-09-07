@@ -62,8 +62,8 @@ MiniHarness 的启动行为全部经环境变量驱动，下面是完整清单�
 | 变量 | 默认 | 作用 |
 |---|---|---|
 | `MINIHARNESS_HOME` | `~/.miniharness` | CLI 数据主目录：`--profile headless` 会话与 `miniharness sessions` 落在 `<HOME>/sessions`，用户预设落在 `<HOME>/.agent-presets`（`cli/headless.py`、`cli/session_cmds.py`、`preset/presets.py`） |
-| `MINIHARNESS_WEB_HOST` | `127.0.0.1` | `--profile web` 监听地址（`web/launcher.py`） |
-| `MINIHARNESS_WEB_PORT` | `0`（OS 分配） | `--profile web` 监听端口 |
+| `MINIHARNESS_WEB_HOST` | `127.0.0.1` | `--profile web` 监听地址（`web/launcher.py`；`--host` CLI 参数优先） |
+| `MINIHARNESS_WEB_PORT` | `0`（OS 分配） | `--profile web` 监听端口（`--port` CLI 参数优先） |
 | `MINIHARNESS_WEB_TOKEN` | 空（无门） | 可选认证门：配置后 `/api/*` 全域强制、WS 升级拒绝写 HTTP 401；监听 `0.0.0.0` 无 token 启动即拒绝（web/auth.py，`docs/interface-wire.md` §7.1） |
 | `MINIHARNESS_WEBUI_DIST` | `web/static/`（教学 vanilla） | 静态服务前端根，指向 `webui/dist/` 即承载产品化前端（`web/frontend.py`） |
 | `MINIHARNESS_WEBUI_PROXY` | `http://127.0.0.1:8899` | 仅 webui 开发期：Vite dev server 的 `/api` 与 `/api/remote.mux` 代理目标（`webui/vite.config.ts`） |

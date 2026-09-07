@@ -82,6 +82,43 @@ class TestLauncherFlags(unittest.TestCase):
             self.assertIsNotNone(ctx)
             ctx.dispose()
 
+    # ---- P2-17：--host / --port 显式监听参数 ----
+
+    def test_host_port_parsed_and_forwarded(self):
+        parsed = _parse_launcher_flags(["--host", "0.0.0.0", "--port", "8080", "--profile", "web"])
+        self.assertEqual(parsed["host"], "0.0.0.0")
+        self.assertEqual(parsed["port"], 8080)
+
+    def test_host_port_forwarded_to_web_main(self):
+        from miniharness.web import launcher as web_launcher
+
+        with mock_patch.object(web_launcher, "run_web") as run_web_mock:
+            _run_cli(["--host", "0.0.0.0", "--port", "9000", "--profile", "web"])
+            kwargs = run_web_mock.call_args.kwargs
+            self.assertEqual(kwargs["host"], "0.0.0.0")
+            self.assertEqual(kwargs["port"], 9000)
+
+    def test_host_invalid_fails(self):
+        out, err, code = _run_cli(["--host", "evil.example", "--profile", "web"])
+        self.assertEqual(code, 1)
+        self.assertIn("must be one of", err)
+
+    def test_port_non_integer_fails(self):
+        out, err, code = _run_cli(["--port", "abc", "--profile", "web"])
+        self.assertEqual(code, 1)
+        self.assertIn("must be an integer", err)
+
+    def test_port_out_of_range_fails(self):
+        for bad in ("-1", "65536"):
+            out, err, code = _run_cli(["--port", bad, "--profile", "web"])
+            self.assertEqual(code, 1)
+            self.assertIn("0..65535", err), bad
+
+    def test_host_missing_value_fails(self):
+        out, err, code = _run_cli(["--host"])
+        self.assertEqual(code, 1)
+        self.assertIn("requires a value", err)
+
     def test_help(self):
         out, err, code = _run_cli(["--help"])
         self.assertEqual(code, None)

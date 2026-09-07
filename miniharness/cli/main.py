@@ -12,13 +12,19 @@ launcher 选项（对齐 args.ts，已核实）：
   --dump-default-config       只打印内置默认组合；与 --patch 互斥
   --config <path>             指定组合文件（mini 教学扩展：上游用 profile 目录机制）
 
+  --host / --port             web profile 显式监听地址/端口（小写字面，P2-17）；
+                              host ∈ {'127.0.0.1','0.0.0.0'}，port ∈ 0..65535
+                              （0 = OS 分配）；缺省走环境/缺省（见 web/launcher）
+
 mini 扩展/简化（须标注）：
   - --config 为 mini 教学扩展（上游无此标志）
   - mini 内置默认组合为空（headless 不走插件树，见 headless.py 简化标注）
   - 组合层与 headless/web 运行时解耦：带 --config/--patch 跑任务时先 boot 验证，
     headless 运行时仍为内置 adapter
-  - web profile 的 host/port 读 MINIHARNESS_WEB_HOST / MINIHARNESS_WEB_PORT
-    （缺省 127.0.0.1 / 0，OS 分配），见 web/launcher.py
+  - web profile 的 host/port：`--host`/`--port` 显式参数 > 环境
+    MINIHARNESS_WEB_HOST / MINIHARNESS_WEB_PORT（缺省 127.0.0.1 / 0，OS 分配），
+    见 web/launcher.py
+  - 不实现上游 `--no-open` / `--trusted-host`（mini 无浏览器自动打开 / trust 栅栏面）
   - sessions 子命令为 mini 教学扩展（上游会话管理在 web 表层）
   - presets 子命令为 mini 教学扩展（上游 preset 管理是 web 表层 Remote 服务）：
     名单/投影/选择/删除，投影与 PresetLockedError 语义对齐，见 cli/preset_cmds.py
@@ -46,7 +52,9 @@ KNOWN_PROFILES = ("headless", "web")
 USAGE = (
     "Usage:\n"
     '  miniharness --profile headless "task"    answer one task, print the final assistant text, and exit\n'
-    "  miniharness --profile web                start the web service (FastAPI; requires fastapi/uvicorn)\n"
+    "  miniharness --profile web [--host HOST] [--port PORT]\n"
+    "                                          start the web service (FastAPI; requires fastapi/uvicorn)\n"
+    "                                          --host 127.0.0.1|0.0.0.0, --port 0..65535 (0 = OS assign)\n"
     "  miniharness --dump-config                print the final composed configuration (read-only)\n"
     "  miniharness --dump-default-config        print only the built-in default composition\n"
     "  miniharness --patch <path> --profile headless \"task\"\n"
@@ -72,6 +80,25 @@ def _parse_launcher(args: list[str]) -> dict[str, Any]:
             if i + 1 >= len(args):
                 raise _UsageError(f"option {a!r} requires a value")
             parsed["profile"] = args[i + 1]
+            i += 2
+        elif a == "--host":
+            if i + 1 >= len(args):
+                raise _UsageError(f"option {a!r} requires a value")
+            if args[i + 1] not in ("127.0.0.1", "0.0.0.0"):
+                raise _UsageError(
+                    f"--host must be one of ['127.0.0.1', '0.0.0.0'], got {args[i + 1]!r}")
+            parsed["host"] = args[i + 1]
+            i += 2
+        elif a == "--port":
+            if i + 1 >= len(args):
+                raise _UsageError(f"option {a!r} requires a value")
+            try:
+                port = int(args[i + 1])
+            except ValueError:
+                raise _UsageError(f"--port must be an integer in 0..65535, got {args[i + 1]!r}")
+            if not 0 <= port <= 65535:
+                raise _UsageError(f"--port must be in 0..65535, got {port!r}")
+            parsed["port"] = port
             i += 2
         elif a == "--config":
             if i + 1 >= len(args):
@@ -209,7 +236,7 @@ def _main(args: list[str]) -> None:
         if parsed["task"]:
             sys.stderr.write("error: web profile takes no task arguments (starts a server instead)\n")
             sys.exit(1)
-        _web_main()
+        _web_main(parsed.get("host"), parsed.get("port"))
         return
 
     from .headless import headless_main
@@ -223,11 +250,12 @@ def _main(args: list[str]) -> None:
     headless_main(task)
 
 
-def _web_main() -> None:
+def _web_main(host: str | None = None, port: int | None = None) -> None:
     """web profile 组装：默认 DeepSeek 适配器 + default_tools，交给 web/launcher。
 
     cli→web 是 launcher 语义的单方向依赖（组装面在 cli，运行面在 web，
-    test_dependencies.py §5 显式例外）。
+    test_dependencies.py §5 显式例外）。host/port 为 `--host`/`--port` 显式
+    参数（None 由 web/launcher 读环境/缺省，见 _resolve_bind）。
     """
     from ..core.scope import Context
     from ..llm import DeepSeekAdapter, LlmFailure
@@ -240,7 +268,7 @@ def _web_main() -> None:
     except LlmFailure as e:
         sys.stderr.write(f"dsh: {e.failure['code']}: {e.failure['message']}\n")
         sys.exit(1)
-    run_web(adapter, default_tools(ctx), ctx)
+    run_web(adapter, default_tools(ctx), ctx, host=host, port=port)
 
 
 if __name__ == "__main__":

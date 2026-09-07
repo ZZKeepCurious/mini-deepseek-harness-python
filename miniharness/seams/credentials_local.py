@@ -62,13 +62,19 @@ describe/set/unset/assertUnshadowed/assertOwnerOnly/parseCredentialsDocument）�
      verified-diffs §3.10）。
 
 载体简化（须在文档标注）：上游文档是 YAML（yaml 包），mini 用 JSON
-（stdlib），"严格映射 + 失败即拒"的语义不变；无文件 watch——外部编辑靠
-**读侧 mtime 探测热重载 + 写路径持锁重读折叠**双保险生效（B 档 2026-08-31：
-读查询/记录读在每次调用前 `os.stat` 比对 mtime/size，变了才重解析整表；写
-路径 reconcile 折叠不变，且外部删除文件也即时清空内存）。.env 解析覆盖上游
-launch-environment 的常见子集（KEY=VALUE + # 注释 + 引号剥离）。
-modifyRecord/deleteRecord 为同步实现（上游为 async + 操作队列 enqueue；
-mini 单进程同步，跨进程互斥由容器锁守护，队列等价于天然顺序）。
+（stdlib），"严格映射 + 失败即拒"的语义不变；文件 watch（P2-2，2026-09-07）——
+**可选 watchdog 主动监听**（对齐上游 chokidar watch + reconcileFromDisk 文本比对 +
+per-entry fan-out），**缺省关闭**（watch=False，与 ACP persistence 同构，显式开启）。
+未开启 watch 时，外部编辑靠**读侧 mtime 探测热重载 + 写路径持锁重读折叠**双保险
+生效（B 档 2026-08-31）：读查询/记录读在每次调用前 `os.stat` 比对 mtime/size，
+变了才重解析整表；写路径 reconcile 折叠不变，且外部删除文件也即时清空内存。
+watch 开启时，外部编辑由 watchdog 事件主动推进折叠（去抖 100ms，对齐上游
+debounceMs 缺省），并逐 entry 发 `credentials/reference-updated`/`credentials/
+record-updated`（对齐上游 reconcile fan-out；由装配的 `CredentialsService` 经
+`on_change` 钩子转成 ctx 事件）。.env 解析覆盖上游 launch-environment 的常见
+子集（KEY=VALUE + # 注释 + 引号剥离）。modifyRecord/deleteRecord 为同步实现
+（上游为 async + 操作队列 enqueue；mini 单进程同步，跨进程互斥由容器锁守护，
+队列等价于天然顺序）。
 """
 from __future__ import annotations
 
@@ -77,13 +83,20 @@ import logging
 import os
 import re
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 
 from filelock import FileLock, Timeout
 
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
+
 from ..boot.dotenv import _is_posix_identifier, parse_dotenv
 from ..core.scope import Context, Service
+
+#: watchdog watch 去抖窗口（秒）。对齐上游 credentials-local debounceMs 缺省 100。
+DEFAULT_WATCH_DEBOUNCE_SECONDS = 0.1
 
 CREDENTIALS_FILENAME = ".credentials.json"
 DOTENV_FILENAME = ".env"
@@ -434,7 +447,9 @@ class LocalCredentialProvider:
     def __init__(self, filename: str | None = None,
                  dsh_home: str | None = None,
                  project_dir: str | None = None,
-                 read_env: bool = True):
+                 read_env: bool = True,
+                 watch: bool = False,
+                 debounce_ms: int = 100):
         self._filename = os.path.abspath(filename or os.path.join(dsh_home or resolve_dsh_home(), CREDENTIALS_FILENAME))
         self._project_dir = project_dir or os.getcwd()
         self._user_dotenv = os.path.join(dsh_home or resolve_dsh_home(), DOTENV_FILENAME)
@@ -448,7 +463,23 @@ class LocalCredentialProvider:
         # 读侧热重载据此判断外部编辑，无需 watchdog。
         self._mtime_ns: int | None = None
         self._size: int | None = None
+        # P2-2（2026-09-07）：外部编辑主动感知（push）+ 事件通知（对齐上游
+        # credentials-local chokidar watch + reconcileFromDisk 文本比对 + fan-out）。
+        # mini 缺省关闭（与 ACP persistence 同构，显式开启避免默认起线程）。
+        self._watch = watch
+        self._debounce_ms = debounce_ms
+        self._observer: Any = None
+        self._watch_dirty = False
+        self._watch_worker: threading.Thread | None = None
+        self._watch_lock = threading.Lock()
+        # 事件发射钩子：OnStateChange(subject, kind)，kind ∈ {'reference','record'},
+        # subject ∈ {ref, key}。watch 触发的读侧折叠叠 log 每个变更时调用；写路径
+        # 不经过它（由 CredentialsService 写后自发）。None = 无消费方（读侧折叠
+        # 不依赖事件）。
+        self.on_change = None
         self._load_initial()
+        if watch:
+            self.start_watch()
 
     # ---------- 四层 ----------
 
@@ -704,21 +735,17 @@ class LocalCredentialProvider:
             text = None
         self._record_mtime()
         if text is None:
-            self._values = {}
-            self._records = {}
-            self._text = None
+            self._apply_external_change({}, {}, None)
             return
         document = parse_credentials_document(text, self._filename)
-        self._values = document["refs"]
-        self._records = document["records"]
-        self._text = text
+        self._apply_external_change(document["refs"], document["records"], text)
 
     def _refresh_if_changed(self) -> None:
         """若磁盘 mtime/size 探测到外部变更，则重读折叠进内存。
 
-        这是"无文件 watch"（§3.10 简化）的产品化落地——单进程发布时外部进程
-        改凭据文件由读侧探测即时感知，不需要 watchdog（B 档 2026-08-31）。
-        一个 stat 成本，仅在有变更时才解析文档。
+        未开启 watch 时的 pull 侧产品化落地——读查询前一个 stat 成本，仅在有
+        变更时才解析文档（B 档 2026-08-31）；watch（P2-2）开启时外部编辑由
+        事件驱动 `_reconcile_from_disk` 主动推进，本探测仍作兜底。
         """
         st = self._disk_stat()
         current = (st.st_mtime_ns, st.st_size) if st is not None else (None, None)
@@ -730,20 +757,143 @@ class LocalCredentialProvider:
         """显式按需重读：探测到磁盘外部变更即折叠进内存（否则 no-op）。"""
         self._refresh_if_changed()
 
+    # ---------- P2-2 外部编辑主动感知（watch） ----------
+
+    def start_watch(self) -> None:
+        """开启 watchdog 监听凭据文档（幂等）。
+
+        监视**父目录**递归扫描 + 精确路径过滤（旁 hmr `_ExactPathHandler`），
+        覆盖文件不存在→创建、删除、修改、move（src/dest）五类；去抖合并高频
+        写入后触发一次 `_reconcile_from_disk`。首次开启先做一次初始折叠，关闭
+         chokidar ready 补一次 reconcile 的竞态缺口（初读与 watcher 就绪之间
+        的变更）。
+        """
+        if self._observer is not None:
+            return
+        directory = os.path.dirname(self._filename)
+        os.makedirs(directory, exist_ok=True)
+        handler = _CredentialChangeHandler(self)
+        observer = Observer()
+        try:
+            observer.schedule(handler, directory, recursive=True)
+        except Exception:
+            logger.warning("credentials-local: failed to watch %s", self._filename)
+            return
+        observer.daemon = True
+        observer.start()
+        self._observer = observer
+        self._schedule_watch_refresh()
+
+    def stop_watch(self) -> None:
+        """关闭 watchdog 监听（幂等）；等齐在飞刷新线程。"""
+        observer = self._observer
+        self._observer = None
+        if observer is not None:
+            observer.stop()
+            observer.join(timeout=5.0)
+        with self._watch_lock:
+            worker = self._watch_worker
+            self._watch_worker = None
+            self._watch_dirty = False
+        if worker is not None:
+            worker.join()
+
+    def _watch_event(self) -> None:
+        """watch 事件入口：去抖合并后推进折叠。"""
+        self._schedule_watch_refresh()
+
+    def _schedule_watch_refresh(self) -> None:
+        """去抖 + 单飞：多次变更折叠为一次 `_reconcile_from_disk`（旁 hmr 单飞）。"""
+        with self._watch_lock:
+            if self._observer is None or self._watch_worker is not None \
+                    and self._watch_worker.is_alive():
+                if self._observer is not None:
+                    self._watch_dirty = True
+                return
+            if self._watch_worker is not None:
+                self._watch_dirty = True
+                return
+            self._watch_worker = threading.Thread(
+                target=self._watch_loop, daemon=True,
+                name=f"credentials-watch-{os.path.basename(self._filename)}")
+            self._watch_worker.start()
+
+    def _watch_loop(self) -> None:
+        """单飞循环：消费 dirty 直到净（对齐 hmr refreshConfig do-while）。"""
+        while True:
+            with self._watch_lock:
+                self._watch_dirty = False
+            try:
+                self._reconcile_from_disk()
+            except BaseException:  # noqa: BLE001 - 折叠失败不外泄，保留上次好快照
+                logger.warning("credentials-local: reload commit failed at %s",
+                               self._filename, exc_info=True)
+            with self._watch_lock:
+                if not self._watch_dirty:
+                    self._watch_worker = None
+                    return
+
+    def _apply_external_change(self, next_values: dict[str, str],
+                               next_records: dict[str, dict],
+                               text: str | None) -> None:
+        """折叠外部变更进内存 + 逐 entry 发变更事件（对齐上游 reconcileFromDisk）。
+
+        自写抑制由调用方文本比对保证（文本未变则不进入本方法）；本方法做
+        **整体快照替换**（删掉的条目绝不在内存残留），并对 refs 按值、records
+        按结构 diff，每个变更 entry 调 `on_change(subject, kind)`（若有）。
+        listen 发事件不外泄——异常日志后继续（对齐上游 fan-out listener
+        failure contained）。`_text` 记录为磁盘原字节（供后续自写文本比对）。
+        """
+        changed_refs = [k for k, value in next_values.items()
+                        if self._values.get(k) != value]
+        changed_keys = [k for k, record in next_records.items()
+                        if not _json_equal(self._records.get(k), record)]
+        for key in list(self._values):
+            if key not in next_values:
+                changed_refs.append(key)
+        for key in list(self._records):
+            if key not in next_records:
+                changed_keys.append(key)
+        self._values = next_values
+        self._records = next_records
+        self._text = text
+        if self.on_change is None:
+            return
+        for ref in changed_refs:
+            self._safe_on_change(ref, "reference")
+        for key in changed_keys:
+            self._safe_on_change(key, "record")
+
+    def _safe_on_change(self, subject: str, kind: str) -> None:
+        """调变更回调；异常 contained（对齐上游 fan-out listener failure）。"""
+        try:
+            self.on_change(subject, kind)
+        except Exception:  # noqa: BLE001 - 事件消费方失败不外泄
+            logger.warning("credentials-local: on_change(%s, %s) failed",
+                           subject, kind, exc_info=True)
+
     def _reconcile_from_disk(self) -> None:
+        """持锁重读 + 折叠外部变更（写路径 & watch 单飞用）。
+
+        与读侧 `_reload_values`（无锁、mtime 驱动）不同：写路径/事件驱动需
+        精确的自写抑制与文本追踪。自写抑制靠文本比对——写路径写完调本方法时
+        `text == self._text`（磁盘原字节）即判定无外部变更；文本不同则解析并
+        折叠（`_apply_external_change` 顺带 diff + fan-out）。
+        """
         _assert_owner_only(self._filename)
         try:
             with open(self._filename, "r", encoding="utf-8") as handle:
                 text = handle.read()
         except FileNotFoundError:
             text = None
-        if text == self._text or text is None:
+        if text == self._text:
             self._record_mtime()
             return
-        document = parse_credentials_document(text, self._filename)
-        self._values = document["refs"]
-        self._records = document["records"]
-        self._text = text
+        if text is None:
+            self._apply_external_change({}, {}, None)
+        else:
+            document = parse_credentials_document(text, self._filename)
+            self._apply_external_change(document["refs"], document["records"], text)
         self._record_mtime()
 
     def _atomic_write(self, text: str) -> None:
@@ -829,6 +979,43 @@ class LocalCredentialProvider:
         return self._filename
 
 
+class _CredentialChangeHandler(FileSystemEventHandler):
+    """watchdog 事件 → 精确路径过滤 → 去抖刷新（旁 hmr _ExactPathHandler）。
+
+    监视的是凭据文档所在的目录（递归），moved 事件取 src（deleted）与
+    dest（created），其余取 src_path；精确比对规范化路径，命中即通知
+    provider 去抖单飞折叠。
+    """
+
+    def __init__(self, provider: "LocalCredentialProvider") -> None:
+        super().__init__()
+        self._provider = provider
+        self._targets = (
+            os.path.normcase(os.path.realpath(provider.filename)),
+            os.path.normcase(os.path.abspath(provider.filename)),
+        )
+
+    def _paths(self, event: FileSystemEvent) -> list[str]:
+        if getattr(event, "is_synthetic", False):
+            return []
+        return [p for p in (getattr(event, "src_path", None),
+                            getattr(event, "dest_path", None)) if p]
+
+    def on_any_event(self, event: FileSystemEvent) -> None:
+        for raw in self._paths(event):
+            if raw and os.path.normcase(os.path.realpath(raw)) in self._targets \
+                    or raw and os.path.normcase(os.path.abspath(raw)) in self._targets:
+                self._provider._watch_event()
+                return
+
+
+def _json_equal(left: dict | None, right: dict | None) -> bool:
+    """结构化等值比较（records diff 用）：None 与缺失一致；否则逐键。"""
+    if left is None or right is None:
+        return left is right
+    return json.dumps(left, sort_keys=True) == json.dumps(right, sort_keys=True)
+
+
 class CredentialsService(Service):
     """`ctx.credentials`：凭据记录半边的服务接线（P2-21 前置，2026-09-06）。
 
@@ -844,7 +1031,20 @@ class CredentialsService(Service):
 
     def __init__(self, ctx: Context, provider: LocalCredentialProvider | None = None):
         self.provider: LocalCredentialProvider = provider or LocalCredentialProvider()
+        # P2-2（2026-09-07）：外部编辑经 provider watch 折叠时逐 entry 转发——
+        # reference → credentials/reference-updated，record → credentials/
+        # record-updated（对齐上游 reconcileFromDisk fan-out）。
+        self.provider.on_change = self._on_external_change
         super().__init__(ctx, "credentials")
+
+    def _on_external_change(self, subject: str, kind: str) -> None:
+        event = ("credentials/reference-updated" if kind == "reference"
+                 else "credentials/record-updated")
+        try:
+            self.ctx.emit(event, subject)
+        except Exception:  # noqa: BLE001 - 事件发射失败不外泄
+            logger.warning("credentials: emit %s(%s) failed", event, subject,
+                           exc_info=True)
 
     def read_record(self, key: str) -> dict | None:
         return self.provider.read_record(key)

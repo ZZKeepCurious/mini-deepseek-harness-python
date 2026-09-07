@@ -122,7 +122,7 @@ web 的宿主侧可以拆成两半，mini 两半都已落地：
 | HTTP + WS 载体与契约 | `packages/client/connection` + `packages/api/gateway` + `packages/api/session-controller` + `packages/api/remotes` | 两信封 RPC + unary 会话服务（`/api/<endpoint>` POST `{args}`）+ WS `/api/remote.mux` 承载 Remote 流（open/cancel/item/end/error）+ `$events` 注册表 + follow/control + 审批 waterfall 桥 + `frontend-static` 静态载体 | `miniharness/web/`（§7.5，已复现） |
 | 浏览器前端 | `packages/client`（39 包）| React shell、对象层、Trajectory、审批面板等 | `web/static/` vanilla SPA（§7.5.4；React monorepo 复现标注教学简化） |
 
-web 的 HTTP/WS 传输层 + 静态契约 + 浏览器 SPA 都在 §7.5 落地，`--profile web` 启动它并监听 `MINIHARNESS_WEB_HOST`/`MINIHARNESS_WEB_PORT`（缺省 `127.0.0.1` / `0`=OS 分配）。
+web 的 HTTP/WS 传输层 + 静态契约 + 浏览器 SPA 都在 §7.5 落地，`--profile web` 启动它并监听地址/端口，优先级：`--host`/`--port`（P2-17，`cli/main.py` 透传）> env `MINIHARNESS_WEB_HOST`/`MINIHARNESS_WEB_PORT`（缺省 `127.0.0.1` / `0`=OS 分配）。
 
 ## 7.4 三个协议入口
 
@@ -208,7 +208,7 @@ alpha.1 把通信收拢为**单一两信封协议**（对齐 `packages/client/co
 3. `GET /api/session.export?sessionId=<id>` → 会话导出下载（`web/downloads.py`）：root + 子代理后代 + 被引用媒体打包 zip，200/400/404/501/500 状态码链，错误走私有信封外壳。
 4. 非 `/api/` 路径 → SPA 静态服务（`web/frontend.py`，frontend-static 契约）：只服务 dist 根内文件；`..` 上跳 → 403；未命中 → `index.html` 200；MIME 按扩展名。dist 根默认 `web/static/`（教学 vanilla，旧 wire 不对新后端工作），经 `MINIHARNESS_WEBUI_DIST` 可指向产品化前端构建产物（`webui/dist/`），契约不变。
 
-`web/launcher.py` 把 `WebApi + GatewayStreams + create_app` 组装成可监听应用；host/port 读 `MINIHARNESS_WEB_HOST/PORT` env（上游是组合配置节，简化标注）。
+`web/launcher.py` 把 `WebApi + GatewayStreams + create_app` 组装成可监听应用；host/port 优先级：`cli/main` 透传的 `--host`/`--port`（P2-17）> `MINIHARNESS_WEB_HOST/PORT` env > 缺省（上游是组合配置节，简化标注）。
 
 **审批桥（`web/approvals.py`，对齐 `packages/api/remotes` waterfall + `interaction/user-approval`）**：桥挂 async `tools/ask` 闸门（power check：`_arm_ask` 注册 `tools/pre-execute` 返回 `{"kind":"ask"}`）→ 落 `approval/asked` 审计 → `events.invoke('approval/request', {approval})` 以 `$events` waterfall 投递给所有客户端 → 首个 `$events/result` 经 `receive_result` 结算 → 落 `approval/decided` → 返回 bool 供管线放行/拒绝。outcome 映射：result∈APPROVAL_OUTCOMES（`allowed-once|rejected|cancelled|unavailable`，否则 unavailable **fail-closed**）/rejected→unavailable/next→await nxt()/cancelled→cancelled；dispose 全 pending 'cancelled'（不悬挂）。
 
@@ -221,7 +221,8 @@ alpha.1 把通信收拢为**单一两信封协议**（对齐 `packages/client/co
 运行方式：
 
 ```sh
-python -m miniharness.cli --profile web          # 走启动器（缺 key → adapter 构造不抛，启动后 describe 可用）
+python -m miniharness.cli --profile web                    # 走启动器（缺 key → adapter 构造不抛，启动后 describe 可用）
+python -m miniharness --profile web --host 0.0.0.0 --port 8000   # 显式监听（0.0.0.0 需配 MINIHARNESS_WEB_TOKEN）
 MINIHARNESS_WEB_PORT=8000 python -m miniharness --profile web
 ```
 
