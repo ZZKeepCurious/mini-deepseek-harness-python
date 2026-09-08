@@ -211,8 +211,12 @@ class ImportDirectionTest(unittest.TestCase):
     def test_seams_domains_independent(self):
         """§5 规则 3：seams/ 内 sandbox（sandbox_local + sandbox_policy）/
         credentials / subagent 互不依赖。policy 与 local 同属沙箱子域：
-        上游 dsh-sandbox-policy 同样依赖 dsh-sandbox（canonicalPath/常量）。"""
-        domains = ("sandbox", "credentials_local", "subagent")
+        上游 dsh-sandbox-policy 同样依赖 dsh-sandbox（canonicalPath/常量）。
+        agent_team 是独立新域，但对 subagent 有单向依赖——上游
+        dsh-experimental-agent-team package.json 直接依赖 dsh-subagent
+        （continuation descriptor 由 subagent 域定义，roster 复述读侧）；
+        subagent 不得反向依赖 agent_team（同 shell→seams 先例）。"""
+        domains = ("sandbox", "credentials_local", "subagent", "agent_team")
 
         def _domain(name: str) -> str:
             leaf = name.split(".")[2]
@@ -229,6 +233,15 @@ class ImportDirectionTest(unittest.TestCase):
                 if dst_unit != "seams":
                     continue
                 dst_domain = _domain(dst)
+                if src_domain == "agent_team" and dst_domain == "subagent":
+                    # 显式例外（单方向）：roster 复述 continuation descriptor
+                    # 读侧（上游 dsh-experimental-agent-team 依赖 dsh-subagent）；
+                    # subagent 不得反向依赖 agent_team
+                    continue
+                if dst_domain == "agent_team" and src_domain != "agent_team":
+                    # agent_team 是消费者域，其它 seam 域不得 import 它
+                    violations.append(f"{module_name}: 反向导入 agent_team 域 {dst}")
+                    continue
                 if dst_domain in domains and dst_domain != src_domain:
                     violations.append(f"{module_name}: 跨子域导入 {dst}")
         self.assertEqual(violations, [])

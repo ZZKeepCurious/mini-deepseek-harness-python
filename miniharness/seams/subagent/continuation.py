@@ -607,11 +607,62 @@ class SubagentContinuationManager:
                 f"子代理嵌套深度 {depth} 达到上限 {self.max_depth}", "MAX_DEPTH_EXCEEDED",
             )
         # 上游 start 流程在 locks.run 临界区内先 assertChildIdAvailable 再物化；
-        # mini 物化同步无 await 窗口，入口单点检查即等价（活体注册表 +
+        # mini 物化同步无 await 窗口，入口单点检查即等价（+ 活体注册表 +
         # 激活表 + 持久化 header 三面，覆盖上游 ctx.agents/sessions/persistence）。
         child_id = child_id or ("child-" + uuid.uuid4().hex[:12])
         self._assert_child_id_available(child_id)
-        child_depth = depth + 1
+        parent, child_id = self._prepare_continuable(
+            label, tool_filter, persona, parent, child_id, agent_options)
+        if prompt is None:
+            return child_id
+        message_id = self.send_message(child_id, prompt, source="parent", parent=parent)
+        return {"childId": child_id, "messageId": message_id}
+
+    async def start_continuable_async(
+        self,
+        label: str | None = None,
+        tool_filter: list[str] | None = None,
+        persona: str | None = None,
+        prompt: str | dict | None = None,
+        parent: AgentLoop | None = None,
+        child_id: str | None = None,
+        agent_options: dict | None = None,
+    ):
+        """async 版 start_continuable：事件循环内投递初始委托走 send_message_async
+        （父无 driver → 内联泵子回合，确定性结算；父有 driver → A8 提交上环）。
+
+        与同步版共享 _prepare_continuable 物化前缀，仅投递分支不同——供
+        agent-team spawn 工具在循环内调用（raster._spawn_admitted_async）。
+        """
+        parent = parent or self.parent
+        self.assert_admitting(parent)
+        depth = delegation_depth_of(parent)
+        if depth >= self.max_depth:
+            raise SubagentError(
+                f"子代理嵌套深度 {depth} 达到上限 {self.max_depth}", "MAX_DEPTH_EXCEEDED",
+            )
+        child_id = child_id or ("child-" + uuid.uuid4().hex[:12])
+        self._assert_child_id_available(child_id)
+        parent, child_id = self._prepare_continuable(
+            label, tool_filter, persona, parent, child_id, agent_options)
+        if prompt is None:
+            return child_id
+        message_id = await self.send_message_async(
+            child_id, prompt, source="parent", parent=parent)
+        return {"childId": child_id, "messageId": message_id}
+
+    def _prepare_continuable(
+        self,
+        label: str | None,
+        tool_filter: list[str] | None,
+        persona: str | None,
+        parent: AgentLoop,
+        child_id: str,
+        agent_options: dict | None,
+    ) -> tuple[AgentLoop, str]:
+        """sync/async start_continuable 共享的物化前缀：seed / meta / descriptor /
+        首轮落盘。返回 (父, 子 id)。"""
+        child_depth = delegation_depth_of(parent) + 1
         seed = completed_turn_prefix(parent.session.events)
         meta: dict[str, Any] = {
             "parentSession": parent.id,
@@ -651,10 +702,7 @@ class SubagentContinuationManager:
         self.persistence.declare(child_id, meta, created_at=child_session.created_at)
         self._persist_delta(child_session, start=0)
         self._persisted[child_id] = len(child_session.events)
-        if prompt is None:
-            return child_id
-        message_id = self.send_message(child_id, prompt, source="parent", parent=parent)
-        return {"childId": child_id, "messageId": message_id}
+        return parent, child_id
 
     def send_message(self, child_id: str, message: str | dict, source: str = "parent",
                      parent: AgentLoop | None = None) -> str:
@@ -988,6 +1036,34 @@ class SubagentContinuationManager:
         activation["loop"].cancel(
             "user" if authority.get("kind") == "user" else "parent", keep_inbox=True,
         )
+
+    def steer_host_subagent(self, child_id: str, content: list,
+                            source: dict | None = None) -> str:
+        """team 域可信投递（镜像上游 steerHostSubagentPrompt，delivery 'steer'）。
+
+        向 root Host 的一个 durable 直系子会话投递预建内容（带 source）；活体
+        目标已有激活 → 直接 steering，否则冷恢复再投递（上游 deliverToChild
+        的 coldResume / submitAdmitted 同序）。调用方（TeamMailbox）已通过
+        Team authority queue 完成成员身份与投递授权——本方法不重复 lineage
+        检查，因为 team 消息的 sender 不恒为 durable 父（上游同构：team
+        域在 journal 事务内授权，subagent 层只做投递）。
+        投递按目标自身状态安全路由（载体差异，对齐 mini 既有 _route_to_parent
+        约定）：idle → steer（同步泵新回合）；driver 运行中 → steer（唤醒）；
+        同步运行中 → inbox next-step（非唤醒，避免重入泵死递归）。上游对
+        目标恒用 agent.steer()；mini 同步载体据此收窄为运行中目标不重入泵。
+        返回投递的消息 id。
+        """
+        activation = self._get_or_resume(child_id, parent=self.parent)
+        blocks = list(content) if isinstance(content, (list, tuple)) else [text_block(content)]
+        msg = create_message("user", blocks, source or {
+            "kind": "host", "form": "relay",
+        })
+        loop = activation["loop"]
+        if loop.status == "idle" or loop._driver is not None:
+            loop.steer(msg)
+        else:
+            loop.inbox.append("next-step", msg)
+        return msg["id"]
 
     def state_of(self, child_id: str) -> dict:
         """簿记查询（上游 stateOf 词汇与判定顺序）：running = agent status

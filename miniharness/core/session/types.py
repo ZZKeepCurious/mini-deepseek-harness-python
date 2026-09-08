@@ -62,6 +62,12 @@ KNOWN_TYPES = frozenset({
     # SessionEventMap：{mode, source?: 'delegation'}，log-only 非 surface、
     # 整值替换最后一条胜出——effective = fold(events) ?? 部署默认）
     "sandbox/mode",
+    # Agent Teams 实验（上游 experimental/agent-team/src/journal.ts
+    # SessionEventMap，四个事件 log-only 非 surface、version 2、存于
+    # Team Lead 会话日志）：team/member 全量投标 {member}；
+    # team/task 全量投标 {task}；team/message/queued {message}；
+    # team/message/delivered {messageId, targetId}
+    "team/member", "team/task", "team/message/queued", "team/message/delivered",
 })
 
 # 只有这三种事件产生模型消息，可带 surfaceOp（上游 types.ts SurfaceEventType）

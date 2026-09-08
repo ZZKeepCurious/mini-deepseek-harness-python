@@ -11,7 +11,11 @@ web 半（传输层 + 浏览器前端）的 wire 面已全对齐：两信封 RPC
 
 ## 规划中
 
-下一主线候选：插件示例集（教程用插件 + 真实工具演示）；多 agent 编排（子 agent 递归任务分解）；遥测（事件订阅、用量统计，`usage` chunk 已就绪）。
+下一主线候选：插件示例集（教程用插件 + 真实工具演示）；更多 agent 编排（agent-team 已落地，见下）；遥测（事件订阅、用量统计，`usage` chunk 已就绪）。
+
+## 已落地的对齐扩展
+
+- **Agent Teams 实验族（2026-09-08，P2-22）**：`seams/agent_team/` 隐式 root roster + durable peer mailbox + 共享任务 DAG（四类 `team/*` 事件全 log-only，Team Lead 会话为权威 journal）+ 模型侧 9 工具与 `team:policy` 提示节（同步门面 + 事件循环内 async 双投递载体）；生产就绪回归（全量 2077 绿、coverage 85%、`mkdocs --strict` 过）。契约/载体差异/简化登记见 verified-diffs §2.29。
 
 ## 上游包观察清单（未复现，暂不纳入范围）
 
