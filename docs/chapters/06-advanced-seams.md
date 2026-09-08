@@ -139,19 +139,56 @@ class _InProcessSubAgent(SubAgent):
 
 > 真实 dsh 的 `ctx.subagents` Provider 有 in-process / fork / ACP / Codex / Claude Code / dsh-sdk 六个。把我们的 `InProcessSubAgentProvider` 换成任何一个，`spawn + run` 的调用方代码一字不改。
 
-## 6.6 验收
+## 6.6 延伸：Agent Teams 接缝（多 agent 协作）
+
+子 agent 是"换 Provider 换行为"；Agent Teams 是它之上的协作层（上游 `packages/experimental/agent-team`，实验族，名叫 agent-teams）：给多个子 agent 一个共享的**任务板**与**信箱**，agent 之间通过模型可见的工具互相派活、收消息。三角色这里依然成立，只是把"接口"换成了"事件"：
+
+- **Service Definition**：四个 log-only 会话事件（全量投标，换人即换值）——`team/member` 成员的权威快照、`team/task` 任务板的权威快照、`team/message/queued` 入队、`team/message/delivered` 送达
+- **Provider**：Team Lead 会话 = 权威 journal。任何工具调用 = 在这一条事件日志上 append，再由 fold 投影出 roster / task board / mailbox
+- **Consumer**：模型侧的 `team_task_*` / `team_peer_*` 工具，只 append + fold，不看别人怎么实现
+
+成员怎么来？复用第 6.5 节的子 agent：`spawn_teammate` = `start_continuable(agent_options={provider})`——一个成员就是一个 durable 子会话（冷恢复、DAG 依赖都在）。projection 折叠可以小到只有几行：
+
+```python
+class TeamProjection:
+    """从 Lead 会话日志折叠成员列表（全量投标，最后一条胜出）。"""
+    def __init__(self, log):
+        self._members = {}
+        for ev in log:
+            if ev.type == "team/member":
+                self._members.update(ev.data["member"])
+
+    @property
+    def ids(self):
+        return list(self._members)
+```
+
+任务板的"状态机"不是 switch：每个动作是 `claimed -> in_progress -> completed` 这样的边，`team_task_update` 校验**当前状态允许这条边**，然后 append 一条 `team/task` 全量投标取代旧快照（revision 从 1 连续，CAS 即"版本号对得上"。两个 agent 同时改同一任务，后写者因 revision 冲突被拒）。
+
+投递有两个载体，取决于宿主有没有事件循环：
+
+```python
+service.spawn_teammate(name, system_prompt)      # 无循环态（harness/CLI）：同步 spawn
+await service.spawn_teammate_async(...)          # 事件循环内（驱动载体）：checkpoint await 让出控制
+```
+
+> 真实 dsh 是纯 async 形态，没有同步载体；mini 的同步门面是给无 driver 的同步 harness/CLI 用的。事件循环内绝不能用 `time.sleep` 等成员 checkpoint——会把整个循环卡死，这也是异步载体存在的唯一原因。
+
+简化与取舍（对齐边界的诚实标注，明细见 `status/mini-harness/verified-diffs.md` §2.29）：上游的 `todo` 事件（todo-list UI 的面）与 `client-ui-agent-team` / web-profile 属于前端 wire 面，mini 不引入；wire/Remote 端点不承载——错误语义用一个 `TeamError.code` 闭集表达，而不是 HTTP/端点层。
+
+## 6.7 验收
 
 ```bash
 python -m unittest tests.test_seams -v
 ```
 
-## 6.7 检查点练习（挑一个做深）
+## 6.8 检查点练习（挑一个做深）
 
 1. **沙箱**：实现 `DenyListSandbox`（基于 deny 黑名单）与 `AllowListSandbox`（基于 allow 白名单）两个 Provider，共享一个测试套件证明 Consumer 不变。
 2. **凭据**：实现 `FileCredentialProvider`（从 `.env` 文件读取，逐行 `KEY=VALUE`），与 `EnvCredentialProvider` 共用同一接口测试。
 3. **子 agent**：用第 4 章的 `DeepSeekAdapter` 实现 `RemoteSubAgentProvider`（真实 API），跑一次"主 agent 派发任务给子 agent"的完整链路。
 
-## 6.8 回到 dsh：真实源码对照
+## 6.9 回到 dsh：真实源码对照
 
 打开 `deepseek-harness/docs/capability-seams.md`：
 
@@ -166,7 +203,7 @@ python -m unittest tests.test_seams -v
 | 凭据 | `CredentialProvider.resolve(key)` | `resolve(ref): ResolvedCredential`（值 + 来源层）+ `describe(ref)`；本地 provider 层：`env` / `file` / `project-env` / `user-env` | 引用是带 brand 的 POSIX 环境变量名语法；每次操作重新解析 ✓ |
 | 子 agent | `SubAgentProvider.spawn(name, prompt)` | `SubagentProvider.start(...)` + `prepareContinuable`（可继续对话）+ `SubagentCapabilities` 能力门（不支持则 `UNSUPPORTED_CAPABILITY` 拒绝） | 六个真实 Provider：in-process / fork / ACP / Codex / Claude Code / dsh-sdk |
 
-## 6.9 进阶实现：真后端 / 四层凭据 / 远程三通道
+## 6.10 进阶实现：真后端 / 四层凭据 / 远程三通道
 
 基础三件套讲清"换 Provider 不改 Consumer"；进阶三件把每个接缝推向与 dsh 对齐的形态（产出：`miniharness/seams/sandbox_local.py` + `credentials_local.py` + `subagent/providers.py` + `subagent/worker.py`，验收测试在 `tests/test_stage6.py`）。
 
@@ -223,7 +260,7 @@ python -m unittest tests.test_seams -v
 
 三者保持同一 Consumer 接口 `spawn(name, prompt) -> SubAgent`：换通道只改 Provider 构造，消费方代码不动。
 
-## 6.10 手册收尾
+## 6.11 手册收尾
 
 全部 6 章做完，你应该能用 Python 亲手证明这三件事（报告《结语》篇 §12 同样强调）：
 
