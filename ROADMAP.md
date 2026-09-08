@@ -11,9 +11,11 @@ web 半（传输层 + 浏览器前端）的 wire 面已全对齐：两信封 RPC
 
 ## 规划中
 
-下一主线候选：插件示例集（教程用插件 + 真实工具演示）；更多 agent 编排（agent-team 已落地，见下）；遥测（事件订阅、用量统计，`usage` chunk 已就绪）。
+下一主线候选：插件示例集（教程用插件 + 真实工具演示）；更多 agent 编排（agent-team 已落地，见下）；遥测上报面（telemetry-capture / OpenTelemetry，需远端数据面，见已落地扩展）。
 
 ## 已落地的对齐扩展
+
+- **遥测 / 用量统计（2026-09-08）**：`miniharness/telemetry/`（L2）——sessionStats + tokenUsage 真实投影 + per-turn 用量推导（`fold_session_stats` / `fold_token_usage` / `derive_turn_token_usage`，对齐上游 session-stats / token-meter）+ opt-in `UsageStatsService`；wire `projections.values` 由空基线升为真实视图；CLI `sessions stats [id]` 教学扩展。生产就绪回归（全量 2117 绿、coverage 85%、`mkdocs --strict` 过）。契约/载体差异/简化登记见 verified-diffs §2.30。
 
 - **Agent Teams 实验族（2026-09-08，P2-22）**：`seams/agent_team/` 隐式 root roster + durable peer mailbox + 共享任务 DAG（四类 `team/*` 事件全 log-only，Team Lead 会话为权威 journal）+ 模型侧 9 工具与 `team:policy` 提示节（同步门面 + 事件循环内 async 双投递载体）；生产就绪回归（全量 2077 绿、coverage 85%、`mkdocs --strict` 过）。契约/载体差异/简化登记见 verified-diffs §2.29。
 

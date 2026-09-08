@@ -17,8 +17,9 @@ control,list,catalog}.ts 的字面量。方法签名：`handler(payload) -> valu
 mini 教学简化（须同步 verified-diffs §3.4 / AGENTS.md）：
   * 单适配器部署：modelCatalog / selectModel 直接导出适配器路由；selectModel
     的“记录”仅 advisory（回落恒单模型），不驱动真实路由。
-  * 无 projection/ChunkRow 注册表：follow/control 的 projections 块空
-    values{}（上游 “a deployment without the registry…” 同语义）；control 的
+  * 无 projection/ChunkRow 注册表：follow/control 的 projections values 由
+    `telemetry/projection_values` 现场折叠为真实 sessionStats/tokenUsage 视图
+    （因果固定单位现场折叠等价于注册表，见 verified-diffs §2.30）；control 的
     queue 帧直接发 inbox 当前态（省略 asOfSeq 投影簿记，订阅方观察语义一致）。
   * follow/page 的 subagent 地址分支全部拒绝（mini 不驱动子代理会话，防御对齐）。
   * search 在 live 会话 surface 快照上扫描，不落全文索引。
@@ -50,6 +51,7 @@ from ..core.session_store import SessionStore
 from ..core.agents import install_agents
 from ..core.tools import ToolRegistry
 from ..llm import LlmAdapter
+from ..telemetry import projection_values
 from .args import (
     BoundaryReject,
     boundary_error_message,
@@ -204,7 +206,8 @@ class _FollowSubscription(_Subscription):
         self._push({"type": "snapshot", "header": api._wire_header(session),
                     "cursor": cursor, "records": api._page_records(page),
                     "hasMore": has_more,
-                    "projections": {"asOfSeq": cursor, "values": {}}})
+                    "projections": {"asOfSeq": cursor,
+                                    "values": projection_values(session, api.ctx.get("usageStats"))}})
         state: dict[str, Any] = {"next_seq": cursor + 1, "pending": []}
 
         def on_event(payload: dict) -> None:
@@ -268,7 +271,8 @@ class _ControlSubscription(_Subscription):
             baseline["queues"][session.session_id] = items
             baseline["jobs"][session.session_id] = []
             baseline["projections"][session.session_id] = {
-                "asOfSeq": session.seq - 1, "values": {}}
+                "asOfSeq": session.seq - 1,
+                "values": projection_values(session, api.ctx.get("usageStats"))}
         self._push({"type": "baseline", "value": baseline})
 
         def on_event(payload: dict) -> None:

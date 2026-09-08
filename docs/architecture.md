@@ -81,6 +81,9 @@ miniharness/
 │   ├── registry.py        # SkillRegistry（ctx.skills 服务 + 分层注册 + 渲染/digest）
 │   ├── filesystem.py      # FileSystemSkillProvider（六类根 + frontmatter）
 │   └── tool_skill.py      # skill 工具 + /名字 手势 + durable catalog 注入
+├── telemetry/             # packages/session/session-stats + packages/llm/token-meter（投影 fold 切片）
+│   ├── folds.py           # fold_session_stats / fold_token_usage / derive_turn_token_usage（纯 fold）
+│   └── service.py         # UsageStatsService（ctx.usageStats）+ projection_values 自由函数
 ├── boot/                  # packages/boot
 │   ├── boot.py            # 启动 + patch overlay
 │   ├── composition.py     # YAML 配置 / !!js 插值 / dump 渲染
@@ -89,7 +92,7 @@ miniharness/
 │   ├── main.py            # launcher 选项（profile / patch / dump）
 │   ├── headless.py        # 一次性任务入口
 │   ├── default_tools.py   # headless 默认工具集（教学扩展）
-│   ├── session_cmds.py    # 会话 list / resume / delete（教学扩展）
+│   ├── session_cmds.py    # 会话 list / resume / delete / stats（教学扩展；stats 为遥测可视化终端）
 │   └── preset_cmds.py     # presets list / show / select / delete（教学扩展，web Remote 等价本地入口）
 ├── preset/                # packages/preset + apps/cli/config/agent-presets
 │   ├── presets.py         # shipped root / 分层 roster / 投影 / 锁 / cordis 翻译（数据目录 preset/{minimal,standard} 随迁）
@@ -177,6 +180,7 @@ miniharness/
 | `commands/` | `packages/interaction/commands/src/` | 命令注册/派发 + `command/run|done` 配对 + commands/change 通知 + normalizeResult fail-loud；handler 签名 `(agent, raw)` 为教学扩展（简化标注见模块 docstring） |
 | `goal/`（domain + service + prompt + driver + tools + commands） | `packages/goal/`（goal + goal-round-driver + tool-goal + command-goal） | Typert remote（上游命令由 human UI 表面派发，mini 用 `/goal` 命令承载）；`_prepare_mutation` 前置 `assert_live_agent`（R4 agent registry）；driver 模式事件驱动续跑（同步门面保留 `continue_rounds`）；权威判定近似；三工具 canonical value + render 已对齐（简化标注见模块 docstring） |
 | `skills/`（registry + filesystem + tool_skill） | `packages/skill/`（skill + skill-filesystem + tool-skill） | 无 chokidar watch、无 ctx.fs 适配；skill 工具 canonical value + render 已对齐（简化标注见模块 docstring） |
+| `telemetry/`（folds + service） | `packages/session/session-stats/src/`（projection）+ `packages/llm/token-meter/src/`（usage-projection + turn-usage） | sessionStats/tokenUsage 投影 fold + derive_turn_token_usage（fail-closed）+ opt-in `UsageStatsService`（ctx.usageStats）；wire `projections.values` 现场折叠等价（不建 registry）；contextPressure/telemetry-capture 未立项（见 verified-diffs §2.30 简化登记） |
 | `boot/boot.py` | `packages/boot/app-boot` | `load_optional_patches`（缺文件→空层、坏文件 fail loud）+ `watch_user_patches`（对齐 app-boot watchUserPatches：经 HMR 服务 watch 用户补丁层→刷新重挂；上游经 Include entry.update() 事务性重挂，mini 无 Include 插件由宿主供 remount 回调） |
 | `boot/composition.py` | `packages/boot/app-boot` + `apps/cli/src/args.ts` | `load_dotenv_file` 对齐上游 readEnvLayer：ENOENT 静默/其它 warn/已存在不覆盖/bootstrap-only 物化前整体拒绝；`home=` 为 harness-home 时 HOME_LAYER_PROXY_NAMES（HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY）豁免、代理名错误文案明说 home `.env` 第二条出路（index.ts:174-177） |
 | `boot/dotenv.py` | `packages/boot/app-boot`（loadEnv） | bootstrap-only 名单/前缀对齐 BOOTSTRAP_NAMES/PREFIXES；HOME_LAYER_PROXY_NAMES 同款；豁免判定在 load_dotenv_file（同上游 readEnvLayer） |
@@ -226,7 +230,7 @@ miniharness/
 |---|---|---|
 | L0 地基 | `core/session`、`core/scope`、`core/dsh_scope`、`core/schema`、`core/hmr` | 无（互不依赖；core.scope ↔ core.dsh_scope / core.schema / core.hmr→core.scope 经 §3 例外豁免） |
 | L1 领域 | `llm/*`、`core/tools`、`core/system_prompt`、`core/session_store`、`core/agents`、`attachment`、`boot/*` | 仅 L0 |
-| L2 编排 | `core/agent_loop`、`compaction`、`jobs`、`plan`、`commands`、`goal`、`skills` | L0 + L1 |
+| L2 编排 | `core/agent_loop`、`compaction`、`jobs`、`plan`、`commands`、`goal`、`skills`、`telemetry` | L0 + L1 |
 | L3 应用与入口 | `cli/*`、`protocol/*`、`seams/*`、`preset`、`extensions`、`interaction`、`client`、`web`、`shell` | L0 ~ L2 |
 | 教学层 | `demo.py`、`example_plugins.py` | 任意层，但不得被业务模块依赖 |
 

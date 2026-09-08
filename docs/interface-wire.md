@@ -168,7 +168,9 @@ subagent/catalog-diagnostic subagent/unauthorized
  "cursor": <seq>,
  "records": [{"type": "event", "event": <事件信封>}...],
  "hasMore": <bool>,
- "projections": {"asOfSeq": <seq>, "values": {}}}
+ "projections": {"asOfSeq": <seq>,
+                 "values": {"sessionStats": {"turns","steps","llmMs","toolMs","ttftMs","ttftSteps","decodeMs","decodeTokens"},
+                            "tokenUsage": {"uncachedInputTokens","outputTokens","cacheReadTokens","cacheWriteTokens"}}}}
 ```
 
   header 是平铺 `SessionWireHeader`（`api.py _wire_header`，上游 history.ts wireHeader：
@@ -177,6 +179,9 @@ subagent/catalog-diagnostic subagent/unauthorized
   `{type, seq, time, data}`（`seq` 0 基严格递增：`seq == 追加前日志长度`，对齐上游
   EventLog `seq: this.log.length` 后 push；首事件 seq=0）。`maxMessages` 溢出时只取尾段
   并置 `hasMore=true`；`cursor` = 最后一条已提交事件 seq（0 基 inclusive，空日志 -1）。
+  `projections.values` 为真实视图（sessionStats 八键 + tokenUsage 四键，未建投影注册表前的
+  现场折叠等价——`telemetry.projection_values`，见 architecture 映射表；`contextPressure`
+  未立项，见 verified-diffs §2.30 简化登记）。
 - 续帧：`{"type":"event", "event": <事件信封>}`，活体帧从 `snapshot.cursor + 1` 起、
   `event.seq` 严格递增；客户端按 seq 去重拼接（webui `TrajectoryBuffer`）。
 - 错误：`gateway/arguments-invalid` / `session/not-found`（未知会话）。
@@ -194,11 +199,14 @@ subagent/catalog-diagnostic subagent/unauthorized
 {"type": "baseline",
  "value": {"queues": {"<sessionId>": [<queue item>...]},
            "jobs":   {"<sessionId>": [<job row>...]},
-           "projections": {"<sessionId>": {"asOfSeq": <seq>, "values": {}}}}}
+           "projections": {"<sessionId>": {"asOfSeq": <seq>,
+                                           "values": {"sessionStats": {...8 键...},
+                                                      "tokenUsage": {...4 键...}}}}}}
 ```
 
   control baseline 的 queues/jobs/projections 覆盖**全部 live 会话**（空会话也各放一条
-  空块）。
+  空块）；projections.values 与 follow 同源（`telemetry.projection_values` 现场折叠，
+  真实 sessionStats/tokenUsage 视图，见 4.1）。
 
 - 续帧（替换语义）：`{"type":"queue", "sessionId": "...", "items":[...]}`（inbox 拼接时）、
   `{"type":"jobs", "sessionId": "...", "jobs":[...]}`（作业变更时）、会话 dispose →

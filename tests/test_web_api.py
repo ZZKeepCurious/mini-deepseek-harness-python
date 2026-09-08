@@ -695,8 +695,15 @@ class TestSessionFollow(WebApiTest):
         self.assertEqual(snapshot["cursor"], -1)
         self.assertEqual(snapshot["records"], [])
         self.assertIs(snapshot["hasMore"], False)
-        self.assertEqual(snapshot["projections"],
-                         {"asOfSeq": -1, "values": {}})
+        self.assertEqual(snapshot["projections"]["asOfSeq"], -1)
+        self.assertEqual(snapshot["projections"]["values"],
+                         {"sessionStats": {
+                             "turns": 0, "steps": 0, "llmMs": 0, "toolMs": 0,
+                             "ttftMs": 0, "ttftSteps": 0, "decodeMs": 0,
+                             "decodeTokens": 0},
+                          "tokenUsage": {
+                             "uncachedInputTokens": 0, "outputTokens": 0,
+                             "cacheReadTokens": 0, "cacheWriteTokens": 0}})
         sub.close()
 
     def test_streams_live_events(self):
@@ -742,8 +749,15 @@ class TestSessionControl(WebApiTest):
         self.assertEqual(baseline["type"], "baseline")
         self.assertEqual(baseline["value"]["queues"], {session_id: []})
         self.assertEqual(baseline["value"]["jobs"], {session_id: []})
-        self.assertEqual(baseline["value"]["projections"],
-                         {session_id: {"asOfSeq": -1, "values": {}}})
+        self.assertEqual(baseline["value"]["projections"][session_id]["asOfSeq"], -1)
+        self.assertEqual(baseline["value"]["projections"][session_id]["values"],
+                         {"sessionStats": {
+                             "turns": 0, "steps": 0, "llmMs": 0, "toolMs": 0,
+                             "ttftMs": 0, "ttftSteps": 0, "decodeMs": 0,
+                             "decodeTokens": 0},
+                          "tokenUsage": {
+                             "uncachedInputTokens": 0, "outputTokens": 0,
+                             "cacheReadTokens": 0, "cacheWriteTokens": 0}})
         self.assertEqual(self._drain(sub), [])
         sub.close()
 

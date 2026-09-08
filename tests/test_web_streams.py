@@ -16,6 +16,20 @@ from miniharness.web.api import WebApi
 from miniharness.web.streams import GatewayStreams, RemoteStreamError
 
 
+def _zero_projection():
+    """空/零统计投影的期望视图（projection_values 对无贡献事件会话的产出）。"""
+    return {
+        "sessionStats": {
+            "turns": 0, "steps": 0, "llmMs": 0, "toolMs": 0,
+            "ttftMs": 0, "ttftSteps": 0, "decodeMs": 0, "decodeTokens": 0,
+        },
+        "tokenUsage": {
+            "uncachedInputTokens": 0, "outputTokens": 0,
+            "cacheReadTokens": 0, "cacheWriteTokens": 0,
+        },
+    }
+
+
 def _run(coro):
     return asyncio.run(coro)
 
@@ -72,8 +86,8 @@ class TestFollow(GatewayStreamsTest):
                 self.assertEqual(record["type"], "event")
             self.assertEqual(snap["cursor"],
                              snap["records"][-1]["event"]["seq"] if snap["records"] else -1)
-            self.assertEqual(snap["projections"],
-                             {"asOfSeq": snap["cursor"], "values": {}})
+            self.assertEqual(snap["projections"]["asOfSeq"], snap["cursor"])
+            self.assertEqual(snap["projections"]["values"], _zero_projection())
             response = self.api.dispatch("session.prompt", "rp", {
                 "sessionId": sid, "mode": "queue", "requestId": "req-" + sid,
                 "content": [{"type": "text", "text": "hello"}],
@@ -202,7 +216,17 @@ class TestControl(GatewayStreamsTest):
             self.assertIn(sid, value["jobs"])
             self.assertIn(sid, value["projections"])
             self.assertEqual(value["queues"][sid][0]["placement"], "queued")
-            self.assertEqual(value["projections"][sid]["values"], {})
+            # projections 真实视图：sessionStats/tokenUsage 均为 8/4 键闭形状
+            pvalues = value["projections"][sid]["values"]
+            self.assertEqual(set(pvalues), {"sessionStats", "tokenUsage"})
+            self.assertEqual(
+                set(pvalues["sessionStats"]),
+                {"turns", "steps", "llmMs", "toolMs", "ttftMs",
+                 "ttftSteps", "decodeMs", "decodeTokens"})
+            self.assertEqual(
+                set(pvalues["tokenUsage"]),
+                {"uncachedInputTokens", "outputTokens",
+                 "cacheReadTokens", "cacheWriteTokens"})
             # 触发一次 inbox splice → 实时 queue 帧（gen 已 running 消费队列）
             loop.inbox.append("next-turn",
                               create_message("user", [text_block("again")], {"kind": "user"}))

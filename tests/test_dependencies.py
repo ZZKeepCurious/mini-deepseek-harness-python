@@ -56,6 +56,7 @@ LAYER_UNITS = [
     ("jobs", 2),
     ("plan", 2),
     ("skills", 2),
+    ("telemetry", 2),
     ("cli", 3),
     ("protocol", 3),
     ("seams", 3),

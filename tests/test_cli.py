@@ -352,6 +352,36 @@ class TestSessions(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertIn("unknown sessions subcommand", err)
 
+    def test_stats_with_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sid = self._make_session(root)
+            out, err, code = _run_cli(["sessions", "stats", sid], env={"MINIHARNESS_HOME": str(root)})
+            self.assertEqual(code, None)
+            self.assertIn(f"session {sid}", out)
+            self.assertIn("turns=", out)
+            self.assertIn("usage: uncachedInput=", out)
+
+    def test_stats_auto_picks_latest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sid = self._make_session(root)
+            out, err, code = _run_cli(["sessions", "stats"], env={"MINIHARNESS_HOME": str(root)})
+            self.assertEqual(code, None)
+            self.assertIn(f"session {sid}", out)
+
+    def test_stats_no_sessions_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out, err, code = _run_cli(["sessions", "stats"], env={"MINIHARNESS_HOME": str(tmp)})
+            self.assertEqual(code, 1)
+            self.assertIn("no sessions found", err)
+
+    def test_stats_missing_session_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out, err, code = _run_cli(["sessions", "stats", "ghost"], env={"MINIHARNESS_HOME": str(tmp)})
+            self.assertEqual(code, 1)
+            self.assertIn("not found", err)
+
 
 if __name__ == "__main__":
     unittest.main()

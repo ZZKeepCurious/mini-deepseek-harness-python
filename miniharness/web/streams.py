@@ -17,14 +17,15 @@
 
 mini 简化 / 已核对（须同步 verified-diffs §3.4)：follow 的 records 用会话日志
 事件流 `Session.events` 投影（wire 形状对齐上游 `{type:'event', event}` 包装、
-cursor = 最后已提交 seq、projections 空基线 `{asOfSeq, values:{}}`——无投影
-注册表），无 message 对齐游标；`_attach` 冷会话自动 resume 后取日志尾部快照，
-再以 `_poll_new_events`（短轮询 + 空闲 sleep，一次捞出全部新事件，seq 严格
-递增）实时补 event 帧。**已核实：alpha.1 wire 无 since 字段**（客户端连回 =
+cursor = 最后已提交 seq；projections values 由 `telemetry/projection_values` 产出
+真实 `sessionStats` + `tokenUsage` 视图，未建投影注册表——固定单位现场折叠等价，
+见 verified-diffs §2.30），无 message 对齐游标；`_attach` 冷会话自动 resume 后取
+日志尾部快照，再以 `_poll_new_events`（短轮询 + 空闲 sleep，一次捞出全部新事件，
+seq 严格递增）实时补 event 帧。**已核实：alpha.1 wire 无 since 字段**（客户端连回 =
 重开流重新投递完整 snapshot/baseline，README 明言单向通知重连不重放）——mini
 同款，重连健壮性由「重开全量 + 客户端按 seq 去重」（webui TrajectoryBuffer）
 保证，无游标也无需再造。control baseline 对齐上游 control.ts（全部 live 会话
-每会话一条，空也放；projections 每会话空基线块）。jobs 来自 ctx 的
+每会话一条，空也放；projections 每会话真实视图块）。jobs 来自 ctx 的
 on_jobs_changed 回调，owner 恒为 AgentLoop；心跳 Ping 由 launcher 的 transport
 级 ping 闭合（`web/launcher.py` uvicorn_options，不在此层）。
 """
@@ -40,6 +41,7 @@ from .args import (
 )
 from .events import RemoteEventRegistry
 from .stream_protocol import REMOTE_EVENT_STREAM_ENDPOINT
+from ..telemetry import projection_values
 
 __all__ = ["GatewayStreams", "RemoteStreamError"]
 
@@ -151,9 +153,8 @@ class GatewayStreams:
             has_more = True
         yield {"type": "snapshot", "header": self.api._wire_header(session),
                "cursor": cursor, "records": records, "hasMore": has_more,
-               # 无投影注册表：空 values 基线（上游 history.ts:197-199 的
-               # {asOfSeq, values} 形状，asOfSeq 与 snapshot cursor 同源）
-               "projections": {"asOfSeq": cursor, "values": {}}}
+               "projections": {"asOfSeq": cursor,
+                               "values": projection_values(session, self.ctx.get("usageStats"))}}
         subscribed = cursor + 1
         while True:
             events = await _poll_new_events(self.api, session_id, subscribed, signal)
@@ -205,13 +206,15 @@ class GatewayStreams:
         queues: dict[str, list] = {}
         jobs: dict[str, list] = {}
         projections: dict[str, dict] = {}
+        stats = self.ctx.get("usageStats")
         for session in self.api.store.list():
             session_id = session.session_id
             queues[session_id] = self._queue_view(session_id)
             jobs[session_id] = self._jobs_view(session_id)
-            # 无投影注册表：{asOfSeq, values:{}} 空基线（上游 projectionBaseline
-            # 的块形状，asOfSeq = 最后已提交 seq）
-            projections[session_id] = {"asOfSeq": session.seq - 1, "values": {}}
+            projections[session_id] = {
+                "asOfSeq": session.seq - 1,
+                "values": projection_values(session, stats),
+            }
         return {"queues": queues, "jobs": jobs, "projections": projections}
 
     def _on_session_event(self, payload: dict) -> None:

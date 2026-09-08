@@ -25,6 +25,7 @@ from ..core.session.persistence import JsonlPersistence, load_events_checked, re
 from ..core.session import Session, repair_interrupted_turn, turn_balance
 from ..core.session_store import install_sessions
 from ..core.agents import install_agents
+from ..telemetry import derive_turn_token_usage, projection_values
 
 
 def sessions_root() -> Path:
@@ -150,9 +151,81 @@ def delete_session(session_id: str, root: Path, stdout: Any, stderr: Any) -> Non
     if sess_dir.exists() and not any(sess_dir.iterdir()):
         sess_dir.rmdir()
         proj_dir = sess_dir.parent
-        if proj_dir != root and proj_dir.exists() and not any(proj_dir.iterdir()):
+        if proj_dir != root and not any(proj_dir.iterdir()):
             proj_dir.rmdir()
     stdout.write(f"deleted {session_id}\n")
+
+
+def _load_session_events(root: Path, session_id: str) -> tuple[list[dict], str]:
+    """加载会话原始事件与 id；找不到或加载失败退出。"""
+    pers = JsonlPersistence(root)
+    if pers.path_of(session_id) is None:
+        sys.stderr.write(f"error: session {session_id!r} not found\n")
+        sys.exit(1)
+    raw = load_events_checked(pers.load(session_id, cwd=None))
+    return raw, session_id
+
+
+def _pick_session_id(root: Path, arg: str | None) -> str:
+    """无 id 时选最新会话。"""
+    if arg:
+        return arg
+    rows = list_sessions(root)
+    if not rows:
+        sys.stderr.write("error: no sessions found\n")
+        sys.exit(1)
+    # 最后一个条目即最新（list_headers 顺序）
+    return rows[-1]["id"]
+
+
+def _last_turn_events(events: list[dict]) -> list[dict] | None:
+    """取最后一个完整 turn 的事件切片（turn/start..turn/end），供 derive_turn_token_usage。"""
+    current_turn: int | None = None
+    current_slice: list[dict] = []
+    last_slice: list[dict] | None = None
+    for ev in events:
+        etype = ev["type"]
+        data = ev["data"]
+        if etype == "turn/start":
+            current_turn = data.get("turn")
+            current_slice = [ev]
+        elif current_turn is not None:
+            current_slice.append(ev)
+            if etype == "turn/end" and data.get("turn") == current_turn:
+                last_slice = list(current_slice)
+                current_turn = None
+                current_slice = []
+    return last_slice
+
+
+def print_stats(session_id: str, root: Path, stdout: Any | None = None) -> None:
+    stdout = stdout or sys.stdout
+    raw, sid = _load_session_events(root, session_id)
+    repaired = repair_interrupted_turn(raw)
+    session = Session(sid, seed=repaired, meta={"cwd": Path.cwd()})
+    values = projection_values(session)
+    stats = values["sessionStats"]
+    usage = values["tokenUsage"]
+    stdout.write(f"session {sid}\n")
+    stdout.write(f"  turns={stats['turns']}  steps={stats['steps']}\n")
+    stdout.write(f"  llm={stats['llmMs']}ms  tool={stats['toolMs']}ms  "
+                 f"ttft={stats['ttftMs']}ms ({stats['ttftSteps']} steps)  "
+                 f"decode={stats['decodeMs']}ms ({stats['decodeTokens']} tokens)\n")
+    stdout.write(f"  usage: uncachedInput={usage['uncachedInputTokens']}  "
+                 f"output={usage['outputTokens']}  "
+                 f"cacheRead={usage['cacheReadTokens']}  "
+                 f"cacheWrite={usage['cacheWriteTokens']}\n")
+    turn_slice = _last_turn_events(repaired)
+    if turn_slice:
+        tu = derive_turn_token_usage(turn_slice)
+        if tu is not None:
+            stdout.write(f"  last turn: uncachedInput={tu['uncachedInputTokens']}  "
+                         f"output={tu['outputTokens']}  total={tu['totalTokens']}")
+            routes = tu.get("routes")
+            if routes:
+                route_str = ", ".join(f"{r['provider']}/{r['model']}" for r in routes)
+                stdout.write(f"  routes=[{route_str}]")
+            stdout.write("\n")
 
 
 def sessions_main(argv: list[str], adapter: LlmAdapter | None = None, root: Path | None = None) -> None:
@@ -161,6 +234,10 @@ def sessions_main(argv: list[str], adapter: LlmAdapter | None = None, root: Path
         print_list(root, sys.stdout)
         return
     cmd, rest = argv[0], argv[1:]
+    if cmd == "stats":
+        session_id = _pick_session_id(root, rest[0] if rest else None)
+        print_stats(session_id, root)
+        return
     if cmd == "resume":
         if not rest:
             sys.stderr.write('error: usage: miniharness sessions resume <id> [task...]\n')
@@ -185,7 +262,7 @@ def sessions_main(argv: list[str], adapter: LlmAdapter | None = None, root: Path
             sys.exit(1)
         delete_session(rest[0], root, sys.stdout, sys.stderr)
         return
-    sys.stderr.write(f"error: unknown sessions subcommand {cmd!r} (list | resume <id> [task...] | delete <id>)\n")
+    sys.stderr.write(f"error: unknown sessions subcommand {cmd!r} (list | resume <id> [task...] | delete <id> | stats [id])\n")
     sys.exit(1)
 
 
