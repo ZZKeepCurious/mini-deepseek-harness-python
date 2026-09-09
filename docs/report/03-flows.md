@@ -141,9 +141,9 @@ flowchart TD
 
 常规做法是"每次变化立刻写库"；dsh 把持久化做成订阅者，异步成批写入。四个要点：
 
-- **扩展口**：`ctx.sessionPersistence` 抽象（locate / create / append / 逻辑 load/inspect / 物理后缀读）。上游当前基线的持久化后端只有 **JSONL**（每会话一个文件，zstd 拼接帧容器一行一事件，generation 版本化文件名 `session.v2.jsonl[.zstd]`）；SQLite 在上游只用于 session-query 检索域（FTS）。
+- **扩展口**：`ctx.sessionPersistence` 抽象（locate / create / append / 逻辑 load/inspect / 物理后缀读）。上游当前基线的持久化后端只有 **JSONL**（每会话一个文件，zstd 拼接帧容器一行一事件，generation 版本化文件名 `session.v3.jsonl[.zstd]`）；SQLite 在上游只用于 session-query 检索域（FTS）。
 - **flush 检查点**：`session/event` 是同步通知，持久化插件先复制事件再异步成批写入；`session/flush` 是等待的并行栅栏，用于认领下一个普通 turn 前的排序与错误观察点。
-- **格式演进：released 版本相邻迁移**：`session-format-catalog` 挂接 v0→v1→v2 迁移链——读路径 `decodeRecoverableArtifact → migrate → encodeCurrent`，把旧 generation 迁移发布为后继 `session.v2.jsonl`（不可变源文件保留）；仅未发布/未知版本双向 fail loud（"升级 harness"）。未知事件类型除非带 `ignorable: true` 标记否则拒绝加载（防止静默丢事件改变后续解读；alpha.2 起支持 `ignorable` 豁免——写方显式标 `ignorable` 的纯信息记录可放行）。
+- **格式演进：released 版本相邻迁移**：`session-format-catalog` 挂接 v0→v1→v2→v3 迁移链——读路径 `decodeRecoverableArtifact → migrate → encodeCurrent`，把旧 generation 迁移发布为后继 `session.v3.jsonl`（不可变源文件保留）；仅未发布/未知版本双向 fail loud（"升级 harness"）。未知事件类型除非带 `ignorable: true` 标记否则拒绝加载（防止静默丢事件改变后续解读；alpha.2 起支持 `ignorable` 豁免——写方显式标 `ignorable` 的纯信息记录可放行）。
 - **崩溃恢复**：关闭孤儿 turn（合成 `interrupted`），只作用于冷会话；活会话 `load` 等待权威内存快照持久化。
 
 <p class="fig-cap">图 13：会话持久化——JSONL 后端、flush 栅栏与崩溃恢复</p>

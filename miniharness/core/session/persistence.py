@@ -17,7 +17,7 @@ packages/session/session-format/src/{format,zstd}.ts。
      再把恢复事件连同 closers 经 commit_repair 持久化（截断点 = 残帧起点，
      对齐上游 commitRepair(truncateTo, recoveredEvents, closers)）
    6. load 时未知事件类型整体拒绝 —— fail-closed
-  7. 目录布局：root/<--projectKey(cwd)-->/<encodeSegment(id)>/session.v2.jsonl[.zstd]；
+  7. 目录布局：root/<--projectKey(cwd)-->/<encodeSegment(id)>/session.v3.jsonl[.zstd]；
      cwd 缺省退化到 _no-cwd 项目目录；项目目录下的散置 *.jsonl 制品
      （遗留平铺布局）响亮拒绝
 
@@ -52,12 +52,12 @@ from .generation import (
     parse_generation_log_filename,
     resolve_generation_in_directory,
 )
-from .released import RELEASED_V0_CODEC, RELEASED_V1_CODEC
+from .released import RELEASED_V0_CODEC, RELEASED_V1_CODEC, RELEASED_V2_CODEC
 from .json import now_ms
 from .seq_ranges import decode_seq_ranges, encode_seq_ranges
 
-#: released 旧版 codec 索引（list_headers 的纯 header 翻译用）。
-RELEASED_CODECS = {0: RELEASED_V0_CODEC, 1: RELEASED_V1_CODEC}
+#: released 旧版 codec 索引（list_headers 的纯 header 翻译用；当前代不经此索引）。
+RELEASED_CODECS = {0: RELEASED_V0_CODEC, 1: RELEASED_V1_CODEC, 2: RELEASED_V2_CODEC}
 from .zstd_frames import (
     compress_zstd_frame,
     decode_frames,
@@ -218,7 +218,7 @@ def _project_dir(root: Path, cwd: str | None) -> Path:
 def _generation_log_name(compression: str | None) -> str:
     """canonical generation 制品名（上游 sessionFormatLogFilename + jsonl
     generationLogFilename）：v0 保留 `session.jsonl`；此后每代带小写 `vN` 段
-    ——当前 v2 = `session.v2.jsonl[.zstd]`。"""
+    ——当前 v3 = `session.v3.jsonl[.zstd]`。"""
     return f"session.v{SESSION_FORMAT_VERSION}{_log_suffix(compression)}"
 
 
@@ -521,7 +521,7 @@ class JsonlPersistence(SessionPersistence):
     """JSONL 后端：每会话一个拼接帧容器文件（默认 zstd）或明文 JSONL。
 
     目录布局对齐上游 session-persistence-jsonl：
-        root/<--projectKey(cwd)-->/<encodeSegment(id)>/session.v2.jsonl[.zstd]
+        root/<--projectKey(cwd)-->/<encodeSegment(id)>/session.v3.jsonl[.zstd]
     cwd 缺省时按 header.meta.cwd 或既有落盘位置反查；新会话反查不到时退化
     到 _no-cwd 项目目录。两种物理编码在同一根目录互斥——发现对立编码的
     制品即响亮拒绝（encodingMismatch），项目目录下的散置制品（遗留平铺
@@ -697,7 +697,7 @@ class JsonlPersistence(SessionPersistence):
     def _find(self, session_id: str) -> Path | None:
         """跨全部项目目录定位唯一会话目录的多代制品并**确保当前代**（上游
         findLog → ensureCurrentLog）：目录内选最高 canonical generation；非当前代
-        先 migrate-on-open 发布后继 `session.v2.jsonl[.zstd]`（不可变源保留），
+        先 migrate-on-open 发布后继 `session.v3.jsonl[.zstd]`（不可变源保留），
         再返回当前代路径。"""
         self._ensure_root_encoding()
         matches: list[Path] = []
@@ -1080,7 +1080,7 @@ class JsonlPersistence(SessionPersistence):
         """读出会话的逐字原始制品文本：完整帧解压后拼接（或明文原文）。
 
         内容是后端写下的确切 JSONL 文本——绝不从解析后的事件重建，打包行、
-        键序与换行逐字节幸存。逻辑制品名恒为 session.v2.jsonl（.zstd 后缀只标
+        键序与换行逐字节幸存。逻辑制品名恒为 session.v3.jsonl（.zstd 后缀只标
         物理编码）。
         """
         path = self.path_of(session_id, cwd)

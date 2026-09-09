@@ -1,8 +1,11 @@
 """surface → 模型消息投影 + 事件级 surface 契约校验。
 
 上游对照：packages/core/session/src/surface.ts（SurfaceIntent append / replace
-语义：{op:'replace', start, end} 以 start/end 两个 **surface 节点的 seq** 命名区间，
-替换为一个新节点；deriveEventMessage：空内容 assistant 消息派生为 None，不入转录）。
+语义：{op:'replace', startSeq, endSeq} 以 startSeq/endSeq 两个 **surface 节点的
+seq** 命名区间（V3 由 start/end 改名），替换为一个新节点；
+deriveEventMessage：空内容 assistant/system 消息派生为 None，不入转录；
+assertSystemHeadRewrite：node 0 的 system 头只允许被恰指该节点的
+system/message replace 改写；validateSessionEventData：canonical 载荷规则）。
 """
 from __future__ import annotations
 
@@ -14,11 +17,13 @@ from .types import SURFACE_TYPES
 
 __all__ = [
     "assert_provenance",
+    "assert_system_head_rewrite",
     "assert_tool_result_rewrite",
     "derive_event_message",
     "derive_messages",
     "is_replace_op",
     "surface_op_of",
+    "validate_session_event_data",
 ]
 
 
@@ -28,16 +33,16 @@ def _is_event_seq(value: Any) -> bool:
 
 
 def is_replace_op(op: Any) -> bool:
-    """surfaceOp 是否为精确的 {op:'replace', start, end}（兼容冻结后的
-    MappingProxyType；start/end 必须是非负安全整数，键集恰为三键——上游
-    surface.ts isReplaceOp）。"""
+    """surfaceOp 是否为精确的 {op:'replace', startSeq, endSeq}（兼容冻结后的
+    MappingProxyType；startSeq/endSeq 必须是非负安全整数，键集恰为三键——上游
+    surface.ts isReplaceOp，V3 起端点名 startSeq/endSeq）。"""
     if not isinstance(op, (dict, MappingProxyType)):
         return False
     keys = set(op.keys())
-    if keys != {"op", "start", "end"}:
+    if keys != {"op", "startSeq", "endSeq"}:
         return False
-    return op.get("op") == "replace" and _is_event_seq(op.get("start")) \
-        and _is_event_seq(op.get("end"))
+    return op.get("op") == "replace" and _is_event_seq(op.get("startSeq")) \
+        and _is_event_seq(op.get("endSeq"))
 
 
 def surface_op_of(type_: str, surfaceOp: Any) -> Any:
@@ -58,6 +63,71 @@ def surface_op_of(type_: str, surfaceOp: Any) -> Any:
             or not is_replace_op(surfaceOp):
         raise ValueError(f'session event "{type_}" carries an invalid surfaceOp')
     return surfaceOp
+
+
+def assert_system_head_rewrite(event_type: str, start_idx: int | None,
+                               shadowed_seqs: list[int],
+                               surface_nodes: list[dict]) -> None:
+    """node 0 系统头保护（上游 surface.ts assertSystemHeadRewrite）。
+
+    替换起点不在 surface 首位（start_idx != 0）→ 无保护；首位节点不是
+    system/message → 无保护；否则替换事件必须是 system/message 且恰好遮蔽
+    该单节点（后续 system 节点无保护，压缩区间可以遮蔽它们）。
+    """
+    if start_idx != 0:
+        return
+    head = surface_nodes[0] if surface_nodes else None
+    if head is None:
+        return
+    events_head_type = head.get("type")
+    if events_head_type != "system/message":
+        return
+    if event_type != "system/message" or len(shadowed_seqs) != 1:
+        raise ValueError(
+            "surface replace: node 0 holds the system prompt and may be "
+            "rewritten only by a system/message over exactly that node")
+
+
+def _plain(value: Any) -> Any:
+    """冻结载体的浅展开（MappingProxyType → dict；其余原样）。"""
+    return dict(value) if isinstance(value, MappingProxyType) else value
+
+
+def validate_session_event_data(event_type: str, data: Any) -> None:
+    """canonical 载荷规则（上游 surface.ts validateSessionEventData）。
+
+    * request/header：data/header 必须是对象；**禁止 header.system**（系统
+      提示词是 system/message 事件）；空 tools 数组与空 adapterDefaults
+      对象必须省略。
+    * tool/result：data.error 存在时 message.content[0].isError 必须 === true
+      （矛盾即拒、绝不补写）。
+
+    兼容冻结事件（data 可能是 MappingProxyType，先浅展开）。
+    """
+    data = _plain(data)
+    if event_type == "request/header":
+        if not isinstance(data, dict):
+            raise ValueError("request/header data must be an object")
+        header = _plain(data.get("header"))
+        if not isinstance(header, dict):
+            raise ValueError("request/header header must be an object")
+        if "system" in header:
+            raise ValueError("request/header must omit header.system; use system/message")
+        if isinstance(header.get("tools"), list) and len(header["tools"]) == 0:
+            raise ValueError("request/header must omit empty tools")
+        defaults = _plain(header.get("adapterDefaults"))
+        if isinstance(defaults, dict) and len(defaults) == 0:
+            raise ValueError("request/header must omit empty adapterDefaults")
+    elif event_type == "tool/result":
+        if not isinstance(data, dict):
+            raise ValueError("tool/result data must be an object")
+        if data.get("error") is None:
+            return
+        message = _plain(data.get("message"))
+        content = message.get("content") if isinstance(message, dict) else None
+        block = _plain(content[0]) if isinstance(content, list) and content else None
+        if not isinstance(block, dict) or block.get("isError") is not True:
+            raise ValueError("tool/result error requires message content[0].isError === true")
 
 
 def assert_provenance(type_: str, source_event_seqs: Any, seq: int,
@@ -163,13 +233,14 @@ def assert_tool_result_rewrite(event: dict, shadowed_seqs: list[int],
 def derive_event_message(ev: dict) -> dict | None:
     """单事件 → 模型消息：surface 节点投影规则（上游 surface.ts deriveEventMessage）。
 
-    空内容 assistant/message（如 max-tokens 只含 usage 的 step）派生为 None，
+    空内容 assistant/message（如 max-tokens 只含 usage 的 step）与空内容
+    system/message（「无系统提示词」节点，保留 surface 位置）派生为 None，
     不入转录；非 surface 事件派生为 None。
     """
     data = ev["data"]
     if ev["type"] == "user/message":
         return data
-    if ev["type"] == "assistant/message":
+    if ev["type"] in ("system/message", "assistant/message"):
         message = data.get("message")
         if message and not message.get("content"):
             return None
@@ -183,7 +254,7 @@ def _surface_nodes(events) -> list[dict]:
     """沿事件日志折叠当前 surface 节点（含 seq，模型可见顺序）。
 
     对齐上游 surface.ts 的 foldSurface：append 追加尾部；replace 按
-    start/end 两个 seq 在当前 surface 上定位区间并整体替换。seq 不在
+    startSeq/endSeq 两个 seq 在当前 surface 上定位区间并整体替换。seq 不在
     当前 surface 上（区间非法/日志损坏）→ fail loud（上游同语义）。
     """
     surface: list[dict] = []
@@ -194,7 +265,7 @@ def _surface_nodes(events) -> list[dict]:
         if op == "append":
             surface.append(ev)
         elif is_replace_op(op):
-            start, end = op["start"], op["end"]
+            start, end = op["startSeq"], op["endSeq"]
             start_idx = next((i for i, n in enumerate(surface) if n["seq"] == start), None)
             end_idx = next((i for i, n in enumerate(surface) if n["seq"] == end), None)
             if start_idx is None or end_idx is None:
@@ -212,8 +283,8 @@ def _surface_nodes(events) -> list[dict]:
 def derive_messages(events) -> list[dict]:
     """纯投影：沿 surface 节点顺序派生模型消息（不修改日志，可重复调用）。
 
-    replace 节点遮蔽被替换区间（上游 surface.ts：{op:'replace', start, end}
-    以当前 surface 上的 seq 定位区间并整体替换）。
+    replace 节点遮蔽被替换区间（上游 surface.ts：{op:'replace', startSeq,
+    endSeq} 以当前 surface 上的 seq 定位区间并整体替换）。
     """
     messages = []
     for node in _surface_nodes(events):

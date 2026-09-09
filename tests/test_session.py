@@ -97,7 +97,7 @@ class TestSession(unittest.TestCase):
         # V2：assistant/message 内嵌源流、不可携带 sourceEventSeqs；压缩检查点
         # 改由 user/message 承载（上游 compaction region.ts 检查点形状）
         s.append("user/message", create_message("user", [text_block("压缩后的摘要")]),
-                 surfaceOp={"op": "replace", "start": 1, "end": 1}, sourceEventSeqs=[1])
+                 surfaceOp={"op": "replace", "startSeq": 1, "endSeq": 1}, sourceEventSeqs=[1])
         msgs = derive_messages(s.events)
         self.assertEqual(len(msgs), 2)
         self.assertEqual([m["role"] for m in msgs], ["user", "user"])
@@ -252,7 +252,7 @@ class TestSurfaceValidation(unittest.TestCase):
         with self.assertRaises(ValueError):
             s.append("assistant/message", {
                 "message": create_message("assistant", [text_block("sum")]),
-            }, surfaceOp={"op": "replace", "start": 0, "end": 0})
+            }, surfaceOp={"op": "replace", "startSeq": 0, "endSeq": 0})
 
     def test_replace_missing_shadowed_seq_rejected(self):
         s = self._session()
@@ -263,34 +263,34 @@ class TestSurfaceValidation(unittest.TestCase):
         # sourceEventSeqs 未覆盖被遮蔽的 seq 0
         with self.assertRaises(ValueError):
             s.append("user/message", create_message("user", [text_block("sum")]),
-                     surfaceOp={"op": "replace", "start": 0, "end": 1}, sourceEventSeqs=[1])
+                     surfaceOp={"op": "replace", "startSeq": 0, "endSeq": 1}, sourceEventSeqs=[1])
 
     def test_replace_source_event_seqs_earlier_required(self):
         s = self._session()
         with self.assertRaises(ValueError):
             s.append("user/message", create_message("user", [text_block("sum")]),
-                     surfaceOp={"op": "replace", "start": 0, "end": 0},
+                     surfaceOp={"op": "replace", "startSeq": 0, "endSeq": 0},
                      sourceEventSeqs=[0, 3])  # seq 3 >= 当前 seq 1
 
     def test_replace_source_event_seqs_duplicate_rejected(self):
         s = self._session()
         with self.assertRaises(ValueError):
             s.append("user/message", create_message("user", [text_block("sum")]),
-                     surfaceOp={"op": "replace", "start": 0, "end": 0},
+                     surfaceOp={"op": "replace", "startSeq": 0, "endSeq": 0},
                      sourceEventSeqs=[0, 0])
 
     def test_replace_op_must_be_exact_three_keys(self):
         s = self._session()
         with self.assertRaises(ValueError):
             s.append("user/message", create_message("user", [text_block("sum")]),
-                     surfaceOp={"op": "replace", "start": 0, "end": 0, "extra": 1},
+                     surfaceOp={"op": "replace", "startSeq": 0, "endSeq": 0, "extra": 1},
                      sourceEventSeqs=[0])
 
     def test_replace_op_negative_seq_rejected(self):
         s = self._session()
         with self.assertRaises(ValueError):
             s.append("user/message", create_message("user", [text_block("sum")]),
-                     surfaceOp={"op": "replace", "start": -1, "end": 0},
+                     surfaceOp={"op": "replace", "startSeq": -1, "endSeq": 0},
                      sourceEventSeqs=[0])
 
     def test_nonsurface_with_source_event_seqs_rejected(self):
@@ -331,7 +331,7 @@ class TestSurfaceValidation(unittest.TestCase):
             s.append("tool/result", {
                 "turn": 1, "step": 1,
                 "message": create_message("user", [tool_result_block("c", [text_block("x")])]),
-            }, surfaceOp={"op": "replace", "start": 0, "end": 0}, sourceEventSeqs=[0])
+            }, surfaceOp={"op": "replace", "startSeq": 0, "endSeq": 0}, sourceEventSeqs=[0])
 
     def test_tool_result_replace_multi_node_rejected(self):
         s = Session("sv2")
@@ -346,7 +346,7 @@ class TestSurfaceValidation(unittest.TestCase):
             s.append("tool/result", {
                 "turn": 1, "step": 1,
                 "message": create_message("user", [tool_result_block("c2", [text_block("y")])]),
-            }, surfaceOp={"op": "replace", "start": 1, "end": 2}, sourceEventSeqs=[1, 2])
+            }, surfaceOp={"op": "replace", "startSeq": 1, "endSeq": 2}, sourceEventSeqs=[1, 2])
 
     def test_tool_result_replace_only_content_change_allowed(self):
         s = Session("sv3")
@@ -358,7 +358,7 @@ class TestSurfaceValidation(unittest.TestCase):
         revised = create_message("user", [tool_result_block("c1", [text_block("b.txt")])])
         revised["id"] = orig["id"]
         s.append("tool/result", {"turn": 1, "step": 1, "message": revised},
-                 surfaceOp={"op": "replace", "start": 1, "end": 1},
+                 surfaceOp={"op": "replace", "startSeq": 1, "endSeq": 1},
                  sourceEventSeqs=[1])
         self.assertEqual(s.replace_generation, 1)
         # 改 toolCallId → 非法
@@ -366,7 +366,7 @@ class TestSurfaceValidation(unittest.TestCase):
         tampered["id"] = orig["id"]
         with self.assertRaises(ValueError):
             s.append("tool/result", {"turn": 1, "step": 1, "message": tampered},
-                     surfaceOp={"op": "replace", "start": 1, "end": 1},
+                     surfaceOp={"op": "replace", "startSeq": 1, "endSeq": 1},
                      sourceEventSeqs=[1])
 
     def test_seed_rejects_bad_provenance(self):
@@ -377,7 +377,7 @@ class TestSurfaceValidation(unittest.TestCase):
              "surfaceOp": "append"},
             {"type": "assistant/message", "seq": 1, "time": 1,
              "data": {"message": create_message("assistant", [text_block("sum")])},
-             "surfaceOp": {"op": "replace", "start": 0, "end": 0}},
+             "surfaceOp": {"op": "replace", "startSeq": 0, "endSeq": 0}},
         ]
         with self.assertRaises(ValueError):
             Session("sv4", seed=seed)
@@ -395,7 +395,7 @@ class TestSurfaceValidation(unittest.TestCase):
              "surfaceOp": "append"},
             {"type": "user/message", "seq": 2, "time": 1,
              "data": create_message("user", [text_block("压缩后的摘要")]),
-             "surfaceOp": {"op": "replace", "start": 0, "end": 0},
+             "surfaceOp": {"op": "replace", "startSeq": 0, "endSeq": 0},
              "sourceEventSeqs": [0]},
         ]
         s = Session("sv4", seed=seed)

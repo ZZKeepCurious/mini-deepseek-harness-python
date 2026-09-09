@@ -1,18 +1,27 @@
 """released 目录（上游 session-format/src/chain.ts + catalog.ts + session-format-catalog
-的 mini 载体）：编译唯一相邻链 0→1→2，物理 codec 分派 + 整件迁移 + 当前编码。
+的 mini 载体）：编译唯一相邻链 0→1→2→3，物理 codec 分派 + 整件迁移 + 当前编码。
 
 `encode_current` 产出 `{header, rows}`——rows 为存储态事件行（sourceEventSeqs 已折叠
 区间编码，复用 mini 既有 `encode_seq_ranges`）；物理容器（zstd header 帧 + body 帧）
 由 `generation.py` 组装。
+
+V3（上游 dsh-v0.1.5-alpha.1）：链增 v2→v3 相邻边（system head 提升 + PTC 词汇
+改名 + canonical 信封）；当前编码 = v3（`session.v3.jsonl`）。
 """
 from __future__ import annotations
 
 from typing import Any
 
-from .codec import RELEASED_V0_CODEC, RELEASED_V1_CODEC, decode_released_header
+from .codec import (
+    RELEASED_V0_CODEC,
+    RELEASED_V1_CODEC,
+    RELEASED_V2_CODEC,
+    decode_released_header,
+)
 from .helpers import SessionFormatError, SessionFormatUnsupportedMigrationError, fail, unsupported
 from .migrate_v0_v1 import V0_TO_V1
 from .migrate_v1_to_v2 import V1_TO_V2
+from .migrate_v2_to_v3 import V2_TO_V3
 
 __all__ = ["SESSION_FORMAT_CATALOG", "migrate_released_artifact", "migrate_released_header"]
 
@@ -24,11 +33,11 @@ def _assert_version(value: Any, label: str) -> int:
 
 
 class _Chain:
-    """唯一相邻链（当前 v2）：plan(from) = ordered[from:]；migrate 逐边执行。"""
+    """唯一相邻链（当前 v3）：plan(from) = ordered[from:]；migrate 逐边执行。"""
 
     def __init__(self) -> None:
-        self.current_version = 2
-        ordered = [V0_TO_V1, V1_TO_V2]
+        self.current_version = 3
+        ordered = [V0_TO_V1, V1_TO_V2, V2_TO_V3]
         self._ordered = ordered
 
     def plan(self, from_version: int) -> list[dict]:
@@ -74,17 +83,17 @@ class _Chain:
 
 
 def _encode_current(artifact: dict) -> dict:
-    """当前 v2 逻辑件 → {header, rows}（存储态；provenance 折叠）。
+    """当前 v3 逻辑件 → {header, rows}（存储态；provenance 折叠）。
 
-    物理头补写 `type:'session'` 标签（上游 v1-to-v2 codec encodeArtifact 的键序：
+    物理头补写 `type:'session'` 标签（上游 v2-to-v3 codec encodeArtifact 的键序：
     type, version, id, createdAt, [cwd, parentSession,] isSeeded, [origin,]
-    delegationDepth, [agentPreset]——可选键缺席即省略）。
+    delegationDepth, [agentPreset]——可选键缺席即省略；V3 沿用 v2 物理头形状）。
     """
     from ..json import thaw
     from ..seq_ranges import encode_seq_ranges
     header = artifact["header"]
-    if header.get("version") != 2:
-        raise fail("encodeCurrent requires Session format v2")
+    if header.get("version") != 3:
+        raise fail("encodeCurrent requires Session format v3")
     physical: dict[str, Any] = {"type": "session"}
     for key in ("version", "id", "createdAt"):
         physical[key] = header[key]
@@ -109,7 +118,7 @@ def _encode_current(artifact: dict) -> dict:
 class _Catalog:
     def __init__(self) -> None:
         self.chain = _Chain()
-        self.codecs = {0: RELEASED_V0_CODEC, 1: RELEASED_V1_CODEC}
+        self.codecs = {0: RELEASED_V0_CODEC, 1: RELEASED_V1_CODEC, 2: RELEASED_V2_CODEC}
 
     @property
     def current_version(self) -> int:
@@ -148,10 +157,10 @@ SESSION_FORMAT_CATALOG = _Catalog()
 
 
 def migrate_released_artifact(artifact: dict) -> dict:
-    """便捷入口：任意 released 版本逻辑件 → 当前 v2 逻辑件。"""
+    """便捷入口：任意 released 版本逻辑件 → 当前 v3 逻辑件。"""
     return SESSION_FORMAT_CATALOG.migrate(artifact)
 
 
 def migrate_released_header(header: dict) -> dict:
-    """便捷入口：任意 released 逻辑头 → 当前 v2 逻辑头（不读事件体）。"""
+    """便捷入口：任意 released 逻辑头 → 当前 v3 逻辑头（不读事件体）。"""
     return SESSION_FORMAT_CATALOG.migrate_header(header)

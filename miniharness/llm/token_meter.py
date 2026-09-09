@@ -4,6 +4,14 @@
 服务自身不产生任何会话事件，对既有事件流做增量 fold（logRevision = consumedEvents），
 提供请求压力与 surface 快照两个测量面。
 
+V3（上游 dsh-v0.1.5-alpha.1）适配：
+  * EpochHeader.system 删除（系统提示词是 surface node 0 的 system/message）——
+    estimateSystemTokens/estimateHeader 的 system 部分废止：estimateSystemMessage
+    定价 system 消息（content + 角色开销），estimateHeader 只计 tools。
+  * usage/estimated 锚的 surface 计量点从 step/start 快照改为 **assistant/message
+    提交前一刻的完整 surface**（anchor includes inputs admitted after step/start：
+    step 内先落的 system/user 节点计入锚价）。
+
 已核实事实（上游 index.ts）：
   * usage 折入锚：最新成功请求的 usage（assistant/message.usage，经 chunk 早样本
     重装的 provider 输出）仅在其 canonical 信封与当前 request/header 一致且总数
@@ -13,9 +21,8 @@
     每消息 4 token 角色开销。
 
 mini 简化标注：
-  * 上游 EpochHeader 含 system/tools（可估 header 开销）；mini 的 request/header
-    形状为 {header:{config, system?, tools?},reason}（见 AGENTS.md 差异清单），
-    estimate_header 定价 system + tools 启发式开销（config 不计价，同上游）。
+  * 上游 contextBreakdown 投影（breakdown-projection.ts，stateVersion 4，nodes[]
+    记 system 节点）mini 未复现（无投影注册表载体，verified-diffs §3.10）。
   * 上游 usage 锚同时计入 cacheRead/cacheWrite；mini 的 TokenUsage 归一同样
     携带 inputTokens/outputTokens/cacheReadTokens/cacheWriteTokens，此处逐项相加。
 """
@@ -31,7 +38,7 @@ from .protocol import BlockAssembler
 
 __all__ = ["BLOCK_OVERHEAD", "CHARS_PER_TOKEN", "ROLE_OVERHEAD", "TokenMeter",
            "estimate_content", "estimate_header", "estimate_message",
-           "estimate_system_tokens", "estimate_tools_tokens"]
+           "estimate_system_message", "estimate_tools_tokens"]
 
 # ---------- 启发式定价（estimate.ts） ----------
 
@@ -61,12 +68,10 @@ def estimate_message(message) -> int:
     return estimate_content(message.get("content", [])) + ROLE_OVERHEAD
 
 
-def estimate_system_tokens(header) -> int:
-    """定价请求信封的 system 部分（上游 estimate.ts estimateSystemTokens）：
-    无 system 字段 → 0；否则 ceil(len/4) + ROLE_OVERHEAD。"""
-    if header is None or header.get("system") is None:
-        return 0
-    return _ceil_len(header["system"]) + ROLE_OVERHEAD
+def estimate_system_message(message) -> int:
+    """定价一条 system 消息（上游 estimate.ts estimateSystemMessage）：
+    content 启发式 + 角色开销；空 content（「无系统提示词」节点）= 角色开销。"""
+    return estimate_content(message.get("content", [])) + ROLE_OVERHEAD
 
 
 def estimate_tools_tokens(header) -> int:
@@ -79,9 +84,10 @@ def estimate_tools_tokens(header) -> int:
 
 
 def estimate_header(header) -> int:
-    """定价请求信封的非 surface 部分（上游 estimate.ts estimateHeader）：
-    system + tools 启发式开销，config 不计价。"""
-    return estimate_system_tokens(header) + estimate_tools_tokens(header)
+    """定价请求信封的非 surface 部分（上游 estimate.ts estimateHeader，V3）：
+    仅 tools 启发式开销（system 已随 EpochHeader.system 删除移入 surface
+    system/message 节点计价；config 不计价，同上游）。"""
+    return estimate_tools_tokens(header)
 
 
 def _ceil_len(text: Any) -> int:
@@ -98,7 +104,7 @@ def _fold_surface_tokens(nodes: list[dict], ev: dict):
     op = ev.get("surfaceOp")
     if op == "append":
         return tokens, nodes + [{"seq": ev["seq"], "tokens": tokens}], tokens
-    start, end = op["start"], op["end"]
+    start, end = op["startSeq"], op["endSeq"]
     start_idx = next((i for i, n in enumerate(nodes) if n["seq"] == start), None)
     end_idx = next((i for i, n in enumerate(nodes) if n["seq"] == end), None)
     if start_idx is None or end_idx is None or start_idx > end_idx:
@@ -213,6 +219,9 @@ class TokenMeter:
 
         surface = None
         if is_surface_event(ev):
+            # V3 锚点：assistant/message 提交**前**的完整 surface（含 step 内
+            # 先落的 system/user 节点）；先记快照再折入本事件
+            surface_before = state["surfaceTokens"]
             surface = _fold_surface_tokens(state["surface"], ev)
 
         if etype == "assistant/message":
@@ -227,7 +236,7 @@ class TokenMeter:
             usage = ev["data"].get("usage")
             if usage is not None and next_header is not None:
                 provider_assistant = self._estimate_provider_assistant(session, ev, event_tokens)
-                anchor_surface = step_start["surfaceTokens"] + provider_assistant
+                anchor_surface = surface_before + provider_assistant
                 provider_tokens = _usage_tokens(usage)
                 estimated_anchor = estimate_header(next_header) + anchor_surface
                 next_anchor = {
@@ -240,7 +249,7 @@ class TokenMeter:
                     ),
                 }
             else:
-                anchor_surface = step_start["surfaceTokens"] + event_tokens
+                anchor_surface = surface_before + event_tokens
                 next_anchor = {
                     "header": next_header,
                     "surfaceTokens": anchor_surface,

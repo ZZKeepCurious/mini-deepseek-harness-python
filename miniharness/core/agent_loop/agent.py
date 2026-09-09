@@ -65,12 +65,15 @@ from ..session import (
 from ..tools import ToolExec, ToolRegistry
 
 
-def canonical_header(config: dict, *, system: str = "", tools: list | None = None,
+def canonical_header(config: dict, *, tools: list | None = None,
                      adapter_defaults: dict | None = None) -> dict:
     """规范化请求信封（上游 session/src/request-header.ts canonicalHeader）：
     config 透传（剔除内部键 turn/step/signal 与 None 值，保留 provider/model/
     reasoningEffort/maxTokens 等连接默认）；adapterDefaults 仅当
-    reasoningEffort/maxTokens 布尔标记之一为真；system 非空才带；tools 非空才带。
+    reasoningEffort/maxTokens 布尔标记之一为真；tools 非空才带。
+
+    V3（上游 dsh-v0.1.5-alpha.1）：`EpochHeader.system` 删除——系统提示词是
+    派生历史（surface node 0 的 `system/message` 事件），不再随 header 携带。
     headerEquals 的 mini 版 = 字典相等。
     """
     _INTERNAL = ("turn", "step", "signal")
@@ -82,11 +85,35 @@ def canonical_header(config: dict, *, system: str = "", tools: list | None = Non
     if adapter_defaults and (adapter_defaults.get("reasoningEffort")
                              or adapter_defaults.get("maxTokens")):
         header["adapterDefaults"] = adapter_defaults
-    if system:
-        header["system"] = system
     if tools:
         header["tools"] = tools
     return header
+
+
+def system_prompt_update_capability(adapter: LlmAdapter) -> str | None:
+    """路由的 systemPromptUpdate 能力位（上游 preparedCall.systemPromptUpdate：
+    LlmResolvedModelInfo.systemPromptUpdate）。`'in-history'` = 端点把 messages
+    任意位置的最新 system 消息视作完整生效提示词；缺省 = 仅读前导 system 消息
+    （incapable route）。mini 以适配器 resolve_model_info 的
+    `system_prompt_update` 键承载（DeepSeek catalog 模型缺省不声明）。
+    """
+    info = adapter.resolve_model_info()
+    value = info.get("system_prompt_update")
+    if value is not None and value != "in-history":
+        raise ValueError(
+            f"adapter {adapter.provider!r} system_prompt_update must be "
+            f"'in-history' when present, got {value!r}")
+    return value
+
+
+def create_system_message(text: str) -> dict:
+    """系统消息工厂（上游 llm/src/message.ts createSystemMessage）：role 'system'
+    + plugin source；空文本 = 「无系统提示词」节点（content 为空数组）。
+    """
+    return create_message(
+        "system",
+        [text_block(text)] if text else [],
+        {"kind": "plugin", "plugin": "system-prompt"})
 
 
 def _replayed_next_turn(session) -> int:
@@ -736,10 +763,18 @@ class AgentLoop:
         """落日志 + LLM 流式（async 迭代器）。返回模型产出的 tool-call 块
         列表（模型序）。
 
+        V3 prepared-route admission（上游 agent.ts step()，dsh-v0.1.5-alpha.1）：
+        step/start 后先 `agent/request` waterfall 决议路由（prepared route），
+        再做系统提示词投影（system/message 落 surface），**之后**才落 user 批
+        （仅首 attempt；重试不重复落）——路由解析失败/取消时输入不进日志，
+        留下平衡的空 step。请求信封不含 system（V3 废止 header.system；系统
+        提示词走 system/message surface 节点）。
+
         失败恢复（阶段 4）：适配器抛 LlmFailure 时派发 agent/request-error
         waterfall（上游 agent-loop 同语义扩展点）；{kind:'retry'} → 同 step
         内重新发起模型请求（同一 messages，历史不因失败 attempt 改变；
-        request/header 只落一次——上游仅在 header 变化时追加、attempt/重试不重复落）
+        request/header 只落一次——上游仅在 header 变化时追加、attempt/重试
+        不重复落）
 
         A5（上游 agent.ts:496-517 buildRequest）：request/header 信封除
         initial/resume/change 外新增 reason 'series' 与可选 startsSeries:true
@@ -750,22 +785,42 @@ class AgentLoop:
         (requestSurfaceGeneration !== surfaceGeneration)`。
         """
         self.session.append("step/start", {"turn": self._turn, "step": self._step})
+
+        # prepared route：路由决议先于任何模型可见输入提交（上游 prepareRequest
+        # 在 step() attempt 循环内、system 投影与 user 批之前）
+        config = self._request_config(self._turn, self._step)
+
+        # 系统提示词投影（上游 SystemPromptProjection.project）：capable 且
+        # 继续系列且文本变 → append 新节点；incapable/断裂/清空 → 规范化
+        # replace（后续非空节点逐个清空 + 头节点按需重写）；无 head → append
+        # （空提示词也预留 node 0）
+        tools = self._tool_definitions()
+        in_history = system_prompt_update_capability(self.adapter) == "in-history"
+        starts_series = (starts_request_series
+                         or self._request_surface_generation != self.session.replace_generation
+                         or self._tools_changed(tools))
+        for message, intent in self._system_prompt_projection(
+                self._system_prompt_text(), in_history, starts_series):
+            self.session.append("system/message",
+                                {"turn": self._turn, "step": self._step, "message": message},
+                                surfaceOp=intent.get("surfaceOp"),
+                                sourceEventSeqs=intent.get("sourceEventSeqs"))
+
         for message in messages:
             self.session.append("user/message", message, surfaceOp="append")
 
         # 请求信封入日志（模型可见 ⟺ 已记录；对齐上游 buildRequest：
         # agent/request waterfall 决议 config → canonicalHeader → 首落
         # initial/resume，之后仅 header 变化落 change、仅系列边界落 series；
-        # request/context 在 provider/model 变化时追加；attempt/重试不重复落）
-        config = self._request_config(self._turn, self._step)
+        # request/context 在 provider/model/contextWindow/systemPromptUpdate
+        # 变化时追加；attempt/重试不重复落）
         header = canonical_header(
             config,
-            system=self._system_prompt_text(),
-            tools=self._tool_definitions(),
+            tools=tools,
             adapter_defaults=self._adapter_defaults(),
         )
-        starts_series = (starts_request_series
-                         or self._request_surface_generation != self.session.replace_generation)
+        header_starts_series = (starts_request_series
+                                or self._request_surface_generation != self.session.replace_generation)
         if self._header_baseline is None:
             resume = any(e["type"] == "request/header" for e in self.session.events)
             self.session.append("request/header", {
@@ -773,10 +828,10 @@ class AgentLoop:
             })
         elif header != self._header_baseline:
             data = {"header": header, "reason": "change"}
-            if starts_series:
+            if header_starts_series:
                 data["startsSeries"] = True
             self.session.append("request/header", data)
-        elif starts_series:
+        elif header_starts_series:
             self.session.append("request/header", {
                 "header": header, "reason": "series",
             })
@@ -786,34 +841,97 @@ class AgentLoop:
         context = {"provider": config.get("provider"), "model": config.get("model")}
         if context_window is not None:
             context["contextWindow"] = context_window
+        capability = system_prompt_update_capability(self.adapter)
+        if capability is not None:
+            context["systemPromptUpdate"] = capability
         if context != self._context_baseline:
             self.session.append("request/context", context)
             self._context_baseline = context
 
         return await self._stream_attempt()
 
-    def _derive_history(self) -> list[dict]:
-        """Derive the full message list from the current session events.
+    def _system_prompt_projection(self, rendered: str, in_history: bool,
+                                  starts_series: bool) -> list[tuple[dict, dict]]:
+        """系统提示词 surface 投影（上游 agent-loop/src/runtime-context.ts
+        SystemPromptProjection.project 逐语义移植）。
 
-        System prompt + history (derived messages).  Callers should invoke this
-        inside each retry attempt so that newly‑added compaction checkpoint events
-        are immediately visible.
+        决策表：
+        * 无 system 头 → append（**空提示词也预留 node 0**）
+        * capable（in_history）且继续系列且文本未变 → 零事件
+        * capable 且继续系列且非空文本变更 → append 新 system 节点
+          （跟在缓存历史后）
+        * incapable route / 系列断裂 / 清空 → 规范化：所有后续非空节点逐个
+          replace 为空 + 头节点文本不同则 replace 头（清空**每一个**保留节点）
+        * 休眠空尾节点不产生重复 replace
 
-        system 消息 = AgentLoop.system_prompt 基底 + ctx.systemPrompt 服务的
-        有序非空节（\n\n 连接，对齐上游 renderPrompt 连接语义；无该服务时仅基底）。
+        返回 (message, intent) 列表：intent = {'surfaceOp': 'append'} 或
+        {'surfaceOp': {op:'replace', startSeq, endSeq}, 'sourceEventSeqs': [seq]}。
         """
-        text = self._system_prompt_text()
-        system = create_message("system", [text_block(text)],
-                                {"kind": "plugin", "plugin": "system-prompt"})
-        history = derive_messages(self.session.events)
-        return [system] + history
+        nodes: list[tuple[int, str | None]] = []
+        for node in self.session.surface_nodes():
+            if node["type"] != "system/message":
+                continue
+            message = node["data"].get("message") or {}
+            content = message.get("content") or []
+            if not content:
+                text = ""
+            elif len(content) == 1 and content[0].get("type") == "text":
+                text = content[0].get("text")
+            else:
+                text = None
+            nodes.append((node["seq"], text))
+        if not nodes:
+            return [(create_system_message(rendered), {"surfaceOp": "append"})]
+        head_seq, head_text = nodes[0]
+        latest = next(((seq, text) for seq, text in reversed(nodes) if text), nodes[0])
+        if not in_history or starts_series or rendered == "":
+            commits = [self._system_replace_commit(seq, "")
+                       for seq, text in nodes[1:] if text]
+            if head_text != rendered:
+                commits.append(self._system_replace_commit(head_seq, rendered))
+            return commits
+        if latest[1] == rendered:
+            return []
+        return [(create_system_message(rendered), {"surfaceOp": "append"})]
+
+    @staticmethod
+    def _system_replace_commit(seq: int, text: str) -> tuple[dict, dict]:
+        """单节点 system replace 提交（上游 SystemPromptProjection.replace）。"""
+        return (create_system_message(text), {
+            "surfaceOp": {"op": "replace", "startSeq": seq, "endSeq": seq},
+            "sourceEventSeqs": [seq],
+        })
+
+    def _tools_changed(self, tools: list) -> bool:
+        """装配的工具 schema 与已落 request/header 是否不同（上游 agent.ts
+        toolsChanged：baseline 缺失 → False；否则用新 tools 重建 canonical
+        header 与 baseline 比较）。供系统提示词投影的 startsSeries 判定。"""
+        baseline = self.session.request_header()
+        if baseline is None:
+            return False
+        probe = canonical_header(
+            baseline.get("config") or {},
+            tools=list(tools),
+            adapter_defaults=baseline.get("adapterDefaults"))
+        return probe != baseline
+
+    def _derive_history(self) -> list[dict]:
+        """从当前会话事件派生完整消息列表（V3：系统提示词是 surface node 0 的
+        `system/message` 事件，随 surface 投影自然进入历史——不再合成前置
+        system 消息；空 content 的 system 节点投影为无消息）。
+
+        Callers should invoke this inside each retry attempt so that
+        newly‑added compaction checkpoint events are immediately visible.
+        """
+        return list(derive_messages(self.session.events))
 
     def _system_prompt_text(self) -> str:
         """渲染系统提示文本：AgentLoop.system_prompt 基底 + systemPrompt 服务
         装配结果（sections 插值 variables 后按 \n\n 连接；对齐上游
         renderPrompt 连接语义；无该服务时仅基底）。
-        request/header 的 system 字段与本方法同一来源，保证 header 与
-        实际请求内容一致（上游 canonicalHeader 用 renderPrompt 结果）。"""
+        V3：渲染结果经 SystemPromptProjection 落为 system/message surface 节点
+        （node 0 / in-history append / 规范化 replace），不再随 request/header
+        携带（上游 canonicalHeader 已删 system 字段）。"""
         parts = [self.system_prompt]
         system_prompt = self.ctx.get("systemPrompt")
         if system_prompt is not None:

@@ -376,7 +376,7 @@ class TestRosterEdges(unittest.TestCase):
         manager.drain_children(root, [child_id])
         # 损坏 target 持久化文件 → 读失败 → 回落 failed
         target_file = os.path.join(self.h.tmp.name, "_no-cwd", child_id,
-                                   "session.v2.jsonl.zstd")
+                                   "session.v3.jsonl.zstd")
         self.assertTrue(os.path.exists(target_file))
         with open(target_file, "wb") as fh:
             fh.write(b"not-a-zstd-frame")
@@ -699,7 +699,7 @@ class TestMailboxEdges(unittest.TestCase):
         self.svc.roster._manager.drain_children(self.root, [member_id])
         # 损坏 target 持久化文件 → 读失败 → 保持 queued + 告警
         target_file = os.path.join(self.h.tmp.name, "_no-cwd", member_id,
-                                   "session.v2.jsonl.zstd")
+                                   "session.v3.jsonl.zstd")
         self.assertTrue(os.path.exists(target_file))
         with open(target_file, "wb") as fh:
             fh.write(b"not-a-zstd-frame")

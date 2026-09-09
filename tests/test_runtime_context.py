@@ -38,7 +38,7 @@ def _prune_over(session: Session, seq: int, summary: str) -> None:
         "user/message",
         create_message("user", [text_block(summary)],
                        {"kind": "plugin", "plugin": "compact"}),
-        surfaceOp={"op": "replace", "start": seq, "end": seq},
+        surfaceOp={"op": "replace", "startSeq": seq, "endSeq": seq},
         sourceEventSeqs=[seq],
     )
 

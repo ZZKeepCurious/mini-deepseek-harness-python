@@ -268,15 +268,21 @@ class TestRequestEnvelope(unittest.TestCase):
         data = self._header_event(session)
         self.assertEqual(data["reason"], "initial")
         header = data["header"]
-        # canonical 信封：config 必有（provider/model），system/tools 非空才带
+        # V3 canonical 信封：config 透传；header 不再携带 system（系统提示词是
+        # surface node 0 的 system/message 事件）；tools 非空才带
         self.assertEqual(header["config"], {"provider": "fake", "model": None})
-        self.assertIn("system", header)
-        self.assertIn("助手", header["system"])
+        self.assertNotIn("system", header)
         self.assertTrue(header["tools"])
         self.assertEqual(header["tools"][0]["name"], "bash")
         # adapter 未显式设 max_tokens → 无 adapterDefaults 字段（canonicalHeader）
         self.assertNotIn("adapterDefaults", header)
-        # request/context 在首个请求落一次（provider/model）
+        # 系统提示词落为 system/message surface 节点（node 0，先于 user 批）
+        system_events = [e for e in session.events if e["type"] == "system/message"]
+        self.assertEqual(len(system_events), 1)
+        self.assertEqual(system_events[0]["surfaceOp"], "append")
+        self.assertEqual(system_events[0]["data"]["message"]["role"], "system")
+        self.assertEqual(system_events[0]["data"]["message"]["content"][0]["text"], "你是一个助手。")
+        # request/context 首次路由记录且仅一次（provider/model）
         ctx = [e for e in session.events if e["type"] == "request/context"]
         self.assertEqual(ctx[0]["data"], {"provider": "fake", "model": None})
 
@@ -301,7 +307,7 @@ class TestRequestEnvelope(unittest.TestCase):
             "user/message",
             create_message("user", [text_block("压缩摘要")],
                            {"kind": "plugin", "plugin": "compact", "compactionId": "c1"}),
-            surfaceOp={"op": "replace", "start": a_msg["seq"], "end": a_msg["seq"]},
+            surfaceOp={"op": "replace", "startSeq": a_msg["seq"], "endSeq": a_msg["seq"]},
             sourceEventSeqs=[a_msg["seq"]],
         )
         loop.followup("第二句")
@@ -321,7 +327,7 @@ class TestRequestEnvelope(unittest.TestCase):
             "user/message",
             create_message("user", [text_block("压缩摘要")],
                            {"kind": "plugin", "plugin": "compact", "compactionId": "c1"}),
-            surfaceOp={"op": "replace", "start": a_msg["seq"], "end": a_msg["seq"]},
+            surfaceOp={"op": "replace", "startSeq": a_msg["seq"], "endSeq": a_msg["seq"]},
             sourceEventSeqs=[a_msg["seq"]],
         )
         loop.followup("第二句")

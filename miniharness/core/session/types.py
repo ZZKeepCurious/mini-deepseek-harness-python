@@ -2,6 +2,11 @@
 
 上游对照：packages/core/session/src/known-event-types.ts（事件类型全集）+ types.ts
 （SurfaceEventType）+ repair.ts（TOOL_NOT_STARTED / TOOL_OUTCOME_UNKNOWN）。
+
+V3（上游 dsh-v0.1.5-alpha.1，SESSION_FORMAT_VERSION 2→3）：system prompt 成为
+surface node 0（新 surface 事件 `system/message`，第 4 种 surface 类型）；
+`tool/code-dispatch{,-start}` 持久词汇改名 `tool/ptc-dispatch{,-start}`；新增
+feedback/message-put|delete 反馈域事件（上游 feedback/message-feedback 包）。
 """
 from __future__ import annotations
 
@@ -13,17 +18,19 @@ __all__ = [
     "TOOL_OUTCOME_UNKNOWN",
 ]
 
-SESSION_FORMAT_VERSION = 2
+SESSION_FORMAT_VERSION = 3
 
 KNOWN_TYPES = frozenset({
     "turn/start", "turn/end", "step/start", "step/end",
+    "system/message",
     "user/message", "assistant/message", "assistant/attempt",
     "tool/call", "tool/result",
     # 请求信封（上游 agent-loop/src/agent.ts SessionEventMap，log-only 非
     # surface）：request/header 存 canonical 快照 {header:{config,
-    # adapterDefaults?, system?, tools?}, reason}，attempt/重试不重复落；
-    # request/context {provider, model, contextWindow?} 在 provider/model/
-    # contextWindow 变化时追加
+    # adapterDefaults?, tools?}, reason}——V3 起 header 不再携带 system（系统
+    # 提示词是派生历史 = surface node 0 的 system/message 事件）；
+    # request/context {provider, model, contextWindow?, systemPromptUpdate?}
+    # 在任一字段变化时追加
     "request/header", "request/context", "session/end-seed",
     # Inbox 变更（上游 agent/src/inbox.ts SessionEventMap，log-only 非 surface：
     # 每次入队/认领/清除的 splice 形状 {target, start, removedCount?, inserted,
@@ -62,6 +69,14 @@ KNOWN_TYPES = frozenset({
     # SessionEventMap：{mode, source?: 'delegation'}，log-only 非 surface、
     # 整值替换最后一条胜出——effective = fold(events) ?? 部署默认）
     "sandbox/mode",
+    # PTC 派发审计（上游 core/tools/src/ptc.ts SessionEventMap，log-only 非
+    # surface；V3 由 tool/code-dispatch{,-start} 改名，payload 不变；mini 不
+    # 产出（无 PTC 运行时），仅为读侧词汇一致性登记）
+    "tool/ptc-dispatch", "tool/ptc-dispatch-start",
+    # 消息反馈（上游 feedback/message-feedback 包 SessionEventMap，log-only 非
+    # surface：put = {sessionId, item:{messageId, rating, version, createdAt,
+    # updatedAt, note?}}；delete = {sessionId, messageId}；mini 不产出，登记可读）
+    "feedback/message-put", "feedback/message-delete",
     # Agent Teams 实验（上游 experimental/agent-team/src/journal.ts
     # SessionEventMap，四个事件 log-only 非 surface、version 2、存于
     # Team Lead 会话日志）：team/member 全量投标 {member}；
@@ -70,8 +85,11 @@ KNOWN_TYPES = frozenset({
     "team/member", "team/task", "team/message/queued", "team/message/delivered",
 })
 
-# 只有这三种事件产生模型消息，可带 surfaceOp（上游 types.ts SurfaceEventType）
-SURFACE_TYPES = frozenset({"user/message", "assistant/message", "tool/result"})
+# 只有这四种事件产生模型消息，可带 surfaceOp（上游 types.ts SurfaceEventType；
+# V3 新增 system/message：系统提示词是 surface node 0 的派生历史）
+SURFACE_TYPES = frozenset({
+    "system/message", "user/message", "assistant/message", "tool/result",
+})
 
 # 崩溃恢复码（上游 session/src/repair.ts）
 TOOL_NOT_STARTED = "TOOL_NOT_STARTED"

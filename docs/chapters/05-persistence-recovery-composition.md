@@ -1,4 +1,4 @@
-﻿# 第 5 章：持久化 + 崩溃恢复 + 组合加载
+# 第 5 章：持久化 + 崩溃恢复 + 组合加载
 
 > 对应 dsh 真实源码：`packages/session/session-persistence` + `packages/boot`
 >（`docs/subsystems/persistence.md`、`docs/subsystems/session-projection.md`）
@@ -11,7 +11,7 @@
     - **`repair_and_replay`**：本章为逐条 `append` 重放；实现为 seed 回放——从 `session/end-seed` 标记重放，且修复合成的 closers 经 `commit_repair` 持久化落盘（`core/session/persistence.py`，基类接口 + JSONL 后端实现）。
     - **`turn/end` reason**：本章差异表写 `reason = "interrupted"` 字符串；实现为对象 `{kind:'interrupted'}`（配合 `repair_interrupted_turn` 合成 closers，见第 1 章横幅）。
     - **崩溃演示**：本章 §5.2"kill 进程"实为手动构造未闭合回合来模拟崩溃尾部，非真实 kill（`tests/test_persistence_boot.py` 可复核）。
-    - **简化载体**：配置为 YAML（pyyaml 硬依赖承载）+ `!!js` 仅 `process.env.<NAME>` 子集。JSONL 载体**已对齐上游默认形态**：zstd 拼接帧容器 + 一行一事件（V2，模型流内嵌 `assistant/message`）+ format.ts 目录布局（`root/--<projectKey(cwd)>--/<encodeSegment(id)>/session.v2.jsonl[.zstd]`——generation 版本化文件名，v0 旧名 `session.jsonl` 保留拒读；编码互斥/遗留布局响亮拒绝），见 `zstd_frames.py` 与 `tests/test_persistence_zstd.py`。
+    - **简化载体**：配置为 YAML（pyyaml 硬依赖承载）+ `!!js` 仅 `process.env.<NAME>` 子集。JSONL 载体**已对齐上游默认形态**：zstd 拼接帧容器 + 一行一事件（V2，模型流内嵌 `assistant/message`）+ format.ts 目录布局（`root/--<projectKey(cwd)>--/<encodeSegment(id)>/session.v3.jsonl[.zstd]`——generation 版本化文件名，v0 旧名 `session.jsonl` 保留拒读；编码互斥/遗留布局响亮拒绝），见 `zstd_frames.py` 与 `tests/test_persistence_zstd.py`。
 
 ## 5.1 这一章要做什么
 
@@ -125,10 +125,10 @@ class JsonlPersistence(SessionPersistence):
 
 #### 多代 generation 与相邻迁移（`generation.py` + `released/`，教学代码之外的对齐实现）
 
-实现层的目录布局是**分代**的：每会话目录下是 `session.v2.jsonl[.zstd]`（v2 = 当前代；v0 保留旧名 `session.jsonl`；canonical 名以外的临时/大写/前导零名不是代）。这带来两个读侧机制，都对着上游 `session-persistence-jsonl/src/generation.ts`：
+实现层的目录布局是**分代**的：每会话目录下是 `session.v3.jsonl[.zstd]`（v2 = 当前代；v0 保留旧名 `session.jsonl`；canonical 名以外的临时/大写/前导零名不是代）。这带来两个读侧机制，都对着上游 `session-persistence-jsonl/src/generation.ts`：
 
 1. **选最高代**（`resolveGenerationInDirectory` 语义）：目录里同时存在多代制品时，读侧选数值最高的 canonical 代；发现对立编码的 canonical 名响亮拒绝（编码互斥，绝不静默迁移编码）。
-2. **migrate-on-open**（`ensureJsonlGenerationCurrent` 语义）：选中的代 ≠ 当前代时，先解码 → 走**相邻迁移链**（v0→v1→v2，`released/` 包）→ 编码 → 校验 staged → 原子发布后继 `session.v2.jsonl[.zstd]`；**不可变源文件原样保留**（迁移永不改写历史）。三个失败面各自有名有姓：未来版本（`JsonlGenerationNewerVersionError`——"升级 harness"）、格式边拒绝内容（`JsonlGenerationUnsupportedMigrationError`——源制品不动）、目标冲突（`JsonlGenerationTargetConflictError`——当前代文件名已被别的字节占用）。
+2. **migrate-on-open**（`ensureJsonlGenerationCurrent` 语义）：选中的代 ≠ 当前代时，先解码 → 走**相邻迁移链**（v0→v1→v2→v3，`released/` 包）→ 编码 → 校验 staged → 原子发布后继 `session.v3.jsonl[.zstd]`；**不可变源文件原样保留**（迁移永不改写历史）。三个失败面各自有名有姓：未来版本（`JsonlGenerationNewerVersionError`——"升级 harness"）、格式边拒绝内容（`JsonlGenerationUnsupportedMigrationError`——源制品不动）、目标冲突（`JsonlGenerationTargetConflictError`——当前代文件名已被别的字节占用）。
 
 迁移链是**纯函数整件迁移**（上游 `session-format/src/chain.ts`）：逻辑件 `{header, inheritedEventCount, events}` 与物理解码分离，每条边只做 `fromVersion → fromVersion+1`。两条边的语义核心：
 

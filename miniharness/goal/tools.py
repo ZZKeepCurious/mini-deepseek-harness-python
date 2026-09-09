@@ -215,6 +215,17 @@ def register_goal_tools(reg: ToolRegistry, goals, ctx: Context | None = None,
                     "objective and max_goal_rounds are valid only with action edit; "
                     "blocked_reason is valid only with action blocked",
                     "GOAL_TOOL_INVALID_UPDATE")
+            current = goals.get(agent)
+            # GOAL_TOOL_RESUME_PAUSED（上游 tool-goal index.ts:279-286）：模型
+            # 不能 resume 处于 paused 的目标——必须由用户恢复（human CLI 侧
+            # /goal resume 不受此限）。
+            if action == "resume" and current is not None \
+                    and current.get("id") == ref.get("id") \
+                    and current.get("revision") == ref.get("revision") \
+                    and current.get("phase") == "paused":
+                raise GoalError(
+                    "the model cannot resume a paused goal; the user must resume it",
+                    "GOAL_TOOL_RESUME_PAUSED")
             goal = goals.pause(agent, ref) if action == "pause" else goals.resume(agent, ref)
             return goal_value(goal)
         if _has_text(args.get("objective")) or _has_round_cap(args.get("max_goal_rounds")):

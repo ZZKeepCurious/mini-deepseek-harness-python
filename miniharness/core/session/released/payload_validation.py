@@ -512,9 +512,21 @@ def turn_end_reason_value(value: Any, label: str) -> None:
     non_empty_string(kind, f"{label} kind")
 
 
-def request_header_value(value: Any, label: str) -> None:
-    header = exact_record(value, label, ["config"],
-                          ["adapterDefaults", "system", "tools"])
+def request_header_value(value: Any, label: str, version: int) -> None:
+    if version >= 3:
+        # V3（上游 surface.ts validateSessionEventData）：header.system 废止——
+        # 系统提示词是 surface node 0 的 system/message 事件；空可选键必须省略。
+        if isinstance(value, dict) and "system" in value:
+            raise fail(f"{label} must omit header.system; use system/message")
+        header = exact_record(value, label, ["config"], ["adapterDefaults", "tools"])
+        if isinstance(header.get("tools"), list) and len(header["tools"]) == 0:
+            raise fail(f"{label} must omit empty tools")
+        defaults_probe = header.get("adapterDefaults")
+        if isinstance(defaults_probe, dict) and len(defaults_probe) == 0:
+            raise fail(f"{label} must omit empty adapterDefaults")
+    else:
+        header = exact_record(value, label, ["config"],
+                              ["adapterDefaults", "system", "tools"])
     config = exact_record(header.get("config"), f"{label} config",
                           ["provider", "model"],
                           ["reasoningEffort", "temperature", "maxTokens", "stop"])
@@ -535,10 +547,45 @@ def request_header_value(value: Any, label: str) -> None:
             literal_value(marker, [True], f"{label} adapterDefaults {key}")
             if key not in config:
                 raise fail(f"{label} adapter default {key} lacks config value")
-    if header.get("system") is not None:
+    if version < 3 and header.get("system") is not None:
         string_value(header.get("system"), f"{label} system")
     if header.get("tools") is not None:
         array_value(header.get("tools"), f"{label} tools", tool_schema_value)
+
+
+def system_message_value(data: dict, label: str, version: int) -> None:
+    """V3 system/message 载荷（上游 v2-to-v3 payload.ts assertSystem）：
+    {turn, step, message}，message 恰四键 id/role/source/content；role 'system'
+    + plugin source；content 语义按同版本 user/message 探针复核。"""
+    exact_keys(data, ("turn", "step", "message"), (), f"{label} data")
+    for coordinate in ("turn", "step"):
+        if count_value(data.get(coordinate), f"{label} {coordinate}") == 0:
+            raise fail(f"{label} {coordinate} must be positive")
+    message = exact_record(data.get("message"), f"{label} system message",
+                           ["id", "role", "source", "content"], [])
+    non_empty_string(message.get("id"), f"{label} system message id")
+    literal_value(message.get("role"), ["system"], f"{label} system message role")
+    source = exact_record(message.get("source"), f"{label} system source", ["kind", "plugin"], [])
+    literal_value(source.get("kind"), ["plugin"], f"{label} system source kind")
+    non_empty_string(source.get("plugin"), f"{label} system source plugin")
+    assert_released_payload_semantics(
+        {"type": "user/message", "seq": 0, "time": 0,
+         "data": {**message, "role": "user"}}, version)
+
+
+def feedback_put_value(data: dict, label: str) -> None:
+    """V3 feedback/message-put 载荷（上游 v2-to-v3 payload.ts assertFeedback）。"""
+    non_empty_string(data.get("sessionId"), f"{label} sessionId")
+    item = exact_record(data.get("item"), f"{label} feedback item",
+                        ["messageId", "rating", "version", "createdAt", "updatedAt"],
+                        ["note"])
+    for key in ("messageId", "version"):
+        string_value(item.get(key), f"{label} feedback {key}")
+    literal_value(item.get("rating"), ["positive", "negative"], f"{label} feedback rating")
+    if item.get("note") is not None:
+        string_value(item.get("note"), f"{label} feedback note")
+    count_value(item.get("createdAt"), f"{label} feedback createdAt")
+    count_value(item.get("updatedAt"), f"{label} feedback updatedAt")
 
 
 def tool_schema_value(value: Any, label: str) -> None:
@@ -956,12 +1003,22 @@ def assert_released_payload_semantics(event: dict, version: int) -> None:
         non_empty_string(data.get("model"), f"{label} model")
         if data.get("contextWindow") is not None:
             positive_integer_value(data.get("contextWindow"), f"{label} contextWindow")
+        if version >= 3 and data.get("systemPromptUpdate") is not None:
+            literal_value(data.get("systemPromptUpdate"), ["in-history"],
+                          f"{label} systemPromptUpdate")
     elif etype == "request/header":
-        request_header_value(data.get("header"), f"{label} header")
+        request_header_value(data.get("header"), f"{label} header", version)
         literal_value(data.get("reason"), ["initial", "resume", "change", "series"],
                       f"{label} reason")
         if data.get("startsSeries") is not None:
             literal_value(data.get("startsSeries"), [True], f"{label} startsSeries")
+    elif version >= 3 and etype == "system/message":
+        system_message_value(data, label, version)
+    elif version >= 3 and etype == "feedback/message-put":
+        feedback_put_value(data, label)
+    elif version >= 3 and etype == "feedback/message-delete":
+        non_empty_string(data.get("sessionId"), f"{label} sessionId")
+        non_empty_string(data.get("messageId"), f"{label} messageId")
     elif etype == "sandbox/mode":
         literal_value(data.get("mode"),
                       ["read-only", "workspace-write", "danger-full-access"],
@@ -1035,12 +1092,16 @@ def assert_released_payload_semantics(event: dict, version: int) -> None:
         non_empty_string(data.get("callId"), f"{label} callId")
         non_empty_string(data.get("name"), f"{label} name")
         string_value(data.get("arguments"), f"{label} arguments")
-    elif etype in ("tool/code-dispatch", "tool/code-dispatch-start"):
+    elif etype in ("tool/code-dispatch", "tool/code-dispatch-start",
+                   "tool/ptc-dispatch", "tool/ptc-dispatch-start"):
+        # V3：tool/ptc-dispatch{,-start} 是 code-dispatch 的改名迁移产物
+        # （payload 形状不变）；required code-dispatch 在 v3 读面随 obsolete
+        # 词表由 validate_v3 拒绝（required 时）/ opaque 收留（ignorable）。
         non_empty_string(data.get("rootCallId"), f"{label} rootCallId")
         non_empty_string(data.get("parentCallId"), f"{label} parentCallId")
         non_empty_string(data.get("subCallId"), f"{label} subCallId")
         non_empty_string(data.get("name"), f"{label} name")
-        if etype == "tool/code-dispatch":
+        if etype in ("tool/code-dispatch", "tool/ptc-dispatch"):
             boolean_value(data.get("isError"), f"{label} isError")
             content_blocks_value(data.get("content"), f"{label} content", version)
     elif etype == "tool/result":
@@ -1050,6 +1111,17 @@ def assert_released_payload_semantics(event: dict, version: int) -> None:
             error = exact_record(data.get("error"), f"{label} error", ["name", "code"])
             non_empty_string(error.get("name"), f"{label} error name")
             non_empty_string(error.get("code"), f"{label} error code")
+            if version >= 3:
+                # V3 canonical（上游 assertCanonicalPayload）：error 元数据必须
+                # 伴随恰好一个 isError:true 的 tool-result 块，矛盾即拒不补写。
+                message = data.get("message")
+                content = message.get("content") if isinstance(message, dict) else None
+                if (not isinstance(content, list) or len(content) != 1
+                        or not isinstance(content[0], dict)
+                        or content[0].get("type") != "tool-result"
+                        or content[0].get("isError") is not True):
+                    raise fail(
+                        f"{label} carries error metadata for a non-error tool result")
     elif etype == "turn/end":
         count_value(data.get("turn"), f"{label} turn")
         turn_end_reason_value(data.get("reason"), f"{label} reason")

@@ -307,8 +307,11 @@ class SystemPromptAssemblyTest(unittest.TestCase):
         adapter = _capture_adapter()
         loop = AgentLoop(Session("sp1"), adapter, ToolRegistry(ctx), ctx)
         loop.followup("你好")
-        header = [e for e in loop.session.events if e["type"] == "request/header"][0]
-        self.assertIn("目标指引：标准", header["data"]["header"]["system"])
+        # V3：系统提示词不再随 request/header 携带，落为 surface node 0 的
+        # system/message 事件；请求消息历史同源（adapter.systems 由派生历史取）
+        system_event = [e for e in loop.session.events if e["type"] == "system/message"][0]
+        self.assertIn("目标指引：标准",
+                      system_event["data"]["message"]["content"][0]["text"])
         self.assertIn("目标指引：标准", adapter.systems[-1])
 
 

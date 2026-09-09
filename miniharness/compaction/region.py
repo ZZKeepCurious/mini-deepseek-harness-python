@@ -27,6 +27,10 @@ __all__ = ["compact_surface_region", "inspect_compaction_entry_state", "select_c
 def select_compactable_range(session, measurement: dict, retain_tokens: int):
     """从头锚定的可压缩区间：保留定价的近期尾部，不切散工具调用/结果对。
 
+    V3（上游 region.ts selectCompactableRange）：system 头节点**永不入区间**
+    ——surface node 0 是 system/message 时起点移到首个非 system 节点（node 0
+    无 system 头则从 0 起）；keepFrom 与平衡回退都不越过该起点。
+
     返回 {start, end}（当前 surface 上首/末被遮蔽节点的 seq），无安全区间返回 None。
     """
     priced = measurement["nodes"]
@@ -37,6 +41,10 @@ def select_compactable_range(session, measurement: dict, retain_tokens: int):
             n["seq"] != p["seq"] for n, p in zip(surface_nodes, priced)):
         raise ValueError("compaction: token-meter surface does not match the current session surface")
 
+    first_idx = 0
+    if surface_nodes and surface_nodes[0]["type"] == "system/message":
+        first_idx = 1
+
     accumulated = 0
     keep_from = len(priced)
     for index in range(len(priced) - 1, -1, -1):
@@ -44,16 +52,17 @@ def select_compactable_range(session, measurement: dict, retain_tokens: int):
         keep_from = index
         if accumulated >= retain_tokens:
             break
-    if keep_from == 0:
+    if keep_from <= first_idx:
         return None
     balance = _balance(session)
-    while keep_from > 0:
+    while keep_from > first_idx:
         if balance[keep_from]:
             break
         keep_from -= 1
-    if keep_from == 0:
+    if keep_from <= first_idx:
         return None
-    return {"start": surface_nodes[0]["seq"], "end": surface_nodes[keep_from - 1]["seq"]}
+    return {"start": surface_nodes[first_idx]["seq"],
+            "end": surface_nodes[keep_from - 1]["seq"]}
 
 
 async def compact_surface_region(session, meter, agent, config: dict, start: int, end: int) -> dict:
@@ -111,7 +120,7 @@ async def compact_surface_region(session, meter, agent, config: dict, start: int
             **({"usage": summary_result["usage"]} if summary_result.get("usage") is not None else {}),
         })
         session.append("user/message", checkpoint, surfaceOp={
-            "op": "replace", "start": start, "end": end,
+            "op": "replace", "startSeq": start, "endSeq": end,
         }, sourceEventSeqs=[start_event["seq"], summary_event["seq"], *selection["shadowedSeqs"]])
         end_event = session.append("compaction/end", {
             "compactionId": compaction_id, "turn": owner,
@@ -209,13 +218,27 @@ def _validate_surface_region(session, start: int, end: int) -> dict:
 
 
 def _build_summarization_input(session, shadowed_seqs: list) -> dict:
-    """重放被遮蔽区间的派生消息（mini 无 system/tools 信封，仅 messages）。"""
+    """重放被遮蔽区间的派生消息（上游 region.ts buildSummarizationInput，V3）：
+
+    前缀 = **system 头派生消息**（surface node 0 的 system/message；无头或
+    空投影则无前导 system 消息）+ 区域自身消息（surface 序）+ header 的
+    tools（无 header 无 tools）。摘要调用是会话请求的真前缀（KV cache 复用
+    动机，上游同款）。"""
+    header = session.request_header()
+    nodes = session.surface_nodes()
+    system_message = None
+    if nodes and nodes[0]["type"] == "system/message":
+        system_message = derive_event_message(session.events[nodes[0]["seq"]])
     messages = []
+    if system_message is not None:
+        messages.append(system_message)
     for seq in shadowed_seqs:
         message = derive_event_message(session.events[seq])
         if message is not None:
             messages.append(message)
-    return {"messages": messages}
+    tools = (header or {}).get("tools")
+    return {"messages": messages,
+            **({} if tools is None else {"tools": tools})}
 
 
 # ---------- 工具配对平衡（tool-pairing.ts） ----------

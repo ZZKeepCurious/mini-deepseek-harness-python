@@ -232,7 +232,7 @@ class CompactSurfaceRegionTest(unittest.TestCase):
         checkpoint = session.events[-2]
         self.assertEqual(checkpoint["type"], "user/message")
         self.assertEqual(checkpoint["surfaceOp"],
-                         {"op": "replace", "start": start, "end": end})
+                         {"op": "replace", "startSeq": start, "endSeq": end})
         self.assertEqual(result["startSeq"] < result["summarySeq"] < result["endSeq"], True)
 
         # 派生消息只含 检查点 + 最后一段
@@ -511,8 +511,8 @@ class ToolResultPrunerSessionTest(unittest.TestCase):
         self.assertGreater(prune_ev["data"]["shadowedTokenCount"], 0)
         replace_ev = session.events[entry["replacementSeq"]]
         self.assertEqual(replace_ev["type"], "tool/result")
-        self.assertEqual(replace_ev["surfaceOp"], {"op": "replace", "start": entry["originalSeq"],
-                                                    "end": entry["originalSeq"]})
+        self.assertEqual(replace_ev["surfaceOp"], {"op": "replace", "startSeq": entry["originalSeq"],
+                                                    "endSeq": entry["originalSeq"]})
         self.assertEqual(list(replace_ev["sourceEventSeqs"]), [entry["originalSeq"]])
         repl_text = replace_ev["data"]["message"]["content"][0]["content"][0]["text"]
         self.assertIn(PRUNE_MARKER, repl_text)

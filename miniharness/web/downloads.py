@@ -10,7 +10,7 @@ session-export.ts + api/downloads.ts + fetch/handler.ts 的 GET 下载通道）�
     后端路径——对齐 upstream 的私有错误安全壳）。
   * 响应头：content-type=application/zip；Content-Disposition: attachment;
     filename="dsh-session-<safe>.zip"（safe = 非 [A-Za-z0-9_-] 折下划线）。
-  * 归档条目（zip 顺序）：根制品逐字置于其原始文件名（session.v2.jsonl）→ 每个
+  * 归档条目（zip 顺序）：根制品逐字置于其原始文件名（session.v3.jsonl）→ 每个
     subagent 后代置于 `subagents/<safe-id>/<filename>`（按 lineage BFS，seen-set
     去重）→ 每个被含日志引用的独立媒体置于 `media/<attachmentId>.<ext>`（内容寻址）。
     根制品在读出前先经 live-session 的 flush 栅栏落盘（cold 会话无需）。

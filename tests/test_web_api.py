@@ -624,7 +624,7 @@ class TestSessionPage(WebApiTest):
         self._append("session-h", "assistant/message", message={"id": "m2"})
         # V2：assistant/message 内嵌流禁带 sourceEventSeqs，replace 以 user/message 演示
         self._append("session-h", "user/message", message={"id": "m1r"},
-                     surface_op={"op": "replace", "start": 0, "end": 0},
+                     surface_op={"op": "replace", "startSeq": 0, "endSeq": 0},
                      source_event_seqs=[0])
         last = self.api.store.get("session-h").seq - 1
         value = self._value(self.api.dispatch("session.page", "rid", {

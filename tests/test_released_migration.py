@@ -12,6 +12,7 @@ from tempfile import TemporaryDirectory
 from miniharness.core.session.generation import (
     CURRENT_GENERATION_VERSION,
     JsonlGenerationNewerVersionError,
+    JsonlGenerationUnsupportedMigrationError,
     JsonlGenerationTargetConflictError,
     ensure_generation_current,
     generation_log_filename,
@@ -102,10 +103,11 @@ class GenerationDirectoryTest(unittest.TestCase):
             (d / "session.jsonl").write_text("{}\n")
             (d / "session.v1.jsonl").write_text("{}\n")
             (d / "session.v2.jsonl").write_text("{}\n")
+            (d / "session.v3.jsonl").write_text("{}\n")
             resolved = resolve_generation_in_directory(d, "none")
-            self.assertEqual(resolved["source_version"], 2)
-            self.assertEqual(resolved["source_path"].name, "session.v2.jsonl")
-            self.assertEqual(resolved["current_path"].name, "session.v2.jsonl")
+            self.assertEqual(resolved["source_version"], 3)
+            self.assertEqual(resolved["source_path"].name, "session.v3.jsonl")
+            self.assertEqual(resolved["current_path"].name, "session.v3.jsonl")
 
     def test_opposite_encoding_refused(self):
         with TemporaryDirectory() as tmp:
@@ -163,10 +165,13 @@ class GenerationEnsureTest(unittest.TestCase):
         return root, session_dir
 
     def test_v1_artifact_migrates_on_open(self):
+        # V3 起 v2→v3 边拒绝「首个 step 前 surface」制品（上游 corpus inventory
+        # 同款：无 step 结构的 flat 消息无法在不改年代史的情况下获得 system
+        # head）——合法 v1 制品的 user/message 必须已在 step 内。
         events = [
-            v1_user(0, 100, "hi"),
-            ev(1, 101, "turn/start", {"turn": 1}),
-            ev(2, 102, "step/start", {"turn": 1, "step": 1}),
+            ev(0, 100, "turn/start", {"turn": 1}),
+            ev(1, 101, "step/start", {"turn": 1, "step": 1}),
+            v1_user(2, 102, "hi"),
             ev(3, 110, "assistant/chunk", {"turn": 1, "step": 1,
                "chunk": {"type": "text-delta", "index": 0, "text": "hello"}}),
             ev(4, 120, "assistant/chunk", {"turn": 1, "step": 1,
@@ -183,24 +188,49 @@ class GenerationEnsureTest(unittest.TestCase):
                 resolved["source_path"], 1, resolved["current_path"], "none")
             self.assertEqual(result["status"], "migrated")
             self.assertEqual(result["from_version"], 1)
-            self.assertEqual(result["to_version"], 2)
+            self.assertEqual(result["to_version"], 3)
             self.assertTrue((session_dir / "session.v1.jsonl").exists())
-            self.assertTrue((session_dir / "session.v2.jsonl").exists())
+            self.assertTrue((session_dir / "session.v3.jsonl").exists())
             # persistence 直接打开迁移后的会话
             p = JsonlPersistence(root, compression="none")
             loaded = p.load("s-v1")
             types = [event["type"] for event in loaded]
-            self.assertEqual(types[0], "user/message")  # unseeded：无合成 marker
+            self.assertEqual(types[0], "turn/start")
+            # V3：首个 step/start 后插空 system head（surface node 0）
+            self.assertEqual(types[2], "system/message")
+            self.assertEqual(loaded[2]["surfaceOp"], "append")
+            self.assertEqual(loaded[2]["data"]["message"]["content"], [])
+            self.assertEqual(types[3], "user/message")
             self.assertIn("assistant/message", types)
             message = next(e for e in loaded if e["type"] == "assistant/message")
             self.assertNotIn("sourceEventSeqs", message)
             self.assertIn("stream", message["data"])
             # 再次打开 = 已是当前代（幂等）
             again = resolve_generation_in_directory(session_dir, "none")
-            self.assertEqual(again["source_version"], 2)
+            self.assertEqual(again["source_version"], 3)
             result2 = ensure_generation_current(
-                again["source_path"], 2, again["current_path"], "none")
+                again["source_path"], 3, again["current_path"], "none")
             self.assertEqual(result2["status"], "current")
+
+    def test_v1_surface_before_first_step_refused(self):
+        """V2→V3 边拒绝：首个 step 前存在 surface 事件的 released 制品
+        （上游 corpus inventory「deliberately unsupported conversion」同款）。"""
+        events = [
+            v1_user(0, 100, "hi"),
+            ev(1, 101, "turn/start", {"turn": 1}),
+            ev(2, 102, "step/start", {"turn": 1, "step": 1}),
+            ev(3, 131, "step/end", {"turn": 1, "step": 1}),
+            ev(4, 132, "turn/end", {"turn": 1, "reason": {"kind": "completed"}}),
+        ]
+        with TemporaryDirectory() as tmp:
+            root, session_dir = self._layout(tmp, events)
+            resolved = resolve_generation_in_directory(session_dir, "none")
+            with self.assertRaises(JsonlGenerationUnsupportedMigrationError) as ctx:
+                ensure_generation_current(
+                    resolved["source_path"], 1, resolved["current_path"], "none")
+            self.assertIn("surface before first step", str(ctx.exception))
+            # 拒绝后源字节不动、不发布后继代
+            self.assertFalse((session_dir / "session.v3.jsonl").exists())
 
     def test_filename_header_version_mismatch_refused(self):
         with TemporaryDirectory() as tmp:
@@ -221,21 +251,21 @@ class GenerationEnsureTest(unittest.TestCase):
     def test_newer_generation_refused(self):
         with TemporaryDirectory() as tmp:
             root, session_dir = self._layout(tmp, [])
-            source = session_dir / "session.v3.jsonl"
+            source = session_dir / "session.v4.jsonl"
             source.write_text(json.dumps({
-                "type": "session", "version": 3, "id": "s-v1", "createdAt": 1,
+                "type": "session", "version": 4, "id": "s-v1", "createdAt": 1,
                 "isSeeded": False, "delegationDepth": 0}) + "\n", encoding="utf-8")
             resolved = resolve_generation_in_directory(session_dir, "none")
-            self.assertEqual(resolved["source_version"], 3)
+            self.assertEqual(resolved["source_version"], 4)
             with self.assertRaises(JsonlGenerationNewerVersionError):
-                ensure_generation_current(resolved["source_path"], 3,
+                ensure_generation_current(resolved["source_path"], 4,
                                           resolved["current_path"], "none")
 
     def test_target_conflict_on_foreign_current(self):
         events = [
-            v1_user(0, 100, "hi"),
-            ev(1, 101, "turn/start", {"turn": 1}),
-            ev(2, 102, "step/start", {"turn": 1, "step": 1}),
+            ev(0, 100, "turn/start", {"turn": 1}),
+            ev(1, 101, "step/start", {"turn": 1, "step": 1}),
+            v1_user(2, 102, "hi"),
             ev(3, 110, "assistant/chunk", {"turn": 1, "step": 1,
                "chunk": {"type": "text-delta", "index": 0, "text": "hello"}}),
             ev(4, 120, "assistant/chunk", {"turn": 1, "step": 1,
@@ -246,14 +276,14 @@ class GenerationEnsureTest(unittest.TestCase):
         ]
         with TemporaryDirectory() as tmp:
             root, session_dir = self._layout(tmp, events)
-            (session_dir / "session.v2.jsonl").write_text(
-                json.dumps({"type": "session", "version": 2, "id": "other",
+            (session_dir / "session.v3.jsonl").write_text(
+                json.dumps({"type": "session", "version": 3, "id": "other",
                             "createdAt": 1, "isSeeded": False, "delegationDepth": 0})
                 + "\n", encoding="utf-8")
             resolved = resolve_generation_in_directory(session_dir, "none")
-            self.assertEqual(resolved["source_version"], 2)
-            # 目录里 v2 已是最高代 → 直接视为 current（不迁移，行为同上游 select-highest）
-            self.assertEqual(resolved["source_path"].name, "session.v2.jsonl")
+            self.assertEqual(resolved["source_version"], 3)
+            # 目录里 v3 已是最高代 → 直接视为 current（不迁移，行为同上游 select-highest）
+            self.assertEqual(resolved["source_path"].name, "session.v3.jsonl")
 
 
 class V1ToV2MigrationTest(unittest.TestCase):
@@ -631,11 +661,11 @@ class V0ToV1MigrationTest(unittest.TestCase):
 
 
 class HeaderTranslationTest(unittest.TestCase):
-    def test_v1_header_translates_to_v2_without_body(self):
+    def test_v1_header_translates_to_v3_without_body(self):
         header = {"version": 1, "id": "s", "createdAt": 5, "isSeeded": True,
                   "delegationDepth": 0, "parentSession": "p"}
         translated = migrate_released_header(header)
-        self.assertEqual(translated["version"], 2)
+        self.assertEqual(translated["version"], 3)
         self.assertEqual(translated["parentSession"], "p")
         self.assertTrue(translated["isSeeded"])
 

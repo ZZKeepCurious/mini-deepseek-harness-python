@@ -185,7 +185,7 @@ class ToolResultPruner:
             replacement = session.append(
                 "tool/result",
                 {**event["data"], "message": new_message},
-                surfaceOp={"op": "replace", "start": seq, "end": seq},
+                surfaceOp={"op": "replace", "startSeq": seq, "endSeq": seq},
                 sourceEventSeqs=[seq],
             )
             source = message.get("source") or {}

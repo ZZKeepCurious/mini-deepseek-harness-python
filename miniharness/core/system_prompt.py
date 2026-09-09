@@ -33,6 +33,9 @@ from .scope import Context
 __all__ = [
     "PERSONA_ORDER",
     "PERSONA_SECTION",
+    "PERSONA_PREFIX_SECTION",
+    "PERSONA_SUFFIX_SECTION",
+    "PERSONA_SUFFIX_ORDER",
     "SYSTEM_PROMPT_SERVICE",
     "TOOL_ORDER_REST",
     "SystemPromptService",
@@ -46,9 +49,16 @@ __all__ = [
 
 SYSTEM_PROMPT_SERVICE = "systemPrompt"
 
-# 部署人设节的保留名与 order（上游 index.ts：同名覆盖即替换生效）
-PERSONA_SECTION = "deployment:persona"
+# 部署人设节的保留名与 order（上游 index.ts：同名覆盖即替换生效）。
+# V3（上游 dsh-v0.1.5-alpha.1）：persona 单节拆双节——`deployment:persona` →
+# `deployment:persona-prefix`（order 0）+ 新 `deployment:persona-suffix`
+# （order 10200）；complete 语义改为只压制 suffix。
+PERSONA_PREFIX_SECTION = "deployment:persona-prefix"
+PERSONA_SUFFIX_SECTION = "deployment:persona-suffix"
 PERSONA_ORDER = 0
+PERSONA_SUFFIX_ORDER = 10200
+# 旧常量名保留为前缀别名（alpha.1 前的调用点兼容；值已随 V3 改名）
+PERSONA_SECTION = PERSONA_PREFIX_SECTION
 
 # toolOrder 的未列出工具插入位（上游 index.ts TOOL_ORDER_REST）
 TOOL_ORDER_REST = "<unlisted-tools>"

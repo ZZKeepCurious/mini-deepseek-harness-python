@@ -31,6 +31,7 @@ from ..seq_ranges import decode_seq_ranges
 __all__ = [
     "RELEASED_V0_CODEC",
     "RELEASED_V1_CODEC",
+    "RELEASED_V2_CODEC",
     "PackedRowError",
     "create_released_codec",
     "decode_released_header",
@@ -230,6 +231,74 @@ def _scan_rows(rows: list[Any], version: int, recoverable: bool) -> list[dict]:
     return events
 
 
+def _decode_physical_header_v2(value: Any, version: int) -> dict:
+    """v2+ 物理 header（`isSeeded` 必填 boolean，键闭集同现行 schema；上游
+    v1-to-v2 codec encodeHeader 的读向）。cut 不随行携带——由继承 marker
+    派生（seeded 无 marker / unseeded 有 marker 双向拒，交给
+    `inherited_cut`）。"""
+    label = f"released v{version} physical Session header"
+    exact_keys(value, ("type", "version", "id", "createdAt", "isSeeded", "delegationDepth"),
+               ("cwd", "parentSession", "origin", "agentPreset"), label)
+    if value.get("type") != "session":
+        raise fail(f"expected released v{version} physical Session header")
+    if value.get("version") != version or isinstance(value.get("version"), bool):
+        raise fail(f"expected released v{version} physical Session header")
+    if not isinstance(value.get("id"), str):
+        raise fail(f"{label} id must be a string")
+    count(value.get("createdAt"), f"{label} createdAt")
+    count(value.get("delegationDepth"), f"{label} delegationDepth")
+    if not isinstance(value.get("isSeeded"), bool):
+        raise fail(f"{label} isSeeded must be boolean")
+    logical: dict[str, Any] = {
+        "version": version,
+        "id": value["id"],
+        "createdAt": value["createdAt"],
+        "isSeeded": value["isSeeded"],
+        "delegationDepth": value["delegationDepth"],
+    }
+    for key in ("cwd", "parentSession", "origin", "agentPreset"):
+        if key in value:
+            logical[key] = value[key]
+    for key in ("cwd", "parentSession", "agentPreset"):
+        if key in logical and not isinstance(logical[key], str):
+            raise fail(f"{label} {key} must be a string")
+    if "origin" in logical and logical["origin"] != "subagent":
+        raise fail(f'{label} origin must be "subagent"')
+    assert_released_session_format_header(logical, version)
+    return {"header": logical, "inherited_event_count": None}
+
+
+def create_released_v2_codec() -> dict:
+    """v2 released codec：物理 header（isSeeded）+ 一行一事件（V2 起 chunk
+    打包行废止）；cut 由继承 marker 派生（persistence.inherited_cut 同语义）。"""
+
+    def decode(header_value: Any, row_values: list[Any], recoverable: bool) -> dict:
+        physical = _decode_physical_header_v2(header_value, 2)
+        events = _scan_rows(row_values, 2, recoverable=recoverable)
+        # cut 派生复用现行读路径单一实现（延迟导入避免 persistence↔released
+        # 模块载入环；调用期无环）。
+        from ..persistence import inherited_cut  # noqa: PLC0415
+        cut = inherited_cut(physical["header"], events)
+        artifact = {"header": physical["header"],
+                    "inherited_event_count": cut,
+                    "events": events}
+        assert_released_v2_physical_artifact(artifact)
+        return artifact
+
+    def decode_artifact(header_value: Any, row_values: list[Any]) -> dict:
+        return decode(header_value, row_values, recoverable=False)
+
+    def decode_recoverable_artifact(header_value: Any, row_values: list[Any]) -> dict:
+        return decode(header_value, row_values, recoverable=True)
+
+    return {
+        "version": 2,
+        "decode_header": lambda header_value: _decode_physical_header_v2(header_value, 2)["header"],
+        "decode_artifact": decode_artifact,
+        "decode_recoverable_artifact": decode_recoverable_artifact,
+    }
+
+
 def create_released_codec(version: int,
                           source_validator: Callable[[dict], None] | None = None) -> dict:
     """v0/v1 共享 codec 工厂：decode_header / decode_artifact / decode_recoverable_artifact。
@@ -272,3 +341,4 @@ def create_released_codec(version: int,
 
 RELEASED_V0_CODEC = create_released_codec(0, assert_released_v0_source_artifact)
 RELEASED_V1_CODEC = create_released_codec(1, assert_released_v1_physical_artifact)
+RELEASED_V2_CODEC = create_released_v2_codec()

@@ -12,6 +12,8 @@ __all__ = [
     "RELEASED_V0_EVENT_TYPES",
     "RELEASED_V2_EVENT_DISPOSITIONS",
     "RELEASED_V2_EVENT_TYPES",
+    "RELEASED_V3_EVENT_DISPOSITIONS",
+    "RELEASED_V3_EVENT_TYPES",
 ]
 
 
@@ -124,3 +126,32 @@ RELEASED_V2_EVENT_DISPOSITIONS: dict[str, dict] = _v2_table()
 
 #: released-v2 稳定词表。
 RELEASED_V2_EVENT_TYPES: list[str] = sorted(RELEASED_V2_EVENT_DISPOSITIONS)
+
+
+def _v3_table() -> dict[str, dict]:
+    """v3 修订表（上游 session-format-v2-to-v3 迁移后的 canonical 词表）：
+    PTC 事件改名（tool/code-dispatch{,-start} → tool/ptc-dispatch{,-start}，
+    payload 不变）+ 新增 system/message 与 feedback/message-{put,delete} +
+    request/context 增可选 systemPromptUpdate。"""
+    table = dict(RELEASED_V2_EVENT_DISPOSITIONS)
+    for name in ("tool/code-dispatch", "tool/code-dispatch-start"):
+        table.pop(name, None)
+    table["system/message"] = _disposition(["turn", "step", "message"])
+    table["feedback/message-put"] = _disposition(["sessionId", "item"])
+    table["feedback/message-delete"] = _disposition(["sessionId", "messageId"])
+    table["tool/ptc-dispatch"] = _disposition(
+        ["rootCallId", "parentCallId", "subCallId", "name", "arguments", "isError", "content"],
+        [], ["arguments"])
+    table["tool/ptc-dispatch-start"] = _disposition(
+        ["rootCallId", "parentCallId", "subCallId", "name", "arguments"],
+        [], ["arguments"])
+    table["request/context"] = _disposition(
+        ["provider", "model"], ["contextWindow", "systemPromptUpdate"])
+    return table
+
+
+#: released-v3（canonical）事件 × payload 成员闭集。
+RELEASED_V3_EVENT_DISPOSITIONS: dict[str, dict] = _v3_table()
+
+#: released-v3 稳定词表。
+RELEASED_V3_EVENT_TYPES: list[str] = sorted(RELEASED_V3_EVENT_DISPOSITIONS)

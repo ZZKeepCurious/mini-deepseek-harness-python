@@ -683,6 +683,11 @@ class WebApi:
             if part["type"] == "image" and not (isinstance(part.get("mediaType"), str)
                                                 and isinstance(part.get("data"), str)):
                 raise _Reject("gateway/bad-request", "image part must carry mediaType and data", {})
+        # 空内容门（上游 commands.ts hasPromptContent：无非空白文本且无非文本
+        # part → gateway/bad-request）
+        if not any(part["type"] != "text" or part["text"].strip() for part in content):
+            raise _Reject("gateway/bad-request",
+                          "prompt content must include non-whitespace text or an attachment", {})
 
         client_time_zone = payload.get("clientTimeZone")
         canonical_time_zone = None
@@ -770,6 +775,11 @@ class WebApi:
             if any(not (isinstance(part, dict) and part.get("type") == "text") for part in content):
                 raise _Reject("session/attachment-invalid", "queue edits accept text content only",
                               {"reason": "QUEUE_EDIT_NON_TEXT"})
+            # 空内容门（上游 commands.ts）：队列编辑无非空白文本 → bad-request
+            if not any(isinstance(part.get("text"), str) and part["text"].strip()
+                       for part in content):
+                raise _Reject("gateway/bad-request",
+                              "queue edit content must include non-whitespace text", {})
 
         agent = self._agents.get(session_id)
         if agent is None or self._subagent_owned(agent.session):

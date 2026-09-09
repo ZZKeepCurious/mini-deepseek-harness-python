@@ -19,7 +19,7 @@ from miniharness.llm.token_meter import (
     estimate_content,
     estimate_header,
     estimate_message,
-    estimate_system_tokens,
+    estimate_system_message,
     estimate_tools_tokens,
 )
 
@@ -47,22 +47,22 @@ class EstimateTest(unittest.TestCase):
         msg = _text_message("user", "hi")
         self.assertEqual(estimate_message(msg), estimate_content(msg["content"]) + ROLE_OVERHEAD)
 
-    def test_header_prices_system_and_tools(self):
-        # canonical 信封：config 不计价，system/tools 启发式定价（上游 estimate.ts）
+    def test_header_prices_tools_only_and_system_message(self):
+        # V3 canonical 信封：config 不计价；system 随 header.system 删除移出
+        # estimateHeader（只计 tools）；system 消息走 estimateSystemMessage
         self.assertEqual(estimate_header(None), 0)
         self.assertEqual(estimate_header({"config": {"provider": "p", "model": "m"}}), 0)
-        header = {"config": {"provider": "p", "model": "m"}, "system": "你好", "tools": []}
-        self.assertEqual(estimate_system_tokens(header),
-                         1 + ROLE_OVERHEAD)  # 2 字符 → ceil(2/4)=1
-        self.assertEqual(estimate_tools_tokens(header), 0)  # 空 tools 不计价
+        header = {"config": {"provider": "p", "model": "m"}, "tools": []}
+        self.assertEqual(estimate_header(header), 0)  # 空 tools 不计价
+        self.assertEqual(estimate_system_message(_text_message("system", "你好")),
+                         1 + BLOCK_OVERHEAD + ROLE_OVERHEAD)  # ceil(2/4)=1 + 块 + 角色
         tools = [{"name": "bash", "description": "d", "parameters": {"type": "object"}}]
         header["tools"] = tools
         import json
         expected_tools = len(json.dumps(tools, ensure_ascii=False,
                                         sort_keys=True)) // CHARS_PER_TOKEN + BLOCK_OVERHEAD
         self.assertEqual(estimate_tools_tokens(header), expected_tools)
-        self.assertEqual(estimate_header(header),
-                         estimate_system_tokens(header) + estimate_tools_tokens(header))
+        self.assertEqual(estimate_header(header), expected_tools)
 
 
 def _append_text(session: Session, text: str, role: str = "user") -> dict:
@@ -111,7 +111,7 @@ class TokenMeterFoldTest(unittest.TestCase):
         old_surface = self.meter.measure(self.session)["surfaceTokens"]
         summary = _text_message("user", "压缩后的摘要。")
         self.session.append("user/message", summary, surfaceOp={
-            "op": "replace", "start": first["seq"], "end": second["seq"],
+            "op": "replace", "startSeq": first["seq"], "endSeq": second["seq"],
         }, sourceEventSeqs=[first["seq"], second["seq"]])
         m = self.meter.measure(self.session)
         expected = estimate_message(summary)

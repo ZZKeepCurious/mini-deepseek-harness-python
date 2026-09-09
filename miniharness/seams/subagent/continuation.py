@@ -59,7 +59,11 @@ from ...core.dsh_scope import scope_of, scope_target
 from ...core.scope import Context
 from ...core.session import Session, create_message, is_json_safe, text_block, thaw
 from ...core.session.persistence import SessionPersistence, inherited_cut
-from ...core.system_prompt import SYSTEM_PROMPT_SERVICE, SystemPromptService
+from ...core.system_prompt import (
+    PERSONA_PREFIX_SECTION,
+    SYSTEM_PROMPT_SERVICE,
+    SystemPromptService,
+)
 from ...core.tools import Tool, ToolExec, ToolRegistry
 from ...attachment import admit_prompt_content
 from ...llm import FakeLlmAdapter, LlmAdapter
@@ -1234,7 +1238,8 @@ class SubagentContinuationManager:
         # 全局单例非 scope-aware → 子作用域提供独立实例）
         svc = SystemPromptService(child_ctx)
         child_ctx.provide(SYSTEM_PROMPT_SERVICE, svc)
-        svc.section("persona", 0, descriptor.get("persona") or _DEFAULT_CHILD_PERSONA)
+        svc.section(PERSONA_PREFIX_SECTION, 0,
+                    descriptor.get("persona") or _DEFAULT_CHILD_PERSONA)
         svc.section("report-guidance", 117, _REPORT_GUIDANCE)
         svc.section("delegation-context", 120, lambda c: self._delegation_context(parent, child_id))
 

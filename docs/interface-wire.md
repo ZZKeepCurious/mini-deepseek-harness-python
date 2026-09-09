@@ -305,7 +305,7 @@ outcome 归一（`APPROVAL_OUTCOMES = {allowed-once, rejected, cancelled, unavai
 - query：`sessionId`（必须）、`includeDescendants`（`true`/`false`/缺省，其余 400）。
 - 状态码链：200 / 400 / 404（缺根）/ 501（后端不支持）/ 500；响应头
   `Content-Disposition: attachment; filename="dsh-session-<safe>.zip"`。
-- zip 条目序：根制品以**逐字原始文件名**入档（`session.v2.jsonl[.zstd]`，generation 版本化
+- zip 条目序：根制品以**逐字原始文件名**入档（`session.v3.jsonl[.zstd]`，generation 版本化
   文件名，压缩 0/none 时为 `session.jsonl`）→ 后代 `subagents/<safe-id>/<同名制品>`
   （parentSession BFS + seen-set 去重）→ 媒体 `media/<attachmentId>.<ext>`；压缩等级 0-9。
 - 错误正文统一私有外壳（`session log export failed to prepare the stored artifact`），不泄路径细节。

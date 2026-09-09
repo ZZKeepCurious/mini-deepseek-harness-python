@@ -11,7 +11,13 @@ from typing import Any, Callable
 
 from .invariant import validate_event
 from .json import deep_freeze, is_json_safe, now_ms, thaw
-from .surface import _surface_nodes, assert_provenance, assert_tool_result_rewrite
+from .surface import (
+    _surface_nodes,
+    assert_provenance,
+    assert_system_head_rewrite,
+    assert_tool_result_rewrite,
+    validate_session_event_data,
+)
 from .types import KNOWN_TYPES, SURFACE_TYPES
 
 __all__ = ["Session"]
@@ -203,24 +209,36 @@ class Session:
         """源头校验 + 冻结：坏事件永远进不了日志。
 
         与上游 append(type, data, surfaceOp) 签名一致；surface 事件必须带
-        surfaceOp（'append' 或 {op:'replace', start, end}），非 surface 事件
-        禁止携带；sourceEventSeqs 仅 surface 事件可带（上游 SurfaceIntent）。
+        surfaceOp（'append' 或 {op:'replace', startSeq, endSeq}），非 surface
+        事件禁止携带；sourceEventSeqs 仅 surface 事件可带（上游 SurfaceIntent）。
 
         事件 seq 即 append 前的日志长度；replace 的 sourceEventSeqs 必须覆盖
         当前 surface 上被遮蔽的全部节点（上游 surface.ts assertProvenance +
-        assertToolResultRewrite，fail-closed——不满足即拒绝 append）。
+        assertToolResultRewrite + assertSystemHeadRewrite，fail-closed——不满足
+        即拒绝 append）；canonical 载荷规则经 validate_session_event_data
+        （request/header 禁 header.system / 空可选省略；tool/result
+        error↔isError 一致性）。
         """
         payload = validate_event(type_, data, surfaceOp, sourceEventSeqs)
+        validate_session_event_data(type_, data if data is not None else {})
         if surfaceOp is not None and surfaceOp != "append":
-            # replace 必须命中当前 surface 上已存在的 start/end 区间
-            start, end = surfaceOp["start"], surfaceOp["end"]
+            # replace 端点必须引用更早事件（上游 validateSurfaceMetadata）；
+            # 必须命中当前 surface 上已存在的 startSeq/endSeq 区间
+            start, end = surfaceOp["startSeq"], surfaceOp["endSeq"]
+            if start >= self.seq or end >= self.seq:
+                raise ValueError(
+                    f"surface replace at seq {self.seq}: startSeq and endSeq "
+                    "must reference earlier events")
             surface = _surface_nodes(self._events)
             shadowed = [node["seq"] for node in surface if start <= node["seq"] <= end]
             if surfaceOp["op"] == "replace" and not shadowed:
                 raise ValueError(f"surface replace: seqs {start}-{end} not found in surface")
+            start_idx = next((i for i, node in enumerate(surface)
+                              if node["seq"] == start), None)
             assert_provenance(type_, sourceEventSeqs, self.seq, shadowed)
             event_probe = {"type": type_, "data": data or {}}
             assert_tool_result_rewrite(event_probe, shadowed, list(self._events))
+            assert_system_head_rewrite(type_, start_idx, shadowed, surface)
         else:
             # append 事件同样校验血统：sourceEventSeqs 必须早于当前 seq
             assert_provenance(type_, sourceEventSeqs, self.seq, [])
@@ -261,6 +279,7 @@ class Session:
             data = ev.get("data", {})
             surface_op = ev.get("surfaceOp")
             source_seqs = ev.get("sourceEventSeqs")
+            validate_session_event_data(etype, data)
             if etype in SURFACE_TYPES:
                 if surface_op not in ("append",) and not (
                     isinstance(surface_op, (dict, MappingProxyType))
@@ -269,13 +288,20 @@ class Session:
                     raise ValueError(f"surface 事件 {etype} 必须带合法 surfaceOp")
                 if surface_op != "append":
                     self._replace_count += 1
-                    start, end = surface_op["start"], surface_op["end"]
+                    start, end = surface_op["startSeq"], surface_op["endSeq"]
+                    if start >= i or end >= i:
+                        raise ValueError(
+                            f"surface replace at seq {i}: startSeq and endSeq "
+                            "must reference earlier events")
                     surface = _surface_nodes(list(self._events))
                     shadowed = [node["seq"] for node in surface if start <= node["seq"] <= end]
                     if not shadowed:
                         raise ValueError(f"surface replace: seqs {start}-{end} not found in surface")
+                    start_idx = next((idx for idx, node in enumerate(surface)
+                                      if node["seq"] == start), None)
                     assert_provenance(etype, source_seqs, i, shadowed)
                     assert_tool_result_rewrite(dict(ev), shadowed, list(self._events))
+                    assert_system_head_rewrite(etype, start_idx, shadowed, surface)
                 else:
                     assert_provenance(etype, source_seqs, i, [])
             else:

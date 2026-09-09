@@ -73,7 +73,7 @@ class TestFollow(GatewayStreamsTest):
             self.assertEqual(snap["type"], "snapshot")
             # snapshot.header = 平铺 SessionWireHeader（上游 history.ts wireHeader）
             self.assertEqual(snap["header"]["id"], sid)
-            self.assertEqual(snap["header"]["version"], 2)
+            self.assertEqual(snap["header"]["version"], 3)
             self.assertIs(snap["header"]["isSeeded"], False)
             self.assertIn("createdAt", snap["header"])
             self.assertIn("cursor", snap)

@@ -181,10 +181,15 @@ class PresetRoot:
 class PersonaConfig:
     """persona 块（上游 agent.cordis.yml 的 persona 行）。
     complete=True 表示系统提示即全部上下文（不注入运行时快照）；
-    include_runtime_context=False 关闭运行时上下文注入。"""
+    include_runtime_context=False 关闭运行时上下文注入。
+    V3（上游 persona 插件配置 `text`→`prefix`+`suffix` 拆分）：prefix 为
+    前缀节（deployment:persona-prefix）、suffix 为尾节
+    （deployment:persona-suffix，缺省空）；complete 语义改为只压制 suffix。
+    旧 `text` 键作为 prefix 的 legacy 别名读取（mini 用户根兼容）。"""
     complete: bool = False
     include_runtime_context: bool = True
     system_prompt: str | None = None
+    suffix: str | None = None
 
 
 @dataclass(frozen=True)
@@ -269,6 +274,7 @@ def load_preset(directory: Path, trust: PresetTrust = "user") -> Preset:
                 complete=persona_raw.get("complete", False),
                 include_runtime_context=persona_raw.get("include_runtime_context", True),
                 system_prompt=persona_raw.get("system_prompt"),
+                suffix=persona_raw.get("suffix"),
             ),
             provides=list(raw.get("provides", [])),
             trust=trust,
@@ -743,7 +749,8 @@ def translate_cordis_composition(directory: Path, trust: PresetTrust = "user") -
         persona = PersonaConfig(
             complete=bool(pc.get("complete")),
             include_runtime_context=bool(pc.get("includeRuntimeContext", True)),
-            system_prompt=pc.get("text"),
+            system_prompt=pc.get("prefix", pc.get("text")),
+            suffix=pc.get("suffix"),
         )
 
     return Preset(
