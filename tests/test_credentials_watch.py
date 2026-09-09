@@ -55,7 +55,12 @@ class TestCredentialsWatchProvider(unittest.TestCase):
 
     def _write_external(self, text):
         os.makedirs(self._dsh_home, exist_ok=True)
-        with open(self._filename, "w", encoding="utf-8") as handle:
+        # 凭据文档必须按 owner-only 落盘（provider 的 assertOwnerOnly 对齐上游
+        # fail-loud）：os.open 创建即 0600，避免 write 与 chmod 之间的瞬时
+        # owner-violating 窗口触发 watch 告警；模拟的外部编辑器默认 umask 022
+        # 会产出 0o644 → 触发拒绝
+        fd = os.open(self._filename, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
 
     # ---- 缺省关闭 ----
@@ -184,7 +189,12 @@ class TestCredentialsWatchService(unittest.TestCase):
 
     def _write_external(self, text):
         os.makedirs(self._dsh_home, exist_ok=True)
-        with open(self._filename, "w", encoding="utf-8") as handle:
+        # 凭据文档必须按 owner-only 落盘（provider 的 assertOwnerOnly 对齐上游
+        # fail-loud）：os.open 创建即 0600，避免 write 与 chmod 之间的瞬时
+        # owner-violating 窗口触发 watch 告警；模拟的外部编辑器默认 umask 022
+        # 会产出 0o644 → 触发拒绝
+        fd = os.open(self._filename, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
 
     def test_reference_edit_emits_ctx_event(self):

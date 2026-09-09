@@ -633,12 +633,17 @@ class TestPublishIntegrityAndSeams(unittest.TestCase):
     def _object_path(self, sha_hex):
         return os.path.join(self._tmp, "objects", sha_hex[:2], sha_hex)
 
+    def _file_object_path(self, sha_hex):
+        # verbatim 文件的规范对象在 file-objects/（file_store.storedFileObjectPath），
+        # 与图片存储的 objects/ 布局（store.normalizedImagePath）不同
+        return os.path.join(self._tmp, "file-objects", sha_hex[:2], sha_hex)
+
     def test_save_file_publishes_readonly_and_dedup_reverifies(self):
         ref = self.store.save_file(SaveFileAttachment(data=b"bytes", name="a.txt"))
         path = self.store.file_host_path(ref)
         sha = ref.attachmentId.value[7:]
         if os.name == "posix":
-            mode = os.stat(self._object_path(sha)).st_mode & 0o777
+            mode = os.stat(self._file_object_path(sha)).st_mode & 0o777
             self.assertEqual(mode, 0o400)
         # 同名重存命中别名 EEXIST：摘要一致 → 幂等成功
         again = self.store.save_file(SaveFileAttachment(data=b"bytes", name="a.txt"))
