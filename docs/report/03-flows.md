@@ -129,7 +129,7 @@ flowchart TD
 2. **PRE `pre-execute` waterfall**（hooks / 权限 / 沙箱）：`allow` → 前进；`deny` → 直接 **DEN**；`ask` → **ASK**（`ctx.approval` 一次性询问；absent / unanswerable → 当 deny）。
 3. **ASK** 结果：`allowed-once` → 前进；拒绝 / 取消 → **DEN**（工具体被跳过，回合不中断）。
 4. **G 注册的单调守卫**：只能减权、乱序无法撤销；`allow` → 前进，`deny` → **DEN**。
-5. **EX `execute` waterfall**（超时 / 重试 / 度量，around-dispatch）→ **BODY 工具本体**（自有事件：todo/write、tool/code-dispatch——PTC dispatch 的 durable 事件；`tools/ptc-dispatch-log` 是 waterfall 钩子名而非会话事件）。
+5. **EX `execute` waterfall**（超时 / 重试 / 度量，around-dispatch）→ **BODY 工具本体**（自有事件：todo/write、tool/ptc-dispatch——PTC dispatch 的 durable 事件；`tools/ptc-dispatch-log` 是 waterfall 钩子名而非会话事件）。
 6. **POST `post-execute` waterfall**：`accept` / `replace` / `block(+feedback)`。
 7. **NORM 注册表外层规范化**：任何 snapshot 阶段异常统一转 `isError`。
 8. **FIN `finalizeContent`**：最后一个内容只读（硬性规定），不可再被后置编辑。
