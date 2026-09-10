@@ -11,7 +11,7 @@
     - **`repair_and_replay`**：本章为逐条 `append` 重放；实现为 seed 回放——从 `session/end-seed` 标记重放，且修复合成的 closers 经 `commit_repair` 持久化落盘（`core/session/persistence.py`，基类接口 + JSONL 后端实现）。
     - **`turn/end` reason**：本章差异表写 `reason = "interrupted"` 字符串；实现为对象 `{kind:'interrupted'}`（配合 `repair_interrupted_turn` 合成 closers，见第 1 章横幅）。
     - **崩溃演示**：本章 §5.2"kill 进程"实为手动构造未闭合回合来模拟崩溃尾部，非真实 kill（`tests/test_persistence_boot.py` 可复核）。
-    - **简化载体**：配置为 YAML（pyyaml 硬依赖承载）+ `!!js` 仅 `process.env.<NAME>` 子集。JSONL 载体**已对齐上游默认形态**：zstd 拼接帧容器 + 一行一事件（V2，模型流内嵌 `assistant/message`）+ format.ts 目录布局（`root/--<projectKey(cwd)>--/<encodeSegment(id)>/session.v3.jsonl[.zstd]`——generation 版本化文件名，v0 旧名 `session.jsonl` 保留拒读；编码互斥/遗留布局响亮拒绝），见 `zstd_frames.py` 与 `tests/test_persistence_zstd.py`。
+    - **简化载体**：配置为 YAML（pyyaml 硬依赖承载）+ `!!js` 仅 `process.env.<NAME>` 子集。JSONL 载体**已对齐上游默认形态**：zstd 拼接帧容器 + 一行一事件（V3 事件格式——模型流内嵌 `assistant/message`，源自 V2 的设计沿袭）+ format.ts 目录布局（`root/--<projectKey(cwd)>--/<encodeSegment(id)>/session.v3.jsonl[.zstd]`——generation 版本化文件名，v0 旧名 `session.jsonl` 保留拒读；编码互斥/遗留布局响亮拒绝），见 `zstd_frames.py` 与 `tests/test_persistence_zstd.py`。
 
 ## 5.1 这一章要做什么
 
@@ -135,7 +135,7 @@ class JsonlPersistence(SessionPersistence):
 - **v0→v1（legacy 归一化）**：flat 消息包装（`legacy-message:<sid>:<seq>` 合成 id）、`steering/message` 并入 `user/message`、`turn/end` reason 转换表（aborted 补 `reason:{kind:'legacy'}`、disposed→aborted、error.failure→error 记录）、`turn/start.trigger` 与 `request/header.messagePrefix` 丢弃、retired 类型（`request/header-delta`/`mode/set`/`reason:"fallback"`）拒迁。
 - **v1→v2（chunk 流内嵌）**：`assistant/chunk` 事件流按 `turn:step` 切成一次次 attempt（六种封口边界：finish 自封 / message 认领 / step-end / llm-retry / llm-retry-started / turn-end）——被 message 认领的流压成内嵌 `stream` 记录、未认领的以最后一条 chunk 的 seq/time 落成 `assistant/attempt`；fork 切点从 header 数值（`seedLength`）重导出为 end-seed marker（`{inherited:true}`，需要时合成），切进一个 attempt 中间直接拒绝；密集重映射只改声明字段，指向已消费 chunk 的引用拒绝且**绝不重定向**。
 
-与上游的载体差异（教学可读性优先，均登记）：压缩后缀 `.zstd`（上游 `.zst`）；发布用临时文件 + `os.replace`（单进程写手，上游为 link 独占 + win32 原生助手）。**深度校验层已按上游整件移植（F1 Phase B）**：`payload_validation.py` 做 51 类型逐字段 payload 语义，`relationships.py` 做跨事件关系状态机（含 v2 `assistant/attempt` step 门），`validate.py`/`validate_v2.py` 做 artifact 编排——迁移链切换成真实校验器：v0→v1 先逐事件过词表/disposition 门、落底再过终态 artifact 双重门，v1→v2 出参直接走 v2 目标校验（内嵌流三事实 cross-check——content/usage/replayState 与发出的 blocks 逐一对照、marker/cut 双向核对、restore＝信封级装载）。
+与上游的载体差异（教学可读性优先，均登记）：压缩后缀 `.zstd`（上游 `.zst`）；发布用临时文件 + `os.replace`（单进程写手，上游为 link 独占 + win32 原生助手）。**深度校验层已按上游整件移植（F1 Phase B）**：`payload_validation.py` 做 54 类型逐字段 payload 语义，`relationships.py` 做跨事件关系状态机（含 v2 `assistant/attempt` step 门），`validate.py`/`validate_v2.py`/`validate_v3.py` 做 artifact 编排——迁移链切换成真实校验器：v0→v1 先逐事件过词表/disposition 门、落底再过终态 artifact 双重门，v1→v2 出参直接走 v2 目标校验（内嵌流三事实 cross-check——content/usage/replayState 与发出的 blocks 逐一对照、marker/cut 双向核对、restore＝信封级装载），v2→v3 出参走 v3 全量校验（system head 三保护 + canonical envelope + 投影关系）。
 
 ### 步骤 3：SQLite 后端（单调 SCHEMA_VERSION）
 

@@ -178,7 +178,7 @@ Trajectory 是 **web 专属**的"Agent 的 DevTools"：一个按 turn 组织的�
 
 ### 4.2 机制：Agent 接口与干预通道
 
-Agent 接口定义于 `packages/core/agent/src/runtime-types.ts:64-144`：
+Agent 接口定义于 `packages/core/agent/src/runtime-types.ts:164`：
 
 | 方法 | 语义 | 日志体现 |
 |---|---|---|

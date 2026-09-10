@@ -3,7 +3,7 @@
 > 定位：这是 `mini-deepseek-harness` 前后端的**唯一耦合面**——`miniharness/web/` 传输层对
 > 前端发布的所有接口契约（信封、帧、错误语义）。产品化前端（仓库顶层 `webui/`）与任何第三方
 > 客户端只依赖本契约，禁止 import Python 内部。正文与当前实现逐条对应；契约本质上对齐上游
-> `dsh-v0.1.3-alpha.1`（`packages/client/connection` + `packages/api/gateway` +
+> `dsh-v0.1.5-alpha.1`（`packages/client/connection` + `packages/api/gateway` +
 > `packages/api/session-controller` + `packages/api/remotes` + `host/frontend-static`），
 > mini 侧保留简化的差异项在 `status/mini-harness/verified-diffs.md` §3.4 登记。
 >

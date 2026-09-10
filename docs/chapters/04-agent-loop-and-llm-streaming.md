@@ -9,7 +9,7 @@
 
     - **`FakeLlmAdapter` finish reason**：本章为字符串（`"stop"` / `"tool-calls"`）；实现为对象 `{"kind": "stop"}` / `{"kind": "tool-calls"}`（`llm/fake.py:58,70`）。
     - **`DeepSeekAdapter` SSE**：实现要求字面 `[DONE]` 必须出现（EOF 未到 `[DONE]` 抛 `STREAM_CLOSED`）、畸形 SSE 载荷抛 `MALFORMED_RESPONSE`、HTTP 错误映射完整（401/403→AUTH、quota 措辞→QUOTA、429→RATE_LIMIT、400 上下文→CONTEXT_WINDOW_EXCEEDED 否则 INVALID_REQUEST、≥500→SERVER、其余 `HTTP_<status>`）、`usage` 归一为 `TokenUsage`（`llm/deepseek.py`，见 `llm/protocol.py` 的 `StreamChunk` 判别字段 `type`）。本章的 `AUTH_ERROR`/`REQUEST_ERROR` 二元映射已过时。
-    - **空响应**：本章 §4.4 声称"空响应未实现"与同章 §4.8/§4.9 自相矛盾——实现已产出 `EMPTY_RESPONSE` 错误且默认可重试（`llm/retry_policy.py` 白名单）。
+    - **空响应**：实现已产出 `EMPTY_RESPONSE` 错误且默认可重试（`llm/retry_policy.py` 白名单），§4.4 教学正文与 §4.8/§4.9 现已一致。
     - **loop 片段**：本章 `loop.py` 的 `_append` 方法、字符串 reason、扁平 `assistant/message` 形态均已过时；实现是 ContentBlock 消息对象 + 显式编号 + `request/header` 事件 + 模型流压缩内嵌 `assistant/message`（失败 attempt 落 `assistant/attempt`）（`core/agent_loop/agent.py`）。
     - **重试接线**：真实调用入口必须挂载 `apply_retry_planner`（`llm/retry.py:298`），否则 `agent/request-error` 瀑布不生效（本章 §4.6 真实 API 示例为教学简化、未挂载；真实装配必须先挂）。
     - **时序图**：完整时序含 `request/header` 事件与内嵌 `assistant/message` 的压缩流落盘（见 `core/agent_loop/agent.py` 的 requestHeaderLogged 语义）。
@@ -121,7 +121,7 @@ class LlmAdapter:
 
 常规做法的错误处理是"哪个 SDK 抛什么就 catch 什么"，不同厂商的报错对象还不一样。dsh 统一为 `LlmFailure(code, message)`：授权失败 `AUTH_ERROR`、网络/HTTP `REQUEST_ERROR`、上下文溢出 `CONTEXT_WINDOW_EXCEEDED`，全部一个异常类型。
 
-> 真实 dsh 还有 `EMPTY_RESPONSE` 编码（空响应 = 可重试的规范错误）。简化版只覆盖前两个：溢出以 docstring 说明，空响应未实现——见 4.8 差异表。
+> 真实 dsh 还有 `EMPTY_RESPONSE` 编码（空响应 = 可重试的规范错误）。实现也覆盖：空响应抛 `LlmFailure(EMPTY_RESPONSE)` 且默认可重试（见 4.8/4.9 差异表）。
 
 ### 步骤 3：FakeLlmAdapter —— 无 key 也能跑回合
 
