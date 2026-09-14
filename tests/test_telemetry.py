@@ -453,6 +453,34 @@ class UsageStatsServiceTest(unittest.TestCase):
         self.assertEqual(set(values), {"sessionStats", "tokenUsage"})
         self.assertEqual(values["tokenUsage"]["outputTokens"], 7)
 
+    def test_on_session_event_none_payload(self):
+        ctx, session = self._ctx_session()
+        svc = install_usage_stats(ctx)
+        svc._on_session_event({"session": None, "event": {}})
+        svc._on_session_event({"session": session, "event": None})
+        svc._on_session_event({})
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_on_session_disposed_none_session(self):
+        ctx, session = self._ctx_session()
+        svc = install_usage_stats(ctx)
+        svc._on_session_disposed({"session": None})
+        svc._on_session_disposed({})
+
+    def test_dispose_clears_states(self):
+        ctx, session = self._ctx_session()
+        svc = install_usage_stats(ctx)
+        svc.session_stats(session)
+        svc.dispose()
+        self.assertEqual(len(svc._states), 0)
+        self.assertEqual(len(svc._disposers), 0)
+
+    def test_session_stats_unknown_session(self):
+        ctx = Context(name="telemetry-test")
+        svc = install_usage_stats(ctx)
+        session = Session("unknown", meta={"cwd": "."})
+        stats = svc.session_stats(session)
+        self.assertEqual(stats["turns"], 0)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    unittest.main()  # pragma: no cover

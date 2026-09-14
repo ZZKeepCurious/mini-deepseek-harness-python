@@ -1,4 +1,4 @@
-"""保持 `python -m miniharness.cli` 可用。"""
-from .main import main
+"""保持 `python -m miniharness.cli` 可用。"""  # pragma: no cover
+from .main import main  # pragma: no cover
 
-main()
+main()  # pragma: no cover

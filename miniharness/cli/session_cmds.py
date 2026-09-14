@@ -266,5 +266,5 @@ def sessions_main(argv: list[str], adapter: LlmAdapter | None = None, root: Path
     sys.exit(1)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     sessions_main(sys.argv[1:])

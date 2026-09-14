@@ -271,5 +271,5 @@ def _web_main(host: str | None = None, port: int | None = None) -> None:
     run_web(adapter, default_tools(ctx), ctx, host=host, port=port)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()

@@ -1,0 +1,14 @@
+[run]
+omit =
+    */sandbox_windows_acl/*
+    */landlock_run.py
+
+[report]
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise NotImplementedError
+    if sys.platform
+    if not os.name
+    if platform.system
+    if __name__

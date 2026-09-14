@@ -163,7 +163,7 @@ def headless_main(task: str) -> None:
     run_headless(task, adapter=adapter, ctx=ctx, persistence=persistence, exit_fn=sys.exit)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     # 直接运行：python -m miniharness.cli.headless "task"
     task = " ".join(sys.argv[1:])
     if task.strip() == "":

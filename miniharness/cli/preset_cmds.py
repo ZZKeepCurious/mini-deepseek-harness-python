@@ -184,5 +184,5 @@ def presets_main(argv: list[str], stdout: Any | None = None, stderr: Any | None 
     sys.exit(1)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     presets_main(sys.argv[1:])

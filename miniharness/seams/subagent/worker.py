@@ -198,5 +198,5 @@ def main() -> int:
     return run_sdk_worker()
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     sys.exit(main())

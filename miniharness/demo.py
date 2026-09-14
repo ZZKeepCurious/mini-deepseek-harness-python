@@ -116,5 +116,5 @@ def main() -> None:
     print("演示完成。清理目录:", tmp)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()

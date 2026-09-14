@@ -297,5 +297,5 @@ def main(argv: list[str] | None = None) -> None:
     restrict_and_exec(ro, rw, command)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()

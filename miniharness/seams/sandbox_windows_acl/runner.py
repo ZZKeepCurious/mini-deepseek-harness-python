@@ -236,5 +236,5 @@ def cli() -> None:
     sys.exit(code)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     cli()
