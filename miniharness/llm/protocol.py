@@ -36,9 +36,12 @@ __all__ = [
     "BlockAssembler",
     "CONTEXT_WINDOW_EXCEEDED",
     "EMPTY_RESPONSE",
-    "INVALID_REQUEST",
+    "IMAGE_OFFLOAD_REQUIRED",
+    "ImageAttachmentAccess",
+    "ImageBlock",
     "LlmAdapter",
     "LlmFailure",
+    "LlmImageRequestBudget",
     "MALFORMED_RESPONSE",
     "QUOTA",
     "RATE_LIMIT",
@@ -51,6 +54,59 @@ __all__ = [
     "TIMEOUT",
     "TRANSPORT",
 ]
+
+# ---------- 类型定义 ----------
+
+def image_attachment_ref(attachment_id: str, media_type: str, bytes_val: int, width: int, height: int, name: str | None = None) -> dict:
+    """ImageAttachmentRef 作为 dict 承载（避免 attachment→llm 依赖）。"""
+    d: dict = {"attachmentId": attachment_id, "mediaType": media_type, "bytes": bytes_val, "width": width, "height": height}
+    if name is not None:
+        d["name"] = name
+    return d
+
+
+class ImageBlock:
+    """A durable raster image reference, valid in user or assistant content."""
+
+    type: str = "image"
+    attachment: dict | None = None
+    offloaded: bool = False
+
+    def __init__(self, attachment: dict | None = None, offloaded: bool = False) -> None:
+        self.type = "image"
+        self.attachment = attachment
+        self.offloaded = offloaded
+
+
+class LlmImageRequestBudget:
+    """Request-image budget one exact image-capable route enforces over the retained occurrences."""
+
+    representation: str
+    maxBytes: int | None
+    maxImages: int | None
+    byteQuantum: int | None
+    countQuantum: int | None
+
+    def __init__(self, representation: str = "raw", maxBytes: int | None = None,
+                 maxImages: int | None = None, byteQuantum: int | None = None,
+                 countQuantum: int | None = None) -> None:
+        self.representation = representation
+        self.maxBytes = maxBytes
+        self.maxImages = maxImages
+        self.byteQuantum = byteQuantum
+        self.countQuantum = countQuantum
+
+
+class ImageAttachmentAccess:
+    """Execution-world path that model tools can use to read one normalized attachment."""
+
+    readonlyPath: str
+
+    def __init__(self, readonlyPath: str) -> None:
+        self.readonlyPath = readonlyPath
+
+
+# ---------- End of type definitions ----------
 
 STREAM_CHUNK_KINDS = frozenset({
     "block-start", "text-delta", "reasoning-delta",
@@ -70,6 +126,7 @@ STREAM_CLOSED = "STREAM_CLOSED"
 EMPTY_RESPONSE = "EMPTY_RESPONSE"
 MALFORMED_RESPONSE = "MALFORMED_RESPONSE"
 REQUEST_ERROR = "REQUEST_ERROR"   # mini 教学扩展：非 4xx/5xx 归类的兜底码（上游无此常量）
+IMAGE_OFFLOAD_REQUIRED = "IMAGE_OFFLOAD_REQUIRED"
 
 
 class StreamChunk(dict):

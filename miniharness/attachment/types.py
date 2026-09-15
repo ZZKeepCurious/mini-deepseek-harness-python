@@ -53,6 +53,7 @@ __all__ = [
     "SaveFileAttachment",
     "SaveFileStreamAttachment",
     "SaveImageAttachment",
+    "StoredImageAttachment",
 ]
 
 ImageMediaType = str
@@ -239,3 +240,6 @@ class RequestImageAttachment:
     depth: str = "uchar"
     space: str = "srgb"
     hasAlpha: bool = False
+
+
+ImageMediaType = str

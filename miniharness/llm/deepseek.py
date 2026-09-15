@@ -27,6 +27,7 @@ from .protocol import (
     AUTH,
     CONTEXT_WINDOW_EXCEEDED,
     EMPTY_RESPONSE,
+    IMAGE_OFFLOAD_REQUIRED,
     INVALID_REQUEST,
     MALFORMED_RESPONSE,
     QUOTA,
@@ -41,15 +42,32 @@ from .protocol import (
     _aiter_raced,
 )
 from .retry_policy import resolve_retry_policy
+from .content import (
+    content_has_image,
+    offloaded_image_text,
+    project_offloaded_images,
+    project_images_for_text_model,
+    required_image_offload,
+    text_only_image_text,
+    request_image_handle_text,
+)
 
 __all__ = [
     "DeepSeekAdapter",
     "UNSUPPORTED_CONTENT",
     "content_has_file",
     "content_has_image",
+    "IMAGE_OFFLOAD_REQUIRED",
     "provider_retry_after_ms",
     "request_id",
     "serialize_messages",
+    "serialize_messages_with_images",
+    "project_offloaded_images",
+    "project_images_for_text_model",
+    "required_image_offload",
+    "text_only_image_text",
+    "offloaded_image_text",
+    "request_image_handle_text",
 ]
 
 
@@ -83,10 +101,9 @@ def serialize_messages(messages: list[dict]) -> list[dict]:
     文本走 {role:'user'}，每个 tool-result 块展开为独立的
     {role:'tool', tool_call_id} 消息（空输出用 '(no output)'）。
 
-    image / file 块显式拒绝（上游 serialize.ts assertTextOnly → UNSUPPORTED_CONTENT；
-    file 块在请求组装即被 project_files_to_text 无条件投影为 handle 文本，正常
-    不会到达 serialize——此处是 last-line 防御）：此 wire 路由是纯文本，静默
-    丢弃会丢失内容。
+    image 块：offloaded=True 时投影为占位文本（projectOffloadedImages），
+    offloaded=False 时抛 UNSUPPORTED_CONTENT（text-only 路由）。
+    file 块在请求组装即被 project_files_to_text 无条件投影为 handle 文本。
     """
     wire: list[dict] = []
 
@@ -95,11 +112,17 @@ def serialize_messages(messages: list[dict]) -> list[dict]:
 
     for message in messages:
         blocks = message.get("content", [])
-        if content_has_image(blocks) or content_has_file(blocks):
+        if content_has_file(blocks):
             raise LlmFailure(
                 UNSUPPORTED_CONTENT,
-                "The DeepSeek chat-completions adapter does not support image content.",
+                "The DeepSeek chat-completions adapter does not support file content.",
             )
+        if content_has_image(blocks):
+            if any(b.get("type") == "image" and b.get("offloaded") is not True for b in blocks):
+                raise LlmFailure(
+                    UNSUPPORTED_CONTENT,
+                    "The DeepSeek chat-completions adapter does not support image content.",
+                )
         if message.get("role") == "system":
             wire.append({"role": "system", "content": flatten_text(blocks)})
             continue
@@ -131,6 +154,196 @@ def serialize_messages(messages: list[dict]) -> list[dict]:
             })
     return wire
 
+
+# ---------- 图像 offload 管线 ----------
+# 导入自 content.py：text_only_image_text, request_image_handle_text,
+# offloaded_image_text, project_offloaded_images, project_images_for_text_model,
+# required_image_offload, content_has_image, content_has_file
+
+
+def serialize_messages_with_images(
+    messages: list[dict],
+    images: dict,
+) -> list[dict]:
+    """Serialize image-capable history after resolving durable attachments.
+
+    上游 serializeMessagesWithImages（serialize.ts:278-333）。
+    Consecutive tool results keep string tool messages and share one
+    following user message containing their images.
+    @param messages - request history whose offloaded occurrences are already placeholder text.
+    @param images - ImageSerializationOptions equivalent dict.
+    @returns ordered DeepSeek wire messages.
+    """
+    assert_supported_image_roles(messages)
+    assert_retained_images_fit(messages, images)
+    request_messages = project_offloaded_images(
+        messages,
+        lambda ref: offloaded_image_text(ref),
+    )
+    return _serialize_messages_with_images_impl(request_messages, images)
+
+
+def _serialize_messages_with_images_impl(
+    messages: list[dict],
+    images: dict,
+) -> list[dict]:
+    """Internal implementation of serializeMessagesWithImages."""
+    wire: list[dict] = []
+    pending_tool_images: list[dict] = []
+
+    def flatten_text(blocks: list) -> str:
+        return "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+
+    def flush_tool_images() -> None:
+        nonlocal pending_tool_images
+        if not pending_tool_images:
+            return
+        wire.append({
+            "role": "user",
+            "content": [{"type": "text", "text": "Attached image(s) from tool result:"}] + pending_tool_images,
+        })
+        pending_tool_images = []
+
+    for message_index, message in enumerate(messages):
+        next_image = {"value": 0}
+        if message.get("role") == "system":
+            flush_tool_images()
+            wire.append({"role": "system", "content": flatten_text(message.get("content") or [])})
+            continue
+        if message.get("role") == "assistant":
+            flush_tool_images()
+            text = flatten_text(message.get("content") or [])
+            reasoning = "".join(b.get("text", "") for b in message.get("content") or [] if b.get("type") == "reasoning")
+            tool_calls = [
+                {"id": b["id"], "type": "function",
+                 "function": {"name": b["name"], "arguments": b["arguments"]}}
+                for b in message.get("content") or [] if b.get("type") == "tool-call"
+            ]
+            wire.append({
+                "role": "assistant",
+                "content": text,
+                **({"reasoning_content": reasoning} if reasoning else {}),
+                **({"tool_calls": tool_calls} if tool_calls else {}),
+            })
+            continue
+
+        regular = [b for b in message.get("content") or [] if b.get("type") != "tool-result"]
+        tool_results = [b for b in message.get("content") or [] if b.get("type") == "tool-result"]
+        content_parts = _content_parts(regular, images, message_index + 1, next_image)
+        content = user_content(content_parts)
+        if content or not tool_results:
+            flush_tool_images()
+            wire.append({"role": "user", "content": content})
+        for result in tool_results:
+            parts = _content_parts(result.get("content") or [], images, message_index + 1, next_image)
+            image_parts = [p for p in parts if p.get("type") != "text"]
+            text = "".join(p.get("text", "") for p in parts if p.get("type") == "text")
+            wire.append({
+                "role": "tool",
+                "tool_call_id": result.get("toolCallId"),
+                "content": text or "(no output)",
+            })
+            pending_tool_images.extend(image_parts)
+    flush_tool_images()
+    return wire
+
+
+def _content_parts(
+    blocks: list,
+    images: dict,
+    message_index: int,
+    next_image: dict,
+) -> list:
+    """Convert user or nested tool-result blocks into ordered wire parts."""
+    parts: list = []
+    for block in blocks or []:
+        btype = block.get("type")
+        if btype == "text":
+            if block.get("text", ""):
+                parts.append({"type": "text", "text": block["text"]})
+        elif btype == "image":
+            next_image["value"] += 1
+            parts.extend(_image_parts(block, images, {"message": message_index, "image": next_image["value"]}, len(parts) > 0))
+        elif btype == "tool-result":
+            parts.extend(_content_parts(block.get("content") or [], images, message_index, next_image))
+    return parts
+
+
+def _image_parts(
+    block: dict,
+    images: dict,
+    location: dict,
+    preceded_by_content: bool,
+) -> list:
+    """Resolve one durable image into its descriptor and transient DeepSeek image part."""
+    aid = str(block["attachment"]["attachmentId"]) if isinstance(block["attachment"]["attachmentId"], object) else str(block["attachment"]["attachmentId"])
+    version = images["requestImages"].get(aid)
+    if version is None:
+        raise LlmFailure(
+            "INVALID_REQUEST",
+            f"DeepSeek request image {aid} was not prepared.",
+        )
+    if images["representation"]["kind"] == "file":
+        file_id = images["representation"]["resolveFileId"](version, block, location)
+        image_part = {"type": "file", "file_id": file_id}
+    else:
+        import base64
+        image_part = {
+            "type": "image_url",
+            "image_url": {"url": f"data:{version['mediaType']};base64,{base64.b64encode(version['data']).decode('ascii')}"},
+        }
+    text_part = {
+        "type": "text",
+        "text": (f"\n" if preceded_by_content else "") + request_image_handle_text(
+            block["attachment"], version,
+        ),
+    }
+    return [text_part, image_part]
+
+
+def user_content(parts: list) -> str | list:
+    """Keep text-only user messages on the compact string wire form."""
+    text: list[str] = []
+    for part in parts:
+        if part.get("type") != "text":
+            return parts
+        text.append(part.get("text", ""))
+    return "".join(text)
+
+
+def assert_supported_image_roles(messages: list[dict]) -> None:
+    """Reject roles whose DeepSeek history format cannot carry image input."""
+    for message in messages:
+        if message.get("role") != "user" and content_has_image(message.get("content") or []):
+            raise LlmFailure(
+                UNSUPPORTED_CONTENT,
+                f"The DeepSeek chat-completions adapter cannot represent image content in a {message['role']} message.",
+            )
+
+
+def assert_retained_images_fit(messages: list[dict], images: dict) -> None:
+    """Reject a request whose retained occurrences exceed the route budget."""
+    representation = images["representation"]["kind"]
+    from .protocol import LlmImageRequestBudget
+    offload_images = required_image_offload(
+        messages,
+        LlmImageRequestBudget(
+            representation=representation,
+            maxBytes=images.get("maxRequestImageBytes"),
+            maxImages=images.get("maxImagesPerRequest"),
+            byteQuantum=images.get("byteQuantum"),
+            countQuantum=images.get("countQuantum"),
+        ),
+        lambda block: images["requestImages"].get(str(block["attachment"]["attachmentId"]))["bytes"] if images["requestImages"].get(str(block["attachment"]["attachmentId"])) else 0,
+    )
+    if offload_images > 0:
+        raise LlmFailure(
+            IMAGE_OFFLOAD_REQUIRED,
+            f"DeepSeek {representation} request images exceed the route budget; {offload_images} more oldest occurrence(s) must be offloaded.",
+        )
+
+
+# ---------- End of image offload pipeline ----------
 
 # 上游 error.ts 的正则集合（isContextWindowExceededError / isQuotaExceededError）
 # 匹配 error.code+type+message 拼接串；mini 以 body 为待测串（stdlib 载体简化）。
