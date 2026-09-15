@@ -24,7 +24,7 @@ from PIL import Image, ImageOps
 from .encoding import EncodedImage, encode_first_within_limit, encoding_ladder, is_exhausted_encoding
 from .error import ATTACHMENT_WRITE_FAILED, AttachmentError
 from .image import DetectedImage, detect_image, encoded_alpha_is_compatible
-from .projection import request_image_dimensions
+from .projection import long_edge_dimensions, request_image_dimensions
 
 __all__ = [
     "NormalizedImage",
@@ -128,11 +128,7 @@ def _initial_dimensions(detected: DetectedImage, policy: NormalizationPolicy) ->
     long_edge = max(budgeted_width, budgeted_height)
     if long_edge <= policy.maxDimension:
         return budgeted_width, budgeted_height
-    scale = policy.maxDimension / long_edge
-    return (
-        max(1, int(budgeted_width * scale)),
-        max(1, int(budgeted_height * scale)),
-    )
+    return long_edge_dimensions(budgeted_width, budgeted_height, policy.maxDimension)
 
 
 def normalize_image(
