@@ -14,10 +14,13 @@ from __future__ import annotations
 
 import json
 
-from .protocol import IMAGE_OFFLOAD_REQUIRED
+from .protocol import IMAGE_OFFLOAD_REQUIRED, LlmImageRequestBudget, ImageAttachmentAccess, ImageBlock
 
 __all__ = [
     "IMAGE_OFFLOAD_REQUIRED",
+    "ImageAttachmentAccess",
+    "ImageBlock",
+    "LlmImageRequestBudget",
     "base64_length",
     "content_has_image",
     "content_has_file",

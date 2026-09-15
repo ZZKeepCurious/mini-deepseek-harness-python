@@ -39,6 +39,7 @@ from .protocol import (
     LlmAdapter,
     LlmFailure,
     StreamChunk,
+    StreamAborted,
     _aiter_raced,
 )
 from .retry_policy import resolve_retry_policy
