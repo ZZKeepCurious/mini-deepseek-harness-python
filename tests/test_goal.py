@@ -25,6 +25,15 @@ from miniharness.goal import (
     install_goals,
     register_goal_tools,
 )
+from miniharness.goal.commands import (
+    GOAL_USAGE,
+    _command_hint,
+    _execute_goal_command,
+    _missing_goal,
+    _phase_label,
+    _render_goal,
+    parse_goal_command,
+)
 from miniharness.llm import FakeLlmAdapter
 
 
@@ -626,6 +635,154 @@ class GoalToolsTest(unittest.TestCase):
         created = self._call(reg, "create_goal", {"objective": "a"}, ToolExec(agent=loop))
         rendered = create.render(created)
         self.assertEqual(json.loads(rendered[0]["text"])["goal"]["phase"], "active")
+
+
+class TestGoalCommands(unittest.TestCase):
+    def test_parse_show(self):
+        self.assertEqual(parse_goal_command(""), {"kind": "show"})
+        self.assertEqual(parse_goal_command("  "), {"kind": "show"})
+        self.assertEqual(parse_goal_command("some objective"), {"kind": "create", "objective": "some objective"})
+
+    def test_parse_controls(self):
+        self.assertEqual(parse_goal_command("clear"), {"kind": "clear"})
+        self.assertEqual(parse_goal_command("pause"), {"kind": "pause"})
+        self.assertEqual(parse_goal_command("resume"), {"kind": "resume"})
+        self.assertEqual(parse_goal_command("edit"), {"kind": "invalid-edit"})
+
+    def test_parse_edit(self):
+        self.assertEqual(parse_goal_command("edit new objective"), {"kind": "edit", "objective": "new objective"})
+
+    def test_phase_label(self):
+        for phase in ("active", "paused", "blocked", "complete"):
+            self.assertEqual(_phase_label(phase), phase)
+        with self.assertRaises(KeyError):
+            _phase_label("unknown")
+
+    def test_command_hint_active_armed(self):
+        self.assertIn("edit", _command_hint({"phase": "active", "activation": "armed"}))
+        self.assertIn("pause", _command_hint({"phase": "active", "activation": "armed"}))
+
+    def test_command_hint_active_not_armed(self):
+        self.assertIn("resume", _command_hint({"phase": "active", "activation": "disarmed"}))
+
+    def test_command_hint_paused(self):
+        out = _command_hint({"phase": "paused"})
+        self.assertIn("edit", out)
+        self.assertIn("resume", out)
+
+    def test_command_hint_complete(self):
+        out = _command_hint({"phase": "complete"})
+        self.assertIn("clear", out)
+
+    def test_render_goal(self):
+        goal = {"phase": "active", "objective": "test goal", "roundsStarted": 1, "maxGoalRounds": 5,
+                 "activation": "armed", "blockedReason": None}
+        out = _render_goal("My Goal", goal)
+        self.assertEqual(out["kind"], "success")
+        self.assertIn("Status: active", out["text"])
+        self.assertIn("Objective: test goal", out["text"])
+
+    def test_render_goal_blocked(self):
+        goal = {"phase": "blocked", "objective": "test", "roundsStarted": 0, "maxGoalRounds": 5,
+                 "activation": "armed", "blockedReason": {"code": "CONFLICT", "message": "busy"}}
+        out = _render_goal("My Goal", goal)
+        self.assertIn("Blocker: CONFLICT: busy", out["text"])
+
+    def test_missing_goal(self):
+        out = _missing_goal("edit")
+        self.assertEqual(out["kind"], "error")
+        self.assertIn("No goal", out["text"])
+        self.assertIn(GOAL_USAGE, out["text"])
+
+    def test_execute_show_no_goal(self):
+        goals = SimpleNamespace(get=lambda agent: None)
+        out = _execute_goal_command(goals, SimpleNamespace(agent="a"), "")
+        self.assertEqual(out["kind"], "success")
+        self.assertIn("No goal", out["text"])
+
+    def test_execute_create(self):
+        created = {"id": "g1", "revision": 1, "phase": "active", "objective": "test",
+                    "roundsStarted": 0, "maxGoalRounds": 5, "activation": "armed"}
+        goals = SimpleNamespace(
+            get=lambda agent: None,
+            create=lambda agent, spec: created,
+        )
+        out = _execute_goal_command(goals, SimpleNamespace(agent="a"), "new goal")
+        self.assertEqual(out["kind"], "success")
+        self.assertIn("created", out["text"].lower())
+
+    def test_execute_create_already_active(self):
+        current = {"id": "g1", "revision": 1, "phase": "active", "objective": "old",
+                    "roundsStarted": 0, "maxGoalRounds": 5, "activation": "armed"}
+        created = {"id": "g2", "revision": 1, "phase": "active", "objective": "new",
+                    "roundsStarted": 0, "maxGoalRounds": 5, "activation": "armed"}
+        goals = SimpleNamespace(
+            get=lambda agent: current,
+            create=lambda agent, spec: created,
+        )
+        out = _execute_goal_command(goals, SimpleNamespace(agent="a"), "new goal")
+        self.assertEqual(out["kind"], "error")
+        self.assertIn("already", out["text"])
+
+    def test_execute_pause(self):
+        paused = {"id": "g1", "revision": 1, "phase": "paused", "objective": "test",
+                   "roundsStarted": 1, "maxGoalRounds": 5, "activation": "armed"}
+        goals = SimpleNamespace(
+            get=lambda agent: paused,
+            pause=lambda agent, spec: paused,
+        )
+        out = _execute_goal_command(goals, SimpleNamespace(agent="a"), "pause")
+        self.assertEqual(out["kind"], "success")
+        self.assertIn("paused", out["text"].lower())
+
+    def test_execute_resume(self):
+        resumed = {"id": "g1", "revision": 1, "phase": "active", "objective": "test",
+                    "roundsStarted": 1, "maxGoalRounds": 5, "activation": "armed"}
+        goals = SimpleNamespace(
+            get=lambda agent: resumed,
+            resume=lambda agent, spec: resumed,
+        )
+        out = _execute_goal_command(goals, SimpleNamespace(agent="a"), "resume")
+        self.assertEqual(out["kind"], "success")
+        self.assertIn("resumed", out["text"].lower())
+
+    def test_execute_clear(self):
+        current = {"id": "g1", "revision": 1, "phase": "active", "objective": "test",
+                    "roundsStarted": 0, "maxGoalRounds": 5, "activation": "armed"}
+        goals = SimpleNamespace(
+            get=lambda agent: current,
+            clear=lambda agent, spec: None,
+        )
+        out = _execute_goal_command(goals, SimpleNamespace(agent="a"), "clear")
+        self.assertEqual(out["kind"], "success")
+        self.assertIn("cleared", out["text"])
+
+    def test_execute_goal_error(self):
+        from miniharness.goal import GoalError
+        def bad_create(*args, **kwargs):
+            raise GoalError("test", "test error")
+        goals = SimpleNamespace(
+            get=lambda agent: None,
+            create=bad_create,
+        )
+        out = _execute_goal_command(goals, SimpleNamespace(agent="a"), "new goal")
+        self.assertEqual(out["kind"], "error")
+        self.assertIn("not valid", out["text"])
+
+    def test_execute_unknown_kind(self):
+        goals = SimpleNamespace(
+            get=lambda agent: None,
+            create=lambda a, s: {"id": "x", "revision": 1, "phase": "active", "objective": "x",
+                                  "roundsStarted": 0, "maxGoalRounds": 5, "activation": "armed"},
+        )
+        import miniharness.goal.commands as cmd_mod
+        orig_parse = cmd_mod.parse_goal_command
+        try:
+            cmd_mod.parse_goal_command = lambda raw: {"kind": "bogus"}
+            with self.assertRaises(ValueError):
+                _execute_goal_command(goals, SimpleNamespace(agent="a"), "bogus")
+        finally:
+            cmd_mod.parse_goal_command = orig_parse
 
 
 if __name__ == "__main__":
