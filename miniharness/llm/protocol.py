@@ -32,6 +32,8 @@ from typing import Any, AsyncIterator
 from ..core.session import create_message, reasoning_block
 
 __all__ = [
+    "AppIdentity",
+    "APP_IDENTITY",
     "AUTH",
     "BlockAssembler",
     "CONTEXT_WINDOW_EXCEEDED",
@@ -40,12 +42,17 @@ __all__ = [
     "ImageAttachmentAccess",
     "ImageBlock",
     "LlmAdapter",
+    "LlmAttemptId",
+    "LlmCallConfig",
+    "LlmCallConfigAdapterDefaults",
     "LlmFailure",
     "LlmImageRequestBudget",
+    "MessageId",
     "MALFORMED_RESPONSE",
     "QUOTA",
     "RATE_LIMIT",
     "REQUEST_ERROR",
+    "ReasoningEffortId",
     "SERVER",
     "STREAM_CHUNK_KINDS",
     "STREAM_CLOSED",
@@ -53,6 +60,9 @@ __all__ = [
     "StreamChunk",
     "TIMEOUT",
     "TRANSPORT",
+    "ToolCallId",
+    "ProviderRequestId",
+    "callConfigEquals",
 ]
 
 # ---------- 类型定义 ----------
@@ -105,6 +115,123 @@ class ImageAttachmentAccess:
     def __init__(self, readonlyPath: str) -> None:
         self.readonlyPath = readonlyPath
 
+
+# ---------- 品牌化 id ----------
+
+class MessageId(str):
+    """Stable identity carried by one message across inbox, log, and model-request boundaries."""
+
+    def __new__(cls, id: str) -> MessageId:
+        return super().__new__(cls, id)
+
+
+class ToolCallId(str):
+    """Correlates a model-issued tool call with its result."""
+
+    def __new__(cls, id: str) -> ToolCallId:
+        return super().__new__(cls, id)
+
+
+class ProviderRequestId(str):
+    """Provider-issued request identifier retained for diagnostics."""
+
+    def __new__(cls, id: str) -> ProviderRequestId:
+        return super().__new__(cls, id)
+
+
+class LlmAttemptId(str):
+    """Identity of one model streaming attempt, unique within one Agent lifecycle."""
+
+    def __new__(cls, id: str) -> LlmAttemptId:
+        return super().__new__(cls, id)
+
+
+class ReasoningEffortId(str):
+    """Adapter-owned identifier for one model's selectable reasoning effort."""
+
+    def __new__(cls, id: str) -> ReasoningEffortId:
+        return super().__new__(cls, id)
+
+
+# ---------- End of branded ids ----------
+
+# ---------- Call configuration ----------
+
+class LlmCallConfig:
+    """Provider, model, reasoning effort, and sampling scalars of one conversation's requests."""
+
+    provider: str
+    model: str
+    reasoningEffort: ReasoningEffortId | None
+    temperature: float | None
+    maxTokens: int | None
+    stop: list[str] | None
+
+    def __init__(self, provider: str, model: str,
+                 reasoningEffort: ReasoningEffortId | None = None,
+                 temperature: float | None = None,
+                 maxTokens: int | None = None,
+                 stop: list[str] | None = None) -> None:
+        self.provider = provider
+        self.model = model
+        self.reasoningEffort = reasoningEffort
+        self.temperature = temperature
+        self.maxTokens = maxTokens
+        self.stop = stop
+
+
+class LlmCallConfigAdapterDefaults:
+    """Effective config fields supplied by exact-model adapter resolution rather than by the caller's request proposal."""
+
+    reasoningEffort: bool | None
+    maxTokens: bool | None
+
+    def __init__(self, reasoningEffort: bool | None = None,
+                 maxTokens: bool | None = None) -> None:
+        self.reasoningEffort = reasoningEffort
+        self.maxTokens = maxTokens
+
+
+def callConfigEquals(a: LlmCallConfig, b: LlmCallConfig) -> bool:
+    """Field-wise equality over LlmCallConfig — decide whether a proposed config is a real change."""
+    if a.provider != b.provider or a.model != b.model:
+        return False
+    if a.reasoningEffort != b.reasoningEffort:
+        return False
+    if a.temperature != b.temperature:
+        return False
+    if a.maxTokens != b.maxTokens:
+        return False
+    if a.stop is None or b.stop is None:
+        return a.stop == b.stop
+    return len(a.stop) == len(b.stop) and all(s == b for s, b in zip(a.stop, b.stop))
+
+
+# ---------- End of call configuration ----------
+
+# ---------- App attribution ----------
+
+class AppIdentity:
+    """Static public application identity sent to LLM providers."""
+
+    product: str
+    version: str
+    url: str
+
+    def __init__(self, product: str, version: str, url: str) -> None:
+        self.product = product
+        self.version = version
+        self.url = url
+
+
+APP_IDENTITY = AppIdentity(
+    product="mini-harness",
+    version="0.0.0",
+    url="https://github.com/mini-harness/mini-deepseek-harness-python",
+)
+
+
+# ---------- End of app attribution ----------
 
 # ---------- End of type definitions ----------
 

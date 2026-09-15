@@ -33,12 +33,15 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from .brand import CommandDefinitionId, CommandId
 from ..core.scope import Context
 from ..core.session import Session
 
 __all__ = [
     "AbortSignal",
     "CommandAborted",
+    "CommandDefinitionId",
+    "CommandId",
     "CommandInvocation",
     "CommandRegistry",
     "install_commands",
