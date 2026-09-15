@@ -32,6 +32,7 @@ __all__ = [
     "request_image_handle_text",
     "required_image_offload",
     "text_only_image_text",
+    "visit_image_blocks",
 ]
 
 
@@ -342,17 +343,17 @@ def required_image_offload(
         lengths.append(bytes_val)
 
     for message in messages:
-        _visit_image_blocks(message.get("content") or [], visit_block)
+        visit_image_blocks(message.get("content") or [], visit_block)
 
     budget_dict = {"maxImages": budget.maxImages, "maxBytes": budget.maxBytes,
                    "countQuantum": budget.countQuantum or 1, "byteQuantum": budget.byteQuantum or 1}
     return offloaded_image_prefix_count(lengths, budget_dict)
 
 
-def _visit_image_blocks(content: list, visit) -> None:
+def visit_image_blocks(content: list, visit) -> None:
     """Visit every image occurrence of typed content in message order, including nested tool-result content."""
     for block in content or []:
         if block.get("type") == "image":
             visit(block)
         elif block.get("type") == "tool-result":
-            _visit_image_blocks(block.get("content") or [], visit)
+            visit_image_blocks(block.get("content") or [], visit)

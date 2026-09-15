@@ -77,6 +77,8 @@ __all__ = [
     "probe_image",
     "read_file_stream_verbatim",
     "request_image_dimensions",
+    "long_edge_dimensions",
+    "ProjectedDimensions",
     "save_file_stream_verbatim",
     "save_file_verbatim",
     "stored_file_path",

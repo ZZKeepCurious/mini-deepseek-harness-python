@@ -121,9 +121,10 @@ def _verify_normalized_image(
 
 def _initial_dimensions(detected: DetectedImage, policy: NormalizationPolicy) -> tuple[int, int]:
     """总像素预算内的尺寸，再按长边封顶，纵横不变（上游 initialDimensions）。"""
-    budgeted_width, budgeted_height = request_image_dimensions(
+    projected = request_image_dimensions(
         detected.width, detected.height, policy.maxPixels
     )
+    budgeted_width, budgeted_height = projected.width, projected.height
     long_edge = max(budgeted_width, budgeted_height)
     if long_edge <= policy.maxDimension:
         return budgeted_width, budgeted_height

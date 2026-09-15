@@ -128,7 +128,7 @@ def _create_request_image(
 ) -> _EncodedRequestImage:
     dimensions = request_image_dimensions(stored.ref.width, stored.ref.height, policy.maxPixels)
     if (
-        dimensions == (stored.ref.width, stored.ref.height)
+        dimensions.width == stored.ref.width and dimensions.height == stored.ref.height
         and len(stored.data) <= policy.maxBytes
     ):
         return _EncodedRequestImage(
@@ -138,7 +138,7 @@ def _create_request_image(
             height=stored.ref.height,
         )
     source = prepared_source(stored.data, has_alpha)
-    prepared = resized(source, dimensions[0], dimensions[1])
+    prepared = resized(source, dimensions.width, dimensions.height)
     encoded = encode_first_within_limit(
         encoding_ladder(prepared, has_alpha), policy.maxBytes
     )
@@ -172,8 +172,8 @@ def read_cached(
         if (
             detected.depth != "uchar"
             or detected.space != "srgb"
-            or detected.width > maximum[0]
-            or detected.height > maximum[1]
+            or detected.width > maximum.width
+            or detected.height > maximum.height
             or not encoded_alpha_is_compatible(expected_alpha, detected.media_type, detected.has_alpha)
         ):
             return None
