@@ -21,6 +21,25 @@ from typing import Any, Callable
 from .dsh_scope import NamedEntries, ScopedLayers, scope_of
 from .scope import Context, _maybe_await
 from .session import deep_freeze, is_json_safe
+from .tool_timeout import TOOL_TIMEOUT, timeout_error_message
+
+
+# ---------- 超时策略常量（对齐 upstream packages/guard/timeout-policy） ----------
+
+def tool_timeout_result(timeout_ms: int) -> ToolResult:
+    """结构化超时结果工厂（对齐 upstream timeout-policy toolTimeoutResult）。
+
+    超时强制在 pipeline_body / pipeline_async_body 中由管线 wrapper 执行；
+    超时发生时，无论工具体返回什么（含 abort 形状错误），一律替换为
+    TOOL_TIMEOUT 结构化错误。retry/sandbox 插件（及回放）可据此路由。
+    """
+    message = timeout_error_message(timeout_ms)
+    return ToolResult(
+        ok=False,
+        is_error=True,
+        error=f"Error: {message}",
+        error_info={"name": "ToolTimeoutError", "code": TOOL_TIMEOUT},
+    )
 
 
 # ---------- JSON Schema 子集校验器 ----------
@@ -87,6 +106,7 @@ class ToolExec:
     agent: Any = None
     name: str | None = None
     arguments: Any = None
+    additional_contexts: list[dict] = field(default_factory=list)
 
 
 class FusedSignal:
@@ -261,13 +281,21 @@ def execution_mode(tool: Tool | None, args: dict) -> str:
 
 def pipeline_policy(
     ctx: Context, tool: Tool, frozen_args: Any,
+    exec_: ToolExec | None = None,
 ) -> ToolResult | None:
-    """政策段（同步版）：pre-execute waterfall / ask / guards。返回拒绝结果或 None。"""
+    """政策段（同步版）：pre-execute waterfall / ask / guards。返回拒绝结果或 None。
+
+    exec_ 可选：传入时 pre-execute payload 携带 "exec" 键，供守卫插件
+    （如 repeat-tool-reminder）在 deny 路径附加 additional_contexts。
+    """
     schema_errors = validate_schema(frozen_args, tool.parameters)
     if schema_errors:
         return ToolResult(ok=False, is_error=True, error="; ".join(schema_errors))
 
-    decision = ctx.waterfall("tools/pre-execute", {"tool": tool.name, "args": frozen_args})
+    payload: dict[str, Any] = {"tool": tool.name, "args": frozen_args}
+    if exec_ is not None:
+        payload["exec"] = exec_
+    decision = ctx.waterfall("tools/pre-execute", payload)
     # 对齐上游 PreToolDecision：{kind:'allow'} / {kind:'deny', reason} / {kind:'ask', reason?}
     # （tools/src/index.ts:588-591；hooks 插件产出的正是 kind 形状）
     verdict = decision.get("kind", "allow") if isinstance(decision, dict) else "allow"
@@ -287,14 +315,20 @@ def pipeline_policy(
 
 async def pipeline_policy_async(
     ctx: Context, tool: Tool, frozen_args: Any,
+    exec_: ToolExec | None = None,
 ) -> ToolResult | None:
     """政策段（async 版）：同一语义，waterfall 走 awaterfall。
-    供调度器在事件循环按模型序有序 await（上游 prepare 的 pre-execute 有序）。"""
+    供调度器在事件循环按模型序有序 await（上游 prepare 的 pre-execute 有序）。
+    exec_ 可选：传入时 pre-execute payload 携带 "exec" 键，供守卫插件
+    （如 repeat-tool-reminder）在 deny 路径附加 additional_contexts。"""
     schema_errors = validate_schema(frozen_args, tool.parameters)
     if schema_errors:
         return ToolResult(ok=False, is_error=True, error="; ".join(schema_errors))
 
-    decision = await ctx.awaterfall("tools/pre-execute", {"tool": tool.name, "args": frozen_args})
+    payload: dict[str, Any] = {"tool": tool.name, "args": frozen_args}
+    if exec_ is not None:
+        payload["exec"] = exec_
+    decision = await ctx.awaterfall("tools/pre-execute", payload)
     # 对齐上游 PreToolDecision：{kind:'allow'} / {kind:'deny', reason} / {kind:'ask', reason?}
     verdict = decision.get("kind", "allow") if isinstance(decision, dict) else "allow"
     if verdict == "deny":
@@ -339,7 +373,15 @@ def pipeline_body(
     ctx: Context, tool: Tool, frozen_args: Any, exec_: ToolExec, *,
     async_: bool = False,
 ) -> tuple[Any, Exception | None]:
-    """执行体段：execute（可选线程超时）+ post-execute。返回 (raw, error)。"""
+    """执行体段：execute（可选线程超时）+ post-execute。返回 (raw, error)。
+
+    超时强制：超时发生时返回 (tool_timeout_result, None)——由管线 wrapper
+    用 TOOL_TIMEOUT 结构化错误替换工具体结果（对齐 upstream timeout-policy
+    timer-wins 语义：工具体 abort 形状错误一律被 TOOL_TIMEOUT 替换）。
+    post-execute 决策携带 additionalContexts 时追加到 exec_.additional_contexts
+    （对齐 upstream post-execute decision.additionalContexts，供守卫插件
+    如 repeat-tool-reminder 注入上下文）。
+    """
     box: dict[str, Any] = {}
 
     def target() -> None:
@@ -352,15 +394,22 @@ def pipeline_body(
         if t.is_alive():
             exec_.signal.set()
             t.join()   # 排干：等待执行体到达静止点
-            return None, TimeoutError(f"timeout after {tool.timeout_ms}ms")
+            # 我们的 timer 赢了（timer-wins）：工具体 abort 形状错误也被替换
+            return tool_timeout_result(tool.timeout_ms), None
     else:
         target()
 
     raw = box.get("value")
-    post = ctx.waterfall("tools/post-execute", {"tool": tool.name, "result": raw})
-    if isinstance(post, dict) and post.get("action") == "block":
-        # 对齐上游：block decision 的 feedback 是 ContentBlock[]（text 块）
-        return None, RuntimeError(_feedback_text(post.get("feedback", "blocked by tools/post-execute")))
+    post = ctx.waterfall("tools/post-execute", {"tool": tool.name, "result": raw, "exec": exec_})
+    if isinstance(post, dict):
+        # 对齐上游 PostToolDecision（tools/src/index.ts:599-602）：
+        # {kind:'accept'|'block', feedback?, additionalContexts?}
+        if post.get("kind") == "block":
+            # block decision 的 feedback 是 ContentBlock[]（text 块）
+            return None, RuntimeError(_feedback_text(post.get("feedback", "blocked by tools/post-execute")))
+        contexts = post.get("additionalContexts")
+        if isinstance(contexts, list) and contexts:
+            exec_.additional_contexts.extend(contexts)
     return raw, box.get("error")
 
 
@@ -430,7 +479,7 @@ def run_pipeline(ctx: Context, tool: Tool, args: dict, exec_: ToolExec | None = 
     exec_.arguments = frozen_args
 
     # 2-4. 政策段（拒绝结果同样走 finalize_content 收口）
-    rejected = pipeline_policy(ctx, tool, frozen_args)
+    rejected = pipeline_policy(ctx, tool, frozen_args, exec_=exec_)
     if rejected is not None:
         return finalize_tool_result(tool, exec_, rejected)
 
@@ -471,6 +520,9 @@ async def pipeline_async_body(
     取消语义对齐上游"已启动的 promise 必须排干到静止"：超时先置位
     exec_.signal（工具协作中止，如子进程工具 terminate），再 await 任务排干；
     wait_for 经 shield 包裹保证超时不取消底层任务（coroutine 可继续排干）。
+    timer-wins 语义（对齐 upstream timeout-policy）：超时发生即返回
+    TOOL_TIMEOUT 结构化错误——工具体排干后的 abort 形状错误同样被替换；
+    caller-cancel-wins（排干返回正常结果）保持原结果。
     """
     exec_ = exec_ or ToolExec()
     exec_.name = tool.name
@@ -484,12 +536,10 @@ async def pipeline_async_body(
         except asyncio.TimeoutError:
             exec_.signal.set()
             try:
-                raw = await task   # 排干：工具观察到 signal 后自行中止
-                error = None
-            except Exception as e:
-                raw, error = None, e
-            if error is None:
-                error = TimeoutError(f"timeout after {tool.timeout_ms}ms")
+                await task   # 排干：工具观察到 signal 后自行中止
+            except Exception:
+                pass   # timer-wins：工具体 abort 形状错误被 TOOL_TIMEOUT 替换
+            return tool_timeout_result(tool.timeout_ms)
     else:
         try:
             raw = await _execute_async(tool, frozen_args, exec_)
@@ -498,10 +548,15 @@ async def pipeline_async_body(
             raw, error = None, e
 
     # post-execute 回事件循环（与上游 finalize 在事件循环跑一致）
-    post = await ctx.awaterfall("tools/post-execute", {"tool": tool.name, "result": raw})
-    if isinstance(post, dict) and post.get("action") == "block":
-        # 对齐上游：block decision 的 feedback 是 ContentBlock[]（text 块）
-        error = RuntimeError(_feedback_text(post.get("feedback", "blocked by tools/post-execute")))
+    post = await ctx.awaterfall("tools/post-execute", {"tool": tool.name, "result": raw, "exec": exec_})
+    if isinstance(post, dict):
+        # 对齐上游 PostToolDecision（tools/src/index.ts:599-602）
+        if post.get("kind") == "block":
+            # block decision 的 feedback 是 ContentBlock[]（text 块）
+            error = RuntimeError(_feedback_text(post.get("feedback", "blocked by tools/post-execute")))
+        contexts = post.get("additionalContexts")
+        if isinstance(contexts, list) and contexts:
+            exec_.additional_contexts.extend(contexts)
 
     if error is not None:
         e = error
@@ -533,7 +588,7 @@ async def run_pipeline_async(
     exec_.name = tool.name
     exec_.arguments = frozen_args
 
-    rejected = await pipeline_policy_async(ctx, tool, frozen_args)
+    rejected = await pipeline_policy_async(ctx, tool, frozen_args, exec_=exec_)
     if rejected is not None:
         return finalize_tool_result(tool, exec_, rejected)
     return await pipeline_async_body(ctx, tool, frozen_args, exec_)

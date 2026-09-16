@@ -269,7 +269,10 @@ class TestScheduleTools(unittest.TestCase):
         self.assertFalse(signal.signal.is_set())
         err = [e for e in session.events if e["type"] == "tool/result"][0]
         self.assertTrue(err["data"]["message"]["content"][0]["isError"])
-        self.assertIn("timeout", err["data"]["message"]["content"][0]["content"][0]["text"])
+        text = err["data"]["message"]["content"][0]["content"][0]["text"]
+        self.assertIn("Error: tool call timed out", text)
+        self.assertEqual(err["data"]["error"],
+                         {"name": "ToolTimeoutError", "code": "TOOL_TIMEOUT"})
 
 
 class TestPipelineAsync(unittest.TestCase):
@@ -304,7 +307,8 @@ class TestPipelineAsync(unittest.TestCase):
         reg.register(t)
         result = asyncio.run(run_pipeline_async(ctx, t, {}))
         self.assertTrue(result.is_error)
-        self.assertIn("timeout", result.error)
+        self.assertIn("Error: tool call timed out after 40ms", result.error)
+        self.assertEqual(result.error_info, {"name": "ToolTimeoutError", "code": "TOOL_TIMEOUT"})
 
 
 class MultiToolAdapter(LlmAdapter):

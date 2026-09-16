@@ -165,11 +165,12 @@ class TestPipeline(unittest.TestCase):
         tool = _make(slow, timeout_ms=50)
         result = run_pipeline(ctx, tool, {})
         self.assertTrue(result.is_error)
-        self.assertIn("timeout", result.error)
+        self.assertIn("Error: tool call timed out after 50ms", result.error)
+        self.assertEqual(result.error_info, {"name": "ToolTimeoutError", "code": "TOOL_TIMEOUT"})
 
     def test_post_execute_block(self):
         ctx = Context()
-        ctx.on("tools/post-execute", lambda p, nxt: {"action": "block", "feedback": "策略拒绝"})
+        ctx.on("tools/post-execute", lambda p, nxt: {"kind": "block", "feedback": "策略拒绝"})
         result = run_pipeline(ctx, _make(lambda a, e: "ok"), {})
         self.assertTrue(result.is_error)
         self.assertIn("策略拒绝", result.error)

@@ -84,6 +84,30 @@ def emit_tool_result(session: Session, turn: int, step: int, call_id: str,
     session.append("tool/result", data, surfaceOp="append", sourceEventSeqs=[call_seq])
 
 
+def append_context_messages(session: Session, turn: int, step: int,
+                            contexts: list[dict]) -> None:
+    """把 post-execute decision 携带的 additionalContexts 落为 user/message。
+
+    对齐上游：守卫插件（repeat-tool-reminder）经 post-execute decision 的
+    additionalContexts 注入上下文，adapter 组装进下一个请求（模型可见 ⟺
+    已记录）。mini 以 surface user/message（append）等价物化——请求上下文
+    由会话日志派生，落日志即模型可见，且相对 tool/result 保持顺序。
+    未知形状条目跳过（fail-open）；非 user role 条目忽略。
+    """
+    for entry in contexts:
+        if not isinstance(entry, dict) or entry.get("role") != "user":
+            continue
+        content = entry.get("content")
+        if not isinstance(content, list) or not content:
+            continue
+        source = entry.get("source")
+        session.append(
+            "user/message",
+            create_message("user", content, source if isinstance(source, dict) else None),
+            surfaceOp="append",
+        )
+
+
 def _parse_args(raw: str) -> dict:
     try:
         return json.loads(raw) if raw else {}
@@ -138,6 +162,7 @@ async def _run_group(
     body_fn: Callable | None, max_parallel: int, agent: Any = None,
 ) -> dict:
     slots: list[ToolResult | None] = [None] * len(group)
+    slot_execs: list[ToolExec | None] = [None] * len(group)
     call_seqs: list[int] = [-1] * len(group)
     next_to_start = 0
     committed = 0
@@ -154,6 +179,13 @@ async def _run_group(
             call = group[committed]
             emit_tool_result(session, turn, step, call["id"], slots[committed], call_seqs[committed])
             concluded = concluded or slots[committed].concludes_turn
+            # 守卫插件经 post-execute decision.additionalContexts 注入的上下文，
+            # 在 tool/result 之后落为 user/message（模型可见 ⟺ 已记录）
+            exec_ = slot_execs[committed]
+            if exec_ is not None and exec_.additional_contexts:
+                contexts = list(exec_.additional_contexts)
+                exec_.additional_contexts.clear()
+                append_context_messages(session, turn, step, contexts)
             committed += 1
 
     async def start_call(index: int) -> None:
@@ -179,8 +211,9 @@ async def _run_group(
         exec_ = ToolExec(signal=FusedSignal(signal.signal), agent=agent)
         exec_.name = call["name"]
         exec_.arguments = frozen
+        slot_execs[index] = exec_
         try:
-            rejected = await pipeline_policy_async(ctx, tool, frozen)
+            rejected = await pipeline_policy_async(ctx, tool, frozen, exec_=exec_)
         except BaseException as e:
             scheduler_failure = e
             return

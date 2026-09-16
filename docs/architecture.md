@@ -33,6 +33,7 @@ miniharness/
 │   ├── hmr.py             # Cordis HMR 服务（vendor/hmr：register_config watch + 单飞刷新 + config-update-failed 外泄）
 │   ├── schema.py           # schemastery 配置引擎全量移植（vendor/schemastery）
 │   ├── home_paths.py       # harness 根解析（$DSH_HOME > ~/.dsh；packages/util/home-paths）
+│   ├── tool_timeout.py     # 工具调用超时契约常量（TOOL_TIMEOUT / timeout_error_message，L0，packages/guard 的超时执行器共享面）
 │   ├── tools.py            # 工具注册表 + 执行管线
 │   ├── system_prompt.py   # SystemPromptService（分节渲染，systemPrompt 服务）
 │   └── agent_loop/        # agent.py（turn/step 状态机，V2 内嵌流落盘）+ assistant_stream.py（AssistantStreamAttempt）+ resident_loop.py（常驻单循环）+ tool_calls.py（并行调度）+ inbox.py（双队列收件箱）
@@ -91,6 +92,9 @@ miniharness/
 │   ├── registry.py        # SkillRegistry（ctx.skills 服务 + 分层注册 + 渲染/digest）
 │   ├── filesystem.py      # FileSystemSkillProvider（六类根 + frontmatter）
 │   └── tool_skill.py      # skill 工具 + /名字 手势 + durable catalog 注入
+├── guard/                  # packages/guard（循环卫生守卫：超时执行器 + 重复调用提醒）
+│   ├── timeout_policy.py   # TimeoutPolicy 插件（上游 timeout-policy，仅注册超时执行器契约面）
+│   └── repeat_tool_reminder.py # RepeatToolReminder（重复工具调用提醒：预拒绝计数 + 决策折叠）
 ├── identity/               # packages/identity/anonymous-user-id（harness-home 匿名用户 id）
 ├── telemetry/             # packages/session/session-stats + packages/llm/token-meter（投影 fold 切片）
 │   ├── folds.py           # fold_session_stats / fold_token_usage / derive_turn_token_usage（纯 fold）
@@ -171,6 +175,8 @@ miniharness/
 | `core/dsh_scope.py` | `packages/core/scope/src/index.ts` + `store.ts` | dsh-scope 协议本尊（纯库，L0）：ScopeKey 弱引用身份键、scopeParents 图（bind/link/rebind + 环检测）、`scope_parent_of`/`scope_chain_of`（nearest-first）、`scope_target`/`_ScopeCarrier`/`is_scope_carrier`/`carrier_key_of`、`scope_of`（parent 链）、NamedEntries/AnonymousEntries/ScopedLayers 对齐 store.ts；`Context.create_scope` 返回 Scope 包装（delegation 包装，`__slots__` 无 `__dict__`） |
 | `core/hmr.py` | `vendor/hmr/src/index.ts` | Cordis HMR 服务：`Hmr(Service)` provide="hmr"；`register_config(filename, refresh)`——findWatchRoot walk-up 根定位（realpath+depth+缺盘拒绝）、重复注册拒绝、初扫已存在目标即刷（chokidar ignoreInitial=false 语义：缺文件无初扫）、disposer 注销+关 watcher+join 在飞刷新；`refresh_config(key)` 单飞+dirty 合并循环、失败 logger.warn + `hmr/config-update-failed` 并行事件外泄不毒化循环；销毁期注册归一 `CordisError(INACTIVE_EFFECT)`。载体 watchdog（上游 chokidar）；Node ESM 模块图热重载（ModuleLoader/externals/accepted）不适用 Python 载体；Windows 短路径两侧 normcase+realpath 归一 |
 | `core/tools.py` | `packages/core/tools` | 作用域化注册表（ScopedLayers/NamedEntries 存储：注册即 effect 归目标 fiber、拆解自动注销；resolve/names 缺省视角 = 注册表 root 的 scope 键，显式 scope 沿键父链最近者胜 + 全局层兜底）+ 守卫执行管线（pre/execute/post waterfall + schema 校验 + 超时） |
+| `core/tool_timeout.py` | `packages/util`（超时常量）→ 被 `packages/guard/timeout-policy` 消费 | 工具调用超时契约叶（L0，零内部依赖）：`TOOL_TIMEOUT = "TOOL_TIMEOUT"`、`timeout_error_message(timeout_ms)`；被 `core/tools.py`（管线超时替换 `error_info={name:'ToolTimeoutError', code:TOOL_TIMEOUT}`）与 `guard/timeout_policy.py` 两侧共享——guard 超时执行器是 `packages/core/tools` 超时语义的消费方 |
+| `guard/` | `packages/guard`（`timeout-policy` + `repeat-tool-reminder`） | **循环卫生守卫（C21 已闭合，2026-09-16，§2.33）**：`repeat_tool_reminder.py` —— 重复工具调用提醒：`Config`（`thresholds: [3,5,8]` fail-loud 校验、`include`/`exclude` 通配符、`argumentsPreviewChars` 默认 500）；per-agent WeakKeyDictionary 链，`agent/pre-step` 任一 user 消息清链；pre-execute 监听器对下行 `{kind:'deny'}` 决策计数并把提醒挂到 `exec_.additional_contexts`（mini deny 短路 post-execute）；post-execute `observe()` 在委派前执行，提醒 prepend 到下游决策 `additionalContexts`（accept 路径 `{kind:'accept', additionalContexts:[reminder]}`，block 路径保留 `kind:'block'`）；提醒消息 source `{kind:'plugin', plugin:'repeat-tool-reminder', form:'notice', summary:'{tool} × {count}'}`；`timeout_policy.py` —— 只 import L0 `core.tool_timeout` 再导出 `TOOL_TIMEOUT`（超时执行器本体在 `core/tools.py` 管线，timer-wins），装配面 opt-in `install_timeout_policy`/`install_repeat_tool_reminder`。载体差异登记：上游 post-execute 决策 `PostToolDecision {kind, feedback?, additionalContexts?}`（tools/src/index.ts:599-602）——mini 管线读取 `kind`（旧 `action` 别名已统一）；上游 pre 侧 deny-vote 计数在 post-execute 决策里反馈，mini 因 deny 短路改为挂 exec |
 | `core/agent_loop/agent.py` | `packages/core/agent-loop/src/agent.ts` | 单一 async 泵（`_pump_async`/`_run_step_async`）+ `followup`/`steer` 同步门面（经常驻单事件循环驱动，见下行 resident_loop）+ 协作式取消（`_cancel_event` 每轮新建 + `call_soon_threadsafe` 跨线程置位——对应上游 agent.ts:325 每 phase 新建 AbortController）；agent/pre-step 决策经 `awaterfall`；publish/dispose 生命周期（enter+announce+agent/session-start / cancel(disposed)+scope.dispose+detach，会话店成员资格归 loop）+ agent/* 事件载波派发（scopeTarget(agent, loop scope 键)，兄弟作用域隔离）+ turn/step 编号 1 起经 `_replayed_next_turn` 从会话日志续号（对齐 invariant.ts `nextTurn`：turn/end 闭合后 +1、尾部未闭合停在当前号；resume 冷重建 loop 不重置回合号）；**V2 流结算**（agent.ts:375-458）：正常完成 settle `assistant/message`（内嵌 stream、content=原始 assembler 块）、finish error/aborted 与异常先 settle `assistant/attempt` 再走 request-error waterfall、取消定稿 interruptedBlocks 前缀（空则 attempt） |
 | `core/agent_loop/resident_loop.py` | （无独立文件：Node 进程固有单事件循环） | 教学扩展：进程级懒加载单例循环（守护线程 run_forever）；`run_on_resident` 阻塞提交协程、异常冒泡、主线程 Ctrl+C 协作取消在途泵；同步门面由此驱动后跨调用共享同一循环，与上游形态一致 |
 | `core/agent_loop/tool_calls.py` | `packages/core/agent-loop/src/tool-calls.ts` | |
@@ -240,8 +246,8 @@ miniharness/
 
 | 层 | 内容 | 允许依赖 |
 |---|---|---|
-| L0 地基 | `core/session`、`core/scope`、`core/dsh_scope`、`core/schema`、`core/hmr`、`core/home_paths` | 无（互不依赖；core.scope ↔ core.dsh_scope / core.schema / core.hmr→core.scope 经 §3 例外豁免） |
-| L1 领域 | `llm/*`、`core/tools`、`core/system_prompt`、`core/session_store`、`core/agents`、`attachment`、`identity`、`storage`、`boot/*` | 仅 L0 |
+| L0 地基 | `core/session`、`core/scope`、`core/dsh_scope`、`core/schema`、`core/hmr`、`core/home_paths`、`core/tool_timeout` | 无（互不依赖；core.scope ↔ core.dsh_scope / core.schema / core.hmr→core.scope 经 §3 例外豁免；core.tool_timeout 是超时契约常量叶，被 core.tools 与 guard 两侧共享） |
+| L1 领域 | `llm/*`、`core/tools`、`core/system_prompt`、`core/session_store`、`core/agents`、`attachment`、`identity`、`storage`、`boot/*`、`guard` | 仅 L0 |
 | L2 编排 | `core/agent_loop`、`compaction`、`jobs`、`plan`、`commands`、`goal`、`skills`、`telemetry` | L0 + L1 |
 | L3 应用与入口 | `cli/*`、`protocol/*`、`seams/*`、`preset`、`extensions`、`interaction`、`client`、`web`、`shell` | L0 ~ L2 |
 | 教学层 | `demo.py`、`example_plugins.py` | 任意层，但不得被业务模块依赖 |
