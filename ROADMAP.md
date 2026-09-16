@@ -15,6 +15,8 @@ web 半（传输层 + 浏览器前端）的 wire 面已全对齐：两信封 RPC
 
 ## 已落地的对齐扩展
 
+- **MCP 客户端 / 资源（2026-09-17，C20）**：`miniharness/mcp/`（L3）——`apply(ctx, config)` 代连接 supervisor（stdio / streamable-http 统一，`tools/list_changed` 重同步、server instructions 字节上限 fail-loud、`failOnStartupError`）+ 指数退避重连（预算耗尽即停）+ 工具归属注册 `${server}.${name}#${hash}` + darkfrozen render / 图片受理投影 + mcp-resources 三个共享资源工具。**载体注记（SDK 2.2）**：SDK stdio 传输不投递子进程 EOF/退出（`_drain_stdout` 永久阻塞、read_stream 不关闭、在途 RPC 永挂）——mini 以「有界 RPC 竞速（5s，对 `generation.lost` 中止）+ 常驻生命线 ping watchdog（15s 心跳 / 3s 超时）替代上游 within 取消令牌」，杜绝死后握手挂死；代关闭屏障 5s 超时 fail-closed 防重叠子进程。生产就绪回归（全量见 verified-diffs）。
+
 - **storage 存储中心（2026-09-16，C19）**：`miniharness/storage/`（L1）——hub + domain 数据形态 + JSON backend（`ctx.storage`）：hub 不碰 IO（backend 注册表 + `storage.backend.<name>` 生命周期服务键）；domain 带 schema 校验、单写链、持久后 `domain/changed` 事件发射、backup-and-skip 坏记录政策；JSON medium single 整文档 / per-record 一记录一文档（原子重写、legacy bootstrap、foreign 文档读缺位）。对齐 `packages/storage`（storage hub + storage-domain + storage-json；storage-sqlite 不承载）。生产就绪回归（全量 2242 绿、coverage 86%、`mkdocs --strict` 过）。契约/载体差异/简化登记见 verified-diffs。
 
 - **遥测 / 用量统计（2026-09-08）**：`miniharness/telemetry/`（L2）——sessionStats + tokenUsage 真实投影 + per-turn 用量推导（`fold_session_stats` / `fold_token_usage` / `derive_turn_token_usage`，对齐上游 session-stats / token-meter）+ opt-in `UsageStatsService`；wire `projections.values` 由空基线升为真实视图；CLI `sessions stats [id]` 教学扩展。生产就绪回归（全量 2117 绿、coverage 85%、`mkdocs --strict` 过）。契约/载体差异/简化登记见 verified-diffs §2.30。
@@ -25,7 +27,7 @@ web 半（传输层 + 浏览器前端）的 wire 面已全对齐：两信封 RPC
 
 以下上游 `packages/` 包尚未复现，未来想扩充复现范围可从中挑选；多数属于"能力扩展口 + 消费工具"的延伸，核心约定不依赖它们。已复现家族中也有只落了切片的（如 subprocess 仅环境清洗、client 仅 ui-trajectory、host 为 apiproxy 子集），权威归属以 docs/architecture.md 映射表为准。
 
-- **能力类**：`fs`、`terminal`、`e2b`、`lsp`、`mcp`、`code-runtime`、`spill`、`workspace`
+- **能力类**：`fs`、`terminal`、`e2b`、`lsp`、`code-runtime`、`spill`、`workspace`
 - **编排类**：`workflow`、`schedule`、`todo`
 - **横切类**：`settings`、`session-query`、`feedback`、`guard`、`runtime-diagnostics`、`api`、`context`、`util`、`web`
 - **平台类**：`typert`、`test-support`

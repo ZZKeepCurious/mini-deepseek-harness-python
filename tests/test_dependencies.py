@@ -69,6 +69,7 @@ LAYER_UNITS = [
     ("extensions", 3),
     ("interaction", 3),
     ("client", 3),
+    ("mcp", 3),
     ("web", 3),
     ("shell", 3),
 ]
@@ -176,6 +177,12 @@ class ImportDirectionTest(unittest.TestCase):
                     # §5 显式例外（单方向）：bash-sandbox 是 ctx.sandbox 的消费者
                     # （confine + 归因），上游 bash-sandbox 同样依赖 dsh-sandbox；
                     # seams 层不得反向 import shell
+                    continue
+                if src_unit == "mcp" and dst_unit == "seams":
+                    # §5 显式例外（单方向）：transport 复用 seams/subprocess_env 的
+                    # 净身父环境组装 stdio 子进程 env（上游 mcp-client spawn 透传
+                    # env，mini 把宿主环境净身集中到 seam——同 cli→seams 先例）；
+                    # seams 层不得反向 import mcp
                     continue
                 if src_unit == "core.scope" and dst_unit == "core.schema":
                     # §5 显式例外：L0 基座叶模块——core.scope 的 config 求值依赖

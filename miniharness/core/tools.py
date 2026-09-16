@@ -156,7 +156,8 @@ class Tool:
     timeout_ms: int | None = None                       # 由管线 wrapper 强制
     present_call: Callable | None = None                # UI 挂起卡片（纯函数）
     present_result: Callable | None = None              # UI 完成卡片（纯函数）
-    render: Callable[[Any], Any] | None = None          # canonical 值 → 模型可见 content（上游 output.render）
+    render: Callable[..., Any] | None = None            # canonical 值 → 模型可见 content；优先 (args, value) 双参（上游
+                                                        # output.render(args, value)），单参 (value) 为 mini 既存简写
     finalize_content: Callable[[ToolExec, dict], Any] | None = None  # 结算前内容收口（上游 finalizeContent）
 
 
@@ -466,6 +467,19 @@ def finalize_tool_result(tool: Tool, exec_: ToolExec, result: ToolResult) -> Too
     return replace(result, content=deep_freeze(replacement))
 
 
+def call_render(tool: Tool, args: dict, raw: Any) -> Any:
+    """统一 render 派发：优先上游 output.render(args, value) 双参契约。
+
+    双参 render 携带调用参数（MCP 资源工具等按 args.server 渲染）；单参
+    render 为 mini 既存简写（goals/skills/plan/jobs 等），按签名 arity 判定。
+    """
+    if tool.render is None:
+        return raw
+    if len(inspect.signature(tool.render).parameters) >= 2:
+        return tool.render(args, raw)
+    return tool.render(raw)
+
+
 def run_pipeline(ctx: Context, tool: Tool, args: dict, exec_: ToolExec | None = None) -> ToolResult:
     """pre-execute → 守卫 → execute → post-execute → 规范化 → 冻结结果。"""
     exec_ = exec_ or ToolExec()
@@ -500,7 +514,7 @@ def run_pipeline(ctx: Context, tool: Tool, args: dict, exec_: ToolExec | None = 
         result = ToolResult(ok=False, is_error=True, error="工具返回了不可 JSON 序列化的值")
     else:
         # 8. 冻结的权威结果：render 将 canonical 值转为模型可见 content（上游 output.render）
-        rendered = tool.render(raw) if tool.render is not None else raw
+        rendered = call_render(tool, dict(frozen_args), raw)
         result = ToolResult(ok=True, content=deep_freeze(rendered), value=raw)
     return finalize_tool_result(tool, exec_, result)
 
@@ -568,7 +582,7 @@ async def pipeline_async_body(
     elif not is_json_safe(raw):
         result = ToolResult(ok=False, is_error=True, error="工具返回了不可 JSON 序列化的值")
     else:
-        rendered = tool.render(raw) if tool.render is not None else raw
+        rendered = call_render(tool, dict(frozen_args), raw)
         result = ToolResult(ok=True, content=deep_freeze(rendered), value=raw)
     return finalize_tool_result(tool, exec_, result)
 

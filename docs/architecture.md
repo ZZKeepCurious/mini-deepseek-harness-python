@@ -132,6 +132,18 @@ miniharness/
 │   ├── bash_local.py      # 本地 bash 执行器（ctx.shell 缺省 provider）
 │   ├── bash_sandbox.py    # 沙箱消费执行器（confine 包裹 + 三路归因）
 │   └── helpers.py         # spawn 归因 / denial / runner 失败分类（helpers.ts）
+├── mcp/                   # packages/mcp/{mcp-client, mcp-resources}（mini 子集）
+│   ├── types.py           # Config schema / ReconnectConfig / RECONNECT_DEFAULTS / 常量
+│   ├── client.py          # apply(ctx, config) 同步门面：resolve 配置 → 链接生成
+│   ├── connection.py      # 代连接 supervisor（stdio / streamable-http）+ 重连 + 工具归属注册 + 生命线 ping
+│   ├── transport.py       # 传输工厂（stdio_client / streamable_http_client）
+│   ├── server_context.py  # MCP server 挂载（静态 server / CLI 定位 / 配置解析 → 联系请求）
+│   ├── tools.py           # sync_tools（公共工具名 hash / bridge 定义 / output 投影 / 图片受理）
+│   ├── fixture_server.py  # stdio 夹具（教学扩展，tests 用）
+│   └── resources/         # packages/mcp/mcp-resources
+│       ├── render.py      # output render（手动 JSON 序列化的紧凑 JSON 投影）
+│       ├── tools.py       # list/read 三个共享资源工具（register_resource_tools）
+│       └── runtime.py     # ResourceRuntime（createResource → 生命周期 + disposer）
 ├── client/                # packages/client
 │   └── trajectory.py      # Trajectory 折叠引擎
 ├── web/                   # packages/api/gateway + packages/client/connection + session-controller + remotes + host/frontend-static + host/webserver（mini 子集）
@@ -211,6 +223,16 @@ miniharness/
 | `extensions/dynamic.py` | `packages/extensions/*` | |
 | `interaction/approval.py` | `packages/interaction/user-approval` | |
 | `client/trajectory.py` | `packages/client/ui-trajectory` | |
+| `mcp/types.py` | `packages/mcp/mcp-client/src/{connection,index}.ts` | ReconnectConfig / RECONNECT_DEFAULTS / Config schema 默认值（serverName 模式 `[A-Za-z0-9_-]{1,32}`、toolCallTimeoutMs 60000、maxInstructionBytes 32768、GENERATION_CLOSE_TIMEOUT_MS 5000）；resolve_reconnect_policy / resolve_mcp_config 以显式解析承载上游 Schemastery loader 的 fail-loud 归一校验 |
+| `mcp/client.py` | `packages/mcp/mcp-client/src/index.ts` | apply(ctx, config)：scope-session 化 serverName 保留集 + resolve → 链接生成；McpServerConnection 同步门面 |
+| `mcp/connection.py` | `packages/mcp/mcp-client/src/connection.ts` | 代连接 supervisor：stdio / streamable-http 统一，简历过期扫描 + 重连（初始/上限延迟、预算耗尽即停），工具归属注册（`_RESOURCE_KEY` / `_TOOLS_OFFSET` 预算集）与 `sync_tools` 换代、`tools/list_changed` 重同步、server instructions 字节上限 fail-loud、失败即拒绝（failOnStartupError 直抛）；**载体差异（SDK 2.2，2026-09-17 已核实）**：SDK stdio 传输在子进程退出时**不投递 EOF/异常**（`_drain_stdout` 永久阻塞、read_stream 不关闭）——mini 以「握手/工具 RPC 有界竞速（`_run_rpc`，5s，对 `generation.lost` 中止）+ 常驻生命线 ping（watchdog，15s 心跳 / 3s 超时）」替代上游 within 取消令牌，杜绝死后握手挂死；代关闭屏障（GENERATION_CLOSE_TIMEOUT_MS）超时 fail-closed 防重叠子进程 |
+| `mcp/transport.py` | `packages/mcp/mcp-client/src/transport.ts` | 传输工厂 + stdio 子进程 env 组装（复用 `seams.subprocess_env` 净身切片的 L3 例外，见 §3 规则 1） |
+| `mcp/server_context.py` | `packages/mcp/mcp-client/src/{server-context,mcp-servers.ts}` | server 挂载点 / CLI 定位（`-m module`、script、绝对路径）/ MCP_SERVERS_ORDER |
+| `mcp/tools.py` | `packages/mcp/mcp-client/src/tools.ts` | sync_tools：`${server}.${name}#${hash}` 公共工具名（stringHash32 → base36 → MCP 前缀截断）、darkfrozen 手写 JSON 序列化等价（frost_equal / create_output）、LLM 输入/输出/图片受理投影（admit 门 + variantId 请求图缓存） |
+| `mcp/resources/render.py` | `packages/mcp/mcp-resources/src/render.ts` | render_resource_result：手动 JSON 序列化紧凑 JSON + blob 掩码（8 base64 字符不泄漏原文） |
+| `mcp/resources/tools.py` | `packages/mcp/mcp-resources/src/tools.ts` | list_mcp_resources / list_mcp_resource_templates / read_mcp_resource 三工具定义（server/cursor/uri 参数契约 + Render 双参） |
+| `mcp/resources/runtime.py` | `packages/mcp/mcp-resources/src/index.ts` | McpResourceRuntime（createResource 生命周期、资源请求经关联连接、disposer 注销）+ install_mcp_resources(ctx) 装配 |
+| `mcp/fixture_server.py` | 无 | 教学扩展（tests 的 stdio/HTTP 夹具，`--die-after` 自毁模拟崩溃） |
 | `web/envelope.py` | `packages/client/connection/src/{rpc-schema,rpc}.ts` | 两信封消息联合（client-request / server-response）+ 连接层错误闭集（含 R3 新增 `gateway/input-invalid`）；transport_error 折叠兜底码 ‘internal’ |
 | `web/api.py` | `packages/api/session-controller/src/index.ts`（session 域辅助入口）| WebApi unary 方法（list/search/create/selectModel/modelCatalog/canOpenWorkspacePath/openWorkspacePath/rename/fork/prompt/attachment/updateQueue/cancel/page）+ 路由表；`session/queue` placement 三态经 `session.control` 投影 |
 | `web/args.py` | `packages/api/gateway/src/index.ts`（assertExactArguments:1112 / decode:1140）+ `remote-error-codes.ts` | 路由层 `{args}` 边界校验：每方法字段集合精确匹配（missing/unexpected → `gateway/arguments-invalid`）+ 顶层 JSON 类型（错型 → `gateway/input-invalid`）；`TypertGatewayFaultDetails{endpoint, field?}`；枚举/范围/非空/跨字段语义留 handler（业务码） |
@@ -249,7 +271,7 @@ miniharness/
 | L0 地基 | `core/session`、`core/scope`、`core/dsh_scope`、`core/schema`、`core/hmr`、`core/home_paths`、`core/tool_timeout` | 无（互不依赖；core.scope ↔ core.dsh_scope / core.schema / core.hmr→core.scope 经 §3 例外豁免；core.tool_timeout 是超时契约常量叶，被 core.tools 与 guard 两侧共享） |
 | L1 领域 | `llm/*`、`core/tools`、`core/system_prompt`、`core/session_store`、`core/agents`、`attachment`、`identity`、`storage`、`boot/*`、`guard` | 仅 L0 |
 | L2 编排 | `core/agent_loop`、`compaction`、`jobs`、`plan`、`commands`、`goal`、`skills`、`telemetry` | L0 + L1 |
-| L3 应用与入口 | `cli/*`、`protocol/*`、`seams/*`、`preset`、`extensions`、`interaction`、`client`、`web`、`shell` | L0 ~ L2 |
+| L3 应用与入口 | `cli/*`、`protocol/*`、`seams/*`、`preset`、`extensions`、`interaction`、`client`、`mcp`、`web`、`shell` | L0 ~ L2 |
 | 教学层 | `demo.py`、`example_plugins.py` | 任意层，但不得被业务模块依赖 |
 
 **三层组织边界**（代码与结构上清晰分离、解耦）：
@@ -266,12 +288,13 @@ miniharness/
 
 规则：
 
-1. L_n 只依赖 L_{&lt;n}，禁止依赖同层或上层。六条显式例外：
+1. L_n 只依赖 L_{&lt;n}，禁止依赖同层或上层。七条显式例外：
    - `seams/subagent/worker.py` 依赖 `protocol/*`（同层）：worker 是 ACP / SDK 线协议的服务端载体，复用协议层的帧与信封实现；
    - `core/hmr.py` 依赖 `core/scope`（同层）：HMR 是 cordis 家族的 vendored 部件（上游 vendor/hmr 直接建在 cordis 之上），复用 Service/fiber 基座，与 core.dsh_scope 同理落 L0；
    - `cli/main.py` 依赖 `web`（同层，单方向）：launcher 组装 web profile——cli 把 ctx/adapter/tools 交给 web 层运行时，web 层不得反向 import cli；
    - `cli/headless.py` 依赖 `seams` 与 `shell`（同层，单方向）：run_headless 组装沙箱栈与 bash 执行器装进 ctx——同上游 bundle/headless 依赖 dsh-sandbox / sandbox-policy / bash-sandbox 的包拓扑；seams/shell 层不得反向 import cli；
    - `shell/bash_sandbox.py` 依赖 `seams/sandbox_local`（同层，单方向）：bash-sandbox 是 ctx.sandbox 的消费者——上游 bash-sandbox 同样依赖 dsh-sandbox，拓扑一致而非分层倒挂；seams 层不得反向 import shell；
+   - `mcp/connection.py` 依赖 `seams/subprocess_env`（同层，单方向）：stdio 子进程 env 组装复用 seam 的净身切片（上游 mcp-client spawn 透传 env），同 cli→seams 先例；seams 层不得反向 import mcp；
    - `cli/main.py` 依赖 `demo`（教学层）：无 profile 时以 `demo` 兜底（教学扩展入口）。
 2. `protocol/` 内三个模块互不依赖（acp、sdk、hooks 各自独立）。
 3. `seams/` 内 sandbox（sandbox_local + sandbox_policy）、credentials、subagent 互不依赖；policy 与 local 同属沙箱子域——上游 dsh-sandbox-policy 同样依赖 dsh-sandbox。
