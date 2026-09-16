@@ -15,6 +15,8 @@ web 半（传输层 + 浏览器前端）的 wire 面已全对齐：两信封 RPC
 
 ## 已落地的对齐扩展
 
+- **storage 存储中心（2026-09-16，C19）**：`miniharness/storage/`（L1）——hub + domain 数据形态 + JSON backend（`ctx.storage`）：hub 不碰 IO（backend 注册表 + `storage.backend.<name>` 生命周期服务键）；domain 带 schema 校验、单写链、持久后 `domain/changed` 事件发射、backup-and-skip 坏记录政策；JSON medium single 整文档 / per-record 一记录一文档（原子重写、legacy bootstrap、foreign 文档读缺位）。对齐 `packages/storage`（storage hub + storage-domain + storage-json；storage-sqlite 不承载）。生产就绪回归（全量 2242 绿、coverage 86%、`mkdocs --strict` 过）。契约/载体差异/简化登记见 verified-diffs。
+
 - **遥测 / 用量统计（2026-09-08）**：`miniharness/telemetry/`（L2）——sessionStats + tokenUsage 真实投影 + per-turn 用量推导（`fold_session_stats` / `fold_token_usage` / `derive_turn_token_usage`，对齐上游 session-stats / token-meter）+ opt-in `UsageStatsService`；wire `projections.values` 由空基线升为真实视图；CLI `sessions stats [id]` 教学扩展。生产就绪回归（全量 2117 绿、coverage 85%、`mkdocs --strict` 过）。契约/载体差异/简化登记见 verified-diffs §2.30。
 
 - **Agent Teams 实验族（2026-09-08，P2-22）**：`seams/agent_team/` 隐式 root roster + durable peer mailbox + 共享任务 DAG（四类 `team/*` 事件全 log-only，Team Lead 会话为权威 journal）+ 模型侧 9 工具与 `team:policy` 提示节（同步门面 + 事件循环内 async 双投递载体）；生产就绪回归（全量 2077 绿、coverage 85%、`mkdocs --strict` 过）。契约/载体差异/简化登记见 verified-diffs §2.29。
@@ -23,9 +25,9 @@ web 半（传输层 + 浏览器前端）的 wire 面已全对齐：两信封 RPC
 
 以下上游 `packages/` 包尚未复现，未来想扩充复现范围可从中挑选；多数属于"能力扩展口 + 消费工具"的延伸，核心约定不依赖它们。已复现家族中也有只落了切片的（如 subprocess 仅环境清洗、client 仅 ui-trajectory、host 为 apiproxy 子集），权威归属以 docs/architecture.md 映射表为准。
 
-- **能力类**：`fs`、`terminal`、`e2b`、`lsp`、`mcp`、`code-runtime`、`storage`、`spill`、`workspace`
+- **能力类**：`fs`、`terminal`、`e2b`、`lsp`、`mcp`、`code-runtime`、`spill`、`workspace`
 - **编排类**：`workflow`、`schedule`、`todo`
-- **横切类**：`settings`、`identity`、`session-query`、`feedback`、`guard`、`runtime-diagnostics`、`api`、`context`、`util`、`web`
+- **横切类**：`settings`、`session-query`、`feedback`、`guard`、`runtime-diagnostics`、`api`、`context`、`util`、`web`
 - **平台类**：`typert`、`test-support`
 
 官方 Python SDK（`python/sdk` 的 stdio JSON-RPC 客户端 + `python/sdk-runtime` 运行时）协议面已复现（`protocol/sdk.py`），互操作测试以官方 SDK 为目标（`tests/test_upstream_sdk_interop.py`，缺 pydantic/上游源码自动 skip），不再列观察清单。

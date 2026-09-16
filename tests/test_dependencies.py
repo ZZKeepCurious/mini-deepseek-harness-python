@@ -51,6 +51,7 @@ LAYER_UNITS = [
     ("boot", 1),
     ("attachment", 1),
     ("identity", 1),
+    ("storage", 1),
     ("core.agent_loop", 2),
     ("compaction", 2),
     ("commands", 2),
