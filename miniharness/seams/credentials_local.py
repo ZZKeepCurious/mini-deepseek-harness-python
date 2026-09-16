@@ -93,6 +93,7 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from ..boot.dotenv import _is_posix_identifier, parse_dotenv
+from ..core.home_paths import resolve_dsh_home as core_resolve_dsh_home
 from ..core.scope import Context, Service
 
 #: watchdog watch 去抖窗口（秒）。对齐上游 credentials-local debounceMs 缺省 100。
@@ -128,8 +129,8 @@ logger = logging.getLogger(__name__)
 
 
 def resolve_dsh_home() -> str:
-    """$DSH_HOME 或 ~/.dsh（上游 resolveDshHome 同语义）。"""
-    return os.environ.get("DSH_HOME") or os.path.join(os.path.expanduser("~"), ".dsh")
+    """$DSH_HOME 或 ~/.dsh（上游 resolveDshHome 同语义，见 core/home_paths.py）。"""
+    return core_resolve_dsh_home()
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict:

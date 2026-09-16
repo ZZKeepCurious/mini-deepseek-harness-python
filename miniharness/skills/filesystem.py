@@ -36,6 +36,7 @@ from typing import Any
 
 import yaml
 
+from ..core.home_paths import resolve_dsh_home
 from .registry import (
     BUNDLED_SKILL_RANK,
     is_skill_name,
@@ -59,12 +60,8 @@ USER_AGENTS_RANK = 500
 
 
 def _resolve_dsh_home(value: str | None) -> Path:
-    if value:
-        return Path(value).resolve()
-    env = os.environ.get("DSH_HOME")
-    if env:
-        return Path(env).resolve()
-    return (Path.home() / ".dsh").resolve()
+    """解析 harness 根（对齐上游 resolveDshHome，实现在 core/home_paths.py）。"""
+    return Path(resolve_dsh_home(value))
 
 
 def find_project_root(cwd: str) -> Path:

@@ -32,6 +32,7 @@ miniharness/
 │   ├── dsh_scope.py       # dsh-scope 原语（scopeParents 图 + scopeTarget 载波 + createScope，对齐 packages/core/scope）
 │   ├── hmr.py             # Cordis HMR 服务（vendor/hmr：register_config watch + 单飞刷新 + config-update-failed 外泄）
 │   ├── schema.py           # schemastery 配置引擎全量移植（vendor/schemastery）
+│   ├── home_paths.py       # harness 根解析（$DSH_HOME > ~/.dsh；packages/util/home-paths）
 │   ├── tools.py            # 工具注册表 + 执行管线
 │   ├── system_prompt.py   # SystemPromptService（分节渲染，systemPrompt 服务）
 │   └── agent_loop/        # agent.py（turn/step 状态机，V2 内嵌流落盘）+ assistant_stream.py（AssistantStreamAttempt）+ resident_loop.py（常驻单循环）+ tool_calls.py（并行调度）+ inbox.py（双队列收件箱）
@@ -81,6 +82,7 @@ miniharness/
 │   ├── registry.py        # SkillRegistry（ctx.skills 服务 + 分层注册 + 渲染/digest）
 │   ├── filesystem.py      # FileSystemSkillProvider（六类根 + frontmatter）
 │   └── tool_skill.py      # skill 工具 + /名字 手势 + durable catalog 注入
+├── identity/               # packages/identity/anonymous-user-id（harness-home 匿名用户 id）
 ├── telemetry/             # packages/session/session-stats + packages/llm/token-meter（投影 fold 切片）
 │   ├── folds.py           # fold_session_stats / fold_token_usage / derive_turn_token_usage（纯 fold）
 │   └── service.py         # UsageStatsService（ctx.usageStats）+ projection_values 自由函数
@@ -228,8 +230,8 @@ miniharness/
 
 | 层 | 内容 | 允许依赖 |
 |---|---|---|
-| L0 地基 | `core/session`、`core/scope`、`core/dsh_scope`、`core/schema`、`core/hmr` | 无（互不依赖；core.scope ↔ core.dsh_scope / core.schema / core.hmr→core.scope 经 §3 例外豁免） |
-| L1 领域 | `llm/*`、`core/tools`、`core/system_prompt`、`core/session_store`、`core/agents`、`attachment`、`boot/*` | 仅 L0 |
+| L0 地基 | `core/session`、`core/scope`、`core/dsh_scope`、`core/schema`、`core/hmr`、`core/home_paths` | 无（互不依赖；core.scope ↔ core.dsh_scope / core.schema / core.hmr→core.scope 经 §3 例外豁免） |
+| L1 领域 | `llm/*`、`core/tools`、`core/system_prompt`、`core/session_store`、`core/agents`、`attachment`、`identity`、`boot/*` | 仅 L0 |
 | L2 编排 | `core/agent_loop`、`compaction`、`jobs`、`plan`、`commands`、`goal`、`skills`、`telemetry` | L0 + L1 |
 | L3 应用与入口 | `cli/*`、`protocol/*`、`seams/*`、`preset`、`extensions`、`interaction`、`client`、`web`、`shell` | L0 ~ L2 |
 | 教学层 | `demo.py`、`example_plugins.py` | 任意层，但不得被业务模块依赖 |
