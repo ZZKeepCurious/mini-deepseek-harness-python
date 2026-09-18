@@ -27,6 +27,8 @@ web 半（传输层 + 浏览器前端）的 wire 面与上游一致：两信封 
 
 - **图像卸载决策（message 投影）**：`core/session/projections.py`（L0）+ `compaction/image_offload.py`（L2）——`image/offload` durable 事件记录要永久卸载的输入图片 occurrence（当前 surface 的 user/message 或 tool/result 节点、深度优先序号、严格递增 + 拆分校验 fail-closed）；`derive_messages` 经 `fold_projections` 把选中 occurrence 投影为不可变 offloaded 副本（身份保留），模型侧投影为占位文本；`offload_oldest_images` + `agent/request-error` 上的 `IMAGE_OFFLOAD_REQUIRED` surface 修复（不消耗重试预算、不落 retry 事件）对应上游 `compaction-image-offload`。会话格式目录新增 `read_released_header` / `encode_current_header` / `encode_current_event`（对应 `session-format-catalog`）。
 
+- **会话检查点策略（session-checkpoint-policy）**：`seams/session_checkpoint.py`（L3）+ `SessionStore.checkpoint`（fail-closed）——三种语义持久化屏障（模型请求前 / 顶层工具体前 / 每步边界），经 `agent/checkpoint` / `tools/pre-execute` / `agent/pre-step` 三个挂点；取消落在检查点窗口内折叠为 canonical `ABORTED_BEFORE_DISPATCH`，检查点失败 fail-closed 不进入下游副作用；嵌套工具派发复用外层检查点。`install_checkpoint_policy(ctx)` opt-in 装配。载体差异：上游经 `llm/stream` 服务 waterfall 延迟适配器构造，mini 单一 adapter 直接调用故改用 `agent/checkpoint` waterfall。
+
 ## 上游包观察清单（未复现，暂不纳入范围）
 
 以下上游 `packages/` 包尚未复现，未来想扩充复现范围可从中挑选；多数属于"能力扩展口 + 消费工具"的延伸，核心约定不依赖它们。已实现的家族中也有只做了一部分切片的（如 subprocess 仅环境清洗、client 仅 ui-trajectory、host 为 apiproxy 子集），权威归属以 docs/architecture.md 映射表为准。

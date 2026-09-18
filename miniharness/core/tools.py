@@ -107,6 +107,9 @@ class ToolExec:
     name: str | None = None
     arguments: Any = None
     additional_contexts: list[dict] = field(default_factory=list)
+    # 嵌套派发标识：外层工具调用（非顶层）复用外层的持久化检查点，不再刷盘；
+    # None = 顶层调用（上游 ToolExecution.parent，session-checkpoint-policy 消费）。
+    parent: Any = None
 
 
 class FusedSignal:
@@ -298,9 +301,13 @@ def pipeline_policy(
         payload["exec"] = exec_
     decision = ctx.waterfall("tools/pre-execute", payload)
     # 对齐上游 PreToolDecision：{kind:'allow'} / {kind:'deny', reason} / {kind:'ask', reason?}
-    # （tools/src/index.ts:588-591；hooks 插件产出的正是 kind 形状）
+    # （tools/src/index.ts:588-591；hooks 插件产出的正是 kind 形状）。
+    # 检查点策略等可携带 {kind:'deny', result}——此时直接采用该 canonical 结果
+    # （上游 session-checkpoint-policy 的 ABORTED_BEFORE_DISPATCH 折叠）。
     verdict = decision.get("kind", "allow") if isinstance(decision, dict) else "allow"
     if verdict == "deny":
+        if isinstance(decision, dict) and isinstance(decision.get("result"), ToolResult):
+            return decision["result"]
         return ToolResult(ok=False, is_error=True, error="denied by tools/pre-execute")
     if verdict == "ask":
         approved = ctx.waterfall("tools/ask", {"tool": tool.name, "args": frozen_args})
@@ -331,8 +338,12 @@ async def pipeline_policy_async(
         payload["exec"] = exec_
     decision = await ctx.awaterfall("tools/pre-execute", payload)
     # 对齐上游 PreToolDecision：{kind:'allow'} / {kind:'deny', reason} / {kind:'ask', reason?}
+    # 检查点策略等可携带 {kind:'deny', result}——直接采用该 canonical 结果
+    # （上游 session-checkpoint-policy 的 ABORTED_BEFORE_DISPATCH 折叠）。
     verdict = decision.get("kind", "allow") if isinstance(decision, dict) else "allow"
     if verdict == "deny":
+        if isinstance(decision, dict) and isinstance(decision.get("result"), ToolResult):
+            return decision["result"]
         return ToolResult(ok=False, is_error=True, error="denied by tools/pre-execute")
     if verdict == "ask":
         approved = await ctx.awaterfall("tools/ask", {"tool": tool.name, "args": frozen_args})

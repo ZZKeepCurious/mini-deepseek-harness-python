@@ -29,6 +29,7 @@
 | Agent Loop（async 驱动 turn/step 状态机 + 同步门面经常驻单事件循环驱动、pre-step 拒绝、工具回灌续跑） | `core/agent-loop` |
 | LLM 扩展口（async `stream(messages, tools, signal)` 接口约定、假模型、DeepSeek 官方 SSE 适配器（httpx 异步流式）、reasoning_effort 四档） | `llm/llm` + `llm/llm-deepseek` |
 | 图片输入请求（catalog 能力解析、`ImageRequestTarget` 投影几何、provider vision-token 定价、Files API 上传复用 + durable 索引、inline base64 回退、有界 stale-id 重试、规范化图片诊断；`image/offload` durable 卸载 + `IMAGE_OFFLOAD_REQUIRED` 恢复） | `llm/llm-deepseek`（`common/*`）+ `attachment/attachment-local` + `compaction/compaction-image-offload` |
+| 会话检查点策略（模型请求前 / 顶层工具体前 / 每步边界三种语义持久化屏障；经 `SessionStore.checkpoint` fail-closed） | `packages/session/session-checkpoint-policy` |
 | 模型请求重试/退避（normal/always 策略、`agent/request-error`、`llm/retry` 审计对、熔合信号派发前检查 + 事件驱动多信号竞速可取消等待、插件 teardown 排干在途恢复） | `llm/llm-retry` + `llm/llm/src/retry-policy.ts` |
 | token 计量（增量 fold、usage 折入锚、4 字符/token 启发式） | `llm/token-meter` |
 | 上下文压缩（pre-step 压力 + `CONTEXT_WINDOW_EXCEEDED` 恢复、surface-replace 检查点事务、可选 tool-result pruner 阶段） | `compaction/compaction-basic` + `compaction-tool-result-pruner` |

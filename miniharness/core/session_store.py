@@ -50,6 +50,7 @@ __all__ = [
     "SESSION_ALREADY_EXISTS",
     "INVALID_BOUNDARY",
     "OPEN_TURN",
+    "SessionCheckpointError",
     "SessionForkError",
     "SessionStore",
     "install_sessions",
@@ -60,6 +61,14 @@ SESSION_NOT_LIVE = "SESSION_NOT_LIVE"
 SESSION_ALREADY_EXISTS = "SESSION_ALREADY_EXISTS"
 INVALID_BOUNDARY = "INVALID_BOUNDARY"
 OPEN_TURN = "OPEN_TURN"
+
+
+class SessionCheckpointError(RuntimeError):
+    """语义持久化检查点失败（上游 session-checkpoint-policy）：fail-closed。
+
+    无持久化参与者、或底层 flush 抛错时上抛；调用方（模型/工具边界）在
+    检查点失败时不得进入下游副作用。
+    """
 
 
 class SessionForkError(Exception):
@@ -200,6 +209,17 @@ class SessionStore(Service):
         entry = self._live_entry_for(session)
         return len(self.ctx.parallel("session/flush", {"session": session},
                                      this_arg=entry["carrier"])) > 0
+
+    def checkpoint(self, session: Session) -> None:
+        """语义持久化检查点（上游 session-checkpoint-policy 经 ctx.sessions.flush）。
+
+        与 `flush` 同源，但 fail-closed：**没有任何持久化监听器参与**（未挂接
+        persistence，或该会话不在 live store）时抛错，而不是静默返回 False——
+        检查点语义要求「工作已落盘」，无人参与者视为未完成。
+        """
+        if not self.flush(session):
+            raise SessionCheckpointError(
+                f"session checkpoint for {session.session_id} had no persistence participant")
 
     # ---------- 查询 ----------
 

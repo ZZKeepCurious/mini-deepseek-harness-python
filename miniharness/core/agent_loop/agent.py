@@ -849,6 +849,14 @@ class AgentLoop:
             self.session.append("request/context", context)
             self._context_baseline = context
 
+        # 语义检查点（上游 session-checkpoint-policy 的模型请求屏障）：请求
+        # 信封落日志后、adapter 派发前刷盘。`agent/checkpoint` waterfall 无
+        # 监听器时为恒等（不引入强制持久化依赖）；装上策略后检查点失败
+        # fail-closed，adapter 不派发。
+        self.ctx.waterfall("agent/checkpoint",
+                           {"agent": self, "boundary": "request"},
+                           this_arg=self._carrier)
+
         return await self._stream_attempt()
 
     def _system_prompt_projection(self, rendered: str, in_history: bool,
