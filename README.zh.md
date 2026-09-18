@@ -2,11 +2,11 @@
 
 [English](README.md) | 中文
 
-**Mini DeepSeek Harness** 是用 **Python（成熟开源库优先，无语义等价库时才用标准库手写）** 逐层复现 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`，由 [DeepSeek AI](https://deepseek.com) 开发的开源 Agent 运行时）的核心约定、**面向产品化的生产就绪**实现（`httpx` 承载 DeepSeek SSE 传输、`pyyaml` 承载配置、可选 `[web]` extra：`fastapi` + `uvicorn` 承载 HTTP/SSE 传输层）。
+**Mini DeepSeek Harness** 是一个用 Python 实现的 Agent 运行时。它逐层复现 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（简称 `dsh`，[DeepSeek AI](https://deepseek.com) 开发的开源 Agent 运行时）的核心约定，目标是可直接上生产。运行依赖 `httpx`（DeepSeek SSE 传输）、`filelock`（凭据跨进程写锁）、`watchdog`（文件监视）、`pyyaml`（YAML 配置）；web 传输层是可选 extra，用 `pip install ".[web]"` 安装 `fastapi` + `uvicorn`。这些库都有成熟实现，直接采用；没有语义等价库时才用标准库手写。
 
-上游项目整个系统建立在一个设计哲学之上：**一切皆插件**（everything is a plugin），其底层是 [Cordis](https://github.com/cordiverse/cordis)，一个依赖注入 + 事件总线框架，设计思想见论文 [_A Programming Paradigm for Spatiotemporal Composability_](https://github.com/cordiverse/paper)。我们对这一设计深表敬意。本仓库是我们的致敬之作：不止于阅读，而是亲手用 Python 重建其核心约定——事件溯源会话日志、插件事件总线、turn/step Agent Loop、能力扩展口三角色（Service Definition / Service Provider / Consumer），**成熟开源库优先**（必需第三方：`httpx` 承载 DeepSeek SSE 传输、`filelock` 承载凭据跨进程写锁、`watchdog` 承载 Cordis HMR 文件监视、`pyyaml` 承载 YAML 配置），任何有 `python3` 的人都可以阅读、运行和修改它们。
+上游整个系统建立在「一切皆插件」（everything is a plugin）的设计之上，底层是 [Cordis](https://github.com/cordiverse/cordis)，一个依赖注入加事件总线框架，设计思想见论文 [_A Programming Paradigm for Spatiotemporal Composability_](https://github.com/cordiverse/paper)。本仓库用 Python 重建它的核心约定：事件溯源会话日志、插件事件总线、turn/step Agent Loop、能力扩展口三角色（Service Definition / Service Provider / Consumer）。只要机器上有 `python3`，就能阅读、运行、修改这些代码。
 
-> **面向生产的复现，不是逐字节移植。** 与 DeepSeek AI 官方无关联。我们优先追求清晰与**真实部署里最要紧的契约**——wire 契约、事件溯源会话日志、可靠性/安全/互操作语义的忠实复现——而非逐包复刻上游；偏差都显式登记，绝不静默假定。
+> **这是面向生产的复现，不是逐字节移植。** 与 DeepSeek AI 官方无关联。我们优先保证真实部署里最要紧的部分：wire 约定、事件溯源会话日志、可靠性 / 安全 / 互操作语义；不逐包复刻上游。与上游的偏差都显式登记，不会默认一致。
 
 > **免责声明**：本仓库的相当一部分内容（包括分析报告与教程手册）是在 AI 助手的辅助下总结、撰写与复现的，可能对上游源码与文档存在误读或不准确之处。请以上游仓库 `deepseek-harness` 的源码与文档为唯一权威参考。
 
@@ -22,12 +22,12 @@
 | 能力 | 上游对应 |
 |---|---|
 | 事件溯源会话（信封 `{type,seq,time,data}`、1 起 turn/step、deep-freeze、`derive_messages`、interrupted 修复） | `packages/core/session` |
-| 持久化（JSONL / SQLite、默认 zstd 拼接帧容器一行一事件、`root/--<projectKey>--/<encoded-id>/session.v3.jsonl[.zstd]` 布局、header + `SESSION_FORMAT_VERSION=3` 双向拒读、编码/布局错配响亮拒绝、flush 栅栏、崩溃恢复、多代读侧经 v0→v1→v2→v3 迁移链就地迁移 released v0/v1 旧产物） | `packages/session/session-persistence` + `session-format-*` |
+| 持久化（JSONL / SQLite、默认 zstd 拼接帧容器一行一事件、`root/--<projectKey>--/<encoded-id>/session.v3.jsonl[.zstd]` 布局、header + `SESSION_FORMAT_VERSION=3` 双向拒读、编码或布局错配直接拒绝、flush 栅栏、崩溃恢复、多代读侧经 v0→v1→v2→v3 迁移链就地迁移 released v0/v1 旧产物） | `packages/session/session-persistence` + `session-format-*` |
 | 插件事件总线（emit / waterfall / parallel / serial、作用域、依赖驱动激活、经 HMR 服务 + `watch_user_patches` 的 epoch 重载） | `vendor/cordis` + `vendor/hmr` + `core/scope` + `core/hmr` |
 | 配置 schema 引擎（schemastery 全量移植：17 类 resolver、meta 克隆、toString/toJSON/i18n/simplify、`~standard` 协议面） | `vendor/schemastery/src/index.ts` |
 | 工具注册表 + 执行管线（schema 校验、pre/execute/post、timeout） | `packages/core/tools` |
 | Agent Loop（async 驱动 turn/step 状态机 + 同步门面经常驻单事件循环驱动、pre-step 拒绝、工具回灌续跑） | `core/agent-loop` |
-| LLM 扩展口（async `stream(messages, tools, signal)` 契约、假模型、DeepSeek 官方 SSE 适配器（httpx 异步流式）、reasoning_effort 四档） | `llm/llm` + `llm/llm-deepseek` |
+| LLM 扩展口（async `stream(messages, tools, signal)` 接口约定、假模型、DeepSeek 官方 SSE 适配器（httpx 异步流式）、reasoning_effort 四档） | `llm/llm` + `llm/llm-deepseek` |
 | 模型请求重试/退避（normal/always 策略、`agent/request-error`、`llm/retry` 审计对、熔合信号派发前检查 + 事件驱动多信号竞速可取消等待、插件 teardown 排干在途恢复） | `llm/llm-retry` + `llm/llm/src/retry-policy.ts` |
 | token 计量（增量 fold、usage 折入锚、4 字符/token 启发式） | `llm/token-meter` |
 | 上下文压缩（pre-step 压力 + `CONTEXT_WINDOW_EXCEEDED` 恢复、surface-replace 检查点事务、可选 tool-result pruner 阶段） | `compaction/compaction-basic` + `compaction-tool-result-pruner` |
@@ -39,23 +39,40 @@
 | system prompt 分节（有序节注册 + 渲染进每次请求） | `core/system-prompt` |
 | boot 与组合（YAML/JSON 补丁、`!!js` 环境变量插值、启动断言） | `packages/boot` |
 | headless 一次性任务入口（`--profile headless "task"`：stdout 最终文本、退出码按 turn/end reason） | `packages/bundle/headless` + `apps/cli` |
-| web 传输层 + 浏览器前端（`--profile web`：两信封 RPC（`client-request`/`server-response`）、WebApi unary 会话服务、Remote 流 wire（单条 `/api/remote.mux` WebSocket 承载 `open/cancel/item/end/error` 帧、`$events` 注册表（api-session/* 转发 + `approval/request` waterfall 经 `$events/result` 结算）、`session.follow`/`session.control` 流）、审批桥（async `tools/ask` ↔ `$events` waterfall）、FastAPI 载体对齐 gateway `stream-server.ts`/`handler.ts` 状态码链 + `$events/result` + frontend-static 契约、会话日志导出 `GET /api/session.export`（root + 子代理后代 + 被引用媒体打包 zip，200/400/404/501/500 状态码链，错误走私有信封外壳）、产品化 `webui/` React 前端（仓库顶层独立工程，只依赖 wire 契约：会话列表/新建、Trajectory（虚拟化窗口 + Overview 折叠视图 + 全文搜索）、审批瀑布、队列/作业面板，`vite build` 产物经 `MINIHARNESS_WEBUI_DIST` 由后端静态承载）、`web/static/` vanilla SPA 降为教学参照（旧 SSE wire，不对新后端工作）） | `packages/api/gateway` + `packages/api/session-controller` + `packages/api/remotes` + `host/frontend-static` + `host/webserver` |
+| web 传输层与浏览器前端（`--profile web`；两信封 RPC、`/api/remote.mux`、`$events`、follow/control、审批桥、FastAPI 载体、会话导出、`webui/` 前端；详见下文） | `packages/api/gateway` + `packages/api/session-controller` + `packages/api/remotes` + `host/frontend-static` + `host/webserver` |
 | 启动器选项（`--patch`、`--dump-config` / `--dump-default-config`、只读组合导出） | `apps/cli/src/args.ts` |
 | 会话管理服务（`ctx.sessions`：create/prepare/enter/announce 生命周期、fork 五错误码、flush 检查点、`session/created|disposed|event|flush` 四事件） | `packages/core/session`（SessionStore） |
 | 会话管理 CLI（`miniharness sessions` 列表/恢复/删除/stats；mini 教学扩展；`stats` 渲染 sessionStats/tokenUsage 投影 + 末 turn 用量归账） | web 表面（上游） |
 | 遥测 / 用量统计（sessionStats + tokenUsage 投影真实化为 `session.follow`/`session.control` 与 Remote snapshot/baseline 的 `projections.values`；`derive_turn_token_usage` per-turn 用量推导，任何缺失边界 fail-closed；opt-in `UsageStatsService` 挂 `ctx.usageStats`） | `packages/session/session-stats` + `packages/llm/token-meter` |
-| 能力扩展口（沙箱后端 + 策略服务 + bash 消费执行器（`ctx.sandboxPolicy` 决议 / `sandbox/mode` 日志覆盖 / `ctx.shell` confine 包裹三路归因）/ 凭据四层 + 记录（record）服务侧五件套 `read/describe/list/modify/delete_record`（`<scope>/<id>` 键语法、跨进程写锁 30s、modifyRecord 唯一写路径、`ctx.credentials` Service + `credentials/record-updated` 事件）/ **授权服务（`install_authorization(ctx)`：`registerFlow`/`list`/`describe`/`cancel`/`begin` + `authorization/settled` 事件，错误码闭集 DUPLICATE_FLOW/NO_FLOW/UNKNOWN_METHOD/ALREADY_IN_FLIGHT/NOT_COMMITTED/DECLINED，经 `credentials/record-updated` 记账 + `describe_record` 二次确认核验凭据提交）**/ 子 agent ACP+SDK+fork 三通道） | capability seams 文档 |
-| 可继续子代理（`start_continuable`/`send_message`（含初始 prompt）、durable 子会话 + 冷恢复、结算投递、异步事件驱动（A8：投递即返回 + watchSettlement + steer 批内合并 + 所有权记账 waiting/settled）、生命周期事件 `subagent/start`/`subagent/end`（runId 配对 + epochStopReason/foldConsumedWork 终局折叠 + 经委托父 scope 载体的 scoped dispatch）、命名 provider 注册表（`register_provider` → 注销发布 `subagent/provider-removed` 边）、DRAINING 准入截止（`drain`/`drain_descendants` + `assert_admitting`，拒绝措辞逐字）、interrupt 授权矩阵（user/ancestor authority + 缺席 no-op）、嵌套续跑（exec.agent 为授权主体，孙代结算通知投直属父）、模型侧委托工具 `subagent`（三段文案逐字、canonical value + `Tool.render`、`run_in_background` 路由）、`send_message`/`interrupt_agent`/`list_agents` 控制工具） | `packages/subagent`（subagent + subagent-in-process-driver + tool-subagent-control + tool-subagent-report） |
-| Agent Teams（implicit-root roster + durable peer mailbox + 共享任务 DAG：`team/member`(v2)/`team/task`/`team/message/queued`/`team/message/delivered` 四事件全 log-only、Team Lead 会话为权威 journal；成员以 `start_continuable` 子会话承载；任务板 8 动作 CAS 转移、图成环拒、写域重叠 advisory；模型侧 9 工具 + `team:policy` 提示节；spawn 投递 sync 与 async（事件循环内）双载体；wire/Remote 端点不承载，错误语义走 `TeamError.code` 闭集） | `packages/experimental/agent-team` + `tool-agent-team` |
-| MCP 客户端（`apply(ctx, config)`：stdio / streamable-http 传输、指数退避重连 + 预算、工具归属注册 `${server}.${name}#${hash}` + `sync_tools` 换代、`tools/list_changed` 重同步、server instructions 字节上限 + `failOnStartupError`、图片投影 / darkfrozen output render；**载体注记（SDK 2.2）**：stdio 传输不投递子进程 EOF/退出（`_drain_stdout` 永久阻塞）——mini 以「有界 RPC 竞速（5s，对 `generation.lost` 中止）+ 生命线 ping watchdog（15s 心跳 / 3s 超时）」替代上游 within 取消令牌） | `packages/mcp/mcp-client` + `mcp-resources` |
+| 能力扩展口（沙箱 / 凭据 / 授权 / 子 agent；详见下文） | capability seams 文档 |
+| 可继续子代理（durable 子会话、异步结算、生命周期事件、控制工具；详见下文） | `packages/subagent` |
+| Agent Teams（roster + mailbox + 共享任务 DAG；详见下文） | `packages/experimental/agent-team` + `tool-agent-team` |
+| MCP 客户端（stdio / streamable-http、重连、工具归属注册；详见下文） | `packages/mcp/mcp-client` + `mcp-resources` |
 | 预设 / Agent 干预 / 轨迹折叠 / 动态插件 / 审批 | `packages/preset` + `core/agent` + `interaction` |
 | 预设系统（shipped `system` 根 + 多根 first-root-wins roster、`project_preset`/`project_session_agent_preset` 投影、会话已开始即 `PresetLockedError`、shipped 预设对 authoring 只读、`agent.cordis.yml` → mini Preset 翻译；`miniharness presets list/show/select/delete` 是承载上游 web Remote 面的教学扩展 CLI） | `packages/preset`（agent-presets） |
 | 协议入口（ACP / JSON-RPC SDK / hooks 桥） | `acp` + `sdk` + `hooks` |
 | 官方 Python SDK 互操作（上游 `DeepSeekHarness` 经 `_launch_args` 驱动 mini worker；`tests/test_upstream_sdk_interop.py`，缺 pydantic/上游源码自动 skip） | `python/sdk` |
-| 异步事件总线、真并行工具 + 屏障 | `core/agent-loop` |
+| 异步事件总线、并行工具执行与屏障 | `core/agent-loop` |
 | CI（GitHub Actions、Python 3.10~3.13、integration 标签真实 API 测试） | — |
 
-上游浏览器前端（`packages/client`，React monorepo）不复现原样：wire 面已全对齐（上游客户端指向 mini 后端可工作）。落地两个消费者前端：产品化 `webui/`（仓库顶层独立 React+TS+Vite 工程，只依赖 wire 契约；构建与运行见 [`webui/README.md`](webui/README.md)），以及 `web/static/` vanilla SPA 教学参照（旧 SSE wire，不对新 alpha.1 后端工作）。
+### 重点能力说明
+
+**web 传输层与浏览器前端**：`--profile web` 启动。两信封 RPC（`client-request` / `server-response`）、WebApi unary 会话服务、Remote 流 wire（单条 `/api/remote.mux` WebSocket 承载 open / cancel / item / end / error 帧）、`$events` 注册表（转发 api-session/*，`approval/request` waterfall 经 `$events/result` 结算）、`session.follow` / `session.control` 流；审批桥把 async `tools/ask` 接到 `$events` waterfall；FastAPI 载体与 gateway 的 `stream-server.ts` / `handler.ts` 状态码链一致；会话日志导出 `GET /api/session.export`，把 root、子代理后代和被引用媒体打包成 zip，沿用 200 / 400 / 404 / 501 / 500 状态码链，错误走私有信封外壳；产品化前端 `webui/` 是仓库顶层的独立 React 工程，只依赖 wire 约定，提供会话列表与新建、Trajectory（虚拟化窗口、Overview 折叠视图、全文搜索）、审批瀑布、队列与作业面板，`vite build` 产物经 `MINIHARNESS_WEBUI_DIST` 由后端静态承载；`web/static/` 的 vanilla SPA 只作教学参照，消费旧 SSE wire，对新后端不工作。
+
+**能力扩展口**：
+
+- 沙箱：后端加策略服务加 bash 消费执行器，含 `ctx.sandboxPolicy` 决议、`sandbox/mode` 日志覆盖、`ctx.shell` 包裹并做三路归因。
+- 凭据：四层加记录服务侧五件套 `read` / `describe` / `list` / `modify` / `delete_record`，含 `<scope>/<id>` 键语法、跨进程写锁 30s、modifyRecord 唯一写路径、`ctx.credentials` Service 与 `credentials/record-updated` 事件。
+- 授权：`install_authorization(ctx)` 提供 `registerFlow` / `list` / `describe` / `cancel` / `begin` 和 `authorization/settled` 事件，错误码闭集为 DUPLICATE_FLOW / NO_FLOW / UNKNOWN_METHOD / ALREADY_IN_FLIGHT / NOT_COMMITTED / DECLINED；经 `credentials/record-updated` 记账，并用 `describe_record` 二次确认凭据提交。
+- 子 agent：ACP、SDK、fork 三条通道。
+
+**可继续子代理**：`start_continuable` / `send_message`（可带初始 prompt）、durable 子会话与冷恢复、结算投递、异步事件驱动（A8：投递即返回、watchSettlement、steer 批内合并、所有权记账 waiting / settled）；生命周期事件 `subagent/start` / `subagent/end`（runId 配对，epochStopReason / foldConsumedWork 终局折叠，经委托父 scope 载体派发）；命名 provider 注册表（`register_provider`，注销时发布 `subagent/provider-removed`）；DRAINING 准入截止（`drain` / `drain_descendants` 与 `assert_admitting`，拒绝措辞逐字一致）；interrupt 授权矩阵（user / ancestor authority，缺席即 no-op）；嵌套续跑（exec.agent 为授权主体，孙代结算通知投直属父）；模型侧委托工具 `subagent`（三段文案逐字、canonical value 与 `Tool.render`、`run_in_background` 路由）；`send_message` / `interrupt_agent` / `list_agents` 控制工具。
+
+**Agent Teams**：implicit-root roster 加 durable peer mailbox 加共享任务 DAG；`team/member`(v2) / `team/task` / `team/message/queued` / `team/message/delivered` 四类事件全部 log-only，Team Lead 会话是权威 journal；成员以 `start_continuable` 子会话承载；任务板 8 个动作走 CAS 转移，成环时拒绝，写域重叠给提示；模型侧 9 个工具加 `team:policy` 提示节；spawn 投递有 sync 和 async（事件循环内）两种载体；wire / Remote 端点不承载，错误语义由 `TeamError.code` 闭集表达。
+
+**MCP 客户端**：`apply(ctx, config)` 支持 stdio / streamable-http 传输、指数退避重连与预算、工具归属注册 `${server}.${name}#${hash}` 与 `sync_tools` 换代、`tools/list_changed` 重同步、server instructions 字节上限与 `failOnStartupError`、图片投影与 darkfrozen output render。载体注记（SDK 2.2）：stdio 传输不投递子进程 EOF 或退出信号（`_drain_stdout` 永久阻塞），mini 改用有界 RPC 竞速（5s，遇 `generation.lost` 中止）加生命线 ping watchdog（15s 心跳 / 3s 超时）。
+
+上游浏览器前端（`packages/client`，React monorepo）不原样复现：wire 面已与上游一致，上游客户端指向 mini 后端即可工作。仓库交付两个消费者前端：产品化的 `webui/`（仓库顶层独立 React + TS + Vite 工程，只依赖 wire 约定，构建与运行见 [`webui/README.md`](webui/README.md)），以及作为教学参照的 `web/static/` vanilla SPA（旧 SSE wire，对新 alpha.1 后端不工作）。
 
 ## 快速开始
 
@@ -73,13 +90,13 @@ python examples/chat_demo.py
 
 # plan + goal 演示（/plan、exit_plan_mode 审查、/goal、goal round 自动续跑）
 python examples/plan_goal_demo.py --approve
-# 一次性任务（对齐 `dsh --profile headless "task"`，需 DEEPSEEK_API_KEY）
+# 一次性任务（与 `dsh --profile headless "task"` 相同，需 DEEPSEEK_API_KEY）
 python -m miniharness.cli --profile headless "run the tests"
 
 # 启动 web 传输层服务器（需：pip install ".[web]"）
 python -m miniharness.cli --profile web
 
-# 只读组合导出（对齐 `dsh --dump-config`）
+# 只读组合导出（与 `dsh --dump-config` 相同）
 python -m miniharness.cli --dump-config
 
 # 会话列表 / 恢复 / 删除
@@ -89,7 +106,7 @@ python -m miniharness.cli sessions
 python -m miniharness.cli presets list
 ```
 
-CLI 写入的全部状态都落在 `MINIHARNESS_HOME`（默认 `~/.miniharness`）下：`--profile headless` 会话与 `miniharness sessions` 在 `$MINIHARNESS_HOME/sessions`，用户预设（`.agent-presets`）与其同级；改该变量即可整体搬迁持久化数据，如 `export MINIHARNESS_HOME=/data/miniharness`。
+CLI 写入的全部状态都在 `MINIHARNESS_HOME`（默认 `~/.miniharness`）下：`--profile headless` 会话与 `miniharness sessions` 在 `$MINIHARNESS_HOME/sessions`，用户预设（`.agent-presets`）与其同级；改该变量即可整体搬迁持久化数据，如 `export MINIHARNESS_HOME=/data/miniharness`。
 
 ### 接真实 DeepSeek API（可选）
 

@@ -8,10 +8,10 @@
 
     - **产出位置**：本章演示的单文件 `session.py` 实为 `core/session/` 包（`session.py` + `invariant.py` + `types.py` + `surface.py` + `repair.py`）。
     - **`Session.append` 签名**：本章为 `append(event: dict)`；实现为 `append(type_, data=None, surfaceOp=None, sourceEventSeqs=None)`（`core/session/session.py:201`），信封 `{type, seq, time, data}` 由 `seq == len(log)` 自动编号。
-    - **事件词汇表**：本章只讲 8 个核心类型；实现 `KNOWN_TYPES` 共 **39 个**（`core/session/types.py`）：核心 9 类（`user/message`、`assistant/message`（V3 内嵌 `stream`）、`assistant/attempt`（失败/中止 attempt）、`turn/start|end`、`step/start|end`、`tool/call`）+ `tool/result`、`request/header`、`request/context`、`session/end-seed`、`agent/inbox/spliced`、`approval/asked|decided|policy`、`hook/invoked|result`、`llm/retry|retry-started`、`compaction/start|summary|end|prune`、`plan/mode`、`command/run|done`、`goal/change`、`subagent/descriptor`、`sandbox/mode`、`system/message`、`feedback/message-put|delete`、`team/member`、`team/message/queued|delivered`、`team/task`、`tool/ptc-dispatch{,-start}`（上游 alpha.1.5 全集 **54 类**——生成式 `KNOWN_SESSION_EVENT_TYPES`，已废除 `assistant/chunk`；读真实上游日志遇超集类型时 fail-closed 拒读）。
+    - **事件词汇表**：本章只讲 8 个核心类型；实现 `KNOWN_TYPES` 共 **39 个**（`core/session/types.py`）：核心 9 类（`user/message`、`assistant/message`（V3 内嵌 `stream`）、`assistant/attempt`（失败/中止 attempt）、`turn/start|end`、`step/start|end`、`tool/call`）+ `tool/result`、`request/header`、`request/context`、`session/end-seed`、`agent/inbox/spliced`、`approval/asked|decided|policy`、`hook/invoked|result`、`llm/retry|retry-started`、`compaction/start|summary|end|prune`、`plan/mode`、`command/run|done`、`goal/change`、`subagent/descriptor`、`sandbox/mode`、`system/message`、`feedback/message-put|delete`、`team/member`、`team/message/queued|delivered`、`team/task`、`tool/ptc-dispatch{,-start}`（上游 alpha.1.5 全集 **54 类**，来自生成式 `KNOWN_SESSION_EVENT_TYPES`，不含 `assistant/chunk`；读真实上游日志遇超集类型时 fail-closed 拒读）。
     - **`derive_messages`**：本章是"扁平字符串消息 + 按 role 替换"；实现是 `ContentBlock` 消息对象 + `surfaceOp: {op:'replace', startSeq, endSeq}` 区间遮蔽（`core/session/surface.py:181` `_surface_nodes` 折叠），replace 遮蔽被替换区间为一个新节点。
     - **`repair_interrupted_turn`**：本章只补 `turn/end` 字符串 reason；实现先为未匹配 tool call 合成 error 结果（`TOOL_NOT_STARTED` / `TOOL_OUTCOME_UNKNOWN`），再补 `step/end` + `turn/end {kind:'interrupted'}`，时间戳复用最后真实事件（`core/session/repair.py:27`）。
-    - **"五个硬性规定"**：replace 遮蔽、`session/end-seed` 标记、repair 合成（`{kind:'interrupted'}`）等已由 `tests/test_session.py` 钉死，以测试为最终验收。
+    - **"五个硬性规定"**：replace 遮蔽、`session/end-seed` 标记、repair 合成（`{kind:'interrupted'}`）等已由 `tests/test_session.py` 固定，以测试为最终验收。
 
 ## 1.1 这一章要做什么，以及为什么它是整个框架的地基
 
@@ -40,7 +40,7 @@
 **常规做法**：维护一个 `messages: list[Message]`，每次对话往里面 append。简单、直接，多数场景够用。但它有三个固有短板：
 
 1. **不可回放**。数组只保存"最终状态"，丢了"过程"。压缩上下文之后，旧消息就没了；想换一种压缩策略重放一遍？做不到。
-2. **副本漂移风险**。UI 显示一份、持久化落盘一份，往往还有一份"内存里的权威版本"。两份数据对不上时，排查成本很高。
+2. **副本漂移风险**。UI 显示一份、持久化写盘一份，往往还有一份"内存里的权威版本"。两份数据对不上时，排查成本很高。
 3. **扩展要动核心**。想加一种新的事实（工具结果、上下文注入），得改核心的数据结构，插件很难插进来。
 
 **dsh 的做法**：日志记的是"发生过什么"，这是完整事实；模型历史只是这份事实的一个投影。三个短板对应地变成三个优点：
@@ -71,7 +71,7 @@ flowchart LR
 3. `模型历史` 只是投影的结果视图，永远可以从日志重建——这就是上一节"模型可见 ⟺ 已记录"的图表示。
 4. `持久化` 同样是日志的下游：按 seq 顺序追加写盘、启动时按序回放重建日志；它只认日志，不认投影出来的消息。
 5. 关键约束：投影与持久化**互不直接打交道**——它们各自消费同一份日志，彼此不调用，因此谁改谁都不会破坏另一条链路（解耦）。
-6. 崩溃后的恢复闭合了回路：持久化把已落盘的事件回灌回 `Session`，日志恢复后再重新投影出完整历史。
+6. 崩溃后的恢复闭合了回路：持久化把已写入磁盘的事件回灌回 `Session`，日志恢复后再重新投影出完整历史。
 
 ## 1.3 代码 step-by-step
 
@@ -118,7 +118,7 @@ def deep_freeze(value):
 两个细节值得展开：
 
 - `allow_nan=False`：Python 的 `json.dumps` 默认允许输出 `NaN`，但 `NaN` 不是合法 JSON，别的语言读不了。关掉它，序列化不了的一律抛错。很多 JSON 相关的隐性 bug 都是从这漏出去的。
-- `MappingProxyType`：返回的是"只读视图"而不是拷贝。调用方以为能改，一改就抛 `TypeError`。日志一旦写入就不可变，这条后面会被测试钉死。
+- `MappingProxyType`：返回的是"只读视图"而不是拷贝。调用方以为能改，一改就抛 `TypeError`。日志一旦写入就不可变，这条后面会被测试固定。
 
 > 真实 dsh 在 `append()` 源头做同样的深度校验和冻结——坏事件永远进不了日志，这是"日志即真相"的硬保证。
 
@@ -159,7 +159,7 @@ class Session:
 
 - **类型在册**（`KNOWN_TYPES`）→ 拒绝未知类型，保证日志内容永远可被理解。
 - **surface 事件必须带合法 `surfaceOp`** → 保证投影永远有据可依。试想一条 `user/message` 没带 `surfaceOp` 进了日志，投影时是 append 还是 replace？没法判断，所以源头就拦下。
-- **可无损 JSON 序列化** → 保证日志永远可落盘、可重放。
+- **可无损 JSON 序列化** → 保证日志永远可写入磁盘、可重放。
 
 然后看最关键的一行：
 
@@ -211,9 +211,9 @@ def _apply_surface(messages, role: str, content: str, op: str) -> None:
 
 要点拆开说：
 
-- **纯函数**：输入事件列表，输出消息列表，不改任何东西。调用十次和一次结果完全一样。这个性质值得写测试钉住，因为"投影可重复"是后面"回放 = 重新派生"的前提。而且出了压缩 bug 时，能对着同一份日志反复调用调试，是纯函数最大的红利。
+- **纯函数**：输入事件列表，输出消息列表，不改任何东西。调用十次和一次结果完全一样。这个性质值得写测试固定，因为"投影可重复"是后面"回放 = 重新派生"的前提。而且出了压缩 bug 时，能对着同一份日志反复调用调试，是纯函数最大的红利。
 - **`append`**：往历史末尾追加一条消息。
-- **`replace`**：从末尾往前找最近一条同 role 的消息，整体替换。这就是上下文压缩落地的机制——压缩不是删日志，而是往日志**追加**一条 `surfaceOp=replace` 的事件，让它替换旧消息的投影。注意关键点：日志本身只是追加，`seq` 依然连续，事实没有丢失，只是投影时被替换。
+- **`replace`**：从末尾往前找最近一条同 role 的消息，整体替换。上下文压缩就靠它实现：压缩不删日志，而是往日志**追加**一条 `surfaceOp=replace` 的事件，让它替换旧消息的投影。注意关键点：日志本身只是追加，`seq` 依然连续，事实没有丢失，只是投影时被替换。
 - **控制类事件不投影**：`turn/*`、`step/*` 是"括号"，不是"内容"。模型不需要看到 `turn/start`，它只关心实际的消息流。`tool/call` 也不投影——模型看到的是 `tool/result` 的汇总文本，看不到内部调用记录。
 
 `_apply_surface` 里有个容易踩的坑：`replace` 找不到同 role 消息时，如果直接 `return`，这条消息就凭空消失了。所以代码里是"退化为 append"——宁可多一条，不能丢一条。这个细节值得写进测试用例。
@@ -278,7 +278,7 @@ python -m unittest tests.test_session -v
 
 现在打开 `deepseek-harness/packages/core/session/src` 对照。建议的读法：先看 `SessionEventMap`（对应本章的 `KNOWN_TYPES`，但它是 TypeScript 接口，靠声明合并扩展），再看 `append()` 的校验（真实实现还有 event 版本字段），最后看 `deriveMessages()`（真实实现按"surface 节点"序列投影，语义和我们一致，但组织方式更正式）。
 
-不用全读，读 50 行就够。目标不是读完，而是体会到一件事：**约定一样，实现更严格**。简化版抓住了设计精髓，真实版在细节上更严密——比如事件版本这类简化版没碰的东西，都是为真实世界的运维场景准备的。
+不用全读，读 50 行就够。目标不在读完，而在体会一件事：**约定一样，实现更严格**。简化版抓住了设计精髓，真实版在细节上更严密——比如事件版本这类简化版没碰的东西，都是为真实世界的运维场景准备的。
 
 ## 1.7 收尾
 

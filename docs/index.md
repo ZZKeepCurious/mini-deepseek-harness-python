@@ -1,13 +1,13 @@
 # Mini DeepSeek Harness（Python）— 文档入口
 
-> 用 Python（成熟开源库优先，无语义等价库时才用标准库手写）以清晰复现 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 核心契约为基础、**面向产品化的生产就绪**实现。
+> 用 Python（成熟开源库优先，无语义等价库时才用标准库手写）清晰复现 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的核心约定，目标是可直接上生产。
 > 仓库：https://github.com/ZZKeepCurious/mini-deepseek-harness-python
 
 ## 这是什么
 
 本手册用 **Python（成熟开源库优先：SSE 传输 `httpx`、凭据跨进程写锁 `filelock`、文件监视 `watchdog`；YAML 配置 `pyyaml`）** 从零实现一个 `MiniHarness`：一个最小可用的 Agent 运行时核心子集，逐条复现 DeepSeek Harness（`dsh`）的**约定与硬性规定**。
 
-复现目标不是逐行移植 TypeScript，而是**掌握约定**：
+复现的目标是掌握约定，不逐行移植 TypeScript：
 
 | 保留（技术核心本身） | 跳过（非核心） |
 |---|---|
@@ -17,10 +17,10 @@
 | 作用域化注册 + 工具管线 | typert 类型图 |
 | turn/step 状态机 + LLM 流式协议 | Web 客户端 / UI 卡片 |
 
-## 架构与对齐（代码组织设计）
+## 架构与上游对应（代码组织设计）
 
 - **[架构说明与上游对应](architecture.md)** —— `miniharness/` 代码自身的"建筑图纸"：目录组织（家族镜像原则）、模块 ↔ 上游映射表、依赖方向规则、公共 API 白名单/黑名单与教学扩展清单。
-- **[接口契约参考](interface-wire.md)** —— 前后端唯一耦合面的权威速查：web 传输层发布的全部 wire 契约（两信封 RPC、`/api/remote.mux` WS 帧、`$events`/`$events/result`、follow/control、审批瀑布、静态承载、会话导出）。产品化前端（`webui/`）只依赖本契约。
+- **[接口约定参考](interface-wire.md)** —— 前后端唯一耦合面的权威速查：web 传输层发布的全部 wire 约定（两信封 RPC、`/api/remote.mux` WS 帧、`$events`/`$events/result`、follow/control、审批瀑布、静态承载、会话导出）。产品化前端（`webui/`）只依赖这份约定。
 
 ## 分析报告（主文档 · 体系化解读）
 
@@ -90,7 +90,7 @@ python -m unittest discover -s tests -t .
 python -m miniharness.demo
 ```
 
-> 每章开头都有"先动手再读解释"的最小代码；读完一章就运行一次该章测试，感受硬性规定被测试钉住的感觉。
+> 每章开头都有"先动手再读解释"的最小代码；读完一章就运行一次该章测试，体会硬性规定如何被测试固定下来。
 
 ## 手册与报告的关系
 

@@ -1,9 +1,9 @@
 # webui — MiniHarness 产品化浏览器前端
 
 > 仓库顶层独立 React + TypeScript + Vite 工程（独立于 Python 内核）。
-> **只依赖后端发布的 wire 契约**：两信封 RPC（`/api/<endpoint>`）+ `/api/remote.mux`
+> **只依赖后端发布的 wire 约定**：两信封 RPC（`/api/<endpoint>`）+ `/api/remote.mux`
 > WebSocket 承载 Remote 流 + `$events`/`$events/result` + `session.follow`/`session.control`。
-> 禁止 import / hack Python 内部。契约权威参考：`../docs/interface-wire.md`。
+> 禁止 import / hack Python 内部。约定权威参考：`../docs/interface-wire.md`。
 
 ## 功能面
 
@@ -30,7 +30,7 @@
 ### 1. 先起 Python web 后端
 
 ```sh
-# 仓库根目录；后端缺省端口为 0（OS 分配），dev 代理默认指向 8899，请显式对齐：
+# 仓库根目录；后端缺省端口为 0（OS 分配），dev 代理默认指向 8899，这里显式设为 8899：
 MINIHARNESS_WEB_PORT=8899 python -m miniharness.cli --profile web
 ```
 
@@ -65,7 +65,7 @@ MINIHARNESS_WEBUI_DIST=webui/dist python -m miniharness.cli --profile web
 
 ```
 webui/
-├── src/wire/      # 契约客户端层（纯 TS，可单测）：rpc / mux / follow / control / events / auth
+├── src/wire/      # 约定客户端层（纯 TS，可单测）：rpc / mux / follow / control / events / auth
 ├── src/app/       # React 编排 hooks（useBackend）
 ├── src/ui/        # 无状态展示组件（SessionList / Trajectory / ApprovalPanel / ControlPanel）
 ├── tests/         # vitest 单测（jsdom，mock fetch/WS）

@@ -11,11 +11,11 @@
 2. 插件怎么在"不互相知道"的前提下协作？（事件总线）
 3. 插件卸载、热重载、故障清理时，副作用怎么可靠地撤销？（可逆副作用）
 
-常规的插件系统有两种解法：全局注册表（谁都能注册，谁也管不住谁），或者手工写启动顺序（顺序错了就崩）。dsh 的做法两样都不太一样，两个核心思想先记住：
+常规的插件系统有两种解法：全局注册表（谁都能注册，谁也管不住谁），或者手工写启动顺序（顺序错了就崩）。dsh 两样都不用，两个核心思想先记住：
 
 > **(1) 注册 = 可逆副作用**：一切贡献经 `ctx.effect()` 登记，`dispose()` 时按注册逆序回滚。这是热重载、插件卸载、故障清理能可靠工作的根基。相比之下，常规的"直接往全局表里塞"没有回滚能力。
 >
-> **(2) waterfall 短路即决策**：流水线事件（`agent/pre-step`、`agent/request-error`、`tools/pre-execute|ask|guards|post-execute`）必须 `next()` 委派；不调 `next` 就短路，返回值就是最终决策。这是"策略插件可以否决"的机制——普通事件广播做不到否决，它没有返回值通道。
+> **(2) waterfall 短路即决策**：流水线事件（`agent/pre-step`、`agent/request-error`、`tools/pre-execute|ask|guards|post-execute`）必须 `next()` 委派；不调 `next` 就短路，返回值就是最终决策。这就是策略插件能行使否决权的原因——普通事件广播做不到否决，它没有返回值通道。
 
 ## 2.2 概念：四种派发模式
 
@@ -100,9 +100,9 @@ class Context:
 
 为什么服务按 **key** 查找而不是直接 import 具体实现？因为插件要依赖的是"接口约定"（Service Definition），不是某个具体类。第 6 章的沙箱、凭据、子 agent 全部是这种模式：消费方只认识 key，具体实现可以替换。
 
-实现存一根**全局 store**，按"name 的隔离标签"键控（对齐上游 `reflect.ts` 的 `ctx[symbols.isolate][name]`）。`_label_of(key)` 沿祖先链找最近的 `isolate(name)` 遮蔽，否则用根默认标签——所以进程级服务（jobs/skills/tools）提供在根上，所有作用域都看得到；per-agent 的 tools/systemPrompt 在各自作用域 `isolate()` 换标签，互不冲撞（第 3 章工具隔离、continuation 子代理都用它）。
+实现存一根**全局 store**，按"name 的隔离标签"键控（同上游 `reflect.ts` 的 `ctx[symbols.isolate][name]`）。`_label_of(key)` 沿祖先链找最近的 `isolate(name)` 遮蔽，否则用根默认标签——所以进程级服务（jobs/skills/tools）提供在根上，所有作用域都看得到；per-agent 的 tools/systemPrompt 在各自作用域 `isolate()` 换标签，互不冲撞（第 3 章工具隔离、continuation 子代理都用它）。
 
-注意 `provide` 对同一标签下的重复提供直接抛错（fail loud）。常规的做法是"后注册的覆盖先注册的"，看起来方便，实际会让"谁覆盖了谁"变成谜。dsh 选择大声失败，冲突必须在启动时解决；真需要"每 agent 一套"就用 `isolate()` 换标签，而不是指望覆盖。
+注意 `provide` 对同一标签下的重复提供直接抛错（fail loud）。常规的做法是"后注册的覆盖先注册的"，看起来方便，实际会让"谁覆盖了谁"变成谜。dsh 选择直接报错，冲突必须在启动时解决；真需要"每 agent 一套"就用 `isolate()` 换标签，而不是指望覆盖。
 
 ### 步骤 2：可逆副作用 —— `effect` 与 `dispose`（fiber 承载）
 
@@ -131,14 +131,14 @@ def provide(self, key, value):
     )
 ```
 
-为什么 execute 立即执行？因为 setup 本身可能注册更多东西（嵌套 effect、监听器），它们必须在这一步就可见——拆解发生在很久以后，只有把"装了什么"完整记下，卸载时才能原样拆出来。而且**注册先于执行**：wrapper 先进入 fiber 的登记表，再跑执行体，所以执行体中途触发拆解时，拆解器能看到这个"尚未完成 setup"的 effect，先挂一个 setup barrier 等它 setup 结束再清理（对齐上游 `disposeAfter(waitForSetup())` 的重入保护，见测试 `test_registration_before_execute_reentrant_unload`）。
+为什么 execute 立即执行？因为 setup 本身可能注册更多东西（嵌套 effect、监听器），它们必须在这一步就可见——拆解发生在很久以后，只有把"装了什么"完整记下，卸载时才能原样拆出来。而且**注册先于执行**：wrapper 先进入 fiber 的登记表，再跑执行体，所以执行体中途触发拆解时，拆解器能看到这个"尚未完成 setup"的 effect，先挂一个 setup barrier 等它 setup 结束再清理（同上游 `disposeAfter(waitForSetup())` 的重入保护，见测试 `test_registration_before_execute_reentrant_unload`）。
 
 `effect` 返回的 disposer 有两个性质：
 
 1. **单发**：调用一次即进入结算，二次调用 no-op，且返回同一个完成对象；
 2. **可 await**：`await disposer()` 会触发（若未触发）并等待结算结束——异步拆解完整落在调用方视线内。
 
-整个机制由一个 **fiber** 承载（上游 `vendor/cordis/src/fiber.ts`）。每个上下文对应一根 fiber，`fiber._disposables` 是它名下的 effect 列表，`fiber.dispose()` 逆序回滚全部：
+整套做法由一个 **fiber** 承载（上游 `vendor/cordis/src/fiber.ts`）。每个上下文对应一根 fiber，`fiber._disposables` 是它名下的 effect 列表，`fiber.dispose()` 逆序回滚全部：
 
 ```python
 class FiberState:
@@ -148,7 +148,7 @@ class FiberState:
 - `create_scope` 铸新 fiber：`pending → loading → active`；
 - `fiber.dispose()`：`active → unloading → disposed`；
 - 每次状态转换派发 `internal/status`（payload `{"fiber", "old"}`）；
-- 处于 `unloading`/`disposed` 的 fiber 拒绝一切注册（`INACTIVE_EFFECT`）——"销毁后拒绝注册"是被测试钉死的硬性规定。
+- 处于 `unloading`/`disposed` 的 fiber 拒绝一切注册（`INACTIVE_EFFECT`）——"销毁后拒绝注册"是被测试固定的硬性规定。
 
 `fiber.dispose()` 幂等：重复调用 join 在途的拆解（`inertia` = 在途转换，竞态共享同一完成）。拆解时全部同步 disposer 立即逆序执行（既有同步调用方零破坏）；含异步 disposer 则返回完成对象，需要时 `await`。异步拆解产生的错误被 contained——记入 fiber 的错误表并记日志，既不静默吞掉也不炸掉拆解本身。
 
@@ -252,7 +252,7 @@ provider = root.plugin({"name": "provider",
 assert fiber.state == FiberState.ACTIVE       # 提供方装载 → 依赖者被唤醒
 ```
 
-常规插件系统靠手工排启动顺序，依赖关系复杂时极易出错。dsh 反过来：依赖满足才 apply，依赖变化触发 epoch 重载（测试 `test_dependency_wakes_pending_fiber` 钉住：provider 必须先于 consumer）。
+常规插件系统靠手工排启动顺序，依赖关系复杂时极易出错。dsh 反过来：依赖满足才 apply，依赖变化触发 epoch 重载（测试 `test_dependency_wakes_pending_fiber` 固定了顺序：provider 先于 consumer）。
 
 两个细节：
 
@@ -287,8 +287,8 @@ python -m unittest tests.test_bus tests.test_fiber -v
 
 打开 `deepseek-harness/vendor/cordis/src`：
 
-- `context.ts` + `reflect.ts`：`provide`/`get`/`set`/`isolate`/`effect`/`dispose` 的完整实现——`effect` 的 execute 形态、注册先于执行、`disposeAfter(waitForSetup())` 重入保护、按隔离标签键控的全局 store、`notify` 的标签过滤，我们逐条对齐
-- `fiber.ts`：fiber 状态机、`internal/status`、`internal/plugin`、`_setEpoch` 依赖重载、`inertia` 在途转换、`_unload` 的 `Promise.all` 并发拆解——2.2 的 fiber 语义都从这里来（mini 已对齐装载半边与依赖驱动注册表，epoch 热重载经 hmr 与 `watch_user_patches` 路径闭合；SessionStore 与上游同构为 `Service` 子类——构造 `super(ctx, "sessions")` 即经 ctx.provide 自动登记、随拥有 fiber 注销）
+- `context.ts` + `reflect.ts`：`provide`/`get`/`set`/`isolate`/`effect`/`dispose` 的完整实现——`effect` 的 execute 形态、注册先于执行、`disposeAfter(waitForSetup())` 重入保护、按隔离标签键控的全局 store、`notify` 的标签过滤，我们逐条复现
+- `fiber.ts`：fiber 状态机、`internal/status`、`internal/plugin`、`_setEpoch` 依赖重载、`inertia` 在途转换、`_unload` 的 `Promise.all` 并发拆解——2.2 的 fiber 语义都从这里来（mini 复现了装载半边与依赖驱动注册表，epoch 热重载走 hmr 与 `watch_user_patches` 路径；SessionStore 与上游同构，是 `Service` 子类——构造 `super(ctx, "sessions")` 即经 ctx.provide 自动登记、随拥有 fiber 注销）
 - `events.ts`：四种派发模式的异步版本
 - `vendor/README.md`：18 项本地加固清单——挑 3 项读，体会"框架被 vendored 且可审计"意味着什么：不依赖 npm 供应链，代码就躺在仓库里，任何人都能审计每一行。
 

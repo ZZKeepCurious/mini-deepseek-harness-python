@@ -9,7 +9,7 @@
 本章做三件事：
 
 1. **事件总线 asyncio 化**：`aemit` / `awaterfall` / `aparallel`，同一语义的异步版本（监听器可以是 async 函数，也可以是同步函数）；
-2. **并行调度器**：`schedule_tool_calls`——exclusive 屏障 + 有界滚动池 + 模型序提交 + abort 排干与合成错误，逐条对齐上游 `tool-calls.ts`；
+2. **并行调度器**：`schedule_tool_calls`——exclusive 屏障 + 有界滚动池 + 模型序提交 + abort 排干与合成错误，逐条同上游 `tool-calls.ts`；
 3. **分类器**：`is_concurrency_safe` 从 bool 升级为"可调用（按参数判定）"，`execution_mode` 只有精确 `True` 才 parallel，其余 fail 到 exclusive。
 
 ## 12.2 概念：上游怎么调度的
@@ -60,7 +60,7 @@ async def _maybe_await(value):
     return value
 ```
 
-注意是**循环**而不是单次 `await`：中间件 `return nxt(p)` 会直接返回下一层的 coroutine（不展开），同步中间件包 async 中间件时可能叠两层。单层解包会在"async 中间件 return nxt()"时拿到未 await 的 coroutine 泄漏出去（第 12 章测试 `test_async_middleware_can_await_before_delegating` 钉住的就是它）。
+注意是**循环**而不是单次 `await`：中间件 `return nxt(p)` 会直接返回下一层的 coroutine（不展开），同步中间件包 async 中间件时可能叠两层。单层解包会在"async 中间件 return nxt()"时拿到未 await 的 coroutine 泄漏出去（第 12 章测试 `test_async_middleware_can_await_before_delegating` 固定的就是它）。
 
 ```python
 async def awaterfall(self, event, payload=None, *, this_arg=None):
@@ -136,7 +136,7 @@ except asyncio.TimeoutError:
         error = TimeoutError(f"timeout after {tool.timeout_ms}ms")
 ```
 
-wait_for 经 `shield` 包裹保证超时不取消底层任务——置位 signal（工具协作中止，如子进程工具 terminate）后必须 `await` 排干到静止点。execute 返回普通值时 `_maybe_await` 原样透传；返回 coroutine 时直接 `await`（async 契约）。
+wait_for 经 `shield` 包裹保证超时不取消底层任务——置位 signal（工具协作中止，如子进程工具 terminate）后必须 `await` 排干到静止点。execute 返回普通值时 `_maybe_await` 原样透传；返回 coroutine 时直接 `await`（async 约定）。
 
 ## 12.5 代码 step-by-step（`miniharness/core/agent_loop/tool_calls.py`）
 
@@ -146,7 +146,7 @@ wait_for 经 `shield` 包裹保证超时不取消底层任务——置位 signal
 |---|---|
 | `executeToolCalls` 外层循环：分类 → 组 | `schedule_tool_calls`：`execution_mode(first)` → `group = planned[next_:] if mode == "parallel" else [first]` |
 | `runGroup` | `_run_group` |
-| `appendToolCall` 先落盘返回 seq | `append_tool_call`（同） |
+| `appendToolCall` 先写日志返回 seq | `append_tool_call`（同） |
 | `commitReady` 只推进连续槽位 | `commit_ready`（同） |
 | `fillPool` 池满停补 | `fill_pool`（`len(in_flight) < max_parallel`） |
 | 组内重分类 exclusive → break | `fill_pool` 里 `next_to_start > 0` 时重新 `execution_mode` |
@@ -156,7 +156,7 @@ wait_for 经 `shield` 包裹保证超时不取消底层任务——置位 signal
 | scheduler failure：排干 + 抛第一个 | `scheduler_failure` 收集，`gather(return_exceptions=True)` 排干后 `raise` |
 | `maxParallelToolCalls`（默认 10） | `max_parallel` 参数 + `DEFAULT_MAX_PARALLEL_TOOL_CALLS` |
 
-合成错误结果的落盘顺序与上游 `appendSkippedToolCall` 一致：先 `tool/call`（引用 seq），再 `tool/result`（`sourceEventSeqs=[seq]` + `error: {name: "AbortError", code: TOOL_ABORTED_BEFORE_DISPATCH}`）。
+合成错误结果的写入顺序与上游 `appendSkippedToolCall` 一致：先 `tool/call`（引用 seq），再 `tool/result`（`sourceEventSeqs=[seq]` + `error: {name: "AbortError", code: TOOL_ABORTED_BEFORE_DISPATCH}`）。
 
 ## 12.6 代码 step-by-step（`miniharness/core/agent_loop/agent.py`）
 
@@ -164,12 +164,12 @@ wait_for 经 `shield` 包裹保证超时不取消底层任务——置位 signal
 
 - `run_async(content)` → `_pump_async` → `_run_step_async`：pre-step 走 `awaterfall`，工具走 `_execute_tools_async`；
 - `_execute_tools_async` 构造共享 `ToolExec`（`self._step_signal`）传给调度器；
-- `cancel()` 在 async 路径多一步：置位 `_step_signal.signal`——调度器检测后停止补池、排干已启动、未启动补合成错误。turn 仍以 `{kind:'aborted'}` 闭合（既有契约不变）；
-- `AgentLoop(max_parallel_tool_calls=10)` 对齐上游配置项。
+- `cancel()` 在 async 路径多一步：置位 `_step_signal.signal`——调度器检测后停止补池、排干已启动、未启动补合成错误。turn 仍以 `{kind:'aborted'}` 闭合（既有约定不变）；
+- `AgentLoop(max_parallel_tool_calls=10)` 同上游配置项。
 
 LLM 流式已原生异步（httpx 传输）：`adapter.stream` 是真 async 迭代器，与工具执行体共用同一事件循环；abort 置位即关闭连接（无遗留线程）。
 
-## 12.7 硬性规定（被测试钉住）
+## 12.7 硬性规定（被测试固定）
 
 1. **精确 True 才并行**：未声明 / False / callable 抛错 / 返回非布尔 → exclusive（`tests.test_parallel.TestExecutionMode`）；
 2. **分类器不进模型 schema**：`_tool_definitions` 里没有 `isConcurrencySafe`；
@@ -188,4 +188,4 @@ LLM 流式已原生异步（httpx 传输）：`adapter.stream` 是真 async 迭�
 - [ ] 解释"pre-execute 有序、body 重叠"与 `pipeline_policy_async` / `pipeline_async_body` 拆段的关系；
 - [ ] 用 `max_parallel=2` 跑 4 个并行工具，观察 `fill_pool` 的补池节奏；
 - [ ] 构造一次中途取消：哪些结果真实、哪些合成，顺序如何；
-- [ ] 说出 mini 相对上游的简化：**schemastery 已全量移植**（`core/schema.py` 头注"全量移植，对齐 902 行单文件引擎"，17 类 resolver + builder + 序列化/i18n/simplify 齐全，见第 15 章；载体差异在 callback 字符串求值不做，只收 callable）；重试等待以多信号竞速 `asyncio.Event` 熔合近似上游 `AbortSignal.any`；`asyncio.subprocess` 尚未接入工具执行。
+- [ ] 说出 mini 相对上游的简化：**schemastery 已全量移植**（`core/schema.py` 头注"全量移植，对应 902 行单文件引擎"，17 类 resolver + builder + 序列化/i18n/simplify 齐全，见第 15 章；载体差异在 callback 字符串求值不做，只收 callable）；重试等待以多信号竞速 `asyncio.Event` 熔合近似上游 `AbortSignal.any`；`asyncio.subprocess` 尚未接入工具执行。

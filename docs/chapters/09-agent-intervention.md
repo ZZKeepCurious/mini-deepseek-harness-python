@@ -1,6 +1,6 @@
 # 09 Agent 干预面：唤醒、转向、注入与取消
 
-> 本章回答一个问题：宿主（web UI、hooks 桥、ACP 客户端、编排程序）怎么干预一个运行中的 agent？第 04 章只实现了"喂一条消息"（followup）；上游把干预做成了七个方法的完整接口面。我们逐一对齐语义，在 mini 的 `AgentLoop` 上补齐 `steer` / `inject` / `cancel` / `when_idle` / `run_maintenance`。
+> 本章回答一个问题：宿主（web UI、hooks 桥、ACP 客户端、编排程序）怎么干预一个运行中的 agent？第 04 章只实现了"喂一条消息"（followup）；上游把干预做成了七个方法的完整接口面。我们逐一复现语义，在 mini 的 `AgentLoop` 上补齐 `steer` / `inject` / `cancel` / `when_idle` / `run_maintenance`。
 >
 > 对应 dsh 真实源码：`packages/core/agent`（Agent 接口，`src/runtime-types.ts:64-144`）+ `packages/core/agent-loop`（pre-step 瀑布与 turn 闭合，`src/agent.ts:225-269`）。mini 复现于 `miniharness/core/agent_loop/agent.py` 干预面一节。
 
@@ -18,7 +18,7 @@
 | `whenIdle()` | — | 整机 quiescence：无活跃 driver 且无 maintenance 才 resolve | — |
 | `runMaintenance(task)` | — | true idle 下执行非回合维护（如 compactNow） | 无会话事件 |
 
-> 防混淆：这里有两套「唤醒」词汇。`Agent.send(…, wakeup)` 的 wakeup 是**通用投递布尔**（上游 rc.x 至今如此）；子代理 report 的投递词汇才是从 `'wakeup'` 改名而来的 `'quiet' | 'next-step'`（`reportDelivery`，见第 04 章 subagent 一节与 verified-diffs §2.4）——后者已废除 'wakeup' 值，前者没有。
+> 防混淆：这里有两套「唤醒」词汇。`Agent.send(…, wakeup)` 的 wakeup 是**通用投递布尔**（上游 rc.x 至今如此）；子代理 report 的投递词汇才是从 `'wakeup'` 改名而来的 `'quiet' | 'next-step'`（`reportDelivery`，见第 04 章 subagent 一节）；后者不再使用 'wakeup' 值，前者没有。
 
 关键语义细节：
 
@@ -30,7 +30,7 @@
 
 ## 9.2 mini 复现：同步模型下的干预面
 
-mini 是同步 loop（一个线程里跑完整个回合），上游的"running 时入队、下个边界消费"在这里等价于：**循环条件在每个 step 之后检查**。所以语义对齐点是"边界生效"，不是"并发中断"。
+mini 是同步 loop（一个线程里跑完整个回合），上游的"running 时入队、下个边界消费"在这里等价于：**循环条件在每个 step 之后检查**。所以语义复现点是"边界生效"，不是"并发中断"。
 
 ```python
 def steer(self, content, source="user"):
@@ -105,7 +105,7 @@ loop.run("跑命令")
 
 取消在 step 边界生效：工具跑完回到循环条件，`_cancelled` 为真 → 不再开下一个 step → finally 落 `turn/end {kind:'aborted'}`。这正是上游"活跃活动 abort + 回合以 aborted 闭合"的同步对应物。
 
-## 9.4 硬性规定（被测试钉住）
+## 9.4 硬性规定（被测试固定）
 
 1. `steer` 从 idle 调用开 turn；`inject` 从 idle 调用**不开** turn（status 保持 idle、无 turn/start）。
 2. `inject` 后接 `followup`，两条消息按 FIFO 顺序进日志（inbox 是唯一队列）。
@@ -121,7 +121,7 @@ loop.run("跑命令")
 
 上游把审批做成了独立的能力 seam（`ApprovalService`），不是塞进 loop 的 if——这保持了"插件，不是 loop 改动"的约束。三个关键点：
 
-1. **两档策略先行**：`ApprovalPolicy = 'ask' | 'never'`。`'ask'`（默认）委托给组合的 answerers，没有 answerer 就 **fail-closed 为 `'unavailable'`**（审批不能默认放行）；`'never'` 在派发**之前**确定性拒绝（`'rejected'`，不提示任何人）——CI / 无人值守的严格立场。策略是 durable 会话状态：`approval/policy` 事件可重放，**最后一条胜出**（纯 fold，resume 无需追赶机制）。
+1. **两档策略先行**：`ApprovalPolicy = 'ask' | 'never'`。`'ask'`（默认）委托给组合的 answerers，没有 answerer 就 **fail-closed 为 `'unavailable'`**（审批不能默认放行）；`'never'` 在派发**之前**确定性拒绝（`'rejected'`，不提示任何人）——CI / 无人值守的严格立场。策略是 durable 会话状态：`approval/policy` 事件可重放，**最后一条胜出**（纯 fold，resume 无需追赶逻辑）。
 2. **审计对**：每次 ask 追加 `approval/asked`（id, toolName, callId?, reason?）+ `approval/decided`（id, outcome）一对，**log-only 非 surface**（模型看不到审计本身，只看到工具结果）。`'allowed-once'` 是唯一授权，且只作用于被请求的那一次动作（无跨调用豁免）。
 3. **open turn 前置**：`approval.request()` 必须在未闭合的 turn 内调用——审计对必须 turn-enclosed，否则抛错且不追加任何东西（两次 turn 之间的裸事件在重载时与崩溃尾部无法区分，会被静默丢弃）。
 
@@ -159,6 +159,6 @@ decide 顺序与上游一致（`src/index.ts:304-344`）：
 - [ ] 手动写一个"工具回调里 cancel"的用例，观察 turn/end reason；
 - [ ] 说出 `'never'` 为什么必须由服务自身在派发前决定（而不是监听器形状的拦截器）；
 - [ ] 解释审计对为什么必须 turn-enclosed（崩溃尾部语义）；
-- [ ] 说出 mini 相对上游的简化：**教学模型按"单循环同步"推演**（§9.2 明确标注：真实实现为常驻单事件循环 + 双队列 `inbox.py` + `_parked` 等待重入，见 §9.1 注），但**未派发 tool call 的 `ABORTED_BEFORE_DISPATCH` 错误结果补对**、**`scope_target` 按 agent 过滤派发**均已对齐（`core/agent_loop/tool_calls.py:33-34`、`core/agent_loop/agent.py:46,131`）；真正保留的简化是"常驻单循环 + `_parked` 重入""无 reserved attempt"（§3.8）——agent 实例注册表已闭合（`core/agents.py` + `AgentLoop.publish()` 注册 + jobs/goal assertLive 边界，见 verified-diffs §2.15），以及语义对齐（aborted 闭合、边界生效、fail-closed 审批）。
+- [ ] 说出 mini 相对上游的简化：**教学模型按"单循环同步"推演**（§9.2 已标注：真实实现是常驻单事件循环 + 双队列 `inbox.py` + `_parked` 等待重入，见 §9.1 注），但**未派发 tool call 的 `ABORTED_BEFORE_DISPATCH` 错误结果补对**与**`scope_target` 按 agent 过滤派发**都已实现（`core/agent_loop/tool_calls.py:33-34`、`core/agent_loop/agent.py:46,131`）；保留的简化是"常驻单循环 + `_parked` 重入"与"无 reserved attempt"（§3.8）——agent 实例注册表已实现（`core/agents.py` + `AgentLoop.publish()` 注册 + jobs/goal assertLive 边界），另有语义一致（aborted 闭合、边界生效、fail-closed 审批）。
 
 > 下一章：轨迹投影引擎——把事件日志折叠成人类可读的回合台账（Trajectory）。

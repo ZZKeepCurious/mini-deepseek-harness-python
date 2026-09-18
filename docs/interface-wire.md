@@ -1,16 +1,16 @@
-# web 接口契约参考（Wire Reference）
+# web 接口约定参考（Wire Reference）
 
 > 定位：这是 `mini-deepseek-harness` 前后端的**唯一耦合面**——`miniharness/web/` 传输层对
-> 前端发布的所有接口契约（信封、帧、错误语义）。产品化前端（仓库顶层 `webui/`）与任何第三方
-> 客户端只依赖本契约，禁止 import Python 内部。正文与当前实现逐条对应；契约本质上对齐上游
-> `dsh-v0.1.5-alpha.1`（`packages/client/connection` + `packages/api/gateway` +
-> `packages/api/session-controller` + `packages/api/remotes` + `host/frontend-static`），
-> mini 侧保留简化的差异项在 `status/mini-harness/verified-diffs.md` §3.4 登记。
+> 前端发布的所有接口约定（信封、帧、错误语义）。产品化前端（仓库顶层 `webui/`）与任何第三方
+> 客户端只依赖本约定，禁止 import Python 内部。正文与当前实现逐条对应，接口约定与上游
+> `dsh-v0.1.5-alpha.1` 一致（`packages/client/connection` + `packages/api/gateway` +
+> `packages/api/session-controller` + `packages/api/remotes` + `host/frontend-static`）。
+> mini 侧保留的简化差异另见项目状态记录。
 >
 > 载体实现：`web/server.py`（FastAPI）；语法层：`web/envelope.py` + `web/stream_protocol.py`；
 > 域实现：`web/api.py` + `web/streams.py` + `web/events.py` + `web/approvals.py` +
 > `web/downloads.py` + `web/frontend.py`。教程对照：`docs/chapters/07-external-entry-points.md`
-> §7.5（按实现顺序讲解）；本文件是**契约的权威速查**，不讲实现细节。
+> §7.5（按实现顺序讲解）；本文件是**约定的权威速查**，不讲实现细节。
 
 ## 1. 通道总览与载体状态码
 
@@ -21,9 +21,9 @@
 | 会话导出 | `GET /api/session.export` | 会话日志 zip 下载 | 401* / 200 / 400 / 404 / 501 / 500 |
 | SPA 静态 | `GET`/`HEAD /{path}`（非 `/api/`） | `webui/dist/` 或 `web/static/` 产物承载 | 403 / 200 / 404 / 405 |
 
-`*` 401 仅在配置了认证 token 时出现（见 §7.1）；未配置 token = 无门（回环开发形态）。
+`*` 401 仅在配置了认证 token 时出现（见 §1.1）；未配置 token = 无门（回环开发形态）。
 
-### 7.1 认证门（可选 token，`web/auth.py`）
+### 1.1 认证门（可选 token，`web/auth.py`）
 
 上游以可插拔的 `connection.requestRejection(req)` 决定 WS 升级拒绝（返回 401/403 →
 `rejectRemoteStreamUpgrade` 写 `HTTP/1.1 401 Unauthorized` 后销毁 socket）。mini 的等价物
@@ -41,27 +41,27 @@
 - **部署纪律**：`run_web` 监听 `0.0.0.0` 时**必须**已配置 token，否则启动即
   `ValueError`（非回环裸听 fail loud）。
 
-### unary 载体状态码语义（`web/server.py`）
+### 1.2 unary 载体状态码语义（`web/server.py`）
 
 - `404`：非 POST、路径不在 `/api/` 下、或 `method` 不在路由表（`session.*` 之外）。
-- `415`：`content-type` 非 `application/json`（跨站写围栏，上游同款安全机制；无 CORS 头）。
+- `415`：`content-type` 非 `application/json`（跨站写围栏，上游同款安全设计；无 CORS 头）。
 - `400`：body 非 JSON（含空体）；`GET/HEAD /api/session.export` 参数缺失/非法同样归 400 文本。
 - `500`：信封合法但实现崩溃（纯文本 `handler failure: <error>`）。
 - `200`：**一切业务结果**——业务错误恒 200 + `server-response` 且 `result.ok=false`，不借 HTTP 状态码表达业务错误。
 
-路径约束：endpoint 段匹配 `[A-Za-z0-9_$.-]+`（`$` 是真实契约：`$events`、`$events/result` 为网关
+路径约束：endpoint 段匹配 `[A-Za-z0-9_$.-]+`（`$` 是真实约定：`$events`、`$events/result` 为网关
 内端点）；body `client-request` 的 `payload` 必须**恰**为 `{args:{...}}` 单字段 plain object
-（多余键 / 缺 args / 非对象一律 `bad-request`，对齐 gateway `remoteRequest`）。
+（多余键 / 缺 args / 非对象一律 `bad-request`，同 gateway `remoteRequest`）。
 
-### WS 关闭码（`web/mux.py`）
+### 1.3 WS 关闭码（`web/mux.py`）
 
 - `1003`：收到二进制帧（协议错误）。
 - `1008`：文本非 JSON / 帧形状非法 / 重复 `open` 同一 `streamId`。
 - `1011`：某流 `error` 帧自身发送失败。
 - 心跳：每条连接每 **2s** 一次 transport 级协议 Ping（`web/launcher.py` uvicorn
   `ws_ping_interval=2`），连续 miss 判死预算 **4s**（`ws_ping_timeout=4`，
-  ≈ 上游 `MAX_MISSED_HEARTBEATS=2 × interval=2s`）——僵死连接被回收，对齐上游
-  gateway heartbeat 契约（`websocketHeartbeatIntervalMs` @default 2000，见 §4.4）。
+  ≈ 上游 `MAX_MISSED_HEARTBEATS=2 × interval=2s`）——僵死连接被回收，与上游
+  gateway heartbeat 约定一致（`websocketHeartbeatIntervalMs` @default 2000，见 §4.4）。
 
 ## 2. 信封层（`web/envelope.py`）
 
@@ -80,10 +80,10 @@
 - 成功分支 `value` 可选（业务无值时整体省略该字段）。
 - 业务方法绝不抛业务错误——一律经 `result.ok` 表达；`details` 恒为对象。
 
-**RpcError 的 `code` 是 24 码命名空间闭集**（alpha.2 起统一为 `<namespace>/<name>` 形式，
-对齐 typert `RemoteErrorDetailsMap` 键集：基础设施 `gateway/*` + 各域 merge-extensible 注册，
-`web/envelope.py` `RPC_ERROR_CODES`；R3 闭合路由层边界校验后新增 `gateway/input-invalid`；
-复核批对齐上游 gateway 未知端点折算码新增 `gateway/invocation-unavailable`）：
+**RpcError 的 `code` 是 24 码命名空间闭集**（统一为 `<namespace>/<name>` 形式，键集与 typert
+`RemoteErrorDetailsMap` 一致：基础设施 `gateway/*` 加各域可扩展注册，见 `web/envelope.py`
+`RPC_ERROR_CODES`；路由层边界校验收 `gateway/input-invalid`，未知端点折算为
+`gateway/invocation-unavailable`）：
 
 ```
 gateway/bad-request       gateway/cancelled         gateway/internal
@@ -102,7 +102,7 @@ subagent/catalog-diagnostic subagent/unauthorized
 
 ## 3. unary 会话服务端点（`web/api.py`，`session.*`）
 
-路由表（`WebApi.ROUTES`），全部满足 §1 unary 载体契约：
+路由表（`WebApi.ROUTES`），全部满足 §1 unary 载体约定：
 
 | 端点 | 轮廓 | 典型业务错误码 |
 |---|---|---|
@@ -121,7 +121,7 @@ subagent/catalog-diagnostic subagent/unauthorized
 | `session.cancel` | 取消当前回合 | session/not-found / session/agent-busy |
 | `session.page` | 分页历史（throughSeq/beforeSeq/maxMessages） | gateway/bad-request / session/not-found / gateway/internal |
 
-> 各端点 `args` 先在路由层经 `web/args.py` 做**统一 `{args}` 边界校验**（对齐 gateway
+> 各端点 `args` 先在路由层经 `web/args.py` 做**统一 `{args}` 边界校验**（同 gateway
 > `assertExactArguments`/`decode`）：字段集合精确匹配——缺 required / 多 unexpected →
 > `gateway/arguments-invalid`（消息 `args fields do not match the descriptor: missing "x"; unexpected "y"`）；
 > 顶层字段 JSON 类型错 → `gateway/input-invalid`（`wire field "x" failed boundary validation`，
@@ -135,14 +135,14 @@ subagent/catalog-diagnostic subagent/unauthorized
 单一路径承载**全部** Remote 流；每条 open 后的 value 序列经 `item` 帧吐出。客户端 `streamId`
 自编号（非空字符串即可）。
 
-**浏览器 → 宿主**（文本帧两型；未知键被 schemastery 投影丢弃，判别字段缺失/类型错才拒）:
+**浏览器 → 宿主**（文本帧两型；未知键被 schemastery 投影丢弃，判别字段缺失/类型错才拒）：
 
 ```json
 {"type": "open",   "streamId": "<id>", "endpoint": "<endpoint>", "payload": {...}}
 {"type": "cancel", "streamId": "<id>"}
 ```
 
-**宿主 → 浏览器**（文本帧三型）:
+**宿主 → 浏览器**（文本帧三型）：
 
 ```json
 {"type": "item",  "streamId": "<id>", "value": "<任意值，可省>"}
@@ -173,22 +173,19 @@ subagent/catalog-diagnostic subagent/unauthorized
                             "tokenUsage": {"uncachedInputTokens","outputTokens","cacheReadTokens","cacheWriteTokens"}}}}
 ```
 
-  header 是平铺 `SessionWireHeader`（`api.py _wire_header`，上游 history.ts wireHeader：
-  `seedLength` 曾短暂引入、同 tag 即回退为 `isSeeded` boolean）；records 严格
-  `{type:'event', event}` 包装（V2 起不再有 chunkrow 打包 record）。事件信封统一形态
-  `{type, seq, time, data}`（`seq` 0 基严格递增：`seq == 追加前日志长度`，对齐上游
-  EventLog `seq: this.log.length` 后 push；首事件 seq=0）。`maxMessages` 溢出时只取尾段
-  并置 `hasMore=true`；`cursor` = 最后一条已提交事件 seq（0 基 inclusive，空日志 -1）。
-  `projections.values` 为真实视图（sessionStats 八键 + tokenUsage 四键，未建投影注册表前的
-  现场折叠等价——`telemetry.projection_values`，见 architecture 映射表；`contextPressure`
-  未立项，见 verified-diffs §2.30 简化登记）。
+  header 是平铺 `SessionWireHeader`（`api.py _wire_header`，上游 history.ts wireHeader 用
+  `isSeeded` boolean）；records 严格 `{type:'event', event}` 包装。事件信封统一形态
+  `{type, seq, time, data}`（`seq` 0 基严格递增：`seq == 追加前日志长度`，同上游 EventLog
+  `seq: this.log.length` 后 push；首事件 seq=0）。`maxMessages` 溢出时只取尾段并置
+  `hasMore=true`；`cursor` = 最后一条已提交事件 seq（0 基 inclusive，空日志 -1）。
+  `projections.values` 是真实视图（sessionStats 八键加 tokenUsage 四键，等价于现场折叠，
+  见 `telemetry.projection_values` 与 architecture 映射表；`contextPressure` 不承载）。
 - 续帧：`{"type":"event", "event": <事件信封>}`，活体帧从 `snapshot.cursor + 1` 起、
   `event.seq` 严格递增；客户端按 seq 去重拼接（webui `TrajectoryBuffer`）。
 - 错误：`gateway/arguments-invalid` / `session/not-found`（未知会话）。
-- 已核实（对齐交付，见 §4.4）：上游 wire **无 `since` 字段**——`follow`/`control` 每次
-  (重)连 = 重开流重投完整 `snapshot`/`baseline`，客户端按 seq 去重即 gap-free；mini 同款，
-  重连健壮性不欠账。follow 活体帧的 mini 载体 = ≤50ms 短轮询批量提取（进程内日志现成可读，
-  帧形状/顺序与上游一致）。
+- 上游 wire **无 `since` 字段**（见 §4.4）：`follow`/`control` 每次（重）连都重开流并重投完整
+  `snapshot`/`baseline`，客户端按 seq 去重即无缺口；mini 相同。follow 活体帧的 mini 载体是
+  ≤50ms 短轮询批量提取，进程内日志现成可读，帧形状与顺序同上游。
 
 ### 4.2 `session.control`（宿主级 live control）
 
@@ -219,7 +216,7 @@ subagent/catalog-diagnostic subagent/unauthorized
 
 - open payload 必须**恰** `{args:{}}`（非空 args → 该流 `error` 帧 `gateway/arguments-invalid`）。
 - 首帧 `ready`：`{"type":"ready", "clientId": "<uuid>", "host": {"home": "<宿主 home>"}}`
-  （`host.home` 仅用于前端缩写本机路径显示；不依赖已删除的 `host.describe`）。
+  （`host.home` 仅用于前端缩写本机路径显示）。
 - 下游帧三种：
 
 ```json
@@ -233,6 +230,24 @@ subagent/catalog-diagnostic subagent/unauthorized
   `agent/error → api-session/error`、user `user/message → api-session/activity`。
 - waterfall：审批问询 `event="approval/request"`、`agentId=<会话 id>`、`request={toolName}`；
   由首个客户端的 `$events/result` 结算（§5）。
+
+### 4.4 重连语义与心跳（三流统一约定）
+
+同上游 README：「reconnection reopens the `$events` stream；one-way notifications
+are **not** replayed after reconnect」「always return a complete opening snapshot followed
+by deltas」。
+
+- **`session.follow` / `session.control`**：每次 open（含重连）都重投完整 `snapshot` / `baseline`
+  快照帧，随后以续帧增量推进。客户端只需「重开即重启，按 seq 与替换帧语义收敛」，无需游标
+  参数（wire 无 `since`）。
+- **`$events`**：新代次先发 `ready`（新 `clientId`）；对旧代次已转发过的单向 emit **不重放**
+  （无 since 恢复游标，不算缺口）；**挂起的 waterfall 保留 `eventId` 跨代次重投**（新客户端
+  open 即收到，首个 `$events/result` 结算，幂等 no-op）。
+- **心跳**：transport 级（不归 `web/mux.py`，前端无感）：每连接每 2s 一次协议 Ping，
+  连续 2 周期无 Pong 判死（`ws_ping_timeout=4`，约等于上游 `MAX_MISSED_HEARTBEATS=2`，
+  即 stream-server.ts 的 terminate）；由 uvicorn 的 websockets 实现透传
+  （`web/launcher.py` 的 `uvicorn_options`，间隔取上游 `websocketHeartbeatIntervalMs`
+  @default 2000）。
 
 ## 5. `$events/result`（HTTP unary 特判端点，`web/server.py` + `web/events.py`）
 
@@ -251,27 +266,9 @@ outcome 三型：
 应答恒 200 `server-response`：合法且结算成功 → `{"ok":true}`；词法非法 / 未知 `clientId` →
 `{ok:false, error:{code:"gateway/bad-request"|"gateway/internal", ...}}`。
 
-结算语义（对齐 `receiveRemoteEventResult`）：`result` → 终局（首个投出者唯一放行）；`next` →
+结算语义（同 `receiveRemoteEventResult`）：`result` → 终局（首个投出者唯一放行）；`next` →
 该客户端让位、全部客户端耗尽 → `'next'`；`rejected` → `'rejected'`；**已结算/被取代的 eventId
 幂等 no-op**；注册表 `dispose()` 时全量 pending 折 `'cancelled'`。
-
-### 4.4 重连语义与心跳（三流统一约定）
-
-对齐上游 README：「reconnection reopens the `$events` stream；one-way notifications
-are **not** replayed after reconnect」「always return a complete opening snapshot followed
-by deltas」。
-
-- **`session.follow` / `session.control`**：每次 open（含重连）重投完整 `snapshot` / `baseline`
-  快照帧，随后续帧增量推进——客户端要做的只是「重开即重启，按 seq / 替换帧语义收敛」，无需
-  游标参数（wire 无 `since`）。
-- **`$events`**：新代次先 `ready`（新 `clientId`）；对旧代次已转发过的单向 emit **不重放**
-  （无 since 恢复游标，非缺口）；**挂起的 waterfall 保留 `eventId` 跨代次重投**（新客户端
-  open 即收到，首个 `$events/result` 结算，幂等 no-op）。
-- **心跳**：transport 级（不归 `web/mux.py`，前端无感）：每连接每 2s 一次协议 Ping，
-  连续 2 周期无 Pong 判死（`ws_ping_timeout=4` ≈ 上游 `MAX_MISSED_HEARTBEATS=2`，
-  stream-server.ts terminate 契约）；由 uvicorn `websockets` 实现透传
-  （`web/launcher.py` `uvicorn_options`，间隔=上游 `websocketHeartbeatIntervalMs`
-  @default 2000）。
 
 ## 6. 审批桥（`tools/ask` ↔ `approval/request` waterfall，`web/approvals.py`）
 
@@ -294,9 +291,9 @@ outcome 归一（`APPROVAL_OUTCOMES = {allowed-once, rejected, cancelled, unavai
 ## 7. SPA 静态承载（`web/frontend.py`）
 
 - `DIST_ROOT` 默认 `web/static/`（教学参照），经 **`MINIHARNESS_WEBUI_DIST`** env 可指向产品化
-  前端构建产物（`webui/dist/`）；`serve_static` 契约不变。
+  前端构建产物（`webui/dist/`）；`serve_static` 约定不变。
 - 只服务 `GET`/`HEAD`，其它方法 405；非 `/api/` 前缀。
-- 契约（对齐 `packages/host/frontend-static`）：目录遍历出根 → 403；未命中 → 回退 `index`
+- 约定（同 `packages/host/frontend-static`）：目录遍历出根 → 403；未命中 → 回退 `index`
   200（SPA 客户端路由）；MIME 按扩展（未知 → `application/octet-stream`）；index taps 恒
   identity（不注入，mini 无 boot-manifest）。
 
@@ -316,11 +313,11 @@ outcome 归一（`APPROVAL_OUTCOMES = {allowed-once, rejected, cancelled, unavai
 2. 载体层 404/415/400/500 只在信封/HTTP 层面，不代表业务状态。
 3. 流内错误 = `error` 帧（单流隔离），不关 WS；`close` 码只留给协议/形状/危险级错误。
 4. 审批 fail-closed：非 APPROVAL_OUTCOMES 合法值一律 `unavailable`，绝不误放行。
-5. 事件 `seq` 严格递增、0 基（`seq == 追加前日志长度`）；未知事件类型持久化读路径 fail-closed（除非带 `ignorable: true` 豁免放行），不做静默吞图。
+5. 事件 `seq` 严格递增、0 基（`seq == 追加前日志长度`）；未知事件类型持久化读路径 fail-closed（除非带 `ignorable: true` 豁免放行），不做静默吞掉。
 
 ## 10. 与前端实现的映射
 
-`webui/src/wire/` 契约客户端层对应本章节：
+`webui/src/wire/` 约定客户端层对应本章节：
 
 | 文件 | 对应 |
 |---|---|
@@ -331,5 +328,5 @@ outcome 归一（`APPROVAL_OUTCOMES = {allowed-once, rejected, cancelled, unavai
 | `control.ts` | §4.2 baseline/queue/jobs 替换帧（`applyControlFrame`） |
 | `types.ts` | §2 信封 + 事件/消息/会话类型（镜像 core 模型） |
 
-测试：`webui/tests/wire.test.ts`（vitest，mock fetch/WS）+ `tests/test_web_*.py`（后端契约全组）；
+测试：`webui/tests/wire.test.ts`（vitest，mock fetch/WS）+ `tests/test_web_*.py`（后端约定全组）；
 后端静态承载新增 `tests/test_web_frontend.py` `test_webui_dist_build`（Vite 形态 dist）。

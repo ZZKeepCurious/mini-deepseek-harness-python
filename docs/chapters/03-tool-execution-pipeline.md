@@ -8,7 +8,7 @@
 
     - **管线拆分**：本章把整条管线写成单一 `run_pipeline`；当前实现拆成两段——`pipeline_policy`（schema 校验 → `tools/pre-execute` → `tools/ask` → `tools/guards`，返回拒绝结果或 `None`）与 `pipeline_body`（execute 超时 + post-execute）再加外层规范化两层（`miniharness/core/tools.py:255` `pipeline_policy`、`:331` `pipeline_body`、`:367` `run_pipeline`），并各有 async 变体（`pipeline_policy_async` / `run_pipeline_async`，供第 12 章并行调度器"pre 有序、body 重叠"使用）。
     - **决策字段名**：本章演示与下文 `PreToolDecision` 均用 `verdict`；实际与上游一致为 **`kind`**（`{kind:'allow'|'deny'|'ask'}`，`core/tools.py:266`）。
-    - **错误规范化文本**：本章为 `f"{type(e).__name__}: {e}"`；实际为统一 `Error: {e}` 前缀（对齐上游 `toolErrorResult` 的 `Error:` 文案，不暴露 Python 类型名），`core/tools.py:390`。
+    - **错误规范化文本**：本章为 `f"{type(e).__name__}: {e}"`；实际为统一 `Error: {e}` 前缀（同上游 `toolErrorResult` 的 `Error:` 文案，不暴露 Python 类型名），`core/tools.py:390`。
     - **领域对象字段**：当前 `ToolResult` 另有 `_aborted` / `error_info` / `concludes_turn`（`core/tools.py:138-153`，`concludes_turn` 直接决定 loop 是否续步）、`ToolExec` 含 `agent`、`Tool` 含 `render`（canonical 值 → 模型可见 content）。
 
 ## 3.1 这一章要做什么
@@ -216,7 +216,7 @@ def run_pipeline(ctx, tool, args, exec_=None):
     return ToolResult(ok=True, content=deep_freeze(raw))
 ```
 
-逐段拆开说：
+逐段说明：
 
 **步骤 3-4 是第 2 章 waterfall 的实际应用**：策略插件不调 `next()` 即 deny。`ask` 分支是"需要人类批准"的场景：一次性询问，缺席（没人回答）按拒绝处理——审批不能默认放行。第 4 章 Agent Loop 会把 `tool/call`、`tool/result` 事件挂在步骤 1 和 8 前后，形成"先记录、后执行"的审计链。
 
@@ -226,7 +226,7 @@ def run_pipeline(ctx, tool, args, exec_=None):
 
 ## 3.4 验收：硬性规定 + 测试
 
-`tests/test_tools.py` 钉住的规定：
+`tests/test_tools.py` 固定的规定：
 
 1. 参数在策略前冻结；schema 违规 = 结构化错误（不进回合）
 2. `pre-execute` deny / approval 拒绝 → 工具体被跳过

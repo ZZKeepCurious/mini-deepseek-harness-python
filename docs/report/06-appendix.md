@@ -15,9 +15,9 @@
 
 ### 9.1 SDK 与 dsh 的关系和区别
 
-**一句话关系**：Python SDK 不是 dsh 的替代品，也不是"另一个实现"，而是 **dsh 的进程级客户端**——它把内置的 dsh 运行时（单文件可执行 `dsh-jsonrpc-agent`）作为子进程启动，通过 stdio 上的换行分隔 JSON-RPC 协议驱动它。SDK 能做什么，取决于其组合里挂了哪些插件；它并不重新实现 harness。
+**一句话关系**：Python SDK 是 **dsh 的进程级客户端**，不是替代品或另一个实现——它把内置的 dsh 运行时（单文件可执行 `dsh-jsonrpc-agent`）作为子进程启动，通过 stdio 上的换行分隔 JSON-RPC 协议驱动它。SDK 能做什么，取决于其组合里挂了哪些插件；它并不重新实现 harness。
 
-| 维度 | dsh（产品本体） | deepseek-harness-sdk（Python 客户端） |
+| 方面 | dsh（产品本体） | deepseek-harness-sdk（Python 客户端） |
 |---|---|---|
 | 形态 | TypeScript monorepo：CLI + Web + 插件生态 + 组合系统，从源码构建运行 | PyPI 分发包 `deepseek-harness-sdk`（import `deepseek_harness`），内置捆绑运行时，安装后**不需要 Node.js** |
 | 扮演角色 | 运行时产品本身（消费者直接面向用户） | 面向 Python 程序员的驱动层（`DeepSeekHarness` 上下文管理器，`run()` 一次任务） |
@@ -194,7 +194,7 @@ UI 专用格式（fenced console、diff、相对路径）留在卡片投影里�
 - **测试**：`docs/testing.md`（门禁 `test:coverage` 每文件 100%；模型/用户可见行为要 keyless 快照）。
 - **Cordis 入门**：`docs/cordis-primer.md` + `docs/cordis-tutorial/` 动手教程。
 - **文档规范**：`docs/AGENTS.md`；贡献任何非平凡变更需 Agent Note（`.agents/notes/`），已归档的冻结。
-- **协议栈**：SDK wire 协议见 `packages/sdk/protocol`；ACP 自动化协议见 `packages/acp/acp/README.md`；Claude Code/Codex hooks 桥接见 `packages/hooks`。
+- **协议族**：SDK wire 协议见 `packages/sdk/protocol`；ACP 自动化协议见 `packages/acp/acp/README.md`；Claude Code/Codex hooks 桥接见 `packages/hooks`。
 
 ## 12. 结语
 

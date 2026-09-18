@@ -12,8 +12,8 @@
     - **空响应**：实现已产出 `EMPTY_RESPONSE` 错误且默认可重试（`llm/retry_policy.py` 白名单），§4.4 教学正文与 §4.8/§4.9 现已一致。
     - **loop 片段**：本章 `loop.py` 的 `_append` 方法、字符串 reason、扁平 `assistant/message` 形态均已过时；实现是 ContentBlock 消息对象 + 显式编号 + `request/header` 事件 + 模型流压缩内嵌 `assistant/message`（失败 attempt 落 `assistant/attempt`）（`core/agent_loop/agent.py`）。
     - **重试接线**：真实调用入口必须挂载 `apply_retry_planner`（`llm/retry.py:298`），否则 `agent/request-error` 瀑布不生效（本章 §4.6 真实 API 示例为教学简化、未挂载；真实装配必须先挂）。
-    - **时序图**：完整时序含 `request/header` 事件与内嵌 `assistant/message` 的压缩流落盘（见 `core/agent_loop/agent.py` 的 requestHeaderLogged 语义）。
-    - **stream 契约已 async 化**（httpx 异步传输）：实现签名为 `async def stream(self, messages, tools, signal=None)` 异步迭代（`llm/protocol.py`，httpx 原生 asyncio 传输，abort 置位即关闭连接、`_aiter_raced` 竞速抛 `StreamAborted`）；agent 循环为单一 async 驱动 + `followup`/`steer` 同步门面（经进程级常驻单事件循环驱动，`core/agent_loop/resident_loop.py`）；本章的同步 `def stream` 与同步泵形态已过时。
+    - **时序图**：完整时序含 `request/header` 事件与内嵌 `assistant/message` 的压缩流写入磁盘（见 `core/agent_loop/agent.py` 的 requestHeaderLogged 语义）。
+    - **stream 约定已 async 化**（httpx 异步传输）：实现签名为 `async def stream(self, messages, tools, signal=None)` 异步迭代（`llm/protocol.py`，httpx 原生 asyncio 传输，abort 置位即关闭连接、`_aiter_raced` 竞速抛 `StreamAborted`）；agent 循环为单一 async 驱动 + `followup`/`steer` 同步门面（经进程级常驻单事件循环驱动，`core/agent_loop/resident_loop.py`）；本章的同步 `def stream` 与同步泵形态已过时。
 
 ## 4.1 这一章要做什么
 
@@ -59,7 +59,7 @@ sequenceDiagram
 
 1. **turn 打开于认领输入之前**。"被拒绝的尝试"也留下 `turn/start + turn/end` 的持久化记录——审计要看到"发生过一次尝试"，即使它什么都没做。
 2. **step = 一次模型请求 + 它调用的工具**。工具结果回灌后，同一 turn 内自动再问一次模型（`_continue`）。所以"一次对话回合"可能包含多次模型请求，这是 agent 循环和普通聊天 API 的本质区别。
-3. **模型可见 ⟺ 已记录**（第 1 章那句话在这里落地）：`user/message` 在 pre-step 通过后才 append，模型永远看不到没进日志的输入。
+3. **模型可见 ⟺ 已记录**（第 1 章那句话在这里体现）：`user/message` 在 pre-step 通过后才 append，模型永远看不到没进日志的输入。
 
 **逐箭头走读**（对应上图从上到下，编号 1 起、step 每 turn 内重置为 1）：
 
@@ -166,7 +166,7 @@ import httpx
 class DeepSeekAdapter(LlmAdapter):
     provider = "deepseek-official"
     CONNECT_TIMEOUT_S = 30.0
-    READ_TIMEOUT_S = 300.0   # per-read idle watchdog（对齐上游 fetch 300s）
+    READ_TIMEOUT_S = 300.0   # per-read idle watchdog（同上游 fetch 300s）
 
     def __init__(self, api_key=None, base_url=None, model="deepseek-chat"):
         self._key = api_key if api_key is not None else os.environ.get("DEEPSEEK_API_KEY", "")
@@ -256,9 +256,9 @@ class DeepSeekAdapter(LlmAdapter):
 两个细节：
 
 - `baseURL / apiKey` 从环境变量读取，代码里只存引用。凭据的完整处理在第 6 章（凭据扩展口）。
-- 错误在源头就分类（`_http_error_code`，对齐上游 adapter.ts）：401/403→`AUTH`、quota 措辞→`QUOTA`、429→`RATE_LIMIT`、400 上下文超限→`CONTEXT_WINDOW_EXCEEDED`、500+→`SERVER`、其余→`HTTP_<status>`，并携带 `status / providerRetryAfterMs / requestId` 事实——调用方不用猜。
+- 错误在源头就分类（`_http_error_code`，同上游 adapter.ts）：401/403→`AUTH`、quota 措辞→`QUOTA`、429→`RATE_LIMIT`、400 上下文超限→`CONTEXT_WINDOW_EXCEEDED`、500+→`SERVER`、其余→`HTTP_<status>`，并携带 `status / providerRetryAfterMs / requestId` 事实——调用方不用猜。
 
-> 传输层为什么用 httpx 而不是 urllib？urllib 的阻塞读无法被真正取消，只能靠固定 120s 超时兜底（producer 线程滞留），与上游"per-read 300s watchdog + fetch 流中断可取消"的语义有差距。httpx 是原生 asyncio 传输：`abort` 置位即抛 `StreamAborted` 并关闭连接，`READ_TIMEOUT_S=300` 对齐上游每读间隙超时，且测试可用 `httpx.MockTransport` 注入、无需打真实网络。这是本手册"成熟开源库优先，无语义等价库处才手写"的典型取舍——存在维护良好的异步 HTTP 库时，不手写传输层。
+> 传输层为什么用 httpx 而不是 urllib？urllib 的阻塞读无法被真正取消，只能靠固定 120s 超时兜底（producer 线程滞留），与上游"per-read 300s watchdog + fetch 流中断可取消"的语义有差距。httpx 是原生 asyncio 传输：`abort` 置位即抛 `StreamAborted` 并关闭连接，`READ_TIMEOUT_S=300` 同上游每读间隙超时，且测试可用 `httpx.MockTransport` 注入、无需打真实网络。这是本手册"成熟开源库优先，无语义等价库处才手写"的典型取舍——存在维护良好的异步 HTTP 库时，不手写传输层。
 
 ## 4.4 代码 step-by-step（loop.py）
 
@@ -328,7 +328,7 @@ class AgentLoop:
                 self._close_turn()
 ```
 
-循环条件：有排队输入，或有工具回灌待继续（`_continue`）。`max_steps` 是死循环守卫：模型如果永远调工具不结束，会在上限步数时报错而不是挂死（测试 `test_max_steps_guard` 钉住）。守卫默认 `DEFAULT_MAX_STEPS = 50`，可由构造参数或环境变量 `MINIHARNESS_MAX_STEPS` 覆盖——上游 `AgentLoop` 无硬性 step 上限，mini 保留该保守守卫作安全网。
+循环条件：有排队输入，或有工具回灌待继续（`_continue`）。`max_steps` 是死循环守卫：模型如果永远调工具不结束，会在上限步数时报错而不是挂死（测试 `test_max_steps_guard` 固定）。守卫默认 `DEFAULT_MAX_STEPS = 50`，可由构造参数或环境变量 `MINIHARNESS_MAX_STEPS` 覆盖——上游 `AgentLoop` 无硬性 step 上限，mini 保留该保守守卫作安全网。
 
 ### 步骤 4：一个 step
 
@@ -371,7 +371,7 @@ class AgentLoop:
 
 四个要点：
 
-- `_append` 是回合事件的统一入口，自动注入 `turn` / `step` 编号——与上游一致，**从 1 起**（`session/invariant.ts` `nextTurn: 1, nextStep: 1`，每 turn 内 step 重置为 1）。这是对齐后与上游完全一致的字段。
+- `_append` 是回合事件的统一入口，自动注入 `turn` / `step` 编号——与上游一致，**从 1 起**（`session/invariant.ts` `nextTurn: 1, nextStep: 1`，每 turn 内 step 重置为 1）。这些字段与上游完全一致。
 - **pre-step 拒绝**：waterfall 返回 `{"verdict": "reject"}` → 不落 `step/start`，turn 直接闭合。这就是"零 step turn"：被拒绝的尝试也留下括号痕迹（4.2 要点 1）。
 - 历史 = `derive_messages(日志)` + system prompt，绝不另存——第 1 章的投影在这里消费。
 - `tool-call-delta` 是增量分片，loop 按 id 累积 name 与 `argumentsDelta`，组装成完整的 `toolCalls` 再落日志。所以日志里存的是完整参数（JSON 字符串），而不是碎片。
@@ -400,7 +400,7 @@ class AgentLoop:
 
 ## 4.5 验收：硬性规定 + 测试
 
-`tests/test_loop.py` 钉住的规定：
+`tests/test_loop.py` 固定的规定：
 
 1. `turn/start` 与 `turn/end` 成对且 `turn_balance == 0`
 2. 拒绝的尝试：有 `turn/start + turn/end`，无 `step/start`
@@ -462,10 +462,10 @@ print([e["type"] for e in session.events])
 payload `{agent, turn, step, provider, failure, retryPolicy, signal}`（与上游逐字段
 一致）。监听器返回 `{kind:'retry'}` 且不调 `next()` = 自己接管恢复；调 `next()` 委派；
 默认 `undefined` 失败终局。重试规划器由**装配方显式挂载**（`AgentLoop` 构造无副作用，
-对齐上游插件 apply 时挂载）：headless / sessions / acp / sdk / demo / 示例在构造
+同上游插件 apply 时挂载）：headless / sessions / acp / sdk / demo / 示例在构造
 loop 前调用 `apply_retry_planner(ctx)`（幂等，可重复调用）。
 
-**策略解析**（`llm/retry_policy.py`，对齐 retry-policy.ts）：
+**策略解析**（`llm/retry_policy.py`，同 retry-policy.ts）：
 
 - 两种模式：`normal`（`maxRetries` + `retryableCodes` 白名单）/ `always`（无限重试）
 - 默认：`maxRetries 5`、`initialDelayMs 500`、`maxDelayMs 10000`、`jitterRatio 0.1`、
@@ -473,7 +473,7 @@ loop 前调用 `apply_retry_planner(ctx)`（幂等，可重复调用）。
 - 严格校验：未知键拒绝、backoff 正有限且 `initial ≤ max`、jitter ∈ [0,1]、
   `maxRetries` 非负整数、codes 非空无重复；解析结果冻结，provider 注册时捕获
 
-**恢复决策**（`llm/retry.py`，对齐 llm-retry/index.ts）：
+**恢复决策**（`llm/retry.py`，同 llm-retry/index.ts）：
 
 1. 策略 `undefined` → 直接委派（不重试）
 2. `always`：派发前检查熔合信号——已中止则失败终局；先委派下游——下游给出 retry
@@ -498,25 +498,25 @@ loop 前调用 `apply_retry_planner(ctx)`（幂等，可重复调用）。
 **生命周期与拆解**：重试插件经 `ctx.on("agent/request-error", ...)` 挂载监听器，
 并登记 effect teardown（label `'llm-retry: abort and drain active recovery'`）：
 拆解时注销监听器 + lifetime.abort + 排干在途恢复（`gather(..., return_exceptions=True)`
-对齐 allSettled）。已拆解后的迟到回调命中陈旧守卫直接返回（不再进入下游策略）。
+即 allSettled）。已拆解后的迟到回调命中陈旧守卫直接返回（不再进入下游策略）。
 
 **接线语义**：重试是同 step 内重新发起模型请求——`messages` 不变（失败 attempt
 内嵌流落 `assistant/attempt`、不产生任何消息事件，`derive_messages` 不受
 `llm/retry` 影响）、`request/header` 只落一次（上游仅在 header 变化时追加）、
 `assistant/message` 内嵌成功 attempt 的压缩流且不带 `sourceEventSeqs`。`LlmFailure` 扩展 `status` / `providerRetryAfterMs` /
 `requestId`（`x-request-id` / `x-deepseek-request-id`）可选字段；socket 超时映射
-`TIMEOUT`（原本混在 `TRANSPORT` 里）。
+`TIMEOUT`。
 
 **上下文溢出降级**：`CONTEXT_WINDOW_EXCEEDED`（400 上下文超限）不在默认白名单
 → 重试规划器不接管，委派下游。装配方在 `apply_retry_planner(ctx)` 之后挂载
 `install_compaction(ctx)`（幂等）：压缩引擎监听 `agent/request-error`，对
 `CONTEXT_WINDOW_EXCEEDED` 强制减容（见 `miniharness/compaction/` 与报告 04 §9.4），且**仅当** surface
-`replaceGeneration` 前进（检查点真实落盘）才返回 `{kind:'retry'}`，计数上限
+`replaceGeneration` 前进（检查点真实写入磁盘）才返回 `{kind:'retry'}`，计数上限
 `maxOverflowRetries`，成功响应/回合结束边界复位。既无压缩也无接管 → 终局
 `turn/end` reason 为 `{kind:'error'}`。
 
 与压缩**互补**的还有一个可选、不送模型的 tool-result 裁剪服务：
-`install_tool_result_pruner(ctx)`（`miniharness/compaction/tool_result_pruner.py`，对齐
+`install_tool_result_pruner(ctx)`（`miniharness/compaction/tool_result_pruner.py`，同
 上游 `compaction-tool-result-pruner`）。它只是把 `ToolResultPruner` 注册为
 `ctx.toolResultPruner` 服务；**真正触发它的地方是压缩引擎**（`miniharness/compaction/
 engine.py:139-167`）——无论压力触发（step 边界）还是 `context-overflow` 触发，引擎都会在
@@ -536,4 +536,4 @@ Retry-After 解析、全部 recover 分支、lifetime 信号与竞速等待、�
 
 ## 4.10 收尾
 
-回合跑通的那一刻，前三章的积木全部就位：日志在写、插件在拦、工具在跑、模型在转。这一章最后要记住的是 turn/step 的分层——turn 是对话的括号，step 是括号里的每一轮"请求 + 工具"。下一章处理一个没解决的实际问题：这些日志怎么落盘、崩溃怎么恢复、整个系统怎么组合启动。
+回合跑通的那一刻，前三章的积木全部就位：日志在写、插件在拦、工具在跑、模型在转。这一章最后要记住的是 turn/step 的分层——turn 是对话的括号，step 是括号里的每一轮"请求 + 工具"。下一章处理一个没解决的实际问题：这些日志怎么写入磁盘、崩溃怎么恢复、整个系统怎么组合启动。

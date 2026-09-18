@@ -25,8 +25,8 @@
 
 </div>
 
-!!! info "当前状态"
-    **当前状态**：developer preview（对齐上游 `dsh-v0.1.5-alpha.1`），MIT 协议。演进策略是"地基优先"：会话格式版本保持 `SESSION_FORMAT_VERSION`，**released 旧版本经相邻迁移链读入**（`session-format-v0-to-v1` / `-v1-to-v2` / `-v2-to-v3` + `session-format-catalog`：读路径 decode→migrate→encodeCurrent，写后继 generation、不动旧代），仅未发布/未知版本双向 fail loud；`session-query` 检索域 SQLite 使用单调 `SCHEMA_VERSION`。学习时不必顾虑历史包袱——你看到的就是当前唯一事实。（报告初稿写于 `0.1.0-rc.7`，行文中的行号/版式可能滞后，涉及量化处已按当前基线校正。）
+!!! info "版本与格式策略"
+    基线为上游 `dsh-v0.1.5-alpha.1`（developer preview，MIT 协议）。演进策略是"地基优先"：会话格式版本保持 `SESSION_FORMAT_VERSION`，**released 旧版本经相邻迁移链读入**（`session-format-v0-to-v1` / `-v1-to-v2` / `-v2-to-v3` + `session-format-catalog`：读路径 decode→migrate→encodeCurrent，写后继 generation、不动旧代），仅未发布/未知版本双向 fail loud；`session-query` 检索域 SQLite 使用单调 `SCHEMA_VERSION`。
 
 ## 2. 分层架构
 

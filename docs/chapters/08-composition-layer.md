@@ -1,6 +1,6 @@
 # 08 组合层深读：配置树、loader 与 preset
 
-> 本章回答一个问题：`agent.cordis.yml` 里那棵树是怎么长出来的，一个进程为什么能同时跑多个不同组成的 agent？这是前几章"内核"与第 07 章"入口"之间被跳过的中间层——**组合层**。我们会先拆上游的配置树三层归属与 loader 结算，然后在 mini 里实现一个最小的 preset roster（会话级 agent 组合的选择与挂载）。
+> 本章回答一个问题：`agent.cordis.yml` 里那棵树是怎么长出来的，一个进程为什么能同时跑多个不同组成的 agent？这是前几章"内核"与第 07 章"入口"之间被跳过的中间层——**组合层**。我们会先理解上游的配置树三层归属与 loader 结算，然后在 mini 里实现一个最小的 preset roster（会话级 agent 组合的选择与挂载）。
 >
 > 对应 dsh 真实源码：`vendor/cordis`（loader/组合结算）+ `packages/preset`（per-session agent composition）+ `apps/cli/config/agent-presets/`（四种出厂 preset）。mini 复现了 roster + 挂载一条（`miniharness/preset/presets.py`）。
 
@@ -12,7 +12,7 @@
 - 工具的实现（bash、文件系统、web 搜索）是**进程级单例**，不应该每个会话复制一份；
 - 所以必须把"有什么实现"（host plane）和"这个会话用哪些"（preset）**分层**——这正是 `packages/preset/README.md:5` 的一句话：一个 preset 就是"挂在一个 agent 作用域下的一棵小组合树"，让一个进程跑几个不同组成的 agent 而不打架。
 
-## 8.2 上游机制：三层归属与 roster
+## 8.2 上游设计：三层归属与 roster
 
 ### 8.2.1 组合树的三层归属
 
@@ -34,7 +34,7 @@ realm 规则的直接后果（`apps/cli/config/agent-presets/standard/agent.cord
 
 loader 的 include 展开（上游由 `@deepseek-ai/cordis-plugin-include` 实现，`packages/boot/app-boot/src/index.ts:16` 安装 `mountRootInclude`；`vendor/cordis` 本体在 `src/` 下只有 context/events/fiber/index/loader 相关源码，无 `loader` 独立目录）做的核心事可压缩成三条：
 
-1. **include 展开**：组合里 `include: 'file.yml'` 的行先被替换成目标文件的内容（递归），这是"一个 preset 引用共享片段"的机制；
+1. **include 展开**：组合里 `include: 'file.yml'` 的行先被替换成目标文件的内容（递归），这是"一个 preset 引用共享片段"的做法；
 2. **插件加载**：每条 entry 的 `plugin` 字段导入真实模块，取回 `inject`/`apply` 元数据（`provides` 已废除——服务在 apply 期动态登记）；
 3. **结算**：把整棵树交给插件管理器，按依赖激活——这正是 mini 第 2 章 `RegistryService` 做的事（`miniharness/core/scope.py`），只是上游还有 scope/fiber/carrier 的完整实现。
 
@@ -49,7 +49,7 @@ loader 的 include 展开（上游由 `@deepseek-ai/cordis-plugin-include` 实�
 
 ## 8.3 mini 复现：preset roster 与挂载
 
-mini 组合层支持 YAML（`boot/composition.py`，pyyaml 硬依赖承载）；preset 清单用 JSON 承载（载体简化，契约对齐）。roster 已对齐上游 alpha.1 的**多根分层**：`shipped root`（随包分发的内置 preset，system trust、authoring 只读）→ 配置 roots → `harness-home`（user），同 id **first-root-wins**（对齐上游 discoverPresets 的 resolvedRoots 顺序）；清单文件双读（`preset.json` 或上游形态 `agent.cordis.yml` 经 `translate_cordis_composition` 翻译）。本章演示以仓库自带目录为例：
+mini 组合层支持 YAML（`boot/composition.py`，pyyaml 硬依赖承载）；preset 清单用 JSON 承载（载体简化，约定与上游一致）。roster 与上游 alpha.1 的**多根分层**一致：`shipped root`（随包分发的内置 preset，system trust、authoring 只读）→ 配置 roots → `harness-home`（user），同 id **first-root-wins**（同上游 discoverPresets 的 resolvedRoots 顺序）；清单文件双读（`preset.json` 或上游形态 `agent.cordis.yml` 经 `translate_cordis_composition` 翻译）。本章演示以仓库自带目录为例：
 
 ```
 miniharness/preset/               # shipped root（system trust）
@@ -108,7 +108,7 @@ class PresetRoster:
                     id=child.name, name=child.name, description="", order=0,
                     broken=f"the composition is unloadable: {error}")
                 continue
-            presets[p.id] = p          # 跨 root 同名 id first-root-wins（对齐上游 discoverPresets resolvedRoots 顺序）
+            presets[p.id] = p          # 跨 root 同名 id first-root-wins（同上游 discoverPresets resolvedRoots 顺序）
         return presets
 ```
 
@@ -151,9 +151,9 @@ loop = AgentLoop(session, adapter, view, ctx,
 
 两个 preset 用同一个 host 注册表、两个 agent 作用域——一个进程同时跑标准与极简 agent 的形态就成立了。
 
-## 8.4 硬性规定（被测试钉住）
+## 8.4 硬性规定（被测试固定）
 
-1. **roster = 多根目录列表**：发现 = 依序扫描 shipped → 配置 roots → harness-home，跨 root 同名 id **first-root-wins**（对齐上游 discoverPresets 的 resolvedRoots；上游早期为单一目录静默覆盖，alpha.1 起演进为分层制）；新增 preset 不碰代码。占位 broken 行的 `broken` 字段使该 preset 在**挂载期**被拒（`Preset.mount` 先检查 `self.broken` 再挂载）。
+1. **roster = 多根目录列表**：发现 = 依序扫描 shipped → 配置 roots → harness-home，跨 root 同名 id **first-root-wins**（同上游 discoverPresets 的 resolvedRoots；上游 alpha.1 起为分层制）；新增 preset 不碰代码。占位 broken 行的 `broken` 字段使该 preset 在**挂载期**被拒（`Preset.mount` 先检查 `self.broken` 再挂载）。
 2. **挂载只开视图**：host 注册表不变，agent 作用域只看到 preset 声明的工具。
 3. **host 缺工具 fail loud**：preset 声明了 host 没有的工具 → `RuntimeError`。
 4. **进程级冲突拒绝挂载**：`provides` 命中 host 已有服务 → `RuntimeError`，而不是覆盖。
@@ -166,6 +166,6 @@ loop = AgentLoop(session, adapter, view, ctx,
 - [ ] 说出组合树三层归属，并解释"进程级服务挂载时被拒绝"为什么比"下个会话撞车"好；
 - [ ] 给 `PresetRoster` 新增一个 preset 目录，`ids()` 自动包含它（一行代码不改）；
 - [ ] 手动构造一个 `provides` 与 host 冲突的 preset，观察挂载被拒绝且 host 服务未被覆盖；
-- [ ] 说出 mini 相对上游的载体简化（YAML→JSON）与语义对齐（组合选择语义不变）。
+- [ ] 说出 mini 相对上游的载体简化（YAML→JSON）与语义一致（组合选择语义不变）。
 
 > 下一章：Agent 干预面——宿主怎么唤醒、转向、取消一个运行中的 agent（steer/inject/cancel/whenIdle）。

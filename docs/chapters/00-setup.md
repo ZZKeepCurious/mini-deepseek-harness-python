@@ -40,7 +40,7 @@ mini-deepseek-harness-python/        ← 仓库根
 └── docs/                        ← 文档
     ├── README.md                ← 本手册索引（学习地图）
     ├── chapters/                ← 00-setup.md ~ 15-schemastery.md（本章所在目录）
-    └── report/                  ← 《DeepSeek Harness 深度学习指南与技术报告》HTML
+    └── report/                  ← 分析报告（MkDocs 站点）
 ```
 
 每个 `miniharness/` 文件的"第 N 章"标注，就是它对应的手册章节。想快速定位一个概念：先在手册找章节，再按章节号找文件。
@@ -64,7 +64,7 @@ MiniHarness 的启动行为全部经环境变量驱动，下面是完整清单�
 | `MINIHARNESS_HOME` | `~/.miniharness` | CLI 数据主目录：`--profile headless` 会话与 `miniharness sessions` 落在 `<HOME>/sessions`，用户预设落在 `<HOME>/.agent-presets`（`cli/headless.py`、`cli/session_cmds.py`、`preset/presets.py`） |
 | `MINIHARNESS_WEB_HOST` | `127.0.0.1` | `--profile web` 监听地址（`web/launcher.py`；`--host` CLI 参数优先） |
 | `MINIHARNESS_WEB_PORT` | `0`（OS 分配） | `--profile web` 监听端口（`--port` CLI 参数优先） |
-| `MINIHARNESS_WEB_TOKEN` | 空（无门） | 可选认证门：配置后 `/api/*` 全域强制、WS 升级拒绝写 HTTP 401；监听 `0.0.0.0` 无 token 启动即拒绝（web/auth.py，`docs/interface-wire.md` §7.1） |
+| `MINIHARNESS_WEB_TOKEN` | 空（无门） | 可选认证门：配置后 `/api/*` 全域强制、WS 升级拒绝写 HTTP 401；监听 `0.0.0.0` 无 token 启动即拒绝（web/auth.py，`docs/interface-wire.md` §1.1） |
 | `MINIHARNESS_WEBUI_DIST` | `web/static/`（教学 vanilla） | 静态服务前端根，指向 `webui/dist/` 即承载产品化前端（`web/frontend.py`） |
 | `MINIHARNESS_WEBUI_PROXY` | `http://127.0.0.1:8899` | 仅 webui 开发期：Vite dev server 的 `/api` 与 `/api/remote.mux` 代理目标（`webui/vite.config.ts`） |
 | `MINIHARNESS_MAX_STEPS` | `50` | Agent Loop 死循环守卫步数上限（第 4 章） |
@@ -76,7 +76,7 @@ MiniHarness 的启动行为全部经环境变量驱动，下面是完整清单�
 ## 0.5 三条学习纪律
 
 1. **先跑测试，再读代码**。每个文件都配了验收测试，测试就是"始终成立的性质"清单。先看测试想验证什么，再去看实现，比顺着代码读效率高。
-2. **每章完成"检查点练习"**。练习都是 10~20 行的小改动，改完要么让测试通过，要么新增测试钉住你的行为。
+2. **每章完成"检查点练习"**。练习都是 10~20 行的小改动，改完要么让测试通过，要么新增测试固定你的行为。
 3. **每章末尾做"回到 dsh"对照**。打开真实仓库对应源码，只读关键 50 行，体会"约定一样、实现简化"在哪里。
 
 ## 0.6 简化立场：与上游的差异
@@ -86,14 +86,14 @@ MiniHarness 是清晰的 Python 复现（以可复现、可学习为核心），
 | MiniHarness 简化 | 真实 dsh |
 |---|---|
 | 同步事件总线为教学主体 + `aemit`/`awaterfall`/`aparallel`/`aserial` async 变体（agent/pre-step、agent/request-error 已 async 化） | 异步（`@deepseek-ai/cordis` 基于 fiber/async） |
-| 服务按隔离标签键控的全局 store（`ctx.get` 缺省返回 `None`；`ctx.isolate(name)` 换标签实现 per-agent 隔离；declarative `provides` 字段已废除，apply 期 `provide` 动态登记） | 反射 `reflect` 全量协议（`inject`/`provide`/`get`/`set`/`isolate`/`intercept` + `ctx.<name>` 属性代理） |
-| 工具体执行体直接 `await`（async 契约）；同步工具函数经 `_maybe_await` 解包；阻塞调用以 `asyncio.to_thread` 显式放行（第 12 章） | `isConcurrencySafe` 并行池 + 串行屏障 |
-| LLM 流式 async 契约 + httpx 异步 SSE 传输（abort 置位即关闭连接，真取消；per-read idle 300s 对齐上游） | `fetch` + AbortSignal 原生异步流 |
+| 服务按隔离标签键控的全局 store（`ctx.get` 缺省返回 `None`；`ctx.isolate(name)` 换标签实现 per-agent 隔离；不再使用 declarative `provides` 字段，改为 apply 期 `provide` 动态登记） | 反射 `reflect` 全量协议（`inject`/`provide`/`get`/`set`/`isolate`/`intercept` + `ctx.<name>` 属性代理） |
+| 工具体执行体直接 `await`（async 约定）；同步工具函数经 `_maybe_await` 解包；阻塞调用以 `asyncio.to_thread` 显式放行（第 12 章） | `isConcurrencySafe` 并行池 + 串行屏障 |
+| LLM 流式 async 约定 + httpx 异步 SSE 传输（abort 置位即关闭连接，真取消；per-read idle 300s 同上游） | `fetch` + AbortSignal 原生异步流 |
  | 同步门面经进程级常驻单事件循环驱动（`core/agent_loop/resident_loop.py` 懒加载单例；主线程 Ctrl+C 协作取消） | 常驻单事件循环（Node 进程固有） |
 | JSON/YAML 配置 + 补丁（pyyaml 硬依赖承载 YAML；`!!js` 仅 `process.env.<NAME>` 子集） | YAML cordis.yml（同样的 id/insert/replace 语义） |
 | LLM 失败以异常抛出（finish 带内 `{kind:'error'|'aborted'}` 与异常同走 `agent/request-error` waterfall） | `LlmError` 编码 `CONTEXT_WINDOW_EXCEEDED` / `EMPTY_RESPONSE`（可重试）等 |
 | `agent/turn-stopping`、`system-prompt/assemble` waterfall 已实现（turn-stopping 为串行终点检查点，见第 4/13 章） | 上游都有 |
-| JSONL 载体已对齐（zstd 拼接帧 + 一行一事件 + format.ts 目录布局，明文模式可配；教学章节用简化明文形态）；SQLite 列 `(session_id, seq, type, data)` | JSONL 默认 checksum+Zstandard 帧容器；SQLite 列 `(session_id, seq, type, time, data, source_event_seqs, surface_op)` |
+| JSONL 载体与上游一致（zstd 拼接帧 + 一行一事件 + format.ts 目录布局，明文模式可配；教学章节用简化明文形态）；SQLite 列 `(session_id, seq, type, data)` | JSONL 默认 checksum+Zstandard 帧容器；SQLite 列 `(session_id, seq, type, time, data, source_event_seqs, surface_op)` |
 | `assistant/message` source 带 `{kind, provider, model}` | 消息 `{id, role, content, source}` 全字段 |
 
 ## 检查点

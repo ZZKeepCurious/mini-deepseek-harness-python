@@ -145,7 +145,7 @@ flowchart LR
 | **Web GUI 宿主端** | `packages/host`（8） | HTTP 路由载体 `ctx.webServer`（webserver）+ SPA 静态托管（frontend-static）+ 目录选择扩展口 `ctx.directoryPicker` + 插件清单远程接口（plugin-inventory）。演进：共享 API 网关 `ctx.apiProxy`（apiproxy）已在 alpha.1 删除，web 载体职责收敛到 `packages/api/gateway`（WS mux）+ `packages/api/session-controller`（typert 一元 RPC）。配套 `docs/subsystems/web-server.md`、workspace.md |
 | **Web GUI 浏览器端** | `packages/client`（40） | 浏览器 shell（web）、对象层（runtime：ConnectionController→SessionManager→Session，React-free）、**slot 组合系统**（`ctx.slots.register`，声明式 UI 扩展点）、connection（浏览器↔宿主 HTTP + WebSocket：POST 一元 RPC + `/api/remote.mux` 流）、30+ 个 `ui-*` 功能插件（会话、工具调用树、子 agent、goal、job、权限、计划、模型选择等）。纪律：组件只见四份 props 派生数据，业务数据永远在对象层，UI 从不写 session 日志 |
 | **远程 BFF / RPC** | `packages/api`（2）、`packages/typert`（4） | typert 从 Host 类型生成调用描述与 Client Remote 投影；gateway 实现 `ctx.typertGateway` 一元 RPC；remotes 拥有 Agent/Session 查找 BFF 策略。方向：remotes → gateway → connection → webserver。配套 `docs/subsystems/typert.md`、`docs/api-gateway.md` |
-| **跨进程 SDK** | `packages/sdk`（3） | JSON-RPC 协议栈：protocol（wire 协议定义）、client（TS 客户端）、server（stdio JSON-RPC 服务器插件）。Python 侧 `python/sdk` 是同协议的另一实现 |
+| **跨进程 SDK** | `packages/sdk`（3） | JSON-RPC 协议族：protocol（wire 协议定义）、client（TS 客户端）、server（stdio JSON-RPC 服务器插件）。Python 侧 `python/sdk` 是同协议的另一实现 |
 | **ACP / Hooks** | `packages/acp`（1）、`packages/hooks`（3） | acp = 仅自动化用途的 Agent Client Protocol 服务器；hooks = Claude Code / Codex hook 桥接（SessionStart、PreToolUse、PostToolUse、Stop）+ 共享 wire 协议库 |
 | **会话数据面** | `packages/session`（18）、`packages/session-query`（4） | 持久化扩展口 + JSONL 后端（`session-persistence-jsonl`）+ 相邻格式迁移链（`session-format` / `-catalog` / `-v0-to-v1` / `-v1-to-v2` / `-v2-to-v3`）+ 投影扩展口 + 标题 + 上报 + session-query（逻辑语料、lineage 血缘、事件关系、语义过滤、SQLite FTS 全文检索）。配套 docs/subsystems/persistence.md、session-projection.md、session-query.md |
 | **协作与状态** | `packages/goal`、`schedule`、`feedback`、`plan`、`todo`、`context`、`guard`、`identity`、`storage`、`workspace` | 同会话目标（goal）、定时跟进（schedule）、人类反馈（feedback）、计划模式（plan）、todo 工具、注入式上下文（context）、循环卫生守卫（guard：重复调用提醒 + tools/execute 超时执行器）、匿名身份、存储中心、工作区实体 |
@@ -159,7 +159,7 @@ flowchart LR
 
 ### 4.1 Cordis 插件模型——"一切皆插件"的地基
 
-通常的插件框架只解决"注册与发现"；Cordis 更进一步，把"装载什么、何时装载、如何卸载"全部形式化。四个核心机制：
+通常的插件框架只解决"注册与发现"；Cordis 更进一步，把"装载什么、何时装载、如何卸载"全部形式化。四个核心要点：
 
 1. **插件是实现了 Service 的对象**：函数插件形如 `{ name, inject, Config, apply(ctx) }`；Service 子类插件由 Cordis 挂载进当前上下文。
 2. **Context 是服务仓库**：服务声明稳定的 `ctx.<key>`（如 `ctx.tools`），插件按 key 查找而非 import 具体实现。
@@ -194,7 +194,7 @@ flowchart LR
 5. **安装可逆副作用**：贡献经 `ctx.effect` / `ctx.on` / `ctx.waterfall` / `ctx.provide` 安装——每条副作用都登记了逆操作。
 6. **返回 disposer**：`register` 返回一个可调用对象，作为撤销该插件全部副作用的句柄。
 7. **卸载 / HMR 热重载**：调用 disposer 或触发热重载，进入卸载路径。
-8. **按注册逆序回滚**：副作用按栈序（后装先卸）逆序撤销，保证不留残余注册。
+8. **按注册逆序回滚**：副作用按后进先出顺序（后装先卸）逆序撤销，保证不留残余注册。
 9. **热重载 → 重新 apply**：HMR 场景下回滚完成后立刻对新版本插件重新执行第 4 步，实现免重启换插件。
 
 ### 4.2 事件溯源会话日志（整个框架的地基）
@@ -206,7 +206,7 @@ flowchart LR
 1. **唯一数据源。**`Session` 是一条只追加、不修改的 `SessionEvent` 日志。模型的消息历史不是另外存出来的，而是每次用 `deriveMessages()` 从日志现算——回放也等于重新派生一遍。相比"内存一份、磁盘一份"的常规做法，没有第二份副本，就没有两份数据对不上的问题。
 2. **模型可见 ⟺ 已记录。**这是唯一数据源的直接推论：历史是派生视图，那么模型能看到的任何内容，都必须能从日志重建。反过来，想给模型加一种新输入，就必须先加一种新的 session 事件（扩展 `SessionEventMap`，再写"从日志渲染它"的代码）。
 3. **可合并扩展。**常规框架加事件类型往往要改核心包；dsh 用 TypeScript 的 `declare module` 声明合并，插件就能把新类型直接"塞"进 `SessionEventMap`——类型系统本身成了扩展点，这是相当少见的设计。
-4. **表面（surface）机制。**四种"产生消息"的事件（`system/message`、`user/message`、`assistant/message`、`tool/result`）都带 `surfaceOp`，取值 `append` 或 `{op:'replace', startSeq, endSeq}`（区间遮蔽）。投影时 `append` 按序排列，`replace` 整体替换旧的那一段。后面 5.2 节会看到，上下文压缩就是靠 `replace` 落地的——压缩不改日志，只追加一条替换事件（检查点载体是 `user/message`，不是被替换的 assistant 消息）。
+4. **表面（surface）。**四种"产生消息"的事件（`system/message`、`user/message`、`assistant/message`、`tool/result`）都带 `surfaceOp`，取值 `append` 或 `{op:'replace', startSeq, endSeq}`（区间遮蔽）。投影时 `append` 按序排列，`replace` 整体替换旧的那一段。后面 5.2 节会看到，上下文压缩就靠 `replace` 实现——压缩不改日志，只追加一条替换事件（检查点载体是 `user/message`，不是被替换的 assistant 消息）。
 5. **无损 JSON 强制。**`append()` 在写入源头做深度校验并冻结，序列化不了的东西（包括非有限浮点数）当场抛错。坏事件在源头就被拦住，进不了日志——日志里永远只有合法的数据。
 6. **崩溃恢复。**重载时发现 turn 没闭合（进程半路崩了），常规做法是截断或回滚；dsh 不这么做——大 turn 可能非常巨大，截断会丢内容。做法是合成一条 `turn/end { reason: {kind:'interrupted'} }` 把括号补平衡：宁可标记"这次被打断了"，也不能悄悄丢掉已经发生过的事实。
 
@@ -261,13 +261,13 @@ flowchart LR
 
 ### 4.4 类型技术（TypeScript 层）
 
-常规 TS 项目的扩展靠"给接口留可选字段"；dsh 把类型系统本身做成扩展机制，三件套：
+常规 TS 项目的扩展靠"给接口留可选字段"；dsh 把类型系统本身做成扩展方式，三件套：
 
 1. **`…Map → derived-union` 模式**：接口按判别标签键控，`keyof` 派生联合类型，插件用声明合并扩展。五个规范 map：`ContentBlockMap`、`MessageSourceMap`、`FinishReasonMap`、`TurnEndReasonMap`、`SessionEventMap`（前两者在 `llm/llm/src/types.ts`，后两者在 `core/session/src/types.ts:200,269`）。合并可扩展的联合在 `switch` 后落到文档化 default——联合随时可能被插件追加新键，穷尽性的 `assertNever` 断言在这里不成立。注意：turn/start 的 `trigger` **不是**规范 map，而是内联判别对象（`{kind:'message', source:{kind:'user'}}`），只在单个 turn 内静态使用，不参与插件声明合并。
 2. **品牌化 ID（`Branded<B>`）**：跨包 ID 结构上是 string、类型上不可互换（`SessionId` ≠ `CallId`）。纯类型包 `util/brand` 零运行时依赖。
 3. **严格类型纪律**：`strict` + `noImplicitAny`；跨边界强制运行时校验（parser、wire、worker、持久化），同进程类型边界信任 TS 不重复校验。
 
-<p class="fig-cap">图 8：类型技术——Map → derived-union → 声明合并扩展的闭环</p>
+<p class="fig-cap">图 8：类型技术——Map → derived-union → 声明合并扩展的完整路径</p>
 
 ```mermaid
 flowchart LR

@@ -6,9 +6,9 @@
 
 ## 10.1 直觉：为什么是"投影"而不是"第二份数据"
 
-Trajectory 是 web 专属的"Agent 的 DevTools"：按 turn 组织的事件台账，带 Overview 时间线（TTFT 两色）、局部检查器、搜索、虚拟化滚动。但设计上它**不是独立数据系统**——没有 session-timeline 包，不额外落盘。它就是同一份会话日志的浏览器端折叠（`packages/client/ui-trajectory/README.md:5`）。好处：日志是唯一数据源，折叠永远可重放、可纠正。
+Trajectory 是 web 专属的"Agent 的 DevTools"：按 turn 组织的事件台账，带 Overview 时间线（TTFT 两色）、局部检查器、搜索、虚拟化滚动。但设计上它**不是独立数据系统**——没有 session-timeline 包，不额外写入磁盘。它就是同一份会话日志的浏览器端折叠（`packages/client/ui-trajectory/README.md:5`）。好处：日志是唯一数据源，折叠永远可重放、可纠正。
 
-上游折叠的三个要点（已核实）：
+上游折叠的三个要点：
 
 1. **折叠是纯函数**：每个折叠 target 用独立 definition（`match/update/finalNode`）物化，无副作用、可重入（`trajectory-*-definition.ts`）；
 2. **保留边界**：设计笔记明确拒绝"把日志拍平成裸记录流"——Turn/Step/Request 边界保留因果结构（`2026-07-27-trajectory-inspection-ledger.md:44`）；
@@ -68,7 +68,7 @@ snapshot.format_text()         # 终端可读台账（turn 分组 + 缩进 + 耗
 fold_events_json(events)   # {"partial":…, "turns":[…], "requests":[…]}
 ```
 
-## 10.5 硬性规定（被测试钉住）
+## 10.5 硬性规定（被测试固定）
 
 1. 折叠是**纯函数**：同一事件流两次折叠结果一致（无状态泄漏）。
 2. **turn 摘要由 turn/start 驱动**：`first_seq` 过滤掉 turn/start 后不产生 turn 摘要（消息节点仍在）。
@@ -83,6 +83,6 @@ fold_events_json(events)   # {"partial":…, "turns":[…], "requests":[…]}
 - [ ] 说出"投影"设计的价值：日志唯一数据源，折叠可重放可纠正；
 - [ ] 解释 turn 摘要为什么必须由 turn/start 驱动（而不是从消息推断）；
 - [ ] 手动构造一个崩溃尾部事件流，观察 partial 标记与 duration=None；
-- [ ] 说出 mini Python 折叠引擎（`client/trajectory.py`）相对上游的简化（折叠语义对齐、无 UI）；浏览器侧 `webui/` Trajectory 已按上游概念补虚拟化窗口 + Overview 折叠跳转 + 增量搜索（见 verified-diffs §2.17）。
+- [ ] 说出 mini Python 折叠引擎（`client/trajectory.py`）相对上游的简化（折叠语义一致、无 UI）；浏览器侧 `webui/` Trajectory 已按上游概念实现虚拟化窗口 + Overview 折叠跳转 + 增量搜索。
 
 > 下一章：运行时自我修改——agent 在进程内给自己加插件的生命周期。

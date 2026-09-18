@@ -14,11 +14,11 @@
 
 这些约定如果每个服务自己手写一遍，既重复又容易漂移。Cordis 用两样东西把它们收口：
 
-> **(1) `Service` 基类**：服务的"构造即注册、可调用、可配置"模板，对齐 `vendor/cordis/src/service.ts`。子类几乎只填 `_invoke` / `_check` / `_init`，其余由基类兜底。
+> **(1) `Service` 基类**：服务的"构造即注册、可调用、可配置"模板，同 `vendor/cordis/src/service.ts`。子类几乎只填 `_invoke` / `_check` / `_init`，其余由基类兜底。
 >
-> **(2) `intercept` / `extend` / `isolate` 三兄弟**：不改父上下文、只给孩子上下文叠一层"额外配置 / 自有属性 / 隔离标签"的子上下文工厂（对齐 `vendor/cordis/src/context.ts`）。其中 `intercept` 专门给服务注入 per-plugin 配置，是 2.4 讲的"`_resolve_config` 沿祖先链合并"那套机制的入口。
+> **(2) `intercept` / `extend` / `isolate` 三兄弟**：不改父上下文、只给孩子上下文叠一层"额外配置 / 自有属性 / 隔离标签"的子上下文工厂（同 `vendor/cordis/src/context.ts`）。其中 `intercept` 专门给服务注入 per-plugin 配置，是 2.4 讲的"`_resolve_config` 沿祖先链合并"那套约定的入口。
 
-本章把这三块讲透。它们已经在 mini 里全量对齐，但此前只在 `architecture.md` 的映射行登记，没有像第 2 章那样逐机制解读——本章补上。
+本章把这三块讲透。它们已经在 mini 里全量实现，但此前只在 `architecture.md` 的映射行登记，没有像第 2 章那样逐项解读——本章补上。
 
 ## 13.2 概念：服务为什么需要基类
 
@@ -69,7 +69,7 @@ def __call__(self, *args, **kwargs):
 
 这解释了为什么 `ctx.logger`（一个 `LoggerService` 实例）既能被 `ctx.logger(name)` 调用返回具名 Logger，又能直接 `ctx.logger.warn(...)`——后者是 `_invoke` 默认产出当前 fiber 名的 Logger 后再调 `.warn`（见步骤 3）。
 
-- **`_init`**：构造后运行（上游 `symbols.init`，类插件场景）。mini 在 `__init__` 末尾 `init()` 调用，对齐"构造后"语义。
+- **`_init`**：构造后运行（上游 `symbols.init`，类插件场景）。mini 在 `__init__` 末尾 `init()` 调用，同"构造后"语义。
 
 为什么"构造即注册"而不是"调用方负责注册"？因为服务实例一旦被创建，它的存在就该立刻对依赖它的 fiber 可见（触发 epoch 重载，见 2.5 步骤 5）。如果交给调用方手动 `provide`，很容易漏注册或重复注册——基类把这条路径焊死。
 
@@ -92,7 +92,7 @@ def _resolve_config(self, base=None, head=None, ctx=None):
     return merged
 ```
 
-`_resolve_intercept`（在 `Context` 上）沿 parent 链收集 `name` 的 intercept 条目，近根者优先（对齐 `service.ts:86-102` 的 prototype 链 `unshift` 走查）：
+`_resolve_intercept`（在 `Context` 上）沿 parent 链收集 `name` 的 intercept 条目，近根者优先（同 `service.ts:86-102` 的 prototype 链 `unshift` 走查）：
 
 ```python
 def _resolve_intercept(self, name):
@@ -140,9 +140,9 @@ class LoggerService(Service):
 
 1. **可调用**：`ctx.get("logger")("agent")` 经 `_invoke` 铸一个具名 `Logger`；`ctx.get("logger").warn(...)` 则 `_invoke` 用当前 fiber 名（hyphenate）铸 Logger 后调 `.warn`。
 2. **配置来自 intercept**：`name` / `level` 不在服务上写死，而是从 `_resolve_config(ctx=ctx)` 解析——所以不同作用域下 `ctx.logger("x")` 能读出不同级别（上游 `logger.ts:251-261` 同款）。
-3. **exporter 注册即 effect**：`exporter()` 经 `ctx.effect` 登记，随 fiber 注销自动移除（对齐 `logger.ts:232-237`）。默认导出器把消息压进 `buffer`（环形，超 `buffer_size` 截断），这是其它导出器（文件、stdout、测试捕获器）之外的兜底。
+3. **exporter 注册即 effect**：`exporter()` 经 `ctx.effect` 登记，随 fiber 注销自动移除（同 `logger.ts:232-237`）。默认导出器把消息压进 `buffer`（环形，超 `buffer_size` 截断），这是其它导出器（文件、stdout、测试捕获器）之外的兜底。
 
-`Logger` 门面本身把 `error/info/warn/debug` 铸成方法，内部构造一条 `Message`（`sn`/`ts`/`name`/`type`/`level`/`args`/`fiber`），遍历所有 exporter，按 `exporter.levels[name] ?? levels.default ?? self.level ?? INFO` 过滤后 `export`（对齐 `logger.ts:141-161`）。格式化走 printf 风格占位符 `%s %d %f %o %c %%`（上游 `defaultFormatters`），`%o` 走 `JSON.stringify`，Error 自动展开栈、AggregateError 递归展开 `errors`——这些在 mini 里以等价 Python 实现。
+`Logger` 门面本身把 `error/info/warn/debug` 铸成方法，内部构造一条 `Message`（`sn`/`ts`/`name`/`type`/`level`/`args`/`fiber`），遍历所有 exporter，按 `exporter.levels[name] ?? levels.default ?? self.level ?? INFO` 过滤后 `export`（同 `logger.ts:141-161`）。格式化走 printf 风格占位符 `%s %d %f %o %c %%`（上游 `defaultFormatters`），`%o` 走 `JSON.stringify`，Error 自动展开栈、AggregateError 递归展开 `errors`——这些在 mini 里以等价 Python 实现。
 
 4. **`ctx.logger` 是绑定视图，不是裸服务**。上游 `ctx.logger` 经 traceable 代理：调用 `_invoke` 时以**访问方** ctx 解析 intercept（而非服务构造时的根 ctx）。mini 用 `_LoggerView` 显式承载同一语义：
 
@@ -199,7 +199,7 @@ assert child.get("greeter")("x") == "hello x"    # 子作用域 intercept 覆盖
 
 ## 13.4 验收：硬性规定
 
-本章机制在 `tests/test_bus.py` / `tests/test_fiber.py` 中逐条有对应断言：
+本章各项在 `tests/test_bus.py` / `tests/test_fiber.py` 中逐条有对应断言：
 
 1. `Service` 子类构造即 `provide`，同名在已注册标签下冲突（fail loud）；fiber 卸载自动收回（不再可见）。
 2. 定义 `_invoke` 的服务实例可调用；未定义则 `__call__` 抛 `TypeError`。
@@ -229,4 +229,4 @@ python -m unittest tests.test_bus -v
 
 ## 13.7 收尾
 
-这一章的四个字可以带走：**服务即对象**。Service 把"构造即注册、可调用、可配置"从每个服务里抽出来焊死，`intercept`/`isolate`/`extend` 提供"不改父、只改子"的组合手段。下一章（14）把作用域从"隔离标签"再推进一层：dsh 专属的 `scope_key` 身份键与 `scopeTarget` 载波派发模型——它用一条 parent 关系同时驱动"注册向下继承"和"事件向上接纳"两个方向，是 agent 组合、会话 owner 路由、agent/* 事件隔离的根基。
+这一章的一句话可以带走：**服务即对象**。Service 把"构造即注册、可调用、可配置"从每个服务里抽出来焊死，`intercept`/`isolate`/`extend` 提供"不改父、只改子"的组合手段。下一章（14）把作用域从"隔离标签"再推进一层：dsh 专属的 `scope_key` 身份键与 `scopeTarget` 载波派发模型——它用一条 parent 关系同时驱动"注册向下继承"和"事件向上接纳"两个方向，是 agent 组合、会话 owner 路由、agent/* 事件隔离的根基。

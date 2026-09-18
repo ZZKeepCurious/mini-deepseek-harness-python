@@ -6,7 +6,7 @@
 
 ## 11.1 上游的边界设计
 
-自我修改在上游不是"agent 任意改配置"：`tool-cordis` 的说明文档 *What it does* 一节里就写了（已核实，`tool-cordis/README.md:19`）：
+自我修改在上游不是"agent 任意改配置"：`tool-cordis` 的说明文档 *What it does* 一节里就写了（`tool-cordis/README.md:19`）：
 
 > 临时插件只保存在进程内存中，明确不写入 cordis.yml，也不会在重启后恢复。
 
@@ -18,7 +18,7 @@
 
 ## 11.2 生命周期（对应 `runner.spec.ts:150-176` 的完整流程）
 
-上游测试里的标准路径（已核实）：
+上游测试里的标准路径：
 
 1. `define`（kind: new）→ mint `dyn-1` / `pkg-1`，**只登记，不生效**；
 2. `run` → 立即 `status: 'running'`、mint `run-1`，插件 `apply` 执行、`ctx.provide` 生效；
@@ -37,10 +37,10 @@ registry.stop(run["runId"])
 registry.undefine(pkg_id)
 ```
 
-## 11.3 硬性规定（被测试钉住）
+## 11.3 硬性规定（被测试固定）
 
 1. **define 只登记**：run 之前服务不可用（invoke 抛 KeyError）。
-2. **运行中可重复 run / 可 undefine**：`run` = 若已运行先 `_retract` 旧 run 再激活新 run（**replace 语义，非拒绝**，对齐上游 `cordis-host-runner/index.ts:842`——旧 run 的服务立即消失，test `test_run_twice_replaces_old_run` 钉住）；`undefine` 对运行中包**自动 retract 后删除**并返回 `{ok: True, wasRunning}`（对齐上游 `index.ts:215-218`，test `test_undefine_auto_retracts_running` 钉住）；只有缺失包才拒绝——`run` 对未定义包抛 `KeyError`，`undefine` 返回 `{ok: false, reason: 'plugin-missing'}`（不抛错）。
+2. **运行中可重复 run / 可 undefine**：`run` = 若已运行先 `_retract` 旧 run 再激活新 run（**replace 语义，非拒绝**，同上游 `cordis-host-runner/index.ts:842`——旧 run 的服务立即消失，test `test_run_twice_replaces_old_run` 固定）；`undefine` 对运行中包**自动 retract 后删除**并返回 `{ok: True, wasRunning}`（同上游 `index.ts:215-218`，test `test_undefine_auto_retracts_running` 固定）；只有缺失包才拒绝——`run` 对未定义包抛 `KeyError`，`undefine` 返回 `{ok: false, reason: 'plugin-missing'}`（不抛错）。
 3. **进程级冲突 fail loud**：插件声明的 provides 若祖先链上已存在（如 host 的 `session-persistence`），run 直接拒绝，host 服务不被覆盖。
 4. **只存进程内存**：新 registry = "重启"，定义与运行全部不恢复（`inspect_self` 快照为空）。
 5. **kind 限定**：非 `new` 的 define 抛 ValueError。
@@ -61,4 +61,4 @@ registry.undefine(pkg_id)
 - [ ] 构造一个进程级冲突场景，验证 fail loud 且 host 服务不被覆盖；
 - [ ] 说出 mini 相对上游的简化（模型侧入口、审批往返）。
 
-> 第 08-11 章至此构成"组合层"闭环：预设（静态装配）→ 干预（运行时控制）→ 轨迹（事后投影）→ 动态插件（运行中自修改），审批（09 章 §9.5）管住干预通道。外部入口（07 章 §7.6-7.8）已复现；下一步进入第 12 章：异步化与并行工具执行。
+> 第 08-11 章至此构成完整的"组合层"：预设（静态装配）→ 干预（运行时控制）→ 轨迹（事后投影）→ 动态插件（运行中自修改），审批（09 章 §9.5）管住干预通道。外部入口（07 章 §7.6-7.8）已实现；下一步进入第 12 章：异步化与并行工具执行。
