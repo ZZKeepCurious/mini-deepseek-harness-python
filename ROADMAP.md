@@ -35,7 +35,7 @@ web 半（传输层 + 浏览器前端）的 wire 面与上游一致：两信封 
 
 以下上游 `packages/` 包尚未复现，未来想扩充复现范围可从中挑选；多数属于"能力扩展口 + 消费工具"的延伸，核心约定不依赖它们。已实现的家族中也有只做了一部分切片的（如 subprocess 仅环境清洗、client 仅 ui-trajectory、host 为 apiproxy 子集），权威归属以 docs/architecture.md 映射表为准。
 
-- **能力类**：`fs`、`terminal`、`e2b`、`lsp`、`code-runtime`、`spill`、`workspace`、`ptc-runtime`
+- **能力类**：`fs`、`terminal`、`e2b`、`lsp`、`code-runtime`、`spill`、`workspace`、`ssh`
 - **编排类**：`workflow`、`schedule`、`todo`
 - **横切类**：`settings`、`session-query`、`feedback`、`guard`、`runtime-diagnostics`、`api`、`context`、`util`、`web`
 - **平台类**：`typert`、`test-support`
