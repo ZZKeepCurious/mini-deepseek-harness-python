@@ -203,6 +203,12 @@ class ImportDirectionTest(unittest.TestCase):
                     # BlockAssembler/expand_assistant_stream（上游 dsh-session
                     # 同样 import 自 dsh-llm，packages/core/session/src/index.ts:15）
                     continue
+                if src_unit == "llm" and dst_unit == "attachment":
+                    # §5 显式例外（单方向）：llm-deepseek 请求侧图片管线复用
+                    # attachment 的纯投影几何（longEdgeDimensions）与引用类型；
+                    # 上游 llm-deepseek package.json 直接依赖 dsh-attachment
+                    # （dsh-llm 本体仅 devDependency 类型）。attachment 不得反向 import llm
+                    continue
                 if dst_layer >= src_layer:
                     violations.append(
                         f"{module_name}: L{src_layer} 导入 {dst}（L{dst_layer}，违反 §5 规则 1）"

@@ -32,7 +32,7 @@ from miniharness.attachment import (
     EncodedFileAttachment,
     FileAttachmentRef,
     ImageAttachmentRef,
-    ImageRequestPolicy,
+    ImageRequestTarget,
     LocalAttachmentStore,
     SaveFileAttachment,
     SaveFileStreamAttachment,
@@ -252,7 +252,7 @@ class TestRequestImage(unittest.TestCase):
     def test_base_store_default_rejects_projection(self):
         with self.assertRaises(AttachmentError) as cm:
             AttachmentStore().read_image_request(
-                self.ref, ImageRequestPolicy(maxPixels=1024, maxBytes=1024)
+                self.ref, ImageRequestTarget(width=1024, height=1024, maxBytes=1024)
             )
         self.assertEqual(cm.exception.code, ATTACHMENT_PROJECTION_UNSUPPORTED)
         self.assertEqual(
@@ -260,22 +260,22 @@ class TestRequestImage(unittest.TestCase):
             "The mounted attachment provider cannot derive model-request images.",
         )
 
-    def test_policy_must_be_positive_integers(self):
+    def test_target_must_be_positive_integers(self):
         with self.assertRaises(AttachmentError) as cm:
             self.store.read_image_request(
-                self.ref, ImageRequestPolicy(maxPixels=0, maxBytes=100)
+                self.ref, ImageRequestTarget(width=0, height=10, maxBytes=100)
             )
         self.assertEqual(cm.exception.code, INVALID_ATTACHMENT_REF)
-        self.assertEqual(str(cm.exception), "Image request maxPixels must be a positive integer.")
+        self.assertEqual(str(cm.exception), "Image request width must be a positive integer.")
         with self.assertRaises(AttachmentError) as cm:
             self.store.read_image_request(
-                self.ref, ImageRequestPolicy(maxPixels=10, maxBytes=-1)
+                self.ref, ImageRequestTarget(width=10, height=10, maxBytes=-1)
             )
         self.assertEqual(str(cm.exception), "Image request maxBytes must be a positive integer.")
 
     def test_passthrough_when_within_budgets(self):
         version = self.store.read_image_request(
-            self.ref, ImageRequestPolicy(maxPixels=10_000, maxBytes=1_000_000)
+            self.ref, ImageRequestTarget(width=10_000, height=10_000, maxBytes=1_000_000)
         )
         self.assertEqual(version.data, _png_bytes(4, 4))
         self.assertEqual(version.mediaType, "image/png")
@@ -283,45 +283,44 @@ class TestRequestImage(unittest.TestCase):
         self.assertEqual(version.space, "srgb")
         self.assertFalse(version.hasAlpha)
         self.assertEqual(str(version.variantId), str(
-            request_image_variant_id(self.ref, ImageRequestPolicy(maxPixels=10_000, maxBytes=1_000_000))
+            request_image_variant_id(self.ref, ImageRequestTarget(
+                width=10_000, height=10_000, maxBytes=1_000_000))
         ))
 
-    def test_variant_id_is_deterministic_and_policy_sensitive(self):
-        policy = ImageRequestPolicy(maxPixels=10_000, maxBytes=1_000_000)
-        other = ImageRequestPolicy(maxPixels=9_999, maxBytes=1_000_000)
+    def test_variant_id_is_deterministic_and_target_sensitive(self):
+        target = ImageRequestTarget(width=10_000, height=10_000, maxBytes=1_000_000)
+        other = ImageRequestTarget(width=9_999, height=10_000, maxBytes=1_000_000)
         self.assertEqual(
-            request_image_variant_id(self.ref, policy),
-            request_image_variant_id(self.ref, policy),
+            request_image_variant_id(self.ref, target),
+            request_image_variant_id(self.ref, target),
         )
-        self.assertNotEqual(request_image_variant_id(self.ref, policy), request_image_variant_id(self.ref, other))
-        self.assertTrue(str(request_image_variant_id(self.ref, policy)).startswith("sha256:"))
+        self.assertNotEqual(request_image_variant_id(self.ref, target), request_image_variant_id(self.ref, other))
+        self.assertTrue(str(request_image_variant_id(self.ref, target)).startswith("sha256:"))
 
     def test_cache_entry_written_and_reused(self):
-        policy = ImageRequestPolicy(maxPixels=4, maxBytes=1_000_000)
-        first = self.store.read_image_request(self.ref, policy)
+        target = ImageRequestTarget(width=2, height=2, maxBytes=1_000_000)
+        first = self.store.read_image_request(self.ref, target)
         hash_hex = str(first.variantId)[len("sha256:"):]
         path = os.path.join(self._tmp, "request-images", hash_hex[:2], hash_hex)
         self.assertTrue(os.path.isfile(path))
-        second = self.store.read_image_request(self.ref, policy)
+        second = self.store.read_image_request(self.ref, target)
         self.assertEqual(second.data, first.data)
         self.assertEqual(second.variantId, first.variantId)
 
-    def test_pixel_budget_projects_dimensions_inward(self):
+    def test_smaller_target_resizes_inward(self):
         version = self.store.read_image_request(
-            self.ref, ImageRequestPolicy(maxPixels=2, maxBytes=1_000_000)
+            self.ref, ImageRequestTarget(width=1, height=1, maxBytes=1_000_000)
         )
-        # 上游内收算法：4×4 预算 2px → (1,1)
-        self.assertLessEqual(version.width * version.height, 2)
         self.assertEqual((version.width, version.height), (1, 1))
         self.assertEqual(
-            request_image_dimensions(4, 4, 2), (1, 1)
+            request_image_dimensions(4, 4, 1), (1, 1)
         )
 
     def test_unreachable_byte_target_keeps_smallest_ladder_output(self):
         # alpha.1：请求图把 maxBytes 当编码字节目标，每个阶梯质量都超限时
         # 保留最小阶梯输出（不再抛 IMAGE_TOO_LARGE）。
         version = self.store.read_image_request(
-            self.ref, ImageRequestPolicy(maxPixels=10_000, maxBytes=2)
+            self.ref, ImageRequestTarget(width=4, height=4, maxBytes=2)
         )
         self.assertGreater(version.bytes, 2)
         self.assertEqual(version.width, self.ref.width)
@@ -330,7 +329,7 @@ class TestRequestImage(unittest.TestCase):
     def test_opaque_route_is_jpeg_and_alpha_route_is_webp(self):
         # alpha.1：编码阶梯按 alpha 分流——不透明走 JPEG，带 alpha 走 WebP。
         opaque = self.store.read_image_request(
-            self.ref, ImageRequestPolicy(maxPixels=4, maxBytes=1_000_000)
+            self.ref, ImageRequestTarget(width=2, height=2, maxBytes=1_000_000)
         )
         self.assertEqual(opaque.mediaType, "image/jpeg")
         # 带半透明 alpha 的 4×4 PNG 强制缩放 → WebP 阶梯且保留 alpha
@@ -343,33 +342,33 @@ class TestRequestImage(unittest.TestCase):
         alpha_im.save(alpha_buffer, format="PNG")
         alpha_ref = self.store.save_image(_save(self.store, data=alpha_buffer.getvalue()))
         alpha_version = self.store.read_image_request(
-            alpha_ref, ImageRequestPolicy(maxPixels=2, maxBytes=1_000_000)
+            alpha_ref, ImageRequestTarget(width=1, height=1, maxBytes=1_000_000)
         )
         self.assertEqual(alpha_version.mediaType, "image/webp")
         self.assertTrue(alpha_version.hasAlpha)
 
-    def test_transform_version_is_v5_and_codes_for_ladder_are_stable(self):
-        # alpha.1：变换版本 request-image-v4 → v5；阶梯与编码参数是 caches/上传
-        # 索引键的一部分，任何变化都必须同时改版本号。
+    def test_transform_version_is_v6_and_codes_for_ladder_are_stable(self):
+        # alpha.1：变换版本 request-image-v5 → v6（路由目标取代 policy）；阶梯与
+        # 编码参数是 caches/上传索引键的一部分，任何变化都必须同时改版本号。
         from miniharness.attachment.encoding import (
             IMAGE_ENCODING_QUALITIES,
             WEBP_ENCODING_EFFORT,
         )
         from miniharness.attachment.request_image import REQUEST_IMAGE_TRANSFORM_VERSION
-        self.assertEqual(REQUEST_IMAGE_TRANSFORM_VERSION, "request-image-v5")
+        self.assertEqual(REQUEST_IMAGE_TRANSFORM_VERSION, "request-image-v6")
         self.assertEqual(IMAGE_ENCODING_QUALITIES, (85, 75, 60))
         self.assertEqual(WEBP_ENCODING_EFFORT, 0)
 
     def test_invalid_cached_variant_is_regenerated(self):
-        # alpha.1：读取缓存时按规范复验（uchar/srgb/尺寸不超投影/alpha 兼容），
+        # alpha.1：读取缓存时按规范复验（uchar/srgb/尺寸不超 target/alpha 兼容），
         # 任何不符当作未命中重新生成（不按字节超限判失效）。
-        policy = ImageRequestPolicy(maxPixels=4, maxBytes=1_000_000)
-        first = self.store.read_image_request(self.ref, policy)
+        target = ImageRequestTarget(width=2, height=2, maxBytes=1_000_000)
+        first = self.store.read_image_request(self.ref, target)
         hash_hex = str(first.variantId)[len("sha256:"):]
         path = os.path.join(self._tmp, "request-images", hash_hex[:2], hash_hex)
         with open(path, "wb") as fh:
             fh.write(b"not-a-real-image")
-        second = self.store.read_image_request(self.ref, policy)
+        second = self.store.read_image_request(self.ref, target)
         self.assertEqual(second.data, first.data)
         self.assertEqual(second.variantId, first.variantId)
 

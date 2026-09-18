@@ -45,12 +45,42 @@ from .protocol import (
 from .retry_policy import resolve_retry_policy
 from .content import (
     content_has_image,
+    content_has_file,
     offloaded_image_text,
     project_offloaded_images,
     project_images_for_text_model,
     required_image_offload,
+    resolve_image_attachment_access,
     text_only_image_text,
     request_image_handle_text,
+)
+from ..attachment.types import AttachmentId, Dimensions, ImageAttachmentRef
+from .deepseek_files import (
+    DEFAULT_CONTEXT_WINDOW,
+    DEFAULT_FILES_API_TIMEOUT_MS,
+    DEFAULT_FILE_EXPIRY_SECONDS,
+    DEFAULT_FILE_QUOTA_CLEANUP_BATCH,
+    DEFAULT_FILE_REFRESH_MARGIN_SECONDS,
+    DEFAULT_IMAGE_OFFLOAD_BYTE_QUANTUM,
+    DEFAULT_IMAGE_OFFLOAD_COUNT_QUANTUM,
+    DEFAULT_INLINE_IMAGE_OFFLOAD_BYTE_QUANTUM,
+    DEFAULT_MAX_IMAGES_PER_REQUEST,
+    DEFAULT_MAX_INLINE_REQUEST_IMAGE_BYTES,
+    DEFAULT_MAX_REQUEST_FILES_BYTES,
+    DEFAULT_MAX_TOKENS,
+    DEFAULT_MODELS,
+    DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+    DeepSeekConnectionOptions,
+    DeepSeekFileConnection,
+    DeepSeekFilePolicy,
+    DeepSeekFileStore,
+    FileResolutionFailure,
+    ImageWireLocation,
+    RequestDefaults,
+    RequestFiles,
+    deep_seek_image_request_pricing,
+    model_info,
+    resolve_request_image_target,
 )
 
 __all__ = [
@@ -75,21 +105,6 @@ __all__ = [
 # ---------- DeepSeek wire 序列化（llm-deepseek/src/serialize.ts） ----------
 
 UNSUPPORTED_CONTENT = "UNSUPPORTED_CONTENT"
-
-
-def content_has_image(blocks: list) -> bool:
-    """内容块是否含 image 块（上游 contentHasImage，message.ts 同语义）。"""
-    return any(b.get("type") == "image" for b in blocks or [])
-
-
-def content_has_file(blocks: list) -> bool:
-    """内容块是否含 file 块（含嵌套 tool-result 递归；上游 contentHasFile，
-    alpha.1 第六类 ContentBlock）。"""
-    return any(
-        b.get("type") == "file"
-        or (b.get("type") == "tool-result" and content_has_file(b.get("content") or []))
-        for b in blocks or []
-    )
 
 
 def serialize_messages(messages: list[dict]) -> list[dict]:
@@ -162,7 +177,7 @@ def serialize_messages(messages: list[dict]) -> list[dict]:
 # required_image_offload, content_has_image, content_has_file
 
 
-def serialize_messages_with_images(
+async def serialize_messages_with_images(
     messages: list[dict],
     images: dict,
 ) -> list[dict]:
@@ -179,12 +194,18 @@ def serialize_messages_with_images(
     assert_retained_images_fit(messages, images)
     request_messages = project_offloaded_images(
         messages,
-        lambda ref: offloaded_image_text(ref),
+        lambda ref: offloaded_image_text(ref, _access_for(images, ref)),
     )
-    return _serialize_messages_with_images_impl(request_messages, images)
+    return await _serialize_messages_with_images_impl(request_messages, images)
 
 
-def _serialize_messages_with_images_impl(
+def _access_for(images: dict, ref: dict):
+    """按当前执行世界解析一个 durable 图片引用的只读访问（可选）。"""
+    resolve_access = images.get("resolveImageAccess")
+    return resolve_access(ref) if resolve_access is not None else None
+
+
+async def _serialize_messages_with_images_impl(
     messages: list[dict],
     images: dict,
 ) -> list[dict]:
@@ -230,13 +251,13 @@ def _serialize_messages_with_images_impl(
 
         regular = [b for b in message.get("content") or [] if b.get("type") != "tool-result"]
         tool_results = [b for b in message.get("content") or [] if b.get("type") == "tool-result"]
-        content_parts = _content_parts(regular, images, message_index + 1, next_image)
+        content_parts = await _content_parts(regular, images, message_index + 1, next_image)
         content = user_content(content_parts)
         if content or not tool_results:
             flush_tool_images()
             wire.append({"role": "user", "content": content})
         for result in tool_results:
-            parts = _content_parts(result.get("content") or [], images, message_index + 1, next_image)
+            parts = await _content_parts(result.get("content") or [], images, message_index + 1, next_image)
             image_parts = [p for p in parts if p.get("type") != "text"]
             text = "".join(p.get("text", "") for p in parts if p.get("type") == "text")
             wire.append({
@@ -249,7 +270,7 @@ def _serialize_messages_with_images_impl(
     return wire
 
 
-def _content_parts(
+async def _content_parts(
     blocks: list,
     images: dict,
     message_index: int,
@@ -264,20 +285,20 @@ def _content_parts(
                 parts.append({"type": "text", "text": block["text"]})
         elif btype == "image":
             next_image["value"] += 1
-            parts.extend(_image_parts(block, images, {"message": message_index, "image": next_image["value"]}, len(parts) > 0))
+            parts.extend(await _image_parts(block, images, {"message": message_index, "image": next_image["value"]}, len(parts) > 0))
         elif btype == "tool-result":
-            parts.extend(_content_parts(block.get("content") or [], images, message_index, next_image))
+            parts.extend(await _content_parts(block.get("content") or [], images, message_index, next_image))
     return parts
 
 
-def _image_parts(
+async def _image_parts(
     block: dict,
     images: dict,
     location: dict,
     preceded_by_content: bool,
 ) -> list:
     """Resolve one durable image into its descriptor and transient DeepSeek image part."""
-    aid = str(block["attachment"]["attachmentId"]) if isinstance(block["attachment"]["attachmentId"], object) else str(block["attachment"]["attachmentId"])
+    aid = str(block["attachment"]["attachmentId"])
     version = images["requestImages"].get(aid)
     if version is None:
         raise LlmFailure(
@@ -285,7 +306,7 @@ def _image_parts(
             f"DeepSeek request image {aid} was not prepared.",
         )
     if images["representation"]["kind"] == "file":
-        file_id = images["representation"]["resolveFileId"](version, block, location)
+        file_id = await images["representation"]["resolveFileId"](version, block, location)
         image_part = {"type": "file", "file_id": file_id}
     else:
         import base64
@@ -295,8 +316,8 @@ def _image_parts(
         }
     text_part = {
         "type": "text",
-        "text": (f"\n" if preceded_by_content else "") + request_image_handle_text(
-            block["attachment"], version,
+        "text": ("\n" if preceded_by_content else "") + request_image_handle_text(
+            block["attachment"], version, _access_for(images, block["attachment"]),
         ),
     }
     return [text_part, image_part]
@@ -503,6 +524,71 @@ def _map_usage(usage: dict) -> dict:
     return mapped
 
 
+# ---------- image-capable 请求辅助（serialize.ts / request-files.ts 载体桥） ----------
+
+def _ref_from_dict(value):
+    """消息块里的 ImageAttachmentRef dict → dataclass（attachment 服务期望 dataclass）。"""
+    if isinstance(value, ImageAttachmentRef):
+        return value
+    original = value.get("originalDimensions")
+    return ImageAttachmentRef(
+        attachmentId=AttachmentId(str(value["attachmentId"])),
+        mediaType=value["mediaType"],
+        bytes=value["bytes"],
+        width=value["width"],
+        height=value["height"],
+        name=value.get("name"),
+        originalDimensions=(Dimensions(**original) if isinstance(original, dict)
+                            else original),
+    )
+
+
+def _version_dict(version) -> dict:
+    """RequestImageAttachment（dataclass）→ llm/content 序列化期望的 dict 载体。"""
+    attachment = version.attachment
+    return {
+        "variantId": str(version.variantId),
+        "attachment": attachment.to_dict() if hasattr(attachment, "to_dict") else attachment,
+        "data": version.data,
+        "mediaType": version.mediaType,
+        "bytes": version.bytes,
+        "width": version.width,
+        "height": version.height,
+        "depth": version.depth,
+        "space": version.space,
+        "hasAlpha": version.hasAlpha,
+    }
+
+
+def _make_resolve_file_id(request_files, objects: dict):
+    """把一个请求版本的 Files 解析包装成序列化器期望的 async resolveFileId 回调。"""
+    async def resolve_file_id(version, block, location):
+        attachment_id = str(block["attachment"]["attachmentId"])
+        resolved = await request_files.resolve(
+            objects[attachment_id],
+            ImageWireLocation(location["message"], location["image"]))
+        return resolved
+    return resolve_file_id
+
+
+def _provider_error_fields(raw: str) -> tuple[str | None, str]:
+    """从 provider 错误体提取 (message, code+type+message)（上游分类字段）。"""
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return None, ""
+    if not isinstance(parsed, dict):
+        return None, ""
+    error = parsed.get("error")
+    if not isinstance(error, dict):
+        return None, ""
+    message = error.get("message") if isinstance(error.get("message"), str) else None
+    detail = " ".join(
+        field for field in (error.get("code"), error.get("type"), error.get("message"))
+        if isinstance(field, str))
+    return message, detail
+
+
 class DeepSeekAdapter(LlmAdapter):
     """DeepSeek 官方 chat API 的 SSE 适配器（httpx 异步传输）。
 
@@ -534,7 +620,11 @@ class DeepSeekAdapter(LlmAdapter):
     def __init__(self, api_key: str | None = None, base_url: str | None = None,
                  model: str = "deepseek-chat", max_tokens: int | None = None,
                  retry_policy: dict | None = None, transport=None,
-                 reasoning_effort: str | None = None):
+                 reasoning_effort: str | None = None,
+                 models=None, attachments=None, map_host_path=None,
+                 files_store=None, files_transport=None,
+                 file_policy=None, default_context_window=None,
+                 thinking=None):
         self._key = api_key if api_key is not None else os.environ.get("DEEPSEEK_API_KEY", "")
         self._base = (base_url or os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")).rstrip("/")
         self._model = model
@@ -547,6 +637,58 @@ class DeepSeekAdapter(LlmAdapter):
         self._reasoning_effort = reasoning_effort
         # 上游 llm-deepseek：retryPolicy 省略即 normal 默认（resolveRetryPolicy(undefined)）
         self.retry_policy = resolve_retry_policy(retry_policy, "llm-deepseek: retryPolicy")
+        # 请求侧图片能力（上游 DeepSeekAdapterOptions 的 mini 载体）：
+        #   * models——建议性目录（缺省 DEFAULT_MODELS，inputModalities 含 image
+        #     才宣称支持图片输入）；
+        #   * attachments——按操作解析的 attachment 服务（callable，缺省 None）；
+        #   * map_host_path——宿主路径→工具执行世界的映射（callable，可选）；
+        #   * files_store / files_transport——Files API 执行簇与测试注入。
+        self._models = tuple(models) if models is not None else DEFAULT_MODELS
+        self._resolve_attachments = attachments
+        self._map_host_path = map_host_path
+        self._files_store = files_store
+        self._files_transport = files_transport
+        self._connection = DeepSeekConnectionOptions(
+            protocol="chat-completions",
+            baseURL=self._base,
+            defaults=RequestDefaults(thinking=thinking, reasoningEffort=reasoning_effort),
+            maxTokens=max_tokens if max_tokens is not None else DEFAULT_MAX_TOKENS,
+            defaultContextWindow=(default_context_window if default_context_window is not None
+                                  else DEFAULT_CONTEXT_WINDOW),
+            models=self._models,
+            streamIdleTimeoutMs=int(self.READ_TIMEOUT_S * 1000),
+            maxRequestFilesBytes=DEFAULT_MAX_REQUEST_FILES_BYTES,
+            maxInlineRequestImageBytes=DEFAULT_MAX_INLINE_REQUEST_IMAGE_BYTES,
+            maxImagesPerRequest=DEFAULT_MAX_IMAGES_PER_REQUEST,
+            imageOffloadByteQuantum=DEFAULT_IMAGE_OFFLOAD_BYTE_QUANTUM,
+            inlineImageOffloadByteQuantum=DEFAULT_INLINE_IMAGE_OFFLOAD_BYTE_QUANTUM,
+            imageOffloadCountQuantum=DEFAULT_IMAGE_OFFLOAD_COUNT_QUANTUM,
+            filesApiTimeoutMs=DEFAULT_FILES_API_TIMEOUT_MS,
+            filePolicy=file_policy if file_policy is not None else DeepSeekFilePolicy(
+                DEFAULT_FILE_EXPIRY_SECONDS, DEFAULT_FILE_REFRESH_MARGIN_SECONDS,
+                DEFAULT_FILE_QUOTA_CLEANUP_BATCH),
+        )
+
+    def _files(self) -> DeepSeekFileStore:
+        """进程级上传复用 store（上游 resolveFiles）。"""
+        if self._files_store is None:
+            self._files_store = DeepSeekFileStore(transport=self._files_transport)
+        return self._files_store
+
+    def image_request_pricing(self, model: str) -> "object":
+        """按连接快照构建 provider 侧请求图定价（上游 imageRequestPricing）。"""
+        model_entry = next((entry for entry in self._models if entry.id == model), None)
+        if model_entry is None or "image" not in (model_entry.inputModalities or ()):
+            return deep_seek_image_request_pricing(self._connection, model)
+        attachments = self._resolve_attachments() if self._resolve_attachments is not None else None
+        if attachments is None or self._map_host_path is None:
+            return deep_seek_image_request_pricing(self._connection, model)
+
+        def resolve_access(ref):
+            return resolve_image_attachment_access(
+                attachments, self._map_host_path, _ref_from_dict(ref))
+
+        return deep_seek_image_request_pricing(self._connection, model, resolve_access)
 
     @property
     def model(self) -> str | None:
@@ -562,32 +704,122 @@ class DeepSeekAdapter(LlmAdapter):
         return self._reasoning_effort
 
     def resolve_model_info(self) -> dict:
-        """DeepSeek chat-completions 适配器只支持文本输入。
+        """按模型目录解析能力（上游 adapter.ts resolveModelInfo → modelInfo）。
 
-        对齐上游 adapter.ts resolveModelInfo：inputModalities 恒为 ['text']
-        （serialize.ts assertTextOnly 拒绝 image 块的原因）。mini 无模型
-        catalog，仅承载能力声明（教学简化）。
+        未编目 endpoint 安全地按 text-only 处理；目录中 inputModalities 含
+        'image' 的条目才宣称图片输入支持（ACP/web 受理门据此判定）。
         """
-        return {
-            "provider": self.provider,
-            "model": self._model,
-            "input_modalities": ["text"],
-        }
+        return model_info(self._connection, self.provider, self._model)
 
     async def stream(self, messages, tools, signal=None):
         """async 迭代器（对齐上游 async stream）：httpx 异步传输 + SSE 解析，
         逐 chunk 产出。signal.aborted/.event 置位即中止——_aiter_raced 在下一次
         取块前抛 StreamAborted，退出 async-with 关闭连接（真取消，无遗留线程）。
+
+        含图片且模型目录宣称 image 输入时走 image-capable 序列化（Files API
+        file-id 优先、解析失败整请求回退 inline base64），否则走原文本路径。
         """
         abort_event = getattr(signal, "event", None) if signal is not None else None
-        body = self._build_body(messages, tools)
-        async for chunk in self._iter_chunks(body, abort_event):
+        if not any(content_has_image(message.get("content") or []) for message in messages):
+            body = self._build_body(messages, tools)
+            async for chunk in self._iter_chunks(body, abort_event):
+                yield chunk
+            return
+        async for chunk in self._stream_images_impl(messages, tools, abort_event, signal):
             yield chunk
 
+    async def _stream_images_impl(self, messages, tools, abort_event, signal):
+        model = next((entry for entry in self._models if entry.id == self._model), None)
+        if model is None or "image" not in (model.inputModalities or ()):
+            raise LlmFailure(
+                UNSUPPORTED_CONTENT,
+                f'DeepSeek model "{self._model}" does not accept image input.')
+        attachments = self._resolve_attachments() if self._resolve_attachments is not None else None
+        if attachments is None:
+            raise LlmFailure(
+                UNSUPPORTED_CONTENT,
+                "DeepSeek image conversion requires the durable attachment service.")
+        request_images, request_objects = self._prepare_request_images(
+            messages, attachments, model)
+        resolve_access = None
+        if self._map_host_path is not None:
+            def resolve_access(ref):
+                return resolve_image_attachment_access(
+                    attachments, self._map_host_path, _ref_from_dict(ref))
+        file_connection = DeepSeekFileConnection(
+            baseURL=self._base, apiKey=self._key, protocol="chat-completions")
+        request_files = RequestFiles(
+            self._files(), file_connection, self._connection.filePolicy,
+            self._connection.filesApiTimeoutMs, abort_event, lambda: None)
+        representation: dict = {"kind": "file"}
+        while True:
+            request_files.begin_attempt()
+            images = {
+                "representation": (
+                    representation if representation["kind"] == "base64"
+                    else {"kind": "file",
+                          "resolveFileId": _make_resolve_file_id(request_files, request_objects)}
+                ),
+                "requestImages": request_images,
+                "maxRequestImageBytes": (
+                    self._connection.maxInlineRequestImageBytes
+                    if representation["kind"] == "base64"
+                    else self._connection.maxRequestFilesBytes),
+                "maxImagesPerRequest": self._connection.maxImagesPerRequest,
+                "byteQuantum": (
+                    self._connection.inlineImageOffloadByteQuantum
+                    if representation["kind"] == "base64"
+                    else self._connection.imageOffloadByteQuantum),
+                "countQuantum": self._connection.imageOffloadCountQuantum,
+            }
+            if resolve_access is not None:
+                images["resolveImageAccess"] = resolve_access
+            try:
+                wire = await serialize_messages_with_images(messages, images)
+            except FileResolutionFailure:
+                representation = {"kind": "base64"}
+                continue
+            body = self._request_body(wire, tools)
+            retry_state = {"retry": False}
+            async for chunk in self._iter_chunks(body, abort_event, request_files, retry_state):
+                yield chunk
+            if retry_state["retry"]:
+                continue
+            return
+
+    def _prepare_request_images(self, messages, attachments, model) -> tuple[dict, dict]:
+        """按路由目标为保守保留的规范化附件准备请求版本（上游 prepareRequestImages）。
+
+        @returns (版本 dict 表[供序列化 handle/占位文本], 版本对象表[供 Files 解析])
+        """
+        refs: dict = {}
+
+        def collect(blocks) -> None:
+            for block in blocks or []:
+                if block.get("type") == "image" and block.get("offloaded") is not True:
+                    ref = block["attachment"]
+                    refs[str(ref["attachmentId"])] = ref
+                elif block.get("type") == "tool-result":
+                    collect(block.get("content") or [])
+
+        for message in messages:
+            collect(message.get("content") or [])
+        version_map: dict = {}
+        object_map: dict = {}
+        for attachment_id, ref in refs.items():
+            version = attachments.read_image_request(
+                _ref_from_dict(ref), resolve_request_image_target(model, ref))
+            version_map[attachment_id] = _version_dict(version)
+            object_map[attachment_id] = version
+        return version_map, object_map
+
     def _build_body(self, messages, tools) -> dict:
+        return self._request_body(serialize_messages(messages), tools)
+
+    def _request_body(self, wire_messages, tools) -> dict:
         body: dict[str, Any] = {
             "model": self._model,
-            "messages": serialize_messages(messages),
+            "messages": wire_messages,
             "stream": True,
             "stream_options": {"include_usage": True},
         }
@@ -606,7 +838,8 @@ class DeepSeekAdapter(LlmAdapter):
             body["reasoning_effort"] = self._reasoning_effort
         return body
 
-    async def _iter_chunks(self, body: dict, abort_event=None):
+    async def _iter_chunks(self, body: dict, abort_event=None,
+                           request_files=None, retry_state=None):
         """httpx 异步传输：发起 POST + 错误映射，逐行喂给 SSE 解析器。
 
         错误映射对齐上游 adapter.ts:333-345（rc.2）：401/403→AUTH、
@@ -616,6 +849,10 @@ class DeepSeekAdapter(LlmAdapter):
         （status / providerRetryAfterMs / requestId）逐项填写。超时→TIMEOUT、
         其它传输错误→TRANSPORT。abort 置位经 _aiter_raced 抛 StreamAborted，
         async-with 退出即关闭连接。
+
+        request_files 非 None 时（image 路径）：stale file-id 响应先走有界
+        invalidate 重试，retry_state["retry"]=True 由调用方重新序列化派发
+        （上游 requestFiles.retry(detail)）；否则按规范化图片诊断收口错误文案。
         """
         headers = {"Content-Type": "application/json", "Authorization": "Bearer " + self._key}
         timeout = httpx.Timeout(self.CONNECT_TIMEOUT_S, read=self.READ_TIMEOUT_S)
@@ -628,10 +865,23 @@ class DeepSeekAdapter(LlmAdapter):
                     "POST", self._base + "/chat/completions", json=body, headers=headers,
                 ) as resp:
                     if resp.status_code >= 400:
-                        detail = (await resp.aread()).decode("utf-8", "replace")[:500]
+                        raw = (await resp.aread()).decode("utf-8", "replace")
+                        detail = raw[:500]
+                        if (request_files is not None and retry_state is not None
+                                and await request_files.retry(detail)):
+                            retry_state["retry"] = True
+                            return
+                        if request_files is not None:
+                            provider_message, provider_detail = _provider_error_fields(raw)
+                            message = request_files.error_message(
+                                resp.status_code,
+                                provider_message or f"HTTP {resp.status_code}: {detail}",
+                                provider_detail or detail)
+                        else:
+                            message = f"HTTP {resp.status_code}: {detail}"
                         raise LlmFailure(
                             _http_error_code(resp.status_code, detail),
-                            f"HTTP {resp.status_code}: {detail}",
+                            message,
                             status=resp.status_code,
                             provider_retry_after_ms=provider_retry_after_ms(
                                 resp.headers.get("Retry-After")),

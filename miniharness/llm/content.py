@@ -31,9 +31,33 @@ __all__ = [
     "project_offloaded_images",
     "request_image_handle_text",
     "required_image_offload",
+    "resolve_image_attachment_access",
     "text_only_image_text",
     "visit_image_blocks",
 ]
+
+
+def resolve_image_attachment_access(
+    attachments,
+    map_host_path,
+    ref: dict,
+) -> ImageAttachmentAccess | None:
+    """把一个 attachment provider 的宿主对象位置桥接进已挂载的工具执行世界。
+
+    上游 resolveImageAttachmentAccess（llm/src/content.ts:33-40）：consumer 提供
+    当前文件系统 provider 的映射，而不让 attachment 或 LLM 定义依赖它。任一
+    provider 不暴露映射即返回 None；durable 引用非法时 attachment provider 抛错。
+
+    @param attachments - 拥有规范化附件对象的 provider（鸭子类型：需 image_host_path）。
+    @param map_host_path - 把一个绝对宿主路径映射进当前工具执行世界。
+    @param ref - durable 规范化图片引用（dict）。
+    @returns 只读执行世界路径，不可用时 None。
+    """
+    host_path = attachments.image_host_path(ref)
+    if host_path is None:
+        return None
+    readonly_path = map_host_path(host_path)
+    return None if readonly_path is None else ImageAttachmentAccess(readonly_path)
 
 
 def _quoted(value: str) -> str:

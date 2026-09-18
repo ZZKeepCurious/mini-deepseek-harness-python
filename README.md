@@ -30,6 +30,7 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 | Tool registry + execution pipeline (schema validation, pre/execute/post, timeout) | `packages/core/tools` |
 | Agent loop (async-driven turn/step state machine, sync facade driven by a process-wide resident event loop, pre-step rejection, tool-feedback continuation) | `core/agent-loop` |
 | LLM seam (async `stream(messages, tools, signal)` contract, fake adapter, official DeepSeek SSE adapter over `httpx` async streaming, four-level `reasoning_effort`) | `llm/llm` + `llm/llm-deepseek` |
+| Image-capable DeepSeek requests (catalog capability resolution, `ImageRequestTarget` projection geometry, provider vision-token pricing, Files API upload/reuse with a durable index, inline-base64 fallback, bounded stale-id retry, normalized-image diagnostics) | `llm/llm-deepseek` (`common/*`) + `attachment/attachment-local` |
 | Model request retry / backoff (normal/always policy, `agent/request-error`, `llm/retry` audit pair, fused-signal pre-dispatch check, event-driven multi-signal race cancellable wait, plugin teardown draining in-flight recoveries) | `llm/llm-retry` + `llm/llm/src/retry-policy.ts` |
 | Token metering (incremental fold, usage anchor, 4 chars/token heuristic) | `llm/token-meter` |
 | Context compaction (pre-step pressure + `CONTEXT_WINDOW_EXCEEDED` recovery, surface-replace checkpoint transaction, optional tool-result pruner stage) | `compaction/compaction-basic` + `compaction-tool-result-pruner` |
@@ -146,7 +147,8 @@ mini-deepseek-harness-python/
 │   │   ├── fake.py          # FakeLlmAdapter (no API key)
 │   │   ├── retry_policy.py  # retry policy parsing (normal/always)
 │   │   ├── retry.py         # agent/request-error recovery + backoff
-│   │   └── token_meter.py   # TokenMeter incremental fold + usage anchor
+│   │   ├── token_meter.py   # TokenMeter incremental fold + usage anchor
+│   │   └── deepseek_files/  # DeepSeek Files API execution cluster (image requests)
 │   ├── compaction/          # upstream packages/compaction
 │   │   ├── engine.py        # pre-step pressure + request-error overflow recovery
 │   │   ├── region.py        # selectCompactableRange + checkpoint transaction

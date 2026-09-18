@@ -17,9 +17,10 @@
   * SaveFileStreamAttachment：{data, signal?, name?}（alpha.1 新增，分块
     迭代提交，实现不得整文件驻留内存）；
   * StoredImageAttachment：{ref, data}；
-  * ImageRequestPolicy：{maxPixels, maxBytes}——按精确模型路由解析的请求图
-    策略；alpha.1 起 maxBytes 是编码字节目标（阶梯每个质量都超限时保留最小
-    阶梯输出，不再是独立拒绝上限）；RequestImageAttachment：{variantId,
+  * ImageRequestTarget：{width, height, maxBytes}——一条精确模型路由为一个附件
+    选定的确定性请求图目标（provider 侧投影选定尺寸与编码字节目标）；
+    alpha.1 起 maxBytes 是编码字节目标（阶梯每个质量都超限时保留最小阶梯
+    输出，不再是独立拒绝上限）；RequestImageAttachment：{variantId,
     attachment, data, mediaType, bytes, width, height, depth:'uchar',
     space:'srgb', hasAlpha}——缓存键 variantId 覆盖 attachment id + policy +
     固定编码器参数。
@@ -47,7 +48,7 @@ __all__ = [
     "ImageAttachmentLimits",
     "ImageAttachmentRef",
     "ImageMediaType",
-    "ImageRequestPolicy",
+    "ImageRequestTarget",
     "ImageVariantId",
     "RequestImageAttachment",
     "SaveFileAttachment",
@@ -219,11 +220,21 @@ class StoredImageAttachment:
 
 
 @dataclass(frozen=True)
-class ImageRequestPolicy:
-    """按精确模型路由选择的请求图策略：纵横保持投影后的总像素 + 编码字节目标。"""
+class ImageRequestTarget:
+    """一条精确模型路由为一个附件选定的确定性请求图目标。
 
-    maxPixels: int
+    上游 ImageRequestTarget（attachment/src/types.ts:136）：
+      * width/height——目标像素；高于源尺寸时保留源尺寸（小图不放大）；
+      * maxBytes——base64 展开或 Files API 上传前的编码字节目标；无阶梯产物
+        满足时保留最小阶梯输出。
+    """
+
+    width: int
+    height: int
     maxBytes: int
+
+    def to_dict(self) -> dict:
+        return {"width": self.width, "height": self.height, "maxBytes": self.maxBytes}
 
 
 @dataclass(frozen=True)

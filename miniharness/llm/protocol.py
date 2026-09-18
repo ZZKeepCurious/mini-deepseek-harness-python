@@ -27,7 +27,7 @@ TokenUsage（usage 载荷）字段对齐上游 llm/src/types.ts:127-149：
 from __future__ import annotations
 
 import asyncio
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 from ..core.session import create_message, reasoning_block
 
@@ -40,14 +40,21 @@ __all__ = [
     "EMPTY_RESPONSE",
     "IMAGE_OFFLOAD_REQUIRED",
     "ImageAttachmentAccess",
+    "ImageAttachmentAccessResolver",
     "ImageBlock",
     "LlmAdapter",
     "LlmAttemptId",
     "LlmCallConfig",
     "LlmCallConfigAdapterDefaults",
+    "LlmDiscoveredModel",
     "LlmFailure",
     "LlmImageRequestBudget",
+    "LlmImageRequestPrice",
+    "LlmImageRequestPricing",
+    "LlmProviderInfo",
     "MessageId",
+    "ModelModality",
+    "ModelModalityMap",
     "MALFORMED_RESPONSE",
     "QUOTA",
     "RATE_LIMIT",
@@ -114,6 +121,78 @@ class ImageAttachmentAccess:
 
     def __init__(self, readonlyPath: str) -> None:
         self.readonlyPath = readonlyPath
+
+
+#: Execution-world 访问解析器签名（上游 ImageAttachmentAccessResolver）：
+#: 接收一个 durable 规范化图片引用，返回只读路径或 None（不可用）。
+ImageAttachmentAccessResolver = Callable[[dict], "ImageAttachmentAccess | None"]
+
+
+class LlmImageRequestPrice:
+    """一个有序图片 occurrence 在一条精确模型路由请求投影下的计价。
+
+    上游 LlmImageRequestPrice：每个 occurrence 解析成 wire 实际携带的二元组
+    ——retained 图片的 provider visual tokens，加上随图或代替图发送的模型可见
+    文本（请求 preview handle、offload 占位符或 text-only 替换）。调用方用自己
+    的文本分词器给 text 计价，因此 provider 计价从不固定文本分词。
+    """
+
+    visualTokens: int
+    text: str
+
+    def __init__(self, visualTokens: int, text: str) -> None:
+        self.visualTokens = visualTokens
+        self.text = text
+
+
+class LlmImageRequestPricing:
+    """一条精确模型路由的 provider 侧请求图计价。
+
+    上游 LlmImageRequestPricing：由按 visual token 计费的 provider 适配器实现；
+    消费者（token meter）每次度量同步解析，故实现不得执行 IO。
+    """
+
+    def price_images(self, images: list) -> list:
+        """给一次请求投影的每个图片 occurrence 计价（按索引与 images 对齐）。"""
+        raise NotImplementedError
+
+
+class LlmProviderInfo:
+    """一个已注册 provider 路由的展示元数据（上游 LlmProviderInfo）。"""
+
+    id: str
+    name: str
+
+    def __init__(self, id: str, name: str) -> None:
+        self.id = id
+        self.name = name
+
+
+#: 可扩展的 provider 模型模态词汇（上游 ModelModalityMap）。
+ModelModalityMap = {"text": "text", "image": "image"}
+
+#: 任一已声明的 provider 模型模态。
+ModelModality = str
+
+
+class LlmDiscoveredModel:
+    """端点自报的一个模型（上游 LlmDiscoveredModel）。
+
+    除 id 外全部可选：多数 provider 列表只给 id；采用它的界面仍需补齐适配器
+    所需的容量字段。
+    """
+
+    id: str
+    name: str | None
+    contextWindow: int | None
+    maxTokens: int | None
+
+    def __init__(self, id: str, name: str | None = None,
+                 contextWindow: int | None = None, maxTokens: int | None = None) -> None:
+        self.id = id
+        self.name = name
+        self.contextWindow = contextWindow
+        self.maxTokens = maxTokens
 
 
 # ---------- 品牌化 id ----------
@@ -254,6 +333,9 @@ EMPTY_RESPONSE = "EMPTY_RESPONSE"
 MALFORMED_RESPONSE = "MALFORMED_RESPONSE"
 REQUEST_ERROR = "REQUEST_ERROR"   # mini 教学扩展：非 4xx/5xx 归类的兜底码（上游无此常量）
 IMAGE_OFFLOAD_REQUIRED = "IMAGE_OFFLOAD_REQUIRED"
+INVALID_RESPONSE = "INVALID_RESPONSE"
+FILES_API = "FILES_API"
+MISSING_CREDENTIAL = "MISSING_CREDENTIAL"
 
 
 class StreamChunk(dict):

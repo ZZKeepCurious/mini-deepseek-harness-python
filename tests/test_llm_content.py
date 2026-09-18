@@ -208,16 +208,19 @@ class RequiredImageOffloadTest(unittest.TestCase):
 
 
 class SerializeMessagesWithImagesTest(unittest.TestCase):
-    def test_text_only_messages(self):
+    def _run(self, messages, images):
+        import asyncio
         from miniharness.llm.deepseek import serialize_messages_with_images
+        return asyncio.run(serialize_messages_with_images(messages, images))
+
+    def test_text_only_messages(self):
         messages = [{"role": "user", "content": [text_block("hi")]}]
         images = {"representation": {"kind": "base64"}, "requestImages": {}, "maxRequestImageBytes": 1000000}
-        result = serialize_messages_with_images(messages, images)
+        result = self._run(messages, images)
         self.assertEqual(result[0]["role"], "user")
         self.assertEqual(result[0]["content"], "hi")
 
     def test_offload_needed_raises(self):
-        from miniharness.llm.deepseek import serialize_messages_with_images
         from miniharness.llm import IMAGE_OFFLOAD_REQUIRED
         messages = [{"role": "user", "content": [IMAGE_BLOCK]}]
         aid = IMAGE_BLOCK["attachment"]["attachmentId"]
@@ -226,7 +229,7 @@ class SerializeMessagesWithImagesTest(unittest.TestCase):
                                           "width": 100, "height": 100, "variantId": "v1"}},
                   "maxRequestImageBytes": 100}
         with self.assertRaises(LlmFailure) as cm:
-            serialize_messages_with_images(messages, images)
+            self._run(messages, images)
         self.assertEqual(cm.exception.code, IMAGE_OFFLOAD_REQUIRED)
 
 

@@ -1,21 +1,20 @@
 """模型请求的确定性缓存图片版本。
 
 对应 dsh 真实源码：packages/attachment/attachment-local/src/request-image.ts。
-alpha.1 重构（2026-08-24，上游 commit 30704dc1df / 4863890535）：
-  * 变换版本 request-image-v4 → request-image-v5；
-  * DESC 编码块与规范化共享同一质量阶梯 [85,75,60]（webpEffort=0），路由
-    改为按 alpha 分流 ['alpha:webp','opaque:jpeg']，废弃 rc.2 的低彩色调色板
-    PNG 分类；
-  * 尺寸投影 requestImageDimensions 抽到 seam 包（projection.py）；
-  * 尺寸未变且字节已在预算内 → 原样直通；否则单一阶梯编码，每个阶梯质量都
-    超字节目标时保留最小阶梯输出（不再抛 IMAGE_TOO_LARGE）。载体：sharp →
-    Pillow。
+alpha.1（dsh-v0.1.6-alpha.1，2026-09-15 走查）：
+  * 变换版本 request-image-v5 → request-image-v6；
+  * 路由策略从 `ImageRequestPolicy{maxPixels,maxBytes}` 改为
+    `ImageRequestTarget{width,height,maxBytes}`——由 provider 侧投影（request
+    pricing）选定精确目标尺寸与编码字节目标，请求图不再自行做总像素投影；
+  * 直通条件 = target 两轴均不小于源尺寸且字节在预算内；否则按长边缩放
+    （不放大）后走共享质量阶梯 [85,75,60]，每个阶梯质量都超字节目标时保留
+    最小阶梯输出。
 
 上游语义：
   * variantId 是覆盖每个变换输入的完整确定身份（sha256 over descriptor），
     同时是缓存与上传索引键；
-  * read_cached 回读复验（uchar / srgb / 尺寸不超投影 / alpha 兼容；不再按
-    字节超限判失效——阶梯产物可合法大于字节目标），任何不符当作未命中重新生成。
+  * read_cached 回读复验（uchar / srgb / 尺寸不超 target / alpha 兼容），任何
+    不符当作未命中重新生成。
 """
 from __future__ import annotations
 
@@ -44,10 +43,9 @@ from .image import (
     probe_image,
 )
 from .normalization import prepared_source, resized
-from .projection import request_image_dimensions
 from .types import (
     ImageAttachmentRef,
-    ImageRequestPolicy,
+    ImageRequestTarget,
     ImageVariantId,
     RequestImageAttachment,
     StoredImageAttachment,
@@ -57,11 +55,11 @@ __all__ = [
     "REQUEST_IMAGE_TRANSFORM_VERSION",
     "read_request_image_file",
     "request_image_variant_id",
-    "validate_policy",
+    "validate_target",
 ]
 
 #: 每个缓存与上传索引身份都包含的变换版本
-REQUEST_IMAGE_TRANSFORM_VERSION = "request-image-v5"
+REQUEST_IMAGE_TRANSFORM_VERSION = "request-image-v6"
 
 
 @dataclass(frozen=True)
@@ -87,20 +85,22 @@ def _checked_integer(value: int, name: str) -> int:
     return value
 
 
-def validate_policy(policy: ImageRequestPolicy) -> None:
-    """路由策略准入：正整数像素与字节预算（上游 validatePolicy）。"""
-    _checked_integer(policy.maxPixels, "Image request maxPixels")
-    _checked_integer(policy.maxBytes, "Image request maxBytes")
+def validate_target(target: ImageRequestTarget) -> None:
+    """路由目标准入：正整数宽/高与字节目标（上游 validateTarget）。"""
+    _checked_integer(target.width, "Image request width")
+    _checked_integer(target.height, "Image request height")
+    _checked_integer(target.maxBytes, "Image request maxBytes")
 
 
-def _descriptor(attachment: ImageAttachmentRef, policy: ImageRequestPolicy) -> str:
+def _descriptor(attachment: ImageAttachmentRef, target: ImageRequestTarget) -> str:
     # JSON.stringify 无空格形态；键序与上游逐字一致（dict 保序）
     return json.dumps(
         {
             "transformVersion": REQUEST_IMAGE_TRANSFORM_VERSION,
             "attachmentId": str(attachment.attachmentId),
-            "routePixelBudget": policy.maxPixels,
-            "encodedByteBudget": policy.maxBytes,
+            "targetWidth": target.width,
+            "targetHeight": target.height,
+            "encodedByteBudget": target.maxBytes,
             "encoding": {
                 "webpQualities": list(IMAGE_ENCODING_QUALITIES),
                 "webpEffort": WEBP_ENCODING_EFFORT,
@@ -115,21 +115,28 @@ def _descriptor(attachment: ImageAttachmentRef, policy: ImageRequestPolicy) -> s
 
 def request_image_variant_id(
     attachment: ImageAttachmentRef,
-    policy: ImageRequestPolicy,
+    target: ImageRequestTarget,
 ) -> ImageVariantId:
-    """一个附件与路由自有请求策略的完整确定身份（上游同名函数）。"""
-    return ImageVariantId(f"sha256:{_digest(_descriptor(attachment, policy))}")
+    """一个附件与路由自有请求目标的完整确定身份（上游同名函数）。"""
+    return ImageVariantId(f"sha256:{_digest(_descriptor(attachment, target))}")
+
+
+def _resize_long_edge(source: Image.Image, target: ImageRequestTarget) -> Image.Image:
+    """仅按源长边对应的目标轴缩放，短边由编码器按路由预测派生（上游 pipeline）。"""
+    if source.width >= source.height:
+        return resized(source, target.width, source.height)
+    return resized(source, source.width, target.height)
 
 
 def _create_request_image(
     stored: StoredImageAttachment,
-    policy: ImageRequestPolicy,
+    target: ImageRequestTarget,
     has_alpha: bool,
 ) -> _EncodedRequestImage:
-    dimensions = request_image_dimensions(stored.ref.width, stored.ref.height, policy.maxPixels)
     if (
-        dimensions.width == stored.ref.width and dimensions.height == stored.ref.height
-        and len(stored.data) <= policy.maxBytes
+        target.width >= stored.ref.width
+        and target.height >= stored.ref.height
+        and len(stored.data) <= target.maxBytes
     ):
         return _EncodedRequestImage(
             data=stored.data,
@@ -138,10 +145,8 @@ def _create_request_image(
             height=stored.ref.height,
         )
     source = prepared_source(stored.data, has_alpha)
-    prepared = resized(source, dimensions.width, dimensions.height)
-    encoded = encode_first_within_limit(
-        encoding_ladder(prepared, has_alpha), policy.maxBytes
-    )
+    prepared = _resize_long_edge(source, target)
+    encoded = encode_first_within_limit(encoding_ladder(prepared, has_alpha), target.maxBytes)
     chosen: EncodedCandidate = (
         encoded.smallest if is_exhausted_encoding(encoded) else encoded
     )
@@ -159,8 +164,7 @@ def _cache_path(root: str, hash_hex: str) -> str:
 
 def read_cached(
     path: str,
-    stored: StoredImageAttachment,
-    policy: ImageRequestPolicy,
+    target: ImageRequestTarget,
     expected_alpha: bool,
 ) -> _VerifiedRequestImage | None:
     """读回缓存版本并复验；任何不符（含缺失）都视为未命中。"""
@@ -168,12 +172,11 @@ def read_cached(
         with open(path, "rb") as handle:
             data = handle.read()
         detected = probe_image(data)
-        maximum = request_image_dimensions(stored.ref.width, stored.ref.height, policy.maxPixels)
         if (
             detected.depth != "uchar"
             or detected.space != "srgb"
-            or detected.width > maximum.width
-            or detected.height > maximum.height
+            or detected.width > target.width
+            or detected.height > target.height
             or not encoded_alpha_is_compatible(expected_alpha, detected.media_type, detected.has_alpha)
         ):
             return None
@@ -237,19 +240,19 @@ def write_cached(path: str, data: bytes) -> None:
 def read_request_image_file(
     root: str,
     stored: StoredImageAttachment,
-    policy: ImageRequestPolicy,
+    target: ImageRequestTarget,
 ) -> RequestImageAttachment:
     """生成或复用一个存储根下的请求图（上游同名函数，同步载体）。"""
-    validate_policy(policy)
+    validate_target(target)
     source_facts: DetectedImage = probe_image(stored.data)
-    variant_id = request_image_variant_id(stored.ref, policy)
+    variant_id = request_image_variant_id(stored.ref, target)
     hash_hex = str(variant_id)[len("sha256:"):]
     path = _cache_path(root, hash_hex)
-    cached = read_cached(path, stored, policy, source_facts.has_alpha)
+    cached = read_cached(path, target, source_facts.has_alpha)
     if cached is not None:
         created: _EncodedRequestImage | _VerifiedRequestImage = cached
     else:
-        created = _create_request_image(stored, policy, source_facts.has_alpha)
+        created = _create_request_image(stored, target, source_facts.has_alpha)
     if cached is not None:
         version: _VerifiedRequestImage = cached
     elif created.data == stored.data:

@@ -62,7 +62,7 @@ from .types import (
     FileAttachmentRef,
     ImageAttachmentLimits,
     ImageAttachmentRef,
-    ImageRequestPolicy,
+    ImageRequestTarget,
     RequestImageAttachment,
     SaveFileAttachment,
     SaveFileStreamAttachment,
@@ -363,7 +363,7 @@ class AttachmentStore:
         raise NotImplementedError
 
     def read_image_request(
-        self, ref: ImageAttachmentRef, policy: ImageRequestPolicy
+        self, ref: ImageAttachmentRef, target: ImageRequestTarget
     ) -> RequestImageAttachment:
         """生成或复用一个确定性模型请求图版本；挂载的后端不能派生时拒绝。"""
         raise AttachmentError(
@@ -528,10 +528,10 @@ class LocalAttachmentStore(AttachmentStore):
         return read_image_file(self.root, ref)
 
     def read_image_request(
-        self, ref: ImageAttachmentRef, policy: ImageRequestPolicy
+        self, ref: ImageAttachmentRef, target: ImageRequestTarget
     ) -> RequestImageAttachment:
         stored = self.read_image(ref)
-        return read_request_image_file(self.root, stored, policy)
+        return read_request_image_file(self.root, stored, target)
 
     # ---------- verbatim 文件族（attachment-local file-store，alpha.1） ----------
     # file_store → store 单向依赖（上游同向：file-store.ts import store.ts），
@@ -561,7 +561,7 @@ class LocalAttachmentStore(AttachmentStore):
         return normalized_image_path(self.root, ref)
 
     def variant_id_for(
-        self, ref: ImageAttachmentRef, policy: ImageRequestPolicy
+        self, ref: ImageAttachmentRef, target: ImageRequestTarget
     ) -> str:
         """不读字节的请求版本身份（缓存键/上传索引键预览）。"""
-        return str(request_image_variant_id(ref, policy))
+        return str(request_image_variant_id(ref, target))

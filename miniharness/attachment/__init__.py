@@ -55,6 +55,7 @@ __all__ = [
     "ImageAttachmentLimits",
     "ImageAttachmentRef",
     "ImageMediaType",
+    "ImageRequestTarget",
     "LocalAttachmentStore",
     "RequestImageAttachment",
     "SaveFileAttachment",

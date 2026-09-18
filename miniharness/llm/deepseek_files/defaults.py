@@ -1,0 +1,42 @@
+"""DeepSeek provider 共享限额与 Chat Files API 缺省值。
+
+对应 dsh 真实源码：packages/llm/llm-deepseek/src/common/defaults.ts。
+"""
+from __future__ import annotations
+
+__all__ = [
+    "DEFAULT_CONTEXT_WINDOW",
+    "DEFAULT_FILES_API_TIMEOUT_MS",
+    "DEFAULT_FILE_EXPIRY_SECONDS",
+    "DEFAULT_FILE_QUOTA_CLEANUP_BATCH",
+    "DEFAULT_FILE_REFRESH_MARGIN_SECONDS",
+    "DEFAULT_IMAGE_OFFLOAD_BYTE_QUANTUM",
+    "DEFAULT_IMAGE_OFFLOAD_COUNT_QUANTUM",
+    "DEFAULT_INLINE_IMAGE_OFFLOAD_BYTE_QUANTUM",
+    "DEFAULT_MAX_INLINE_REQUEST_IMAGE_BYTES",
+    "DEFAULT_MAX_TOKENS",
+    "DEFAULT_STREAM_IDLE_TIMEOUT_MS",
+]
+
+#: 适配器流读在途时允许的最大空闲间隔（毫秒）。
+DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000
+#: 缺省合并请求/响应上下文容量。
+DEFAULT_CONTEXT_WINDOW = 1_000_000
+#: 缺省单请求输出 token 上限。
+DEFAULT_MAX_TOKENS = 256_000
+#: Files API 回退后 base64 图片载荷的缺省字节上界。
+DEFAULT_MAX_INLINE_REQUEST_IMAGE_BYTES = 20 * 1024 * 1024
+#: 确定性 raw 字节移除步长。
+DEFAULT_IMAGE_OFFLOAD_BYTE_QUANTUM = 64 * 1024 * 1024
+#: Files API 回退后 base64 字节移除步长。
+DEFAULT_INLINE_IMAGE_OFFLOAD_BYTE_QUANTUM = 10 * 1024 * 1024
+#: 确定性图片计数移除步长。
+DEFAULT_IMAGE_OFFLOAD_COUNT_QUANTUM = 20
+#: 上传图片的缺省显式寿命（7 天）。
+DEFAULT_FILE_EXPIRY_SECONDS = 7 * 24 * 60 * 60
+#: 已索引 file id 的缺省主动刷新余量。
+DEFAULT_FILE_REFRESH_MARGIN_SECONDS = 60 * 60
+#: 配额恢复时删除的最旧 harness 自有所属文件数。
+DEFAULT_FILE_QUOTA_CLEANUP_BATCH = 100
+#: 通过 Files API 解析一张请求图的缺省截止时间（毫秒）。
+DEFAULT_FILES_API_TIMEOUT_MS = 60_000

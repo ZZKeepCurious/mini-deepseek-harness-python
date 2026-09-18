@@ -23,11 +23,13 @@ web 半（传输层 + 浏览器前端）的 wire 面与上游一致：两信封 
 
 - **Agent Teams**：`seams/agent_team/` 隐式 root roster + durable peer mailbox + 共享任务 DAG（四类 `team/*` 事件全 log-only，Team Lead 会话为权威 journal）+ 模型侧 9 工具与 `team:policy` 提示节（同步门面 + 事件循环内 async 双投递载体）。
 
+- **图片输入请求（DeepSeek Files API 执行簇）**：`miniharness/llm/deepseek_files/`（L1）——file-id/defaults/models/types/model-info（catalog 能力解析）+ image-tokens（provider vision-token 计算器逐字移植）+ request-pricing（`ImageRequestTarget` 路由目标 + offloaded/retained 定价）+ files-api（Chat Completions 与 Messages 双协议 httpx 传输）+ upload-index（`files-v3.json` + filelock 跨进程锁 + `os.replace` 原子发布）+ file-store（单飞共享上传 + 索引复用 + 配额恢复）+ request-files（stale-id 恰一次重试 + 规范化图片诊断）；`DeepSeekAdapter` 按目录宣称 image 输入并走 image-capable 请求路径（Files file-id 优先 → 解析失败整请求回退 inline base64）。载体差异：httpx 异步替代 fetch/FormData、filelock + `os.replace` 替代 dsh-atomic-write（见 verified-diffs §2.36）。
+
 ## 上游包观察清单（未复现，暂不纳入范围）
 
 以下上游 `packages/` 包尚未复现，未来想扩充复现范围可从中挑选；多数属于"能力扩展口 + 消费工具"的延伸，核心约定不依赖它们。已实现的家族中也有只做了一部分切片的（如 subprocess 仅环境清洗、client 仅 ui-trajectory、host 为 apiproxy 子集），权威归属以 docs/architecture.md 映射表为准。
 
-- **能力类**：`fs`、`terminal`、`e2b`、`lsp`、`code-runtime`、`spill`、`workspace`
+- **能力类**：`fs`、`terminal`、`e2b`、`lsp`、`code-runtime`、`spill`、`workspace`、`ptc-runtime`
 - **编排类**：`workflow`、`schedule`、`todo`
 - **横切类**：`settings`、`session-query`、`feedback`、`guard`、`runtime-diagnostics`、`api`、`context`、`util`、`web`
 - **平台类**：`typert`、`test-support`

@@ -44,14 +44,16 @@ miniharness/
 │   ├── fake.py            # FakeLlmAdapter（教学扩展）
 │   ├── retry_policy.py    # retry policy 解析（normal/always）
 │   ├── retry.py           # agent/request-error 恢复 + 退避
-│   └── token_meter.py     # TokenMeter 增量 fold + usage 折入锚
+│   ├── token_meter.py     # TokenMeter 增量 fold + usage 折入锚
+│   └── deepseek_files/    # DeepSeek Files API 执行簇（file-id/defaults/models/types/model-info/
+│                          #   image-tokens/request-pricing/files-api/upload-index/file-store/request-files）
 ├── attachment/             # packages/attachment（attachment + attachment-local）
-│   ├── types.py            # ImageAttachmentRef（含 originalDimensions）/ FileAttachmentRef / SaveImage·SaveFile·SaveFileStreamAttachment / ImageAttachmentLimits / ImageRequestPolicy / RequestImageAttachment
+│   ├── types.py            # ImageAttachmentRef（含 originalDimensions）/ FileAttachmentRef / SaveImage·SaveFile·SaveFileStreamAttachment / ImageAttachmentLimits / ImageRequestTarget / RequestImageAttachment
 │   ├── error.py            # AttachmentError + 17 错误码（含 INVALID_FILE_BASE64 / ATTACHMENT_FILES_UNSUPPORTED）+ is_attachment_error
 │   ├── encoding.py         # 共享质量阶梯 [85,75,60] + encodeFirstWithinLimit 惰性候选执行
 │   ├── normalization.py    # provider 无关规范化管线（直通/总像素预算+长边封顶/按 alpha 分流编码）
 │   ├── projection.py       # requestImageDimensions 纯请求投影几何（alpha.1 抽到 seam 包）
-│   ├── request_image.py    # variantId 确定身份的请求图缓存版本
+│   ├── request_image.py    # variantId 确定身份的请求图缓存版本（request-image-v6，按路由目标）
 │   ├── admission.py        # canonical base64 wire 受理入口（图片批次 + 文件单个）
 │   ├── file_store.py       # verbatim 文件内容寻址存储（files/<sha2>/<sha>/<name> 别名 + file-objects 规范对象）
 │   └── store.py            # LocalAttachmentStore（规范化字节 sha256 内容寻址 + 完整性复验 + verbatim 文件族 + admit_prompt_content）
@@ -198,9 +200,10 @@ miniharness/
 | `core/agent_loop/runtime_context.py` | `packages/core/agent-loop/src/runtime-context.ts` | loop 侧运行时上下文投影：retained 三态（undefined/null/{seq,text}）restore（倒序找最近一条仍在 surface 的 owned 快照）+ 按追加序惰性消化新事件；`project(current, sections)` 文本相等去重、变化铸快照 user 消息（sections 非空带 `form:'snapshot'` 归因，空即 CLEARED 哨兵不带归因）；SOURCE/CLEARED 逐字一致；接线在 `_run_step_async` pre-step waterfall 前（默认进入把快照追加在 claimed 之后，显式 enter 决策整体接管） |
 | `core/system_prompt.py` | `packages/core/system-prompt/src/` | assemble waterfall + contexts/tools/variables 提供器 + `{{variable}}` 严格插值 + `render_context_sections`/`join_context_sections` 节渲染面（上游 renderContextSections/joinContextSections）；scope 层叠、assembly.tools→请求工具集成未复现（简化标注见模块 docstring） |
 | `llm/protocol.py` | `packages/llm/llm/src/` | `stream(messages, tools, signal)` async 约定 + `StreamAborted` + `_aiter_raced`（异步迭代与 abort 事件竞速，asyncio 原生载体） |
-| `llm/deepseek.py` | `packages/llm/llm-deepseek/src/` | httpx 异步传输（原生 asyncio，abort 置位即关闭连接、真取消）+ per-read idle 300s watchdog（与上游 fetch 一致）+ SSE spec-strict 解析 |
+| `llm/deepseek.py` | `packages/llm/llm-deepseek/src/` | httpx 异步传输（原生 asyncio，abort 置位即关闭连接、真取消）+ per-read idle 300s watchdog（与上游 fetch 一致）+ SSE spec-strict 解析 + catalog 能力解析 + image-capable 请求路径（Files API file-id 优先 → inline base64 回退 → stale-id 有界重试） |
+| `llm/deepseek_files/` | `packages/llm/llm-deepseek/src/common/` | Files API 执行簇：file-id/defaults/models/types/model-info（能力解析）+ image-tokens（vision-token 计算器）+ request-pricing（路由目标 ImageRequestTarget + 请求图定价）+ files-api（双协议 httpx 传输）+ upload-index（files-v3.json + filelock）+ file-store（单飞共享上传 + 配额恢复）+ request-files（解析 + stale-id 重试 + 规范化图片诊断） |
 | `llm/fake.py` | 无 | 教学扩展 |
-| `attachment/`（types + error + image + encoding + normalization + projection + request_image + admission + file_store + store） | `packages/attachment/attachment`（seam + types + error + admission + request-projection）+ `packages/attachment/attachment-local`（store + image + encoding + normalization + request-image + file-store） | sharp→Pillow（权威全量解码/EXIF 定向/重编码）；规范化管线（总像素预算 + 长边封顶 + 共享质量阶梯按 alpha 分流）与 variantId 请求图缓存（request-image-v5）与 alpha.1 一致；**verbatim 文件族与 alpha.1 一致**（`file_store.py`：file_leaf_name 清洗 / `files/<sha2>/<sha>/<name>` 别名 + `file-objects` 规范对象 / save·save_stream·read_stream 摘要验证；AttachmentStore 七方法含 admit_prompt_content 实例方法）；CompressionLimiter 并发闸与 SharedRequest 单飞登记架构不适用（同步载体天然串行）；显式 root（上游 DSH_HOME/attachments/v1） |
+| `attachment/`（types + error + image + encoding + normalization + projection + request_image + admission + file_store + store） | `packages/attachment/attachment`（seam + types + error + admission + request-projection）+ `packages/attachment/attachment-local`（store + image + encoding + normalization + request-image + file-store） | sharp→Pillow（权威全量解码/EXIF 定向/重编码）；规范化管线（总像素预算 + 长边封顶 + 共享质量阶梯按 alpha 分流）与 variantId 请求图缓存（request-image-v6，路由目标 ImageRequestTarget）与 alpha.1 一致；**verbatim 文件族与 alpha.1 一致**（`file_store.py`：file_leaf_name 清洗 / `files/<sha2>/<sha>/<name>` 别名 + `file-objects` 规范对象 / save·save_stream·read_stream 摘要验证；AttachmentStore 七方法含 admit_prompt_content 实例方法）；CompressionLimiter 并发闸与 SharedRequest 单飞登记架构不适用（同步载体天然串行）；显式 root（上游 DSH_HOME/attachments/v1） |
 | `llm/retry_policy.py` | `packages/llm/llm/src/retry-policy.ts` | |
 | `llm/retry.py` | `packages/llm/llm-retry/src/` | async 恢复决策（派发前熔合信号检查 + always 派发后复查中止胜过决策）+ 事件驱动多信号竞速可取消等待（等价 `AbortSignal.any`；裸测试替身信号回退轮询）+ 插件 effect teardown（注销监听器 + lifetime.abort + 排干在途恢复） |
 | `llm/token_meter.py` | `packages/llm/token-meter/src/` | |
