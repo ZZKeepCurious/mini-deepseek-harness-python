@@ -414,12 +414,16 @@ class LlmFailure(Exception):
     def __init__(self, code: str, message: str,
                  status: int | None = None,
                  provider_retry_after_ms: int | None = None,
-                 request_id: str | None = None):
+                 request_id: str | None = None,
+                 offload_images: int | None = None):
         super().__init__(message)
         self.code = code
         self.status = status
         self.provider_retry_after_ms = provider_retry_after_ms
         self.request_id = request_id
+        # 上游 LlmError failure.offloadImages：IMAGE_OFFLOAD_REQUIRED 携带的
+        # 「还需卸载多少最旧 retained occurrence」计数（compaction-image-offload 消费）。
+        self.offload_images = offload_images
         failure: dict[str, Any] = {"code": code, "message": message}
         if status is not None:
             failure["status"] = status
@@ -427,6 +431,8 @@ class LlmFailure(Exception):
             failure["providerRetryAfterMs"] = provider_retry_after_ms
         if request_id is not None:
             failure["requestId"] = request_id
+        if offload_images is not None:
+            failure["offloadImages"] = offload_images
         self.failure = failure
 
 

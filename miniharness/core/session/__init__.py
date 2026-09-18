@@ -30,10 +30,12 @@ from .message import *  # noqa: F401,F403
 from .invariant import *  # noqa: F401,F403
 from .repair import *  # noqa: F401,F403
 from .surface import *  # noqa: F401,F403
+from .projections import *  # noqa: F401,F403
 from .session import *  # noqa: F401,F403
 
 __all__ = [
     "KNOWN_TYPES",
+    "MESSAGE_PROJECTION_EVENT_TYPES",
     "NEXT_STEP",
     "NEXT_TURN",
     "SESSION_FORMAT_VERSION",
@@ -41,11 +43,16 @@ __all__ = [
     "Session",
     "TOOL_NOT_STARTED",
     "TOOL_OUTCOME_UNKNOWN",
+    "ImageOffloadProjection",
+    "MessageProjection",
     "create_message",
     "deep_freeze",
+    "default_message_projections",
     "derive_event_message",
     "derive_messages",
     "file_block",
+    "fold_projections",
+    "offload_message_images",
     "image_block",
     "is_json_safe",
     "now_ms",

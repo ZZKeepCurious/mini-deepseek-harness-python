@@ -21,8 +21,9 @@
 miniharness/
 ├── __init__.py            # 教学面再导出，只含约定层（__all__ == 28，见 §4）
 ├── core/                  # packages/core
-│   ├── session/           # Session 本体 + types/invariant/json/message/repair/surface，__init__.py 聚合
+│   ├── session/           # Session 本体 + types/invariant/json/message/repair/surface/projections，__init__.py 聚合
 │   │   │                  #   message.py 上游在 llm/llm/src/message.ts，mini 保留会话域（L0 不依赖 llm，简化标注）
+│   │   ├── projections.py # message 投影（SessionMessageProjection）：image/offload 的拆分校验 + 图片卸载覆盖表（对应 session/surface.ts + compaction-image-offload/projection.ts）
 │   │   ├── zstd_frames.py # zstd 拼接帧容器扫描/解码/截断前缀恢复（python-zstandard）
 │   │   ├── persistence.py # JSONL(zstd 帧容器/明文) / SQLite 持久化（上游独立包组 packages/session；V2 一行一事件）+ _find/list_headers 走多代解析
 │   │   ├── generation.py  # generation 读侧：canonical 文件名/目录多代选择/migrate-on-open（对应 session-persistence-jsonl/src/generation.ts）
@@ -39,6 +40,7 @@ miniharness/
 │   └── agent_loop/        # agent.py（turn/step 状态机，V2 内嵌流写入磁盘）+ assistant_stream.py（AssistantStreamAttempt）+ resident_loop.py（常驻单循环）+ tool_calls.py（并行调度）+ inbox.py（双队列收件箱）
 ├── llm/                   # packages/llm
 │   ├── protocol.py        # StreamChunk / LlmAdapter / LlmFailure / BlockAssembler（协议层）
+│   │                        + 图像定价/模态/发现类型（LlmImageRequestPrice/Pricing 等）
 │   ├── assistant_stream.py # AssistantStreamRecord codec：Accumulator 压缩 / expand 解码 / validate 校验（V2 流内嵌）
 │   ├── deepseek.py        # DeepSeek wire 序列化 + SSE 适配器
 │   ├── fake.py            # FakeLlmAdapter（教学扩展）
@@ -207,7 +209,7 @@ miniharness/
 | `llm/retry_policy.py` | `packages/llm/llm/src/retry-policy.ts` | |
 | `llm/retry.py` | `packages/llm/llm-retry/src/` | async 恢复决策（派发前熔合信号检查 + always 派发后复查中止胜过决策）+ 事件驱动多信号竞速可取消等待（等价 `AbortSignal.any`；裸测试替身信号回退轮询）+ 插件 effect teardown（注销监听器 + lifetime.abort + 排干在途恢复） |
 | `llm/token_meter.py` | `packages/llm/token-meter/src/` | |
-| `compaction/`（config + region + summarizer + engine + tool_result_pruner） | `packages/compaction/compaction-basic/src/` + `compaction-tool-result-pruner/src/`（config / region / summarizer / index.ts） | 前缀重放无 KV cache 语义；toolResultPruner 可选阶段已与上游一致（`compaction/tool_result_pruner.py`，上游注入 `ctx.toolResultPruner`，mini 经 `ctx.get('toolResultPruner')` 取用） |
+| `compaction/`（config + region + summarizer + engine + tool_result_pruner + image_offload） | `packages/compaction/compaction-basic/src/` + `compaction-tool-result-pruner/src/` + `compaction-image-offload/src/`（config / region / summarizer / index.ts / projection.ts） | 前缀重放无 KV cache 语义；toolResultPruner 可选阶段已与上游一致（`compaction/tool_result_pruner.py`，上游注入 `ctx.toolResultPruner`，mini 经 `ctx.get('toolResultPruner')` 取用）；`image_offload.py` 镜像 compaction-image-offload——`offload_oldest_images` + `agent/request-error` 上的 `IMAGE_OFFLOAD_REQUIRED` surface 修复（`install_compaction` 一并安装），投影经 `core/session/projections.py` |
 | `jobs/`（types + registry + tools） | `packages/jobs/`（seam + jobs-local + tool-jobs） | controller/监听器按 scope 分层（P1-4a）；canonical value + render 分离；finalizeContent 可见输出二次封顶（job_output/job_kill）；`_assert_access` 前置 `assert_live_agent`（R4 agent registry，`core/agents.py`）；`run_in_background` 触发入口经模型侧 `subagent` 工具复现（简化标注见模块 docstring） |
 | `plan/`（config + mode + review + projection） | `packages/plan/plan-mode/src/` | 状态机 + plan:policy 节 + 审查 UI（exit_plan_mode / /plan / userQuestions）+ plan 投影；canonical value + Tool.render 已与上游一致（简化标注见模块 docstring） |
 | `commands/` | `packages/interaction/commands/src/` | 命令注册/派发 + `command/run|done` 配对 + commands/change 通知 + normalizeResult fail-loud；handler 签名 `(agent, raw)` 为教学扩展（简化标注见模块 docstring） |

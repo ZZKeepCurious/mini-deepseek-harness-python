@@ -12,6 +12,7 @@ from __future__ import annotations
 
 __all__ = [
     "KNOWN_TYPES",
+    "MESSAGE_PROJECTION_EVENT_TYPES",
     "SESSION_FORMAT_VERSION",
     "SURFACE_TYPES",
     "TOOL_NOT_STARTED",
@@ -87,6 +88,16 @@ KNOWN_TYPES = frozenset({
     # SessionEventMap，log-only 非 surface、version 1）：唯一持久 Schedule
     # 状态；create{schedule} / delete{id} / dispatch{id[, acceptedAt]} 四形状
     "schedule/change",
+    # 输入图片永久卸载（上游 compaction/compaction-image-offload/src/projection.ts
+    # SessionEventMap，log-only 非 surface、@messageProjection）：targets 指名
+    # 当前 user/message 或 tool/result 节点上要永久卸载的输入图片 occurrence
+    "image/offload",
+})
+
+# message-投影事件类型（上游 known-event-types.ts MESSAGE_PROJECTION_EVENT_TYPES）：
+# 这些事件经 pure replay 覆盖当前 surface 消息（不改变节点身份/日志字节）。
+MESSAGE_PROJECTION_EVENT_TYPES = frozenset({
+    "image/offload",
 })
 
 # 只有这四种事件产生模型消息，可带 surfaceOp（上游 types.ts SurfaceEventType；

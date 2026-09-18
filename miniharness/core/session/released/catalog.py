@@ -23,7 +23,13 @@ from .migrate_v0_v1 import V0_TO_V1
 from .migrate_v1_to_v2 import V1_TO_V2
 from .migrate_v2_to_v3 import V2_TO_V3
 
-__all__ = ["SESSION_FORMAT_CATALOG", "migrate_released_artifact", "migrate_released_header"]
+__all__ = [
+    "SESSION_FORMAT_CATALOG",
+    "decode_released_header",
+    "migrate_released_artifact",
+    "migrate_released_header",
+    "read_released_header",
+]
 
 
 def _assert_version(value: Any, label: str) -> int:
@@ -152,6 +158,26 @@ class _Catalog:
     def encode_current(self, artifact: dict) -> dict:
         return _encode_current(artifact)
 
+    def encode_current_header(self, header: dict, inherited_event_count: int) -> dict:
+        """编码一个当前逻辑头为物理头（上游 catalog.encodeCurrentHeader）。
+
+        `inherited_event_count` 是调用方持有的切点；v3 物理头由 isSeeded 承载
+        （cut 由最后一个 `{inherited:true}` marker 派生，不写物理头）。
+        """
+        encoded = _encode_current({"header": header, "events": []})
+        return encoded["header"]
+
+    def encode_current_event(self, event: dict) -> dict:
+        """编码一个当前逻辑事件为存储态行（上游 catalog.encodeCurrentEvent）：
+        sourceEventSeqs 折叠为区间编码（复用 mini encode_seq_ranges）。"""
+        from ..json import thaw
+        from ..seq_ranges import encode_seq_ranges
+
+        row = thaw(event)
+        if "sourceEventSeqs" in row:
+            row = {**row, "sourceEventSeqs": encode_seq_ranges(row["sourceEventSeqs"])}
+        return row
+
 
 SESSION_FORMAT_CATALOG = _Catalog()
 
@@ -164,3 +190,30 @@ def migrate_released_artifact(artifact: dict) -> dict:
 def migrate_released_header(header: dict) -> dict:
     """便捷入口：任意 released 逻辑头 → 当前 v3 逻辑头（不读事件体）。"""
     return SESSION_FORMAT_CATALOG.migrate_header(header)
+
+
+def read_released_header(header_value: Any) -> dict:
+    """分类一个物理头（上游 catalog.readHeader）：当前版本直接读，旧版本走相邻头迁移。
+
+    @param header_value - 已解析的物理 header 行（含 `type:'session'` 标签）。
+    @returns `{status, storedVersion, targetVersion, header}`——status 为
+        'current'（stored == 当前版本）或 'migration-required'（需要迁移），
+        header 为迁移到当前版本的逻辑头（物理 `type` 标签剥离，上游 readHeader 同形）。
+    """
+    stored = decode_released_header(header_value)
+    if stored == SESSION_FORMAT_CATALOG.current_version:
+        # 当前版本：校验逻辑头（物理 `type` 标签剥离）并在结果中返回逻辑头。
+        from .validate_v3 import assert_released_v3_header
+
+        logical = {key: value for key, value in header_value.items() if key != "type"}
+        assert_released_v3_header(logical)
+        return {"status": "current", "storedVersion": stored,
+                "targetVersion": stored, "header": logical}
+    # 旧版本：物理头先经存储版本 codec 解码为逻辑头（seedLength→isSeeded），再走相邻头迁移。
+    logical = SESSION_FORMAT_CATALOG.codec_for(stored)["decode_header"](header_value)
+    return {
+        "status": "migration-required",
+        "storedVersion": stored,
+        "targetVersion": SESSION_FORMAT_CATALOG.current_version,
+        "header": SESSION_FORMAT_CATALOG.migrate_header(logical),
+    }

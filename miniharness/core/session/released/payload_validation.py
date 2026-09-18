@@ -1133,8 +1133,35 @@ def assert_released_payload_semantics(event: dict, version: int) -> None:
         non_empty_string(data.get("endpoint"), f"{label} endpoint")
         non_empty_string(data.get("apiVersion"), f"{label} apiVersion")
         deep_seek_search_body_value(data.get("body"), f"{label} body")
+    elif etype == "image/offload":
+        image_offload_value(data, label)
     else:
         raise fail(f"released payload validator is missing event {js_stringify(etype)}")
+
+
+def image_offload_value(data: Any, label: str) -> None:
+    """image/offload payload（上游 projection.ts imageOffloadProjection.project 校验）：
+    恰 targets 单键、targets 非空；每个 target 恰 {seq, imageIndexes} 两键、
+    seq 非负安全整数、imageIndexes 非空且严格递增的非负安全整数。"""
+    if not is_json_object(data):
+        raise fail(f"{label} must be a JSON object")
+    record = exact_record(data, label, ["targets"])
+    targets = record.get("targets")
+    if not isinstance(targets, (list, tuple)) or len(targets) == 0:
+        raise fail(f"{label} targets must be a nonempty array")
+    for index, target in enumerate(targets):
+        item_label = f"{label} targets[{index}]"
+        item = exact_record(target, item_label, ["seq", "imageIndexes"])
+        count_value(item.get("seq"), f"{item_label} seq")
+        indexes = item.get("imageIndexes")
+        if not isinstance(indexes, (list, tuple)) or len(indexes) == 0:
+            raise fail(f"{item_label} imageIndexes must be a nonempty array")
+        previous = -1
+        for position, value in enumerate(indexes):
+            count_value(value, f"{item_label} imageIndexes[{position}]")
+            if value <= previous:
+                raise fail(f"{item_label} imageIndexes must be strictly increasing")
+            previous = value
 
 
 def _todo_item(member: Any, item_label: str) -> None:

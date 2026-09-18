@@ -25,6 +25,8 @@ web 半（传输层 + 浏览器前端）的 wire 面与上游一致：两信封 
 
 - **图片输入请求（DeepSeek Files API 执行簇）**：`miniharness/llm/deepseek_files/`（L1）——file-id/defaults/models/types/model-info（catalog 能力解析）+ image-tokens（provider vision-token 计算器逐字移植）+ request-pricing（`ImageRequestTarget` 路由目标 + offloaded/retained 定价）+ files-api（Chat Completions 与 Messages 双协议 httpx 传输）+ upload-index（`files-v3.json` + filelock 跨进程锁 + `os.replace` 原子发布）+ file-store（单飞共享上传 + 索引复用 + 配额恢复）+ request-files（stale-id 恰一次重试 + 规范化图片诊断）；`DeepSeekAdapter` 按目录宣称 image 输入并走 image-capable 请求路径（Files file-id 优先 → 解析失败整请求回退 inline base64）。载体差异：httpx 异步替代 fetch/FormData、filelock + `os.replace` 替代 dsh-atomic-write（见 verified-diffs §2.36）。
 
+- **图像卸载决策（message 投影）**：`core/session/projections.py`（L0）+ `compaction/image_offload.py`（L2）——`image/offload` durable 事件记录要永久卸载的输入图片 occurrence（当前 surface 的 user/message 或 tool/result 节点、深度优先序号、严格递增 + 拆分校验 fail-closed）；`derive_messages` 经 `fold_projections` 把选中 occurrence 投影为不可变 offloaded 副本（身份保留），模型侧投影为占位文本；`offload_oldest_images` + `agent/request-error` 上的 `IMAGE_OFFLOAD_REQUIRED` surface 修复（不消耗重试预算、不落 retry 事件）对应上游 `compaction-image-offload`。会话格式目录新增 `read_released_header` / `encode_current_header` / `encode_current_event`（对应 `session-format-catalog`）。
+
 ## 上游包观察清单（未复现，暂不纳入范围）
 
 以下上游 `packages/` 包尚未复现，未来想扩充复现范围可从中挑选；多数属于"能力扩展口 + 消费工具"的延伸，核心约定不依赖它们。已实现的家族中也有只做了一部分切片的（如 subprocess 仅环境清洗、client 仅 ui-trajectory、host 为 apiproxy 子集），权威归属以 docs/architecture.md 映射表为准。

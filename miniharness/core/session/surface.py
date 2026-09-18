@@ -280,14 +280,32 @@ def _surface_nodes(events) -> list[dict]:
     return surface
 
 
-def derive_messages(events) -> list[dict]:
+def derive_messages(events, projections=None) -> list[dict]:
     """纯投影：沿 surface 节点顺序派生模型消息（不修改日志，可重复调用）。
 
     replace 节点遮蔽被替换区间（上游 surface.ts：{op:'replace', startSeq,
     endSeq} 以当前 surface 上的 seq 定位区间并整体替换）。
+
+    projections 非 None 时先应用 message 投影覆盖表（上游 foldSurface +
+    SessionMessageProjection）：`image/offload` 等 durable 事实把对应节点
+    投影为不可变副本（身份保留），未覆盖的节点原样派生。
     """
+    nodes = _surface_nodes(events)
+    try:
+        event_list = [ev for ev in events]
+    except TypeError:  # pragma: no cover - 迭代器兜底
+        event_list = list(events)
+        nodes = _surface_nodes(event_list)
+    overrides = {}
+    if projections is not None:
+        from .projections import fold_projections
+
+        overrides = fold_projections(event_list, nodes, projections)
     messages = []
-    for node in _surface_nodes(events):
+    for node in nodes:
+        if node["seq"] in overrides:
+            messages.append(overrides[node["seq"]])
+            continue
         msg = derive_event_message(node)
         if msg is not None:
             messages.append(msg)

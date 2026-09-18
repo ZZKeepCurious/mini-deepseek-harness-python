@@ -147,6 +147,10 @@ def _v3_table() -> dict[str, dict]:
         [], ["arguments"])
     table["request/context"] = _disposition(
         ["provider", "model"], ["contextWindow", "systemPromptUpdate"])
+    # 图像卸载决策（上游 compaction-image-offload/projection.ts，@messageProjection）：
+    # payload 恰 targets，每个 target 是 {seq, imageIndexes}（逐字段深校验在
+    # validate_v3 的消息投影层；此处登记成员闭集）。
+    table["image/offload"] = _disposition(["targets"])
     return table
 
 

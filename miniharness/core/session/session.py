@@ -18,7 +18,7 @@ from .surface import (
     assert_tool_result_rewrite,
     validate_session_event_data,
 )
-from .types import KNOWN_TYPES, SURFACE_TYPES
+from .types import KNOWN_TYPES, MESSAGE_PROJECTION_EVENT_TYPES, SURFACE_TYPES
 
 __all__ = ["Session"]
 
@@ -44,6 +44,29 @@ def _json_deep_equal(a: Any, b: Any) -> bool:
             return False
         return all(_json_deep_equal(x, y) for x, y in zip(a, b))
     return a == b
+
+
+def _validate_message_projection(session: "Session", type_: str, data: dict) -> None:
+    """append 前校验 message-投影事件（上游 imageOffloadProjection.project）。
+
+    复用投影自身的 fail-closed 校验（targets 形状、seq 在当前 surface、
+    图片序号严格递增、非法 occurrence 拒绝），保证坏事件永远进不了日志。
+    """
+    from .projections import default_message_projections, fold_projections
+
+    nodes = _surface_nodes(session._events)
+    # 已提交投影先折叠（上游 append 校验在「前一次决策的结果」上做），
+    # 使重复卸载 / 已 offloaded occurrence 同样在源头被拒。
+    messages = fold_projections(list(session._events), nodes,
+                                default_message_projections())
+    context = {"nodes": [node["seq"] for node in nodes],
+               "event_at": lambda seq: next(
+                   (ev for ev in session._events if ev["seq"] == seq), None),
+               "messages": messages}
+    for projection in default_message_projections():
+        if projection.type == type_:
+            projection.project({"type": type_, "data": data}, context)
+            return
 
 
 class Session:
@@ -221,6 +244,8 @@ class Session:
         """
         payload = validate_event(type_, data, surfaceOp, sourceEventSeqs)
         validate_session_event_data(type_, data if data is not None else {})
+        if type_ in MESSAGE_PROJECTION_EVENT_TYPES:
+            _validate_message_projection(self, type_, data if data is not None else {})
         if surfaceOp is not None and surfaceOp != "append":
             # replace 端点必须引用更早事件（上游 validateSurfaceMetadata）；
             # 必须命中当前 surface 上已存在的 startSeq/endSeq 区间

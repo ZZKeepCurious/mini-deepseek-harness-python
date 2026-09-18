@@ -362,6 +362,7 @@ def assert_retained_images_fit(messages: list[dict], images: dict) -> None:
         raise LlmFailure(
             IMAGE_OFFLOAD_REQUIRED,
             f"DeepSeek {representation} request images exceed the route budget; {offload_images} more oldest occurrence(s) must be offloaded.",
+            offload_images=offload_images,
         )
 
 

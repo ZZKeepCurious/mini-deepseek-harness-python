@@ -59,6 +59,7 @@ from .tool_calls import schedule_tool_calls
 from ..session import (
     Session,
     create_message,
+    default_message_projections,
     derive_messages,
     text_block,
 )
@@ -922,8 +923,12 @@ class AgentLoop:
 
         Callers should invoke this inside each retry attempt so that
         newly‑added compaction checkpoint events are immediately visible.
+
+        应用 message 投影（上游 foldSurface + imageOffloadProjection）：
+        `image/offload` 决策把对应节点投影为 offloaded 不可变副本。
         """
-        return list(derive_messages(self.session.events))
+        return list(derive_messages(
+            self.session.events, default_message_projections()))
 
     def _system_prompt_text(self) -> str:
         """渲染系统提示文本：AgentLoop.system_prompt 基底 + systemPrompt 服务

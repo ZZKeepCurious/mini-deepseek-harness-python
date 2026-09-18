@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from . import config as _config
 from . import engine as _engine
+from . import image_offload as _image_offload
 from . import region as _region
 from . import summarizer as _summarizer
 from . import tool_result_pruner as _pruner
@@ -22,11 +23,13 @@ __all__ = [
     "ToolResultPruner",
     "compact_surface_region",
     "inspect_compaction_entry_state",
+    "offload_oldest_images",
     "select_compactable_range",
     "resolve_config",
     "resolve_spec",
     "resolve_target_policy",
     "install_compaction",
+    "install_image_offload",
     "install_tool_result_pruner",
 ]
 
@@ -53,6 +56,9 @@ ToolResultPruner = _pruner.ToolResultPruner  # noqa: F401
 install_tool_result_pruner = _pruner.install_tool_result_pruner  # noqa: F401
 PRUNE_MARKER = _pruner.PRUNE_MARKER  # noqa: F401
 
+offload_oldest_images = _image_offload.offload_oldest_images  # noqa: F401
+install_image_offload = _image_offload.install_image_offload  # noqa: F401
+
 
 def install_compaction(ctx, config: dict | None = None):
     """Idempotent assembly‑site helper: creates a CompactionEngine and registers
@@ -65,3 +71,6 @@ def install_compaction(ctx, config: dict | None = None):
         return
     ctx._miniharness_compaction_installed = True
     _engine.CompactionEngine(ctx, config)
+    # 图像卸载恢复（上游 compaction-image-offload 独立插件）：与压缩同族，
+    # agent/request-error 上的 IMAGE_OFFLOAD_REQUIRED surface 修复。
+    install_image_offload(ctx)

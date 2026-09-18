@@ -71,7 +71,12 @@ from .validate_v3 import (
 from .migrate_v0_v1 import V0_TO_V1
 from .migrate_v1_to_v2 import V1_TO_V2
 from .migrate_v2_to_v3 import V2_TO_V3
-from .catalog import SESSION_FORMAT_CATALOG, migrate_released_artifact, migrate_released_header
+from .catalog import (
+    SESSION_FORMAT_CATALOG,
+    migrate_released_artifact,
+    migrate_released_header,
+    read_released_header,
+)
 
 __all__ = [
     "SAFE_INT_MAX",
@@ -122,4 +127,5 @@ __all__ = [
     "SESSION_FORMAT_CATALOG",
     "migrate_released_artifact",
     "migrate_released_header",
+    "read_released_header",
 ]
