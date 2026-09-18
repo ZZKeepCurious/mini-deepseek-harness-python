@@ -49,6 +49,10 @@ miniharness/
 │   ├── token_meter.py     # TokenMeter 增量 fold + usage 折入锚
 │   └── deepseek_files/    # DeepSeek Files API 执行簇（file-id/defaults/models/types/model-info/
 │                          #   image-tokens/request-pricing/files-api/upload-index/file-store/request-files）
+├── ptc_runtime/           # packages/ptc-runtime（seam + Python 后端）
+│   ├── types.py           # PtcRunRequest/Spec/Result/Failure + 绑定契约（PtcBindingNamespace）
+│   ├── service.py         # PtcRuntime Service Definition + 保留名常量 + 绑定校验
+│   └── runtime.py         # PythonPtcRuntime（CPython 子进程 + 行 JSON 绑定协议）
 ├── attachment/             # packages/attachment（attachment + attachment-local）
 │   ├── types.py            # ImageAttachmentRef（含 originalDimensions）/ FileAttachmentRef / SaveImage·SaveFile·SaveFileStreamAttachment / ImageAttachmentLimits / ImageRequestTarget / RequestImageAttachment
 │   ├── error.py            # AttachmentError + 17 错误码（含 INVALID_FILE_BASE64 / ATTACHMENT_FILES_UNSUPPORTED）+ is_attachment_error
@@ -266,6 +270,7 @@ miniharness/
 | `seams/subagent/`（`__init__.py` + `descriptor.py` + `providers.py` + `worker.py` + `continuation.py` + `tool.py`） | `packages/subagent/subagent` + `subagent-fork-in-process` + `-acp` + `-dsh-sdk` + `subagent-spawn-in-process` + `subagent-in-process-driver` + `tool-subagent-control` + `tool-subagent-report` | 续跑 A8 为异步事件驱动（双路径：父有 driver → 投递即返回 + watchSettlement 结算 + steer 批内合并；无 driver → 回退同步 pump）。生命周期 scoped dispatch（委托父 scope 载体过滤，无标号退化祖先链）+ provider 注册表（register_provider → 注销发布 subagent/provider-removed）+ DRAINING 拒绝面（drain/drain_descendants/drain_children + assert_admitting 准入边界）+ report 工具逐字约定（output 参数、部署级 reportDelivery 'quiet'\|'next-step'、{messageId} 返回与 render）+ childId 预留 DUPLICATE_CHILD 断言已与上游一致；invariant 运行时校验架构不适用；同步模式结算投递走非唤醒 next-step |
 | `seams/agent_team/`（13 模块） | `packages/experimental/agent-team` + `tool-agent-team`（src/index.ts） | **Agent Teams 实验族**：implicit-root roster + durable peer mailbox + shared task DAG。`types/validation/error/journal/projection`（`team/member`(v2)/`team/task`/`team/message/queued`/`team/message/delivered` 四事件全 log-only、payload 逐字段 zod-strict fail-closed、task revision 从 1 连续、图成环拒、写域 advisory 重叠校验）；`roster`（spawn/stop/interrupt/reconcile/live_children_by_root；成员以 `start_continuable(agent_options={provider})` 子会话承载，descriptor `agentProvider` 承载请求方 provider）；`mailbox`（Team authority queue → `steer_host_subagent` 冷/热三态路由）；`task_board`（8 动作 CAS 转移矩阵）；`activity`（with观测窗口 wait_for）；`lifecycle`（admit/JOINED 窗）；`service`（同步门面）；`tools`（9 工具 + `team:policy` 提示节，canonical value 全 fixed record）。**sync/async 双投递载体**：同步 `_spawn_admitted`（harness/CLI 无循环态）+ 事件循环内 `start_continuable_async`/`spawn_async`/`_checkpoint_initial_prompt_async`（await 让出控制，驱动载体不被 time.sleep 阻塞）。简化：wire/Remote 端点不承载（错误语义走 TeamError.code 闭集）、上游 `todo` 事件与 `client-ui-agent-team`/web-profile 前端 wire 面由 `webui/` 自行选择 |
 | `seams/session_checkpoint.py` | `packages/session/session-checkpoint-policy/src/index.ts` | 语义持久化检查点（三屏障）：模型请求（`agent/checkpoint` boundary='request'，请求信封落日志后、adapter 派发前）+ 顶层工具（`tools/pre-execute`，`exec_.agent` 有且 `exec_.parent` 为空；取消折叠为 canonical `ABORTED_BEFORE_DISPATCH`）+ 步边界（`agent/pre-step`）；经 `SessionStore.checkpoint`（无持久化参与者 fail-closed）。载体差异：上游经 `llm/stream` 服务 waterfall 延迟适配器构造，mini 单一 adapter 直接调用故改用 `agent/checkpoint` waterfall。`install_checkpoint_policy(ctx)` opt-in |
+| `ptc_runtime/`（types + service + runtime） | `packages/ptc-runtime/ptc-runtime/src/{index,types}.ts` + `ptc-runtime-node` + `packages/experimental/ptc-runtime-python` | PTC 执行 seam：`PtcRuntime` Service Definition（`ctx.ptcRuntime`）+ 保留名常量（`RESERVED_BINDING_GLOBALS`/`RESERVED_ERROR_MEMBERS`/`PORTABLE_RESERVED_WORDS`/`DUNDER_MEMBER`）+ 绑定校验；`PythonPtcRuntime` 每请求在全新 CPython 子进程跑模型 Python（顶层 await/return），绑定经 stdin/stdout 行 JSON 协议桥接，墙钟预算/中止/输出上限 + 正交失败分类（exception/timeout/abort/worker-exit/invalid-output/output-limit/protocol）。载体差异：上游 Node 后端 worker/subprocess + fd-3 wire，mini CPython 子进程 + 行 JSON；子进程非安全边界（上游同款声明）。`install_ptc_runtime(ctx)` |
 | `demo.py` | `packages/examples/agent-spine-demo` | 教学入口，保留顶层（`python -m miniharness.demo`） |
 | `example_plugins.py` | `examples/` | 教学示例，保留顶层 |
 
@@ -276,7 +281,7 @@ miniharness/
 | 层 | 内容 | 允许依赖 |
 |---|---|---|
 | L0 地基 | `core/session`、`core/scope`、`core/dsh_scope`、`core/schema`、`core/hmr`、`core/home_paths`、`core/tool_timeout` | 无（互不依赖；core.scope ↔ core.dsh_scope / core.schema / core.hmr→core.scope 经 §3 例外豁免；core.tool_timeout 是超时约定常量叶，被 core.tools 与 guard 两侧共享） |
-| L1 领域 | `llm/*`、`core/tools`、`core/system_prompt`、`core/session_store`、`core/agents`、`attachment`、`identity`、`storage`、`boot/*`、`guard` | 仅 L0 |
+| L1 领域 | `llm/*`、`core/tools`、`core/system_prompt`、`core/session_store`、`core/agents`、`attachment`、`ptc_runtime`、`identity`、`storage`、`boot/*`、`guard` | 仅 L0 |
 | L2 编排 | `core/agent_loop`、`compaction`、`jobs`、`plan`、`commands`、`goal`、`skills`、`telemetry` | L0 + L1 |
 | L3 应用与入口 | `cli/*`、`protocol/*`、`seams/*`、`preset`、`extensions`、`interaction`、`client`、`mcp`、`web`、`shell` | L0 ~ L2 |
 | 教学层 | `demo.py`、`example_plugins.py` | 任意层，但不得被业务模块依赖 |

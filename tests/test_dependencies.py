@@ -52,6 +52,7 @@ LAYER_UNITS = [
     ("llm", 1),
     ("boot", 1),
     ("attachment", 1),
+    ("ptc_runtime", 1),
     ("identity", 1),
     ("storage", 1),
     ("core.agent_loop", 2),

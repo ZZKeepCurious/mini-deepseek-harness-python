@@ -27,6 +27,8 @@ web 半（传输层 + 浏览器前端）的 wire 面与上游一致：两信封 
 
 - **图像卸载决策（message 投影）**：`core/session/projections.py`（L0）+ `compaction/image_offload.py`（L2）——`image/offload` durable 事件记录要永久卸载的输入图片 occurrence（当前 surface 的 user/message 或 tool/result 节点、深度优先序号、严格递增 + 拆分校验 fail-closed）；`derive_messages` 经 `fold_projections` 把选中 occurrence 投影为不可变 offloaded 副本（身份保留），模型侧投影为占位文本；`offload_oldest_images` + `agent/request-error` 上的 `IMAGE_OFFLOAD_REQUIRED` surface 修复（不消耗重试预算、不落 retry 事件）对应上游 `compaction-image-offload`。会话格式目录新增 `read_released_header` / `encode_current_header` / `encode_current_event`（对应 `session-format-catalog`）。
 
+- **PTC 运行时（ptc-runtime）**：`miniharness/ptc_runtime/`（L1）——`PtcRuntime` Service Definition（`ctx.ptcRuntime`）+ 保留名常量 + 绑定校验；`PythonPtcRuntime` 每请求在全新 CPython 子进程跑模型 Python（顶层 await/return），绑定经 stdin/stdout 行 JSON 协议桥接，墙钟预算/中止/输出上限 + 正交失败分类（exception/timeout/abort/worker-exit/invalid-output/output-limit/protocol）；`install_ptc_runtime(ctx)`。载体差异：上游 Node 后端 worker/subprocess + fd-3 wire，mini CPython 子进程 + 行 JSON；子进程非安全边界（上游同款声明）。**注**：`run_code` 模型侧工具与 `tool/ptc-dispatch*` 事件属 tools-presentation seam，另立后续项。
+
 - **会话检查点策略（session-checkpoint-policy）**：`seams/session_checkpoint.py`（L3）+ `SessionStore.checkpoint`（fail-closed）——三种语义持久化屏障（模型请求前 / 顶层工具体前 / 每步边界），经 `agent/checkpoint` / `tools/pre-execute` / `agent/pre-step` 三个挂点；取消落在检查点窗口内折叠为 canonical `ABORTED_BEFORE_DISPATCH`，检查点失败 fail-closed 不进入下游副作用；嵌套工具派发复用外层检查点。`install_checkpoint_policy(ctx)` opt-in 装配。载体差异：上游经 `llm/stream` 服务 waterfall 延迟适配器构造，mini 单一 adapter 直接调用故改用 `agent/checkpoint` waterfall。
 
 ## 上游包观察清单（未复现，暂不纳入范围）

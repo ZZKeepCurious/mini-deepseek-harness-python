@@ -15,6 +15,7 @@ venv/
 # Test / coverage artifacts
 .pytest_cache/
 .coverage
+cov.json
 htmlcov/
 
 # Local runtime data (demo / persistence outputs)
