@@ -83,6 +83,10 @@ KNOWN_TYPES = frozenset({
     # team/task 全量投标 {task}；team/message/queued {message}；
     # team/message/delivered {messageId, targetId}
     "team/member", "team/task", "team/message/queued", "team/message/delivered",
+    # Schedule 会话内提醒（上游 schedule/schedule/src/types.ts
+    # SessionEventMap，log-only 非 surface、version 1）：唯一持久 Schedule
+    # 状态；create{schedule} / delete{id} / dispatch{id[, acceptedAt]} 四形状
+    "schedule/change",
 })
 
 # 只有这四种事件产生模型消息，可带 surfaceOp（上游 types.ts SurfaceEventType；
