@@ -14,9 +14,10 @@ import time
 import unittest
 from unittest import mock
 
+from miniharness.boot import boot
 from miniharness.boot.boot import load_optional_patches, watch_user_patches
 from miniharness.core.hmr import CONFIG_UPDATE_FAILED, Hmr, find_watch_root
-from miniharness.core.scope import CordisError, Context, FiberState, INACTIVE_EFFECT
+from miniharness.core.scope import CordisError, Context, INACTIVE_EFFECT
 
 
 class _EventBus:
@@ -267,88 +268,87 @@ class TestRealWatchdogIntegration(unittest.TestCase):
 class TestWatchUserPatches(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
-        self.patch_file = os.path.join(self._tmp.name, "cordis.patch.yml")
+        self.dir = os.path.abspath(self._tmp.name)
+        self.patch_file = os.path.join(self.dir, "cordis.patch.yml")
         self.bus = _EventBus()
-        self.ctx = Context(name="root")
-        self.remounted = []
+        self.config_file = os.path.join(self.dir, "cordis.yml")
+        with open(self.config_file, "w", encoding="utf-8") as h:
+            h.write(
+                "plugins:\n"
+                "  - id: greeter\n"
+                "    module: miniharness.example_plugins\n"
+                "    config:\n"
+                "      greeting: hi\n")
+        self.ctx, _ = boot(self.config_file)
+        self._install_hmr()
 
     def tearDown(self):
         self.ctx.dispose()
         self._tmp.cleanup()
 
     def _install_hmr(self):
-        return Hmr(self.ctx, base_dir=self._tmp.name,
+        return Hmr(self.ctx, base_dir=self.dir,
                    internals={"watcher_factory": _fake_factory(self.bus)})
 
-    def _write_patch_file(self, entries):
+    def _write_patch(self, text):
         with open(self.patch_file, "w", encoding="utf-8") as h:
-            json.dump(entries, h)
+            h.write(text)
 
     def test_requires_hmr_service(self):
-        with self.assertRaisesRegex(RuntimeError, "requires the Cordis HMR service"):
-            watch_user_patches(self.ctx, self.patch_file, self.remounted.append)
+        other = Context(name="root")
+        try:
+            with self.assertRaisesRegex(RuntimeError, "requires the Cordis HMR service"):
+                watch_user_patches(other, self.patch_file)
+        finally:
+            other.dispose()
 
-    def test_missing_patch_file_means_empty_layer(self):
-        self._install_hmr()
-        # 注册时文件不存在 → 无初扫（chokidar 只对已存在文件发 'add'）
-        watch_user_patches(self.ctx, self.patch_file, self.remounted.append)
-        self.assertEqual(self.remounted, [])
-        with open(self.patch_file, "w", encoding="utf-8") as h:
-            h.write("[]")
-        self.bus.emit(os.path.abspath(self.patch_file))
-        self.assertTrue(_wait_until(lambda: self.remounted == [[]]))
+    def test_requires_root_include_entry(self):
+        ctx = Context(name="root")
+        try:
+            Hmr(ctx, base_dir=self.dir, internals={"watcher_factory": _fake_factory(_EventBus())})
+            with self.assertRaisesRegex(RuntimeError, "requires the root Include entry"):
+                watch_user_patches(ctx, self.patch_file)
+        finally:
+            ctx.dispose()
+
+    def test_patch_change_reapplies_to_root_include(self):
+        watch_user_patches(self.ctx, self.patch_file)
+        self._write_patch(
+            "- replace:\n"
+            "    id: greeter\n"
+            "    config:\n"
+            "      greeting: yo\n")
+        self.bus.emit(self.patch_file)
+        self.assertTrue(_wait_until(lambda: self.ctx.get("greeter")("x") == "yo, x!"))
+
+    def test_removing_patch_file_reverts_layer(self):
+        watch_user_patches(self.ctx, self.patch_file)
+        self._write_patch(
+            "- replace:\n"
+            "    id: greeter\n"
+            "    config:\n"
+            "      greeting: yo\n")
+        self.bus.emit(self.patch_file)
+        self.assertTrue(_wait_until(lambda: self.ctx.get("greeter")("x") == "yo, x!"))
+        os.remove(self.patch_file)
+        self.bus.emit(self.patch_file)
+        self.assertTrue(_wait_until(lambda: self.ctx.get("greeter")("x") == "hi, x!"))
 
     def test_broken_patch_file_routes_to_failed_event(self):
-        self._install_hmr()
         failures = []
         self.ctx.on(CONFIG_UPDATE_FAILED, lambda p: failures.append(p))
-        watch_user_patches(self.ctx, self.patch_file, self.remounted.append)
-        with open(self.patch_file, "w", encoding="utf-8") as h:
-            h.write("{not-an-array")
-        self.bus.emit(os.path.abspath(self.patch_file))
+        watch_user_patches(self.ctx, self.patch_file)
+        self._write_patch("{not-an-array")
+        self.bus.emit(self.patch_file)
         self.assertTrue(_wait_until(lambda: bool(failures)))
-        self.assertEqual(self.remounted, [])  # 刷新失败绝不误触 remount
-
-    def test_change_delivers_new_patch_list_to_remount(self):
-        self._install_hmr()
-        watch_user_patches(self.ctx, self.patch_file, self.remounted.append)
-        self._write_patch_file([{"id": "x", "config": {"k": 1}}])
-        self.bus.emit(os.path.abspath(self.patch_file))
-        self.assertTrue(_wait_until(lambda: len(self.remounted) >= 1))
-        self.assertEqual(self.remounted[-1], [{"id": "x", "config": {"k": 1}}])
+        self.assertEqual(self.ctx.get("greeter")("x"), "hi, x!")  # 失败不改动活树
 
     def test_inactive_effect_returns_noop_disposer(self):
-        hmr = self._install_hmr()
+        hmr = self.ctx.get("hmr")
         with mock.patch.object(hmr, "register_config",
                                side_effect=CordisError(INACTIVE_EFFECT)):
-            disposer = watch_user_patches(self.ctx, self.patch_file, self.remounted.append)
+            disposer = watch_user_patches(self.ctx, self.patch_file)
         self.assertIsNone(disposer())
-
-    def test_end_to_end_epoch_reload_via_remount(self):
-        """文件变更 → HMR 单飞 → remount 调 fiber.update → internal/update
-        waterfall → epoch 卸载重装（动态 reload 触发源全链）。"""
-        plugin_calls = []
-
-        def apply(ctx, config=None):
-            # Fiber 直接以位置实参传 resolved config（dict）
-            plugin_calls.append((config or {}).get("value"))
-
-        fiber = self.ctx.plugin({"name": "echo", "inject": [], "apply": apply},
-                                {"value": "v1"})
-        self.assertEqual(plugin_calls, ["v1"])
-        self._install_hmr()
-
-        def remount(patches):
-            for patch in patches:
-                if patch.get("replace", {}).get("id") == "echo":
-                    fiber.update(patch["replace"].get("config", {}))
-
-        watch_user_patches(self.ctx, self.patch_file, remount)
-        self._write_patch_file(
-            [{"replace": {"id": "echo", "config": {"value": "v2"}}}])
-        self.bus.emit(os.path.abspath(self.patch_file))
-        self.assertTrue(_wait_until(lambda: plugin_calls[-1:] == ["v2"]))
-        self.assertEqual(fiber.state, FiberState.ACTIVE)
 
 
 if __name__ == "__main__":

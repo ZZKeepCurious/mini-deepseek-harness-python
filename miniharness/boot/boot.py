@@ -22,6 +22,7 @@ import asyncio
 import importlib
 import inspect
 import os
+import weakref
 from typing import Any, Callable
 
 from ..core.hmr import Hmr
@@ -38,6 +39,10 @@ __all__ = [
     "mount_root_include",
     "watch_user_patches",
 ]
+
+#: root ctx → 根 Include 条目（对齐 app-boot 的 bootstrapIncludes WeakMap）：
+#: `watch_user_patches` 经它把用户补丁层事务性重应用到装载树。
+_BOOTSTRAP_INCLUDES: "weakref.WeakKeyDictionary[Context, Any]" = weakref.WeakKeyDictionary()
 
 
 def load_plugin(entry: dict) -> dict:
@@ -105,7 +110,9 @@ def mount_root_include(
         "name": "cordis:include",
         "config": include_config,
     })
-    return loader.resolve(include_id)
+    entry = loader.resolve(include_id)
+    _BOOTSTRAP_INCLUDES[root] = entry
+    return entry
 
 
 def _settle_loader(loader: Loader) -> None:
@@ -264,29 +271,42 @@ def load_optional_patches(patch_path: str, bin_name: str = "miniharness") -> lis
 def watch_user_patches(
     ctx: Context,
     filename: str,
-    remount: Callable[[list[dict]], Any],
     *,
     bin_name: str = "miniharness",
     compose: Callable[[list[dict]], list[dict]] | None = None,
 ) -> Callable:
-    """watch 用户补丁层，变更时经 HMR 单飞循环事务性重应用（对齐 app-boot
-    watchUserPatches，index.ts:232-265）。
+    """watch 用户补丁层，变更时经 HMR 单飞循环事务性重应用到根 Include（对齐
+    app-boot watchUserPatches，index.ts:253-296）。
 
-    filename 为被 watch 的补丁文件（相对路径按 HMR baseDir 解析）；每次刷新
-    重读文件并调用 remount(patches)——重挂载由宿主回调承担：上游经根
-    Include entry.update() 走 internal/update waterfall 完成 epoch 卸载/
-    重装；compose 允许把用户层插入完整补丁序列的中间（缺省恒等）。HMR 缺席
-    或 watcher 启动失败 fail loud；注册期 INACTIVE_EFFECT 表示应用正在退出，
-    返回 no-op disposer（上游同款豁免）。
+    每次刷新：重读 include 的非补丁 config → 重读补丁文件（缺失=空层）→
+    `compose`（缺省恒等，允许把用户层插入完整补丁序列中间）→ 根 Include
+    `entry.update({config: {...includeConfig, patches}})` 走 internal/update
+    waterfall 完成卸载/重装 → `loader.await_all()` 结算 → `inactive_entries`
+    审计（有未激活即抛诊断，由 HMR 单飞循环折算 `hmr/config-update-failed`）。
+    HMR 缺席或根 Include 缺席 fail loud；注册期 INACTIVE_EFFECT 表示应用正在
+    退出，返回 no-op disposer（上游同款豁免）。
     """
     hmr = ctx.get("hmr")
     if hmr is None or not isinstance(hmr, Hmr):
         raise RuntimeError(f"{bin_name}: user patch-layer watching requires the Cordis HMR service")
+    entry = _BOOTSTRAP_INCLUDES.get(ctx)
+    if entry is None:
+        raise RuntimeError(f"{bin_name}: user patch-layer watching requires the root Include entry")
 
     def refresh() -> None:
+        include_config = dict(entry.options.get("config") or {})
+        include_config.pop("patches", None)
         user_patches = load_optional_patches(filename, bin_name)
-        patches = compose(user_patches) if compose is not None else user_patches
-        remount(patches)
+        composed = compose(user_patches) if compose is not None else user_patches
+        include_config["patches"] = _overlay_to_entry_patches(composed)
+        entry.update({"config": include_config})
+        loader = ctx.get("loader")
+        if loader is not None:
+            loader.await_all()
+            failures = inactive_entries(loader)
+            if failures:
+                raise RuntimeError(
+                    _activation_diagnostic(bin_name, "warning", failures).rstrip("\n"))
 
     try:
         return hmr.register_config(filename, refresh)
