@@ -1,5 +1,9 @@
 """PTC 模式 `run_code` 工具（tools-presentation seam，L2）。
 
+PTC = programmatic tool calls（程序化工具调用）：模型写一段程序，在程序内通过
+宿主机提供的异步绑定调用工具（上游更名记录：
+packages/.agents/notes/archived/architecture/2026-08-25-rename-code-mode-to-ptc.md）。
+
 对应 dsh 真实源码：packages/core/tools/src/ptc.ts。
 
 `ptc_runtime/`（L1）承载执行 seam + Python 后端；本层承载把注册表工具暴露给

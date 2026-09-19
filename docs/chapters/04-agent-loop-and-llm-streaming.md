@@ -534,6 +534,31 @@ Retry-After 解析、全部 recover 分支、lifetime 信号与竞速等待、�
 排干/陈旧守卫、loop 集成——重试成功/耗尽终局/非白名单终局）；
 压缩/溢出见 `tests/test_compaction.py`。
 
+### 延伸：图像输入请求（DeepSeek Files API 执行簇）与图像卸载投影
+
+文本回合走 §4.3 的 adapter；带图的回合多一层**图像输入请求路由**。真实上游
+`v0.1.6-alpha.1` A 组 #1-3 把"含图消息如何进模型"做成了完整文件管线，mini 对应
+`miniharness/llm/deepseek_files/` 十二模块（对照 `docs/architecture.md` 映射表）。
+
+**路由目标**（`ImageRequestTarget`，request-image v6）：先算"这张图以什么规格请求"
+——按像素预算决策（detail 网格 + 4096 单边封顶），与文本 token 一起交给定价器
+（`request-pricing.py`）得出总成本；这是"请求前先知道要付多少"，不是请求后的记账。
+
+**文件管线**（`files_api.py` + `upload_index.py` + `file_store.py`）：
+
+1. **file-id 优先**：同一会话内已上传过的图片（durable `files-v3.json` 索引，内容寻址），直接复用 file-id，不重复上传。
+2. **新增则上传**：单飞（并发闸）共享同一 upload 任务；配额用尽按 LRU 恢复；索引经 filelock（30s）+ `os.replace` 原子发布。
+3. **base64 回退**：file-id 不可用（如已知解码器限制）时退回消息内 base64，且回退决定在**请求前**（`resolve_image_attachment_access`），不在中途。
+4. **stale-id 恰一次重试**：请求期 file-id 已失效（stale）→ 有界重试换新 id，不无限重试。
+
+载体差异：上游走官方 Files API（HTTP 语义有一套独立映射），mini 用 httpx 实现同一契约；上传状态索引上游无等价物，属 mini 生产就绪增量（已登记）。
+
+**配套的上下文压力出口——图像卸载投影**（`miniharness/core/session/projections.py` + `compaction/image_offload.py`，对应上游 `compaction-image-offload`）：当上下文压力过大需要"腾地方"，逐字压缩不是唯一手段——可以把**最旧的输入图片**从历史里卸载，token 立刻省一大块。机制：
+
+- `image/offload` 是 durable 事件：记录要卸载的图片 occurrence（当前 surface 的 `user/message` 或 `tool/result` 节点 + 深度优先序号），`offload_oldest_images` 逐个挑选，选定集严格递增 + 拆分校验 fail-closed。
+- 读侧 `derive_messages` 经 `fold_projections` 把被选中 occurrence 投影为**不可变 offloaded 副本**（身份保留，只是内容变占位文本）——历史结点不删，模型侧只见占位。
+- 卸载请求若因上下文仍超限失败，在 `agent/request-error` 上带 `IMAGE_OFFLOAD_REQUIRED` 标记触发**重新卸载尝试**：不消耗重试预算、不落 retry 事件（与上一小节重试的分野）。
+
 ## 4.10 收尾
 
 回合跑通的那一刻，前三章的积木全部就位：日志在写、插件在拦、工具在跑、模型在转。这一章最后要记住的是 turn/step 的分层——turn 是对话的括号，step 是括号里的每一轮"请求 + 工具"。下一章处理一个没解决的实际问题：这些日志怎么写入磁盘、崩溃怎么恢复、整个系统怎么组合启动。

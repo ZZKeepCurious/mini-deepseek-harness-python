@@ -1,5 +1,9 @@
 """PTC 执行 seam 的词汇类型：调用方交给 PtcRuntime 什么、拿回什么。
 
+PTC = programmatic tool calls（程序化工具调用）：模型不逐一调用工具，而是写一段程序，
+在程序内通过宿主机提供的异步绑定（如 ``await tools.add({...})``）完成多步操作
+（上游更名记录：packages/.agents/notes/archived/architecture/2026-08-25-rename-code-mode-to-ptc.md）。
+
 对应 dsh 真实源码：packages/ptc-runtime/ptc-runtime/src/types.ts（纯类型，无运行时代码）。
 """
 from __future__ import annotations

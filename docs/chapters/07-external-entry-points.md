@@ -24,7 +24,7 @@
 | `web` | `dsh-base` + `dsh-web-app` | 浏览器表面，有 Host/HTTP/浏览器插件 |
 | `headless` | `dsh-base` + `dsh-headless` | 一次性任务，无任何 Host 层 |
 
-其它名字的 profile 首次使用不会自动初始化，必须先经 `dsh plugin` 路径显式创建（`initProfile`），否则 fail loud。`dsh-base` 是共享的内核底座（persona、工具模式、Code Mode worker 等），两个表面都叠在它上面。
+其它名字的 profile 首次使用不会自动初始化，必须先经 `dsh plugin` 路径显式创建（`initProfile`），否则 fail loud。`dsh-base` 是共享的内核底座（persona、工具模式、PTC——programmatic tool calls，程序化工具调用——worker 等），两个表面都叠在它上面。
 
 ### mini 复现现状（launcher 层）
 

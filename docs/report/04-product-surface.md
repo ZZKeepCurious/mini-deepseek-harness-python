@@ -9,12 +9,12 @@
 
 ### 1.1 产品体验
 
-`dsh --profile web` 启动后，用户在入口处可切换四种"模式"：**标准模式**、**PTC 模式**、**极简模式**、**创造模式**。它们不是同一 agent 的四种开关，而是**四个不同组成的 agent**：每个模式 = 一组工具目录 + 一套系统提示词 + 若干能力开关，会话内生效、互不影响。
+`dsh --profile web` 启动后，用户在入口处可切换四种"模式"：**标准模式**、**PTC 模式**、**极简模式**、**创造模式**。它们不是同一 agent 的四种开关，而是**四个不同组成的 agent**：每个模式 = 一组工具目录 + 一套系统提示词 + 若干能力开关，会话内生效、互不影响。其中 **PTC = programmatic tool calls（程序化工具调用）**：模型不再逐次调用工具，而是写一段程序，在程序内通过宿主机提供的异步绑定（如 `await tools.add({...})`）组合多步操作（上游更名记录：`.agents/notes/archived/architecture/2026-08-25-rename-code-mode-to-ptc.md`，旧称 "Code Mode"）。
 
 | 模式 | preset 目录（roster） | 一句话差别 |
 |---|---|---|
 | 标准模式 | `agent-presets/standard/` | 完整编码 agent：bash/pwsh、文件系统、skills、goals、plan、上下文压缩、子代理/工作流、web 搜索 |
-| PTC 模式 | `agent-presets/code/` | 标准全部能力 + 经 Code Mode SDK 呈现的编程工具：模型写一个 TypeScript 程序，组合多步文件操作 |
+| PTC 模式 | `agent-presets/code/` | 标准全部能力 + 经 PTC 运行时（`ctx.ptcRuntime`）呈现的编程工具（`run_code`）：模型写一段程序，组合多步工具调用 |
 | 极简模式 | `agent-presets/minimal/` | 仅两个工具（持久 bash + str_replace_editor）+ 固定完整提示词，无运行时上下文快照、无压缩 |
 | 创造模式 | `agent-presets/cordis/` | 标准能力 + 运行时检查与插件实验（inspect/define/run）、preset 创作指导 |
 

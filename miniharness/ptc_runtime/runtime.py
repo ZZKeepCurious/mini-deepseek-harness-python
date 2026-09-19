@@ -1,5 +1,9 @@
 """CPython 子进程 PTC 运行时（dsh-ptc-runtime seam 的 Python 后端）。
 
+PTC = programmatic tool calls（程序化工具调用）：模型不逐一调用工具，而是写一段程序，
+在程序内通过宿主机提供的异步绑定（如 ``await tools.add({...})``）完成多步操作
+（上游更名记录：packages/.agents/notes/archived/architecture/2026-08-25-rename-code-mode-to-ptc.md）。
+
 对应 dsh 真实源码：packages/ptc-runtime/ptc-runtime-node（Node worker/subprocess
 载体）+ packages/experimental/ptc-runtime-python（CPython 子进程 + fd-3 wire）。
 

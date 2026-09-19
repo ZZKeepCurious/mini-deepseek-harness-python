@@ -224,6 +224,26 @@ def run_pipeline(ctx, tool, args, exec_=None):
 
 **规范化**：三种"出错形态"（抛异常、返回 `isError` dict、返回不可序列化的值）全部收敛为 `ToolResult(is_error=True)`。这是"回合不中断"承诺的落实：模型收到的是结构化错误消息，而不是一个崩溃的回合。常规做法里异常向上抛，一次工具崩溃整个会话就没了。
 
+### 延伸：程序化工具调用（PTC）——`run_code` 子派发
+
+八段管线讲的是"宿主替模型调工具"。PTC（programmatic tool calls，程序化工具调用）换了一个递送方式：**模型不逐条决定工具调用，而是写一段程序，在程序内通过宿主机提供的异步绑定 `await tools.<name>(args)` 组合多步调用**（上游定义出处：`deepseek-harness/.agents/notes/archived/architecture/2026-08-25-rename-code-mode-to-ptc.md`，旧称 "Code Mode"）。对应真实源码 `packages/core/tools/src/ptc.ts`；mini 实现 = `miniharness/ptc/run_code.py`（模型侧工具）+ `miniharness/ptc_runtime/`（执行 seam，见第 6 章 §6.11）。
+
+```python
+# run_code 的调用身份字段（core/tools.py ToolExec 与 loop/tool_calls.py 共用）
+# call_id / root_call_id —— 上游 ToolExecution.callId / rootCallId 的载体对应
+exec_.call_id       # 每层派发独立
+exec_.root_call_id  # 顶层 run_code 调用
+```
+
+一次 `run_code` 的会话痕迹是这样落日志的：
+
+1. 模型交一段程序 → 落 `tool/call`（name=`run_code`）。
+2. 程序运行到 `await tools.someTool(args)` → 触发一次**子派发**：落 `tool/ptc-dispatch-start`（payload `{rootCallId, parentCallId, subCallId, name, arguments}`），其中 `subCallId = "<parent>:ptc:<n>"`（第 n 次子派发，从 0 起）——`tool/ptc-dispatch-log` 是挂在 waterfall 上的**钩子名**，不是会话事件。
+3. 子派发走的就是本章八段管线（物化/冻结 → pre-execute → execute → post-execute → 规范化），结算后落 `tool/ptc-dispatch`（payload 追加 `isError` / `content`）。所以**子派发天然继承审批与沙箱语义**——程序写多步工具调用，也绕不开每一步的宿主把关。
+4. 程序结束 → 外层 `tool/result` 只收录**精心挑选过的结果**（logs + 可选 result + sandbox），中间几十次子派发细节留在 `tool/ptc-dispatch*` 事件里供审计，不全部灌回模型历史。
+
+用前面的话说：`tool/ptc-dispatch*` 是 log-only 审计事件（读侧词汇，不投影），模型只见外层结果——这就是第 1 章"模型可见 ⟺ 已记录"在嵌套场景下的落点。载体差异：上游用 registry 分阶段调度接口（prepare/dispatch/finalize/finish）+ 并发池，mini 经 `run_pipeline` 顺序执行（事件序与 payload 形状对齐，并发上限已登记）。
+
 ## 3.4 验收：硬性规定 + 测试
 
 `tests/test_tools.py` 固定的规定：

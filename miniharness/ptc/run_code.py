@@ -1,5 +1,11 @@
 """PTC 模式 `run_code` 传输：模型侧工具 + 子派发事件日志。
 
+PTC = programmatic tool calls（程序化工具调用）：模型不逐一调用工具，而是写一段程序，
+在程序内通过宿主机提供的异步绑定（如 ``await tools.add({...})``）完成多步操作；
+`run_code` 是该模式的模型侧入口，模型交付一段程序（语言取
+runtime.language flavor，typescript/python），程序内调用绑定枚举的 agent 可见工具（上游更名记录：
+packages/.agents/notes/archived/architecture/2026-08-25-rename-code-mode-to-ptc.md）。
+
 对应 dsh 真实源码：packages/core/tools/src/ptc.ts（`createRunCodeTool`）。
 
 程序经 `tools` 绑定命名空间调用注册表里 agent 可见的工具（嵌套执行）；每次

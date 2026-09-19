@@ -1,5 +1,9 @@
 """PTC 执行能力 seam 的 Service Definition。
 
+PTC = programmatic tool calls（程序化工具调用）：模型不逐一调用工具，而是写一段程序，
+在程序内通过宿主机提供的异步绑定（如 ``await tools.add({...})``）完成多步操作
+（上游更名记录：packages/.agents/notes/archived/architecture/2026-08-25-rename-code-mode-to-ptc.md）。
+
 对应 dsh 真实源码：packages/ptc-runtime/ptc-runtime/src/index.ts。
 
 Seam 只描述「对宿主异步绑定运行一段模型写的程序」；运行时对工具/会话一无所知——

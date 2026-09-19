@@ -137,6 +137,8 @@ class JsonlPersistence(SessionPersistence):
 
 与上游的载体差异（教学可读性优先）：压缩后缀 `.zstd`（上游 `.zst`）；发布用临时文件 + `os.replace`（单进程写手，上游为 link 独占 + win32 原生助手）。**深度校验层按上游整件移植**：`payload_validation.py` 做 54 类型逐字段 payload 语义，`relationships.py` 做跨事件关系状态机（含 v2 `assistant/attempt` step 门），`validate.py`/`validate_v2.py`/`validate_v3.py` 做 artifact 编排——迁移链切换成真实校验器：v0→v1 先逐事件过词表/disposition 门、落底再过终态 artifact 双重门，v1→v2 出参直接走 v2 目标校验（内嵌流三事实 cross-check——content/usage/replayState 与发出的 blocks 逐一对照、marker/cut 双向核对、restore＝信封级装载），v2→v3 出参走 v3 全量校验（system head 三保护 + canonical envelope + 投影关系）。
 
+**会话格式目录收口**（`released/catalog.py` + `released/dispositions.py`，对应上游 `session-format-catalog`）：迁移链要能"读旧头 → 迁旧事件"、"写新头 → 写新事件"，这两个方向的编码协议收敛成**目录三函数**——`read_released_header`（物理头分类：新发版本直读、旧发相邻迁移、未知/错格 fail-closed）、`encode_current_header` / `encode_current_event`（当前发布版本的主写路径）。新事件类型（含 `image/offload`、PTC `tool/ptc-dispatch*`，见第 4 章延伸）登记进目录后，迁移与校验就自动认识它们——这正是 §5.1 说的"格式是演进来的，不是重新发明的"：加类型 = 在目录里登记，而不是改三四个分支。
+
 ### 步骤 3：SQLite 后端（单调 SCHEMA_VERSION）
 
 ```python

@@ -57,6 +57,12 @@
 | 作用域化注册（per-agent ctx） | 每 agent 一个注册表实例，父子链式查找（继承/遮蔽） | 作用域注册卸载即回滚；restrict 过滤继承工具 |
 | JSONL 持久化 + 崩溃恢复 | **zstd 拼接帧容器** + 一行一事件 + generation 文件名 `session.v3.jsonl[.zstd]`（`compression='none'` 退回明文 `.jsonl`）；启动回放时合成 `interrupted` turn（`commit_repair` 追加 closers），torn 尾部读路径截断；released 旧格式经相邻迁移链（v0→v1→v2→v3）读入 | seq 连续；未知事件类型拒绝加载（fail-closed，`ignorable: true` 豁免放行）；`SESSION_FORMAT_VERSION = 3` 双向拒读 |
 | 组合层（bundle / patch） | YAML 配置 + 按 id 的整段覆盖 + insert 列表 | 补丁算法单一实现，导出纯函数，禁止复制粘贴 |
+| DeepSeek Files API 执行簇（图像输入请求路由） | `httpx` 异步 + `deepseek_files/` 十二模块 + `ImageRequestTarget`（request-image v6） | 路由目标（token 网格 / 像素预算 + 4096 单边封顶）→ 定价 → file-id 上传/复用（durable `files-v3.json` 索引 + filelock 30s + os.replace 原子发布）→ 含图请求 image-capable 路径：file-id 优先 → base64 回退 → stale-id 有界重试 |
+| 图像卸载 message 投影 | `core/session/projections.py` + `compaction/image_offload.py` | 投影=按事件序折叠覆盖表（fold_projections）；`image/offload` durable 事件记录要卸载的图片 occurrence（严格递增拆分校验 fail-closed）；`offload_oldest_images` + `agent/request-error` 上的 `IMAGE_OFFLOAD_REQUIRED` 修复（不耗重试预算） |
+| 会话格式目录（released 迁移链收口） | `core/session/released/catalog.py` | `read_released_header`（物理头分类 + 旧版相邻头迁移）/ `encode_current_header` / `encode_current_event`；dispositions + `image/offload` |
+| 会话检查点策略（语义持久化屏障） | `seams/session_checkpoint.py` + `SessionStore.checkpoint` | 三屏障（模型请求前 / 顶层工具体前 / 每步边界），经 `agent/checkpoint` / `tools/pre-execute` / `agent/pre-step`；取消折叠为 canonical `ABORTED_BEFORE_DISPATCH`；fail-closed 无参与者抛 `SessionCheckpointError` |
+| PTC 运行时 seam（programmatic tool calls） | `ptc_runtime/`（types + service + runtime） | 模型写一段程序、程序内经绑定调用工具；`PythonPtcRuntime` = 全新 CPython 子进程 + 行 JSON 绑定桥 + 墙钟/中止/输出上限 + 正交失败分类（exception/timeout/abort/worker-exit/invalid-output/output-limit/protocol/sandbox-unavailable） |
+| PTC `run_code` 工具 | `ptc/run_code.py` + `core/tools.py`（`ToolExec.call_id/root_call_id`） | 模型交付程序 → 绑定枚举 agent 可见工具（剔除 run_code 自身）→ 子派发落 `tool/ptc-dispatch-start` / `tool/ptc-dispatch`（subCallId=`<parent>:ptc:<n>`）；外层结果 canonical `{logs, result?, sandbox?}` |
 
 ### 7.3 迷你复现项目清单（MiniHarness，用 Python）
 
@@ -152,6 +158,20 @@
 </div>
 
 </div>
+
+### 7.4 基线已落地扩展能力速览
+
+!!! note "本节定位"
+    六步迷你复现（§7.3）覆盖"技术核心"；下述能力已在 `miniharness/` 按上游契约落地（对照 `docs/architecture.md` 映射表），是**从核心走向产品化**的增量面。每项一句话说明做什么、落在哪。
+
+| 能力 | 一句话功能描述 | 所在 |
+|---|---|---|
+| DeepSeek Files API 执行簇 | 图像输入请求的完整文件管线：路由目标定价 → file-id 上传（单飞共享 + durable 索引 + 配额恢复）→ 双协议传输（Chat Completions / Messages）→ stale-id 恰一次重试 | `llm/deepseek_files/` |
+| 图像卸载投影（image/offload） | 上下文压力过大时把最旧输入图片卸载为占位文本的决策 + message 投影，`IMAGE_OFFLOAD_REQUIRED` 恢复不耗重试预算 | `core/session/projections.py` + `compaction/image_offload.py` |
+| 会话检查点策略 | 语义持久化屏障：模型请求前 / 顶层工具体前 / 每步边界各刷一次盘，崩溃后不丢已承诺事实 | `seams/session_checkpoint.py` |
+| 会话格式目录 | released 格式迁移链的读头分类、当前头/事件编码、新事件类型登记（v3 主线） | `core/session/released/catalog.py` |
+| PTC 运行时 | programmatic tool calls：模型写程序、程序内经绑定调用工具；CPython 子进程执行 + 正交失败分类 | `ptc_runtime/` |
+| `run_code` 工具 | PTC 模式的模型侧入口：绑定枚举 agent 可见工具，子派发落 `tool/ptc-dispatch*` 审计事件 | `ptc/run_code.py` |
 
 !!! warning "复现的取舍"
     复现目标是**掌握约定与硬性规定**，不是逐行移植。跳过：声明合并、双面打包、生成器门禁、HMR 热重载、typert 类型图、Web 客户端。保留：事件溯源、插件副作用、waterfall、作用域、工具管线、状态机、持久化恢复、配置组合——这些是"技术核心"本身。

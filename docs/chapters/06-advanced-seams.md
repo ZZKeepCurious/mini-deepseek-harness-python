@@ -176,19 +176,44 @@ await service.spawn_teammate_async(...)          # 事件循环内（驱动载�
 
 简化与取舍（诚实标注）：上游的 `todo` 事件（todo-list UI 的面）与 `client-ui-agent-team` / web-profile 属于前端 wire 面，mini 不引入；wire/Remote 端点不承载——错误语义用一个 `TeamError.code` 闭集表达，而不是 HTTP/端点层。
 
-## 6.7 验收
+## 6.7 延伸：会话检查点策略（语义持久化屏障）
+
+前面几章把"什么事实该落盘"交给了宿主：turn/step 括号、工具结果、压缩都在事件层保证。但**什么时候落盘**、落到哪个粒度，是另一个独立决策——这就是检查点策略（上游 `packages/session/session-checkpoint-policy`，mini `seams/session_checkpoint.py`）。
+
+它的职责一句话：**在副作用发生前，把"将要发生的承诺"先写进磁盘**，崩了不丢已承诺事实。实现是"三屏障"：
+
+| 屏障 | 挂点 | 时机 |
+|---|---|---|
+| 模型请求前 | `agent/checkpoint`（boundary=`request`） | 请求信封落日志后、adapter 派发前 |
+| 顶层工具体前 | `tools/pre-execute` | `exec_.agent` 有且 `exec_.parent` 为空（子派发复用外层检查点） |
+| 每步边界 | `agent/pre-step` | 新 step 开始前 |
+
+```python
+# 语义示意（seams/session_checkpoint.py）
+SessionStore.checkpoint(session, boundary)   # 经 ctx.checkpointService 派发
+# 有持久化参与者才真正 flush；无参与者 → fail-closed 抛 SessionCheckpointError
+```
+
+两个关键决定：
+
+1. **取消折叠**：请求/工具体落在检查点窗口内被取消，折叠成 canonical `ABORTED_BEFORE_DISPATCH`——不落"未发生的副作用"。
+2. **fail-closed**：没有持久化参与者时，`checkpoint` 直接失败而不是静默跳过——"不知道数据存没存"比"没存"更糟，宁可停。
+
+载体差异（诚实标注）：上游经 `llm/stream` 服务 waterfall 延迟适配器构造（`agent/checkpoint` 挂 waterfall 上延迟决定是否重新适配器），mini 是单一 adapter 直接调用，故改用 `agent/checkpoint` 完成同一承诺语义。装配 = `install_checkpoint_policy(ctx)`（opt-in）。
+
+## 6.8 验收
 
 ```bash
 python -m unittest tests.test_seams -v
 ```
 
-## 6.8 检查点练习（挑一个做深）
+## 6.9 检查点练习（挑一个做深）
 
 1. **沙箱**：实现 `DenyListSandbox`（基于 deny 黑名单）与 `AllowListSandbox`（基于 allow 白名单）两个 Provider，共享一个测试套件证明 Consumer 不变。
 2. **凭据**：实现 `FileCredentialProvider`（从 `.env` 文件读取，逐行 `KEY=VALUE`），与 `EnvCredentialProvider` 共用同一接口测试。
 3. **子 agent**：用第 4 章的 `DeepSeekAdapter` 实现 `RemoteSubAgentProvider`（真实 API），跑一次"主 agent 派发任务给子 agent"的完整链路。
 
-## 6.9 回到 dsh：真实源码对照
+## 6.10 回到 dsh：真实源码对照
 
 打开 `deepseek-harness/docs/capability-seams.md`：
 
@@ -203,7 +228,7 @@ python -m unittest tests.test_seams -v
 | 凭据 | `CredentialProvider.resolve(key)` | `resolve(ref): ResolvedCredential`（值 + 来源层）+ `describe(ref)`；本地 provider 层：`env` / `file` / `project-env` / `user-env` | 引用是带 brand 的 POSIX 环境变量名语法；每次操作重新解析 |
 | 子 agent | `SubAgentProvider.spawn(name, prompt)` | `SubagentProvider.start(...)` + `prepareContinuable`（可继续对话）+ `SubagentCapabilities` 能力门（不支持则 `UNSUPPORTED_CAPABILITY` 拒绝） | 六个真实 Provider：in-process / fork / ACP / Codex / Claude Code / dsh-sdk |
 
-## 6.10 进阶实现：真后端 / 四层凭据 / 远程三通道
+## 6.11 进阶实现：真后端 / 四层凭据 / 远程三通道 / PTC 运行时
 
 基础三件套讲清"换 Provider 不改 Consumer"；进阶三件把每个接缝推向与 dsh 一致的形态（产出：`miniharness/seams/sandbox_local.py` + `credentials_local.py` + `subagent/providers.py` + `subagent/worker.py`，验收测试在 `tests/test_stage6.py`）。
 
@@ -260,7 +285,21 @@ python -m unittest tests.test_seams -v
 
 三者保持同一 Consumer 接口 `spawn(name, prompt) -> SubAgent`：换通道只改 Provider 构造，消费方代码不动。
 
-## 6.11 手册收尾
+**PTC 运行时**（`miniharness/ptc_runtime/`，对应上游 `packages/ptc-runtime/{ptc-runtime,ptc-runtime-node}` + `packages/experimental/ptc-runtime-python`）：第 3 章延伸讲了 `run_code` 工具怎么把程序交进来；这里补执行侧。PTC（programmatic tool calls，程序化工具调用）的编排单元是**程序**而非单条工具调用，所以 `PtcRuntime` 是一条 Service Definition（`ctx.ptcRuntime`）：
+
+- `run(request) -> {result, failure?}`：拿模型写的程序 + 绑定表，执行并返回结果。绑定表里是可调用的工具（`tools.<name>`），程序 `await` 它。
+- **保留名与绑定校验**：`RESERVED_BINDING_GLOBALS` / `RESERVED_ERROR_MEMBERS` / `PORTABLE_RESERVED_WORDS` / `DUNDER_MEMBER`——程序不能碰宿主保留名，绑定不能撞 `__dunder__` 私有面（失败分类 `binding-conflict`）。这是安全边界的**第一道**：程序能调什么由绑定表显式枚举，不是宿主进程全局。
+- **`PythonPtcRuntime` 的执行载体**：每个请求在**全新 CPython 子进程**跑模型 Python（顶层 `await`/`return`）。绑定经 stdin/stdout **行 JSON 协议**桥接——宿主进程不经 eval 接触模型代码。墙钟预算 / 中止信号 / 输出上限三件套，配合正交失败分类闭集：`exception / timeout / abort / worker-exit / invalid-output / output-limit / protocol`。
+
+```python
+# 语义示意（ptc_runtime/types.py）
+run(request=PtcRunRequest(sandbox=spec, program, bindings, timeout_ms, max_log_bytes))
+# -> PtcRunResult(bytecode?, sandbox)  或 failure=PtcRunFailure(code=..., message=...)
+```
+
+载体差异（诚实标注）：上游是 Node 后端（worker/subprocess + fd-3 wire），mini 用 CPython 子进程 + 行 JSON——和沙箱一样，**子进程不是安全边界**（上游同款声明：防的是失控程序毁掉宿主进程，不是躲恶意代码）。装配 = `install_ptc_runtime(ctx)`（opt-in）。
+
+## 6.12 手册收尾
 
 全部 6 章做完，你应该能用 Python 亲手证明这三件事（报告《结语》篇 §12 同样强调）：
 
