@@ -1,7 +1,7 @@
 // Trajectory — virtualized trajectory view with Overview bar, per-turn
 // collapse and full-text search (R5).
 //
-// Data flows from the wire trajectory buffer (session.follow) as
+// Data flows from the wire trajectory buffer (session/follow) as
 // EventEnvelope[]. Rendering here is windowed: the event log is projected into
 // measurable virtual rows (src/trajectory/model.ts) and only the rows inside
 // the scroll viewport (± overscan) are mounted, so sessions with thousands of

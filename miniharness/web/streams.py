@@ -1,12 +1,12 @@
-"""web 远程方法面（GatewayStreams）：`$events` 装配 + session.follow/control 流。
+"""web 远程方法面（GatewayStreams）：`$events` 装配 + session/follow/control 流。
 
 对齐上游 `packages/api/gateway/src/` + `packages/api/session-controller/src/`：
 本类把 session-controller 进程侧能力折叠成一个可被 `web/mux.py` 按 endpoint
 打开/取消的路由表（Remote method exports 的 stream 子集）：
 
-  * `session.follow`  —— 单个会话跟随流（history.follow）：开流即一个 `snapshot`
+  * `session/follow`  —— 单个会话跟随流（history.follow）：开流即一个 `snapshot`
     帧（header/cursor/records/hasMore/projections）后逐条 `event` 帧。
-  * `session.control` —— 宿主级 live control：首个 `baseline` 帧（queues/jobs/
+  * `session/control` —— 宿主级 live control：首个 `baseline` 帧（queues/jobs/
     projections）后按变更给 `queue` / `jobs` / `projection` 帧。
   * `$events`         —— 远程事件流（`web/events.py` RemoteEventRegistry），承载
     api-session/* 转发源 + 审批 waterfall（`web/approvals.py` bridge）。
@@ -37,6 +37,7 @@ from typing import Any
 from .args import (
     BoundaryReject,
     boundary_error_message,
+    canonical_endpoint,
     validate_args,
 )
 from .events import RemoteEventRegistry
@@ -67,7 +68,7 @@ def _as_plain(value: Any) -> Any:
 
 
 class GatewayStreams:
-    """WebApi 之上组装好的 Remote 方法面（$events + session.follow/control）。
+    """WebApi 之上组装好的 Remote 方法面（$events + session/follow/control）。
 
     WebApi 构造时创建一次（`api.gateway`）；`web/mux.py` 的 WS open 按 endpoint
     分发到 `open_stream`；`web/server.py` 的 `$events/result` unary 经
@@ -91,8 +92,8 @@ class GatewayStreams:
         """endpoint → 打开/消费实现（上游 RemoteMethod exports 的 stream 子集）。"""
         return {
             REMOTE_EVENT_STREAM_ENDPOINT: "$events",
-            "session.follow": "follow",
-            "session.control": "control",
+            "session/follow": "follow",
+            "session/control": "control",
         }
 
     def open_stream(self, endpoint: str, payload: Any, signal=None):
@@ -102,6 +103,7 @@ class GatewayStreams:
         @param signal - 可选取消句柄（mux 关闭/客户端 cancel 时终止）。
         @raises EventSourceFailure / RemoteStreamError。
         """
+        endpoint = canonical_endpoint(endpoint)
         kind = self.stream_kinds().get(endpoint)
         if kind is None:
             # 未知 endpoint：上游 gateway 报 invocation-unavailable（index.ts:660
@@ -125,7 +127,7 @@ class GatewayStreams:
             return self._follow(payload["args"], signal)
         return self._control(signal)
 
-    # ---------- session.follow（历史跟随流） ----------
+    # ---------- session/follow（历史跟随流） ----------
 
     async def _follow(self, args: dict, signal=None):
         address = args.get("address")
@@ -133,7 +135,7 @@ class GatewayStreams:
                 or not isinstance(address.get("sessionId"), str)
                 or not address["sessionId"]):
             raise RemoteStreamError("gateway/arguments-invalid",
-                                    "session.follow requires a session address")
+                                    "session/follow requires a session address")
         session_id = address["sessionId"]
         session = self.api.store.get(session_id)
         if session is None:
@@ -169,7 +171,7 @@ class GatewayStreams:
         """SessionEventEntry 包装（上游 history.ts entryFor：`{type:'event', event}`）。"""
         return {"type": "event", "event": _as_plain(event)}
 
-    # ---------- session.control（宿主级 live control） ----------
+    # ---------- session/control（宿主级 live control） ----------
 
     def _attach_control(self) -> None:
         if self._attached:

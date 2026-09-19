@@ -866,11 +866,11 @@ class TestDispatch(WebApiTest):
 
     def test_methods_set(self):
         self.assertEqual(self.api.methods(), frozenset({
-            "session.list", "session.search", "session.create", "session.selectModel",
-            "session.modelCatalog", "session.canOpenWorkspacePath",
-            "session.openWorkspacePath", "session.rename", "session.fork",
-            "session.prompt", "session.attachment", "session.updateQueue",
-            "session.cancel", "session.page"}))
+            "session/list", "session/search", "session/create", "session/selectModel",
+            "session/modelCatalog", "session/canOpenWorkspacePath",
+            "session/openWorkspacePath", "session/rename", "session/fork",
+            "session/prompt", "session/attachment", "session/updateQueue",
+            "session/cancel", "session/page"}))
 
     def test_bad_payload_shape(self):
         error = self._error(self.api.dispatch("session.list", "rid", "nope"))
@@ -910,12 +910,19 @@ class TestArgsBoundary(WebApiTest):
         error = self._error(self.api.dispatch("session.search", "rid", {}))
         self.assertEqual(error["code"], "gateway/arguments-invalid")
         self.assertIn('missing "query"', error["message"])
-        self.assertEqual(error["details"], {"endpoint": "session.search"})
+        self.assertEqual(error["details"], {"endpoint": "session/search"})
 
         error = self._error(self.api.dispatch("session.page", "rid", {
             "address": {"kind": "session", "sessionId": "x"}}))
         self.assertEqual(error["code"], "gateway/arguments-invalid")
         self.assertIn('missing "throughSeq"', error["message"])
+
+    def test_upstream_slash_endpoint_dispatches(self):
+        # 上游 typert 端点为 `<namespace>/<method>`（gateway endpointOf）：斜杠式
+        # 路由可达；历史点式由 canonical_endpoint 折成斜杠。
+        error = self._error(self.api.dispatch("session/search", "rid", {}))
+        self.assertEqual(error["code"], "gateway/arguments-invalid")
+        self.assertEqual(error["details"], {"endpoint": "session/search"})
 
     def test_unexpected_fields_arguments_invalid(self):
         error = self._error(self.api.dispatch("session.cancel", "rid", {
@@ -935,7 +942,7 @@ class TestArgsBoundary(WebApiTest):
         self.assertEqual(error["code"], "gateway/input-invalid")
         self.assertIn('wire field "query" failed boundary validation', error["message"])
         self.assertEqual(error["details"],
-                         {"endpoint": "session.search", "field": "query"})
+                         {"endpoint": "session/search", "field": "query"})
 
         error = self._error(self.api.dispatch("session.cancel", "rid", {"sessionId": 5}))
         self.assertEqual(error["code"], "gateway/input-invalid")

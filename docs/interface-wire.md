@@ -16,8 +16,8 @@
 
 | 通道 | 载体 | 覆盖范围 | 载体状态码 |
 |---|---|---|---|
-| unary RPC | `POST /api/<endpoint>` | `session.*` 14 个 unary 端点 + `$events/result` 特判 | 401* / 404 / 415 / 400 / 500 / 200 |
-| Remote 流 | `WS /api/remote.mux` | `$events` + `session.follow` + `session.control` 全部长期流 | HTTP 401*（升级拒绝）/ WS 关闭码 1003 / 1008 / 1011 |
+| unary RPC | `POST /api/<endpoint>` | `session/*` 14 个 unary 端点 + `$events/result` 特判 | 401* / 404 / 415 / 400 / 500 / 200 |
+| Remote 流 | `WS /api/remote.mux` | `$events` + `session/follow` + `session/control` 全部长期流 | HTTP 401*（升级拒绝）/ WS 关闭码 1003 / 1008 / 1011 |
 | 会话导出 | `GET /api/session.export` | 会话日志 zip 下载 | 401* / 200 / 400 / 404 / 501 / 500 |
 | SPA 静态 | `GET`/`HEAD /{path}`（非 `/api/`） | `webui/dist/` 或 `web/static/` 产物承载 | 403 / 200 / 404 / 405 |
 
@@ -43,7 +43,7 @@
 
 ### 1.2 unary 载体状态码语义（`web/server.py`）
 
-- `404`：非 POST、路径不在 `/api/` 下、或 `method` 不在路由表（`session.*` 之外）。
+- `404`：非 POST、路径不在 `/api/` 下、或 `method` 不在路由表（`session/*` 之外）。
 - `415`：`content-type` 非 `application/json`（跨站写围栏，上游同款安全设计；无 CORS 头）。
 - `400`：body 非 JSON（含空体）；`GET/HEAD /api/session.export` 参数缺失/非法同样归 400 文本。
 - `500`：信封合法但实现崩溃（纯文本 `handler failure: <error>`）。
@@ -100,26 +100,28 @@ subagent/catalog-diagnostic subagent/unauthorized
 寄送方签发 `rpcId`（实践中 UUID 即可，递增非零即可）；`transport_error` 把载体层异常折进
 `result.ok=false` 分支，兜底码恒 `gateway/internal`。
 
-## 3. unary 会话服务端点（`web/api.py`，`session.*`）
+## 3. unary 会话服务端点（`web/api.py`，`session/*`）
 
-路由表（`WebApi.ROUTES`），全部满足 §1 unary 载体约定：
+端点命名与上游 typert 一致：`<namespace>/<method>`（gateway `endpointOf` = `${namespace}/${method}`，
+client `connection/src/client/rpc.ts` 按 `/` 切两段）；`web/args.canonical_endpoint` 兼容历史
+点式 `namespace.method` 折成斜杠式。路由表（`WebApi.ROUTES`），全部满足 §1 unary 载体约定：
 
 | 端点 | 轮廓 | 典型业务错误码 |
 |---|---|---|
-| `session.list` | 会话清单（附 running 位） | —（gateway/bad-request 守卫） |
-| `session.search` | 按查询过滤会话 | gateway/bad-request |
-| `session.create` | 新建会话（`cwd` 或 `workspaceId` 二选一、`sessionId` 可注入幂等、`agentPreset` 可选） | gateway/bad-request / workspace/not-found / agent-preset/conflict / session/conflict / gateway/internal |
-| `session.selectModel` | 设置模型 + `reasoningEffort` | gateway/bad-request / session/not-found / session/model-unavailable |
-| `session.modelCatalog` | 模型目录 | — |
-| `session.canOpenWorkspacePath` | 工作区路径可达性检查 | — |
-| `session.openWorkspacePath` | 打开工作区 | gateway/bad-request |
-| `session.rename` | 改标题 | gateway/bad-request / session/not-found |
-| `session.fork` | 分支会话（无 fork 场景 → session/fork-unavailable） | gateway/bad-request / session/not-found / session/attachment-invalid / session/fork-unavailable |
-| `session.prompt` | 投递 prompt（`mode` queue/steer、content 逐块 text/image、时间戳校验） | gateway/bad-request / session/not-found / session/invalid-time-zone / session/attachment-invalid / session/agent-busy |
-| `session.attachment` | 附件受理（media + variantId） | session/not-found / session/attachment-invalid / gateway/internal |
-| `session.updateQueue` | 队列编辑（edit/remove/steer 三类） | gateway/bad-request / session/attachment-invalid / session/queue-item-not-found / session/steer-unavailable |
-| `session.cancel` | 取消当前回合 | session/not-found / session/agent-busy |
-| `session.page` | 分页历史（throughSeq/beforeSeq/maxMessages） | gateway/bad-request / session/not-found / gateway/internal |
+| `session/list` | 会话清单（附 running 位） | —（gateway/bad-request 守卫） |
+| `session/search` | 按查询过滤会话 | gateway/bad-request |
+| `session/create` | 新建会话（`cwd` 或 `workspaceId` 二选一、`sessionId` 可注入幂等、`agentPreset` 可选） | gateway/bad-request / workspace/not-found / agent-preset/conflict / session/conflict / gateway/internal |
+| `session/selectModel` | 设置模型 + `reasoningEffort` | gateway/bad-request / session/not-found / session/model-unavailable |
+| `session/modelCatalog` | 模型目录 | — |
+| `session/canOpenWorkspacePath` | 工作区路径可达性检查 | — |
+| `session/openWorkspacePath` | 打开工作区 | gateway/bad-request |
+| `session/rename` | 改标题 | gateway/bad-request / session/not-found |
+| `session/fork` | 分支会话（无 fork 场景 → session/fork-unavailable） | gateway/bad-request / session/not-found / session/attachment-invalid / session/fork-unavailable |
+| `session/prompt` | 投递 prompt（`mode` queue/steer、content 逐块 text/image、时间戳校验） | gateway/bad-request / session/not-found / session/invalid-time-zone / session/attachment-invalid / session/agent-busy |
+| `session/attachment` | 附件受理（media + variantId） | session/not-found / session/attachment-invalid / gateway/internal |
+| `session/updateQueue` | 队列编辑（edit/remove/steer 三类） | gateway/bad-request / session/attachment-invalid / session/queue-item-not-found / session/steer-unavailable |
+| `session/cancel` | 取消当前回合 | session/not-found / session/agent-busy |
+| `session/page` | 分页历史（throughSeq/beforeSeq/maxMessages） | gateway/bad-request / session/not-found / gateway/internal |
 
 > 各端点 `args` 先在路由层经 `web/args.py` 做**统一 `{args}` 边界校验**（同 gateway
 > `assertExactArguments`/`decode`）：字段集合精确匹配——缺 required / 多 unexpected →
@@ -152,10 +154,10 @@ subagent/catalog-diagnostic subagent/unauthorized
 
 - 每条 open 立即按 `endpoint` 分发（§4.1/4.2/4.3）；`open` 内抛错 → 该流先发 `error` 帧再 `end`，
   **不关 WS**（单流失败与其它流隔离）；流中途失败同理；`error` 帧本身发送失败 → close 1011。
-- 关键 `endpoint`（`GatewayStreams.stream_kinds`）：`$events`、`session.follow`、`session.control`；
+- 关键 `endpoint`（`GatewayStreams.stream_kinds`）：`$events`、`session/follow`、`session/control`；
    未知 endpoint → `error` 帧 `gateway/internal`。
 
-### 4.1 `session.follow`（历史跟随流）
+### 4.1 `session/follow`（历史跟随流）
 
 - open payload：`{args:{address:{kind:'session', sessionId}, maxMessages?}}`
 - 首帧 `snapshot`：
@@ -187,7 +189,7 @@ subagent/catalog-diagnostic subagent/unauthorized
   `snapshot`/`baseline`，客户端按 seq 去重即无缺口；mini 相同。follow 活体帧的 mini 载体是
   ≤50ms 短轮询批量提取，进程内日志现成可读，帧形状与顺序同上游。
 
-### 4.2 `session.control`（宿主级 live control）
+### 4.2 `session/control`（宿主级 live control）
 
 - open payload：恰 `{args:{}}`。
 - 首帧 `baseline`：
@@ -237,7 +239,7 @@ subagent/catalog-diagnostic subagent/unauthorized
 are **not** replayed after reconnect」「always return a complete opening snapshot followed
 by deltas」。
 
-- **`session.follow` / `session.control`**：每次 open（含重连）都重投完整 `snapshot` / `baseline`
+- **`session/follow` / `session/control`**：每次 open（含重连）都重投完整 `snapshot` / `baseline`
   快照帧，随后以续帧增量推进。客户端只需「重开即重启，按 seq 与替换帧语义收敛」，无需游标
   参数（wire 无 `since`）。
 - **`$events`**：新代次先发 `ready`（新 `clientId`）；对旧代次已转发过的单向 emit **不重放**

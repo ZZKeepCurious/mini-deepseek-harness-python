@@ -105,7 +105,7 @@ headless 一次性任务入口（`miniharness/cli/headless.py` + `cli/main.py`�
 
 协议入口最小子集：JSON-RPC 信封（`miniharness/protocol/sdk.py`，07 章 §7.6）、ACP（`miniharness/protocol/acp.py`，07 章 §7.7）、hooks 桥（`miniharness/protocol/hooks.py`，07 章 §7.8）。
 
-web 传输层（`miniharness/web/`，07 章 §7.5）：两信封 RPC（`client-request`/`server-response`，`server.py` 严格 `{args}` 解包）、WebApi unary 会话服务（`api.py`：list/search/create/selectModel/modelCatalog/…/page unary）、Remote 流 wire（`stream_protocol.py`，单条 `/api/remote.mux` WebSocket 承载 open/cancel/item/end/error 帧 + `$events/result` unary 结算）、`$events` 注册表（`events.py`：ready 首帧 + api-session/* 转发 + waterfall）、`session.follow`/`session.control` 流（`streams.py`，follow=snapshot{header,cursor,records,hasMore,projections}+逐帧、control=baseline{queues,jobs,projections}+替换帧）、审批桥（`approvals.py`：async tools/ask 闸门 ↔ `$events` waterfall 经 result 结算 + `approval/asked|decided` 审计）、会话导出下载（`downloads.py`：`GET /api/session.export`，root + 子代理后代 + 被引用媒体 zip，200/400/404/501/500 状态码链，错误走私有信封外壳）、FastAPI 载体（`server.py`，同 gateway `stream-server.ts` 状态码链 + client/connection 一元信封 + frontend-static 约定）、`--profile web` 启动器（`launcher.py` + `cli/main.py`）。约定层与 alpha.1 真实约定完全一致（上游 React 客户端指向 mini 后端可工作）。**浏览器前端二形态**：产品化 `webui/`（仓库顶层独立 React+TS+Vite 工程，只依赖 wire 约定：会话列表/新建、Trajectory（虚拟化窗口 + Overview 折叠跳转 + 全文 search）、审批瀑布、队列/作业；`vite build` 产物经 `MINIHARNESS_WEBUI_DIST` 由后端静态承载）+ `web/static/` vanilla SPA（旧 SSE wire 教学参照，不对新后端工作）。
+web 传输层（`miniharness/web/`，07 章 §7.5）：两信封 RPC（`client-request`/`server-response`，`server.py` 严格 `{args}` 解包）、WebApi unary 会话服务（`api.py`：list/search/create/selectModel/modelCatalog/…/page unary）、Remote 流 wire（`stream_protocol.py`，单条 `/api/remote.mux` WebSocket 承载 open/cancel/item/end/error 帧 + `$events/result` unary 结算）、`$events` 注册表（`events.py`：ready 首帧 + api-session/* 转发 + waterfall）、`session/follow`/`session/control` 流（`streams.py`，follow=snapshot{header,cursor,records,hasMore,projections}+逐帧、control=baseline{queues,jobs,projections}+替换帧）、审批桥（`approvals.py`：async tools/ask 闸门 ↔ `$events` waterfall 经 result 结算 + `approval/asked|decided` 审计）、会话导出下载（`downloads.py`：`GET /api/session.export`，root + 子代理后代 + 被引用媒体 zip，200/400/404/501/500 状态码链，错误走私有信封外壳）、FastAPI 载体（`server.py`，同 gateway `stream-server.ts` 状态码链 + client/connection 一元信封 + frontend-static 约定）、`--profile web` 启动器（`launcher.py` + `cli/main.py`）。约定层与 alpha.1 真实约定完全一致（上游 React 客户端指向 mini 后端可工作）。**浏览器前端二形态**：产品化 `webui/`（仓库顶层独立 React+TS+Vite 工程，只依赖 wire 约定：会话列表/新建、Trajectory（虚拟化窗口 + Overview 折叠跳转 + 全文 search）、审批瀑布、队列/作业；`vite build` 产物经 `MINIHARNESS_WEBUI_DIST` 由后端静态承载）+ `web/static/` vanilla SPA（旧 SSE wire 教学参照，不对新后端工作）。
 
 异步化与并行工具执行（`miniharness/core/agent_loop/tool_calls.py` + core/scope async 变体 + `execution_mode` 分类器，手册 12 章）——屏障/滚动池/模型序提交/取消排干与上游 `agent-loop/src/tool-calls.ts` 逐条一致。
 
@@ -129,7 +129,7 @@ Trajectory 是 **web 专属**的"Agent 的 DevTools"：一个按 turn 组织的�
 ```text
 数据流：
 会话日志（唯一数据源）
-  → session.page RPC（throughSeq/beforeSeq/maxMessages 游标向前分页，按 append-origin 消息边界切页）
+  → session/page RPC（throughSeq/beforeSeq/maxMessages 游标向前分页，按 append-origin 消息边界切页）
   → ConversationNodeAssembler 折叠（`packages/client/ui-conversation/src/client/conversation/assembler.ts`）
       · 折叠窗口 = 当前滚动区间的节点
       · 每个 target（user/assistant/tool/steering…）用独立 definition 物化
@@ -141,7 +141,7 @@ Trajectory 是 **web 专属**的"Agent 的 DevTools"：一个按 turn 组织的�
 **数据流逐节点走读**（对应上图每行）：
 
 1. **会话日志**：唯一数据源，Trajectory 只读它，不维护独立数据。
-2. **session.page RPC**：按 `throughSeq`/`beforeSeq` 游标向前分页拉取日志切片，页边界取 **append-origin 消息边界**（保证折叠窗口内消息完整，不劈裂一条消息）。
+2. **session/page RPC**：按 `throughSeq`/`beforeSeq` 游标向前分页拉取日志切片，页边界取 **append-origin 消息边界**（保证折叠窗口内消息完整，不劈裂一条消息）。
 3. **ConversationNodeAssembler 折叠**（`packages/client/ui-conversation/src/client/conversation/assembler.ts`）：把原始事件折叠成可检查记录。折叠窗口 = 当前滚动区间的节点；每个 target（user / assistant / tool / steering…）用**独立 definition**（`match/update/finalNode` 纯函数）物化成自己的记录形状。
 4. **TrajectorySnapshot**（trajectory-contract.ts:60-68）：折叠的成品——由 `eventNodes`（节点表）、`eventLocations`（节点↔事件序号映射）、`requests`、`callSchemas`、`partial`（崩溃未闭合尾部标记）、`runningCalls`（在飞工具调用）六块组成。
 5. **渲染 + 虚拟化**：只挂载可见行窗口（阈值 100 行）+ overscan 12，长会话翻页加载，避免一次性渲染整条日志。
@@ -153,7 +153,7 @@ Trajectory 是 **web 专属**的"Agent 的 DevTools"：一个按 turn 组织的�
 - **Overview**：从同一折叠数据投影真实开始时间与耗时（TTFT 等），不是另一套采集；
 - **搜索**：浏览器内增量索引（trajectory-search-index.ts），随事件到达增量更新，不走 session-query；
 - **虚拟化**：只挂载可见行（阈值 100 行、overscan 12、DOM 上限 160，trajectory-virtualization.e2e.ts 固定该约定）；
-- **分页**：依赖 `session.page` 的消息边界切页语义（议题 7），保证折叠窗口内消息完整。
+- **分页**：依赖 `session/page` 的消息边界切页语义（议题 7），保证折叠窗口内消息完整。
 
 ### 3.3 源码证据
 
@@ -297,16 +297,16 @@ web 中打开历史会话有两种不同深度：**读历史窗口**（滚动回
 
 ```text
 会话检索与恢复：
-sidebar 搜索 → ctx.sessions.search（runtime manager.ts:518-527）→ RPC session.search
+sidebar 搜索 → ctx.sessions.search（runtime manager.ts:518-527）→ RPC session/search
   · listVisibleSessionSummaries() 划定授权可见集
   · sessionQuery.searchSessions：事件过滤 [user/message, assistant/message] × surface current
   · 分页游标消费（≤ SESSION_SEARCH_PROVIDER_CALL_LIMIT 次），逐 hit 校验可见性
   · snippet 240 codepoints，≤20 条 + hasMore（api/session-search.ts:2,5）
 
 打开窗口（读历史，不激活）：
-  ui-workspace open → ctx.sessions.open → RPC session.page（尾页 PAGE_MESSAGES=50）
+  ui-workspace open → ctx.sessions.open → RPC session/page（尾页 PAGE_MESSAGES=50）
   → host：historySourceFor（attached 优先，否则持久化 inspect，session-controller/src/index.ts，aliased host/history-source）
-  → paginate：消息边界切页 → session.page（throughSeq/beforeSeq/maxMessages，gateway 映射）；客户端与 mux 实时帧按 seq 缝合；subscribedLastSeq>tailSeq 补拉（gap repair）
+  → paginate：消息边界切页 → session/page（throughSeq/beforeSeq/maxMessages，gateway 映射）；客户端与 mux 实时帧按 seq 缝合；subscribedLastSeq>tailSeq 补拉（gap repair）
   → loadOlder（beforeSeq=窗口首 seq）
 
 真正恢复（resume，激活运行）：
@@ -315,14 +315,14 @@ sidebar 搜索 → ctx.sessions.search（runtime manager.ts:518-527）→ RPC se
   声明式路径：config agents[].resumeSessionId（与 sessionId 互斥，index.ts:270-373）
 ```
 
-- **分页语义**（session-controller/src/index.ts session.page，原 api-proxy.ts:282-313 已随 apiproxy 删除）：`beforeSeq` 缺省=尾页；从尾部倒着数 maxMessages 个 **append-origin 消息**（user/assistant message 且 isAppendSurfaceEvent）；replacement 拷贝不占配额；派生事件经 `sourceEventSeqs` 归并到所属消息（如 `tool/result` 引其 `tool/call`；V2 起 assistant 消息内嵌流自带边界、禁带 `sourceEventSeqs`），**绝不在消息中段切页**；`compaction/summary` 与其 replacement 同页；
+- **分页语义**（session-controller/src/index.ts session/page，原 api-proxy.ts:282-313 已随 apiproxy 删除）：`beforeSeq` 缺省=尾页；从尾部倒着数 maxMessages 个 **append-origin 消息**（user/assistant message 且 isAppendSurfaceEvent）；replacement 拷贝不占配额；派生事件经 `sourceEventSeqs` 归并到所属消息（如 `tool/result` 引其 `tool/call`；V2 起 assistant 消息内嵌流自带边界、禁带 `sourceEventSeqs`），**绝不在消息中段切页**；`compaction/summary` 与其 replacement 同页；
 - **全文检索是 opt-in**：session-query 家族（服务定义 + SQLite FTS5 实现，`packages/session-query/`）索引六类事件（user/message、assistant/message、tool/call name+arguments、tool/result content+error、todo/write、turn/end reason）；结构性事件不产生文档（extraction.ts:13-42）；shipped bundle 默认 `openAt: never`（SQLite 永不打开，搜索抛 `SESSION_QUERY_SEARCH_DISABLED`），此时 sidebar 退化为本地子串匹配（bundle/base/cordis.patch.yml:109-121）；
 - **读历史从不 resume 或发布 Agent**（packages/api/session-controller/src/index.ts）——两条路径刻意分离；
 - **headless 无 --session**：startup.ts:31-56 只解析 task 位置参数；headless.spec.ts:90 的 resume 桩直接 reject 证明从不调用。
 
 ### 7.3 源码证据
 
-- `packages/api/session-controller/src/index.ts`（session.page / session.search / session.fork / resume 约定；原 api-proxy.ts:282-313/1533-1538/1617-1662/2036-2165 已随 apiproxy 删除）—— 分页、historySourceFor、ensureSession、session.search
+- `packages/api/session-controller/src/index.ts`（session/page / session/search / session/fork / resume 约定；原 api-proxy.ts:282-313/1533-1538/1617-1662/2036-2165 已随 apiproxy 删除）—— 分页、historySourceFor、ensureSession、session/search
 - `packages/api/session-controller/src/types.ts` —— page 游标（throughSeq/beforeSeq/maxMessages）+ SessionErrorDetailsMap 错误闭集
 - `packages/session-query/session-query/src/extraction.ts:13-42` —— 索引文档投影六类事件
 - `packages/session-query/session-query-sqlite/README.md:19,40-42,55` —— FTS5、openAt 三态、进程内同步执行

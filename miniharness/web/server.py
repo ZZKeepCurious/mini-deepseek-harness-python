@@ -37,6 +37,7 @@ from fastapi.responses import Response
 
 from ..core.session.json import thaw
 from .api import WebApi
+from .args import canonical_endpoint
 from .auth import TokenGateMiddleware, resolve_web_token
 from .downloads import build_session_export, parse_export_query
 from .envelope import (
@@ -146,7 +147,7 @@ def create_app(api: WebApi, gateway: GatewayStreams,
         except Exception:  # noqa: BLE001 - json 解析失败（含空体）
             return Response("body is not JSON", status_code=400)
 
-        method_name = pathname[len("/api/"):]
+        method_name = canonical_endpoint(pathname[len("/api/"):])
 
         # 可应答交互结算入口：POST /api/$events/result（gateway dispatchRpc 特判）
         if method_name == "$events/result":
@@ -165,7 +166,7 @@ def create_app(api: WebApi, gateway: GatewayStreams,
                                    {"issues": [{"path": [], "message": str(error)}]})
 
         # path 与 message.method 不一致 → 200 bad-request
-        if message["method"] != method_name:
+        if canonical_endpoint(message["method"]) != method_name:
             return _error_response(message["rpcId"], "gateway/bad-request",
                                    f'method "{message["method"]}" does not match path "{method_name}"',
                                    {"issues": []})

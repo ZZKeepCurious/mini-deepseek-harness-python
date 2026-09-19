@@ -31,6 +31,7 @@ from typing import Any
 
 __all__ = [
     "BoundaryReject",
+    "canonical_endpoint",
     "validate_args",
     "boundary_error_message",
 ]
@@ -57,67 +58,67 @@ class BoundaryReject(Exception):
 
 #: 每方法参数规格：字段 → (类型, required)。类型见模块级 STR/INT/OBJ/ARR。
 _SPECS: dict[str, dict[str, tuple[str, bool]]] = {
-    "session.list": {
+    "session/list": {
         "cursor": (STR, False),
     },
-    "session.search": {
+    "session/search": {
         "query": (STR, True),
     },
-    "session.create": {
+    "session/create": {
         "workspaceId": (STR, False),
         "cwd": (STR, False),
         "sessionId": (STR, False),
         "agentPreset": (STR, False),
     },
-    "session.selectModel": {
+    "session/selectModel": {
         "sessionId": (STR, True),
         "provider": (STR, True),
         "model": (STR, True),
         "reasoningEffort": (STR, False),
     },
-    "session.modelCatalog": {},
-    "session.canOpenWorkspacePath": {},
-    "session.openWorkspacePath": {
+    "session/modelCatalog": {},
+    "session/canOpenWorkspacePath": {},
+    "session/openWorkspacePath": {
         "path": (STR, True),
     },
-    "session.rename": {
+    "session/rename": {
         "sessionId": (STR, True),
         "title": (STR, True),
     },
-    "session.fork": {
+    "session/fork": {
         "sessionId": (STR, True),
         "atSeq": (INT, False),
     },
-    "session.prompt": {
+    "session/prompt": {
         "requestId": (STR, True),
         "sessionId": (STR, True),
         "mode": (STR, True),
         "content": (ARR, True),
         "clientTimeZone": (STR, False),
     },
-    "session.attachment": {
+    "session/attachment": {
         "sessionId": (STR, True),
         "attachmentId": (STR, True),
     },
-    "session.updateQueue": {
+    "session/updateQueue": {
         "sessionId": (STR, True),
         "itemId": (STR, True),
         "action": (OBJ, True),
     },
-    "session.cancel": {
+    "session/cancel": {
         "sessionId": (STR, True),
     },
-    "session.page": {
+    "session/page": {
         "address": (OBJ, True),
         "throughSeq": (INT, True),
         "beforeSeq": (INT, False),
         "maxMessages": (INT, False),
     },
-    "session.follow": {
+    "session/follow": {
         "address": (OBJ, True),
         "maxMessages": (INT, False),
     },
-    "session.control": {},
+    "session/control": {},
 }
 
 
@@ -131,6 +132,16 @@ def _check(kind: str, value: Any) -> bool:
     if kind == ARR:
         return isinstance(value, list)
     return False
+
+
+def canonical_endpoint(method: str) -> str:
+    """wire 端点规范化：上游 typert 端点为 `<namespace>/<method>`（gateway
+    `endpointOf` = `${namespace}/${method}`，client/connection `rpc.ts` 按 `/`
+    切分两段）；兼容历史点式 `namespace.method`（mini 早期载体）→ 折成斜杠式。
+    `$events/result` 等已含 `/` 的原样保留。"""
+    if "/" in method:
+        return method
+    return method.replace(".", "/", 1)
 
 
 def validate_args(endpoint: str, args: Any) -> None:

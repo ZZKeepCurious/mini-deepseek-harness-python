@@ -1,12 +1,12 @@
 """web 会话服务：session 域 unary + 流订阅工厂（对齐 `packages/api/session-controller`）。
 
-方法集（alpha.1 已核实）：`session.list` / `session.search` / `session.create` /
-`session.selectModel` / `session.modelCatalog` / `session.canOpenWorkspacePath` /
-`session.openWorkspacePath` / `session.rename` / `session.fork` / `session.prompt` /
-`session.attachment` / `session.updateQueue` / `session.cancel` / `session.page`；
-流方法 `session.follow` / `session.control` 返回缓冲订阅对象（api 层同步可测，
-事件循环泵由载体层 web/mux.py 驱动）。`host.describe` / `session.history` /
-`session.models` 已从新契约消失，连同 apiproxy 阶段的命令路由一起移除。
+方法集（alpha.1 已核实）：`session/list` / `session/search` / `session/create` /
+`session/selectModel` / `session/modelCatalog` / `session/canOpenWorkspacePath` /
+`session/openWorkspacePath` / `session/rename` / `session/fork` / `session/prompt` /
+`session/attachment` / `session/updateQueue` / `session/cancel` / `session/page`；
+流方法 `session/follow` / `session/control` 返回缓冲订阅对象（api 层同步可测，
+事件循环泵由载体层 web/mux.py 驱动）。`host.describe` / `session/history` /
+`session/models` 已从新契约消失，连同 apiproxy 阶段的命令路由一起移除。
 
 契约已逐条对照上游源码核实（status/upstream/baseline.md D18-21）；错误分支的
 消息文案与 details 形状来自 session-controller/src/{commands,agent,history,
@@ -55,6 +55,7 @@ from ..telemetry import projection_values
 from .args import (
     BoundaryReject,
     boundary_error_message,
+    canonical_endpoint,
     validate_args,
 )
 from .envelope import rpc_error, rpc_result_ok
@@ -333,20 +334,20 @@ class WebApi:
     # ---------- 路由 ----------
 
     ROUTES: dict[str, str] = {
-        "session.list": "list_sessions",
-        "session.search": "search",
-        "session.create": "create_session",
-        "session.selectModel": "select_model",
-        "session.modelCatalog": "model_catalog",
-        "session.canOpenWorkspacePath": "can_open_workspace_path",
-        "session.openWorkspacePath": "open_workspace_path",
-        "session.rename": "rename",
-        "session.fork": "fork",
-        "session.prompt": "prompt",
-        "session.attachment": "attachment",
-        "session.updateQueue": "update_queue",
-        "session.cancel": "cancel",
-        "session.page": "page",
+        "session/list": "list_sessions",
+        "session/search": "search",
+        "session/create": "create_session",
+        "session/selectModel": "select_model",
+        "session/modelCatalog": "model_catalog",
+        "session/canOpenWorkspacePath": "can_open_workspace_path",
+        "session/openWorkspacePath": "open_workspace_path",
+        "session/rename": "rename",
+        "session/fork": "fork",
+        "session/prompt": "prompt",
+        "session/attachment": "attachment",
+        "session/updateQueue": "update_queue",
+        "session/cancel": "cancel",
+        "session/page": "page",
     }
 
     def methods(self) -> frozenset[str]:
@@ -359,17 +360,18 @@ class WebApi:
         方法级 `{args}` 先经路由层边界校验（args.py），越界抛 `BoundaryReject`
         折成 gateway/arguments-invalid 或 gateway/input-invalid。
         """
-        handler = self.ROUTES.get(method)
+        handler = self.ROUTES.get(canonical_endpoint(method))
         if handler is None:
             return None
         if not isinstance(payload, dict):
             return self._err(rpc_id_, "gateway/bad-request", "payload must be a JSON object", {})
         try:
-            validate_args(method, payload)
+            validate_args(canonical_endpoint(method), payload)
             value = getattr(self, handler)(payload)
         except BoundaryReject as error:
             return self._err(rpc_id_, error.code,
-                             boundary_error_message(method, error.message), error.details)
+                             boundary_error_message(canonical_endpoint(method), error.message),
+                             error.details)
         except _Reject as error:
             return self._err(rpc_id_, error.code, error.message, error.details)
         return self._ok(rpc_id_, value)

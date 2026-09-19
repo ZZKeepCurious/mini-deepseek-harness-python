@@ -1,6 +1,6 @@
-// session.control client — host-level live control (queues / jobs / projections).
+// session/control client — host-level live control (queues / jobs / projections).
 // Wire contract (source: miniharness/web/streams.py `_control`):
-//   open session.control with payload {args:{}} → first frame:
+//   open session/control with payload {args:{}} → first frame:
 //     {type:'baseline', value:{queues:{[sid]: items[]}, jobs:{[sid]: jobs[]}, projections:{}}}
 //   then replacement frames: {type:'queue', sessionId, items} | {type:'jobs', sessionId, jobs}
 

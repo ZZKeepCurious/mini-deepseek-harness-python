@@ -172,7 +172,7 @@ miniharness/
 │   ├── stream_protocol.py # Remote 流 wire 语法（open/cancel/item/end/error 帧 + $events/result payload）
 │   ├── mux.py             # WS /api/remote.mux 单路径承载全部 Remote 流（RemoteStreamMuxConnection）
 │   ├── events.py          # $events 注册表（api-session/* 转发源 + waterfall + $events/result 结算）
-│   ├── streams.py         # GatewayStreams（$events 装配 + session.follow/control 流分发表）
+│   ├── streams.py         # GatewayStreams（$events 装配 + session/follow/control 流分发表）
 │   ├── approvals.py       # 审批桥（async tools/ask 闸门 ↔ approval/request waterfall + $events/result）
 │   ├── downloads.py       # GET /api/session.export 会话日志导出（zip 打包 root + 后代 + 媒体）
 │   ├── frontend.py        # 静态服务约定（遍历 403 / SPA 回退 200 / MIME）
@@ -256,12 +256,12 @@ miniharness/
 | `mcp/resources/runtime.py` | `packages/mcp/mcp-resources/src/index.ts` | McpResourceRuntime（createResource 生命周期、资源请求经关联连接、disposer 注销）+ install_mcp_resources(ctx) 装配 |
 | `mcp/fixture_server.py` | 无 | 教学扩展（tests 的 stdio/HTTP 夹具，`--die-after` 自毁模拟崩溃） |
 | `web/envelope.py` | `packages/client/connection/src/{rpc-schema,rpc}.ts` | 两信封消息联合（client-request / server-response）+ 连接层错误闭集（含 R3 新增 `gateway/input-invalid`）；transport_error 折叠兜底码 ‘internal’ |
-| `web/api.py` | `packages/api/session-controller/src/index.ts`（session 域辅助入口）| WebApi unary 方法（list/search/create/selectModel/modelCatalog/canOpenWorkspacePath/openWorkspacePath/rename/fork/prompt/attachment/updateQueue/cancel/page）+ 路由表；`session/queue` placement 三态经 `session.control` 投影 |
+| `web/api.py` | `packages/api/session-controller/src/index.ts`（session 域辅助入口）| WebApi unary 方法（list/search/create/selectModel/modelCatalog/canOpenWorkspacePath/openWorkspacePath/rename/fork/prompt/attachment/updateQueue/cancel/page）+ 路由表；`session/queue` placement 三态经 `session/control` 投影 |
 | `web/args.py` | `packages/api/gateway/src/index.ts`（assertExactArguments:1112 / decode:1140）+ `remote-error-codes.ts` | 路由层 `{args}` 边界校验：每方法字段集合精确匹配（missing/unexpected → `gateway/arguments-invalid`）+ 顶层 JSON 类型（错型 → `gateway/input-invalid`）；`TypertGatewayFaultDetails{endpoint, field?}`；枚举/范围/非空/跨字段语义留 handler（业务码） |
 | `web/stream_protocol.py` | `packages/api/gateway/src/stream-protocol.ts` | Remote 流 wire 语法：`open`/`cancel`/`item`/`end`/`error` 帧、`$events` 打开与 `$events/result` payload 解析、无损 JSON 判定（dict 键须 str、float 有限非 -0） |
 | `web/mux.py` | `packages/api/gateway/src/create-mux-websocket.ts`（RemoteStreamMuxConnection）| 单条 `/api/remote.mux` WebSocket 承载全部 Remote 流；open/cancel/item/end/error 帧往返，二进制 1003/非法 1008 关闭码，隔离单流失败 |
 | `web/events.py` | `packages/api/gateway/src/index.ts`（remote-event）+ `packages/api/session-controller`（api-session/*）+ `packages/api/remotes` | `$events` 注册表：open 首帧 `ready`{clientId, host.home} → 转发 emit/waterfall/cancel；api-session/* 转发源（created/disposed/status/error/activity）；waterfall 经 `$events/result` 结算（result/next/rejected/cancelled），未知 clientId fail-closed |
-| `web/streams.py` | `packages/api/session-controller/src/{index,remote-events}.ts` | GatewayStreams Remote 方法面：session.follow（快照 snapshot{header,cursor,records,hasMore,projections} + 逐条 event）+ session.control（baseline{queues,jobs} + 实时 queue/jobs）+ `$events` 装配；跨堆非阻塞唤醒线程安全。活体 event 载体 = ≤50ms 短轮询批量提取（`_poll_new_events`，`seq >= cursor`，0 基 seq 不吞首帧）；**wire 无 since**（重连=重开全量） |
+| `web/streams.py` | `packages/api/session-controller/src/{index,remote-events}.ts` | GatewayStreams Remote 方法面：session/follow（快照 snapshot{header,cursor,records,hasMore,projections} + 逐条 event）+ session/control（baseline{queues,jobs} + 实时 queue/jobs）+ `$events` 装配；跨堆非阻塞唤醒线程安全。活体 event 载体 = ≤50ms 短轮询批量提取（`_poll_new_events`，`seq >= cursor`，0 基 seq 不吞首帧）；**wire 无 since**（重连=重开全量） |
 | `web/approvals.py` | `packages/interaction/user-approval` + `packages/api/remotes`（last-resort approval 转发）| 审批桥：async `tools/ask` 闸门 → `approval/request` waterfall（`$events`）+ `$events/result` 结算； outcome 映射 result∈APPROVAL_OUTCOMES（否则 unavailable fail-closed）/rejected→unavailable/next→nxt()/cancelled；审计对 approval/asked+decided；接线点在工具闸门（上游在 approval/request，教学简化） |
 | `web/server.py` | `packages/api/gateway/src/{stream-server,index}.ts`（WS mux + 升级拒绝）+ `packages/client/connection/src/rpc.ts`（unary 载体语义） | FastAPI 载体：unary POST `{args}` 严格解包（`/api/<endpoint>`）+ `$events/result` 特判；载体状态码 404/415/400（token 门配置时 /api/* 另有 401，`web/auth.py`——上游 requestRejection 等价物），业务错误恒 200 + result.ok=false + server-response 信封；WS `/api/remote.mux`；`GET /api/session.export` 载体（query 校验→400、调 `build_session_export`）；SPA 静态 fallback；无 CORS（上游同款：靠 415 状态码挡跨站写入） |
 | `web/downloads.py` | `packages/session-query/session-log-export/src/{archive,index}.ts`（导出域）+ `api/session-controller`（下载端点约定面） | 会话日志导出：parse_export_query（sessionId/includeDescendants）、SessionLogExportDeps、safe_session_id_segment、session_log_zip_filename、build_session_export（zip 条目序：根制品逐字原始文件名→后代 BFS+seen-set 去重→媒体、压缩等级缺省 6、私有错误安全壳）；测试 `tests/test_web_export.py` |
@@ -309,7 +309,7 @@ miniharness/
 
 前端唯一的耦合面是 `web/` 层发布的 wire 约定，不是 Python 内部 API——这保证前端可独立选用现代化的技术组合（如 React）而无需改造内核。
 
-**`webui/`**（仓库顶层独立工程，React+TS+Vite）：产品化浏览器前端，只消费 `web/` 发布的 alpha.1 wire 约定（两信封 RPC `/api/<endpoint>` + `/api/remote.mux` WS 帧 + `$events`/`$events/result` + `session.follow`/`control`），零 Python import。三层结构：`src/wire/`（约定客户端层，纯 TS 可单测）、`src/app/`（React 编排 hooks）、`src/ui/`（无状态展示组件）；测试用 vitest（mock fetch/WS）。构建/运行手册见 `webui/README.md`：开发期 Vite dev server 把 `/api` 与 `/api/remote.mux` 代理到本地 Python 后端（`vite.config.ts`，目标经 `MINIHARNESS_WEBUI_PROXY` 覆盖）；生产期 `vite build` 产出 `webui/dist/`，后端 `web/frontend.py` 经 `MINIHARNESS_WEBUI_DIST` 指向该产物即可承载（`serve_static` 约定不变）。覆盖范围与教学 SPA 功能面一致（会话列表/新建、Trajectory（虚拟化窗口 + Overview 折叠跳转 + 全文搜索）、审批瀑布、队列/作业），不整体移植上游 `packages/client` 40 模块。
+**`webui/`**（仓库顶层独立工程，React+TS+Vite）：产品化浏览器前端，只消费 `web/` 发布的 alpha.1 wire 约定（两信封 RPC `/api/<endpoint>` + `/api/remote.mux` WS 帧 + `$events`/`$events/result` + `session/follow`/`control`），零 Python import。三层结构：`src/wire/`（约定客户端层，纯 TS 可单测）、`src/app/`（React 编排 hooks）、`src/ui/`（无状态展示组件）；测试用 vitest（mock fetch/WS）。构建/运行手册见 `webui/README.md`：开发期 Vite dev server 把 `/api` 与 `/api/remote.mux` 代理到本地 Python 后端（`vite.config.ts`，目标经 `MINIHARNESS_WEBUI_PROXY` 覆盖）；生产期 `vite build` 产出 `webui/dist/`，后端 `web/frontend.py` 经 `MINIHARNESS_WEBUI_DIST` 指向该产物即可承载（`serve_static` 约定不变）。覆盖范围与教学 SPA 功能面一致（会话列表/新建、Trajectory（虚拟化窗口 + Overview 折叠跳转 + 全文搜索）、审批瀑布、队列/作业），不整体移植上游 `packages/client` 40 模块。
 
 规则：
 

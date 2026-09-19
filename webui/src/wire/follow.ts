@@ -1,7 +1,7 @@
-// session.follow client — single-session history follow stream.
+// session/follow client — single-session history follow stream.
 // Wire contract (source: miniharness/web/streams.py `_follow`, aligned with
 // upstream packages/api/session-controller history.ts):
-//   open session.follow with payload {args:{address:{kind:'session',sessionId}, maxMessages?}}
+//   open session/follow with payload {args:{address:{kind:'session',sessionId}, maxMessages?}}
 //   first server frame: {type:'snapshot', header(SessionWireHeader), cursor(last committed seq),
 //     records:{type:'event',event}[], hasMore, projections:{asOfSeq,values}}
 //   then: {type:'event', event} frames (event[seq] strictly increasing).

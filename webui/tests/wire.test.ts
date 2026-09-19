@@ -1,6 +1,6 @@
 // Wire-layer unit tests. These mock fetch / WebSocket — no transpmsport over the
 // network. They pin the alpha.1 wire shapes (two-envelope RPC, remote.mux frames,
-// $events/ready|waterfall, $events/result, session.follow/control).
+// $events/ready|waterfall, $events/result, session/follow/control).
 
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -159,7 +159,7 @@ describe("RemoteMuxConnection", () => {
     const sock = FakeWebSocket.instances[0];
     sock.open();
 
-    const handle = conn.openStream("session.follow", {
+    const handle = conn.openStream("session/follow", {
       args: { address: { kind: "session", sessionId: "s1" } },
     });
     const first = handle.next();
@@ -167,7 +167,7 @@ describe("RemoteMuxConnection", () => {
     void Promise.resolve();
     const parsed = JSON.parse(sock.sent[0]) as { type: string; streamId: number; endpoint: string };
     expect(parsed.type).toBe("open");
-    expect(parsed.endpoint).toBe("session.follow");
+    expect(parsed.endpoint).toBe("session/follow");
     expect(parsed.streamId).toBe(handle.streamId);
 
     sock.serverSend({ type: "item", streamId: handle.streamId, value: { type: "snapshot", records: [] } });
@@ -185,7 +185,7 @@ describe("RemoteMuxConnection", () => {
     const sock = FakeWebSocket.instances[0];
     sock.open();
 
-    const handle = conn.openStream("session.follow", { args: {} });
+    const handle = conn.openStream("session/follow", { args: {} });
     void Promise.resolve();
     sock.sent.length = 0;
     handle.close();
@@ -219,7 +219,7 @@ describe("RemoteMuxConnection", () => {
     conn.connect();
     FakeWebSocket.instances[0].open();
 
-    const handle = conn.openStream("session.follow", { args: {} });
+    const handle = conn.openStream("session/follow", { args: {} });
     const p = handle.next();
     void Promise.resolve();
     const parsed = JSON.parse(FakeWebSocket.instances[0].sent[0]) as { streamId: number };
@@ -294,7 +294,7 @@ describe("RemoteEventClient ($events)", () => {
 
 // ---------- follow / control projection ----------
 
-describe("TrajectoryBuffer (session.follow)", () => {
+describe("TrajectoryBuffer (session/follow)", () => {
   it("dedups by seq and orders ascending", () => {
     const buf = new TrajectoryBuffer();
     buf.push([
@@ -308,7 +308,7 @@ describe("TrajectoryBuffer (session.follow)", () => {
   });
 });
 
-describe("applyControlFrame (session.control)", () => {
+describe("applyControlFrame (session/control)", () => {
   it("replaces queue/jobs per session", () => {
     let s: ReturnType<typeof applyControlFrame> = {
       sessionId: "s1",

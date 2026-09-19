@@ -75,7 +75,7 @@ export function useBackend(): UseBackend {
     bufRef.current!.reset();
     const buf = bufRef.current!;
     const stream = mux.openStream(
-      "session.follow",
+      "session/follow",
       { args: { address: { kind: "session", sessionId } } },
     );
     followRef.current = stream;
@@ -109,7 +109,7 @@ export function useBackend(): UseBackend {
   const attachControl = useCallback(() => {
     const mux = muxRef.current;
     if (!mux || controlRef.current) return;
-    const stream = mux.openStream("session.control", { args: {} });
+    const stream = mux.openStream("session/control", { args: {} });
     controlRef.current = stream;
     (async () => {
       for (;;) {

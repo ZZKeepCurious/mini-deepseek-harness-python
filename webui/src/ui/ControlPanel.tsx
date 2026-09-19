@@ -1,5 +1,5 @@
 // ControlPanel — right pane: live control for the selected session
-// (queue items + jobs) fed by `session.control` replacement frames.
+// (queue items + jobs) fed by `session/control` replacement frames.
 
 interface Props {
   queue: unknown[];

@@ -48,7 +48,7 @@
 | 启动器选项（`--patch`、`--dump-config` / `--dump-default-config`、只读组合导出） | `apps/cli/src/args.ts` |
 | 会话管理服务（`ctx.sessions`：create/prepare/enter/announce 生命周期、fork 五错误码、flush 检查点、`session/created|disposed|event|flush` 四事件） | `packages/core/session`（SessionStore） |
 | 会话管理 CLI（`miniharness sessions` 列表/恢复/删除/stats；mini 教学扩展；`stats` 渲染 sessionStats/tokenUsage 投影 + 末 turn 用量归账） | web 表面（上游） |
-| 遥测 / 用量统计（sessionStats + tokenUsage 投影真实化为 `session.follow`/`session.control` 与 Remote snapshot/baseline 的 `projections.values`；`derive_turn_token_usage` per-turn 用量推导，任何缺失边界 fail-closed；opt-in `UsageStatsService` 挂 `ctx.usageStats`） | `packages/session/session-stats` + `packages/llm/token-meter` |
+| 遥测 / 用量统计（sessionStats + tokenUsage 投影真实化为 `session/follow`/`session/control` 与 Remote snapshot/baseline 的 `projections.values`；`derive_turn_token_usage` per-turn 用量推导，任何缺失边界 fail-closed；opt-in `UsageStatsService` 挂 `ctx.usageStats`） | `packages/session/session-stats` + `packages/llm/token-meter` |
 | 能力扩展口（沙箱 / 凭据 / 授权 / 子 agent；详见下文） | capability seams 文档 |
 | 可继续子代理（durable 子会话、异步结算、生命周期事件、控制工具；详见下文） | `packages/subagent` |
 | Agent Teams（roster + mailbox + 共享任务 DAG；详见下文） | `packages/experimental/agent-team` + `tool-agent-team` |
@@ -62,7 +62,7 @@
 
 ### 重点能力说明
 
-**web 传输层与浏览器前端**：`--profile web` 启动。两信封 RPC（`client-request` / `server-response`）、WebApi unary 会话服务、Remote 流 wire（单条 `/api/remote.mux` WebSocket 承载 open / cancel / item / end / error 帧）、`$events` 注册表（转发 api-session/*，`approval/request` waterfall 经 `$events/result` 结算）、`session.follow` / `session.control` 流；审批桥把 async `tools/ask` 接到 `$events` waterfall；FastAPI 载体与 gateway 的 `stream-server.ts` / `handler.ts` 状态码链一致；会话日志导出 `GET /api/session.export`，把 root、子代理后代和被引用媒体打包成 zip，沿用 200 / 400 / 404 / 501 / 500 状态码链，错误走私有信封外壳；产品化前端 `webui/` 是仓库顶层的独立 React 工程，只依赖 wire 约定，提供会话列表与新建、Trajectory（虚拟化窗口、Overview 折叠视图、全文搜索）、审批瀑布、队列与作业面板，`vite build` 产物经 `MINIHARNESS_WEBUI_DIST` 由后端静态承载；`web/static/` 的 vanilla SPA 只作教学参照，消费旧 SSE wire，对新后端不工作。
+**web 传输层与浏览器前端**：`--profile web` 启动。两信封 RPC（`client-request` / `server-response`）、WebApi unary 会话服务、Remote 流 wire（单条 `/api/remote.mux` WebSocket 承载 open / cancel / item / end / error 帧）、`$events` 注册表（转发 api-session/*，`approval/request` waterfall 经 `$events/result` 结算）、`session/follow` / `session/control` 流；审批桥把 async `tools/ask` 接到 `$events` waterfall；FastAPI 载体与 gateway 的 `stream-server.ts` / `handler.ts` 状态码链一致；会话日志导出 `GET /api/session.export`，把 root、子代理后代和被引用媒体打包成 zip，沿用 200 / 400 / 404 / 501 / 500 状态码链，错误走私有信封外壳；产品化前端 `webui/` 是仓库顶层的独立 React 工程，只依赖 wire 约定，提供会话列表与新建、Trajectory（虚拟化窗口、Overview 折叠视图、全文搜索）、审批瀑布、队列与作业面板，`vite build` 产物经 `MINIHARNESS_WEBUI_DIST` 由后端静态承载；`web/static/` 的 vanilla SPA 只作教学参照，消费旧 SSE wire，对新后端不工作。
 
 **能力扩展口**：
 
