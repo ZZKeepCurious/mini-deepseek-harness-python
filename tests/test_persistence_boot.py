@@ -263,7 +263,7 @@ class TestBoot(unittest.TestCase):
                 {"id": "greeter", "module": "miniharness.example_plugins"},
                 {"id": "missing", "module": "miniharness.no_such_module"},
             ]}), encoding="utf-8")
-            with self.assertRaises(ImportError):
+            with self.assertRaisesRegex(RuntimeError, "failed to import"):
                 boot(config)
 
 

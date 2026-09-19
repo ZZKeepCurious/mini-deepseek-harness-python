@@ -79,10 +79,27 @@ class Entry:
     def evaluate(self, expr: str) -> str:
         return evaluate(expr)
 
+    def get_outer_stack(self) -> list[str]:
+        """条目归属栈（对齐上游 getOuterStack）：`    at <baseUrl>#<id>` 自顶向下。"""
+        entry: Any = self
+        result: list[str] = []
+        while entry is not None:
+            result.append(
+                f"    at {entry.parent.tree.ctx.baseUrl}#{entry.options.get('id')}")
+            entry = getattr(getattr(entry.parent.ctx, "fiber", None), "entry", None)
+        return result
+
     def _patch_context(self, diff: list[str]) -> None:
-        if self.fiber is not None and self.fiber.uid is not None and (
-                "config" in diff or self.options.get("group")):
-            _settle_result(self.fiber.update(self.options.get("config"), True))
+        def base(entry: Any) -> None:
+            # 对齐上游 fabric：entry ctx 的原型指向所属组 ctx，使组条目的
+            # isolate/intercept 层被子条目继承（mini 以父链近似原型链）。
+            if self.parent is not None and self.parent.ctx is not self.ctx:
+                self.ctx.parent = self.parent.ctx
+            if self.fiber is not None and self.fiber.uid is not None and (
+                    "config" in diff or self.options.get("group")):
+                _settle_result(self.fiber.update(self.options.get("config"), True))
+
+        self.context.waterfall("loader/patch-context", self, base=base)
 
     def refresh(self) -> None:
         if self.fiber is not None:

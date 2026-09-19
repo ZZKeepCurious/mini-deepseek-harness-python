@@ -145,40 +145,63 @@ def _contain_update(root: Context) -> Callable:
     return observer
 
 
-def _assert_loader_activated(loader: Loader, bin_name: str) -> None:
-    """对齐上游 auditStartupEntries：遍历条目，非 active 者 fail loud。
+def inactive_entries(loader: Loader) -> list[tuple[Any, str]]:
+    """收集未激活条目与 disabled 表达式错误（对齐 app-boot inactiveEntries）。
 
-    - disabled 条目跳过（含表达式在 disabledOf 抛错时上抛 —— mini 直接重抛，
-      上游会收集进诊断）；group 载体跳过（其子树逐条自评）
-    - 未创建 fiber（导入缺失）→ 重抛 entry._error 原错误；否则 'failed to import'
-    - FAILED → 重抛 fiber._error 原错误
-    - PENDING → 点名缺失的注入服务；其它 → state 诊断；聚合为 RuntimeError
+    逐条判定：disabled 跳过（表达式抛错 → disabled expression failed 诊断）；
+    无 fiber → failed to import；FAILED → 渲染 fiber 错误；PENDING → 点名缺失
+    的注入服务；其余 → fiber state。返回 (entry, diagnostic) 列表。
     """
-    failures: list[str] = []
+    failures: list[tuple[Any, str]] = []
     for entry in loader.entries():
-        if entry.options.get("group"):
-            continue
-        if entry.disabled:
+        name = entry.options.get("name") or entry.options.get("module")
+        subject = f"{entry.options.get('id')} ({name})"
+        try:
+            if entry.disabled:
+                continue
+        except BaseException as error:
+            failures.append((entry, f"{subject}: disabled expression failed: {error}"))
             continue
         fiber = entry.fiber
-        subject = entry.options.get("id")
         if fiber is None:
-            if entry._error is not None:
-                raise entry._error
-            failures.append(f"{subject}: failed to import")
+            failures.append((entry, f"{subject}: failed to import"))
             continue
         state = fiber.state
         if state == FiberState.ACTIVE:
             continue
-        if state == FiberState.FAILED and fiber._error is not None:
-            raise fiber._error
+        if state == FiberState.FAILED:
+            failures.append((entry, f"{subject}: {fiber._error}"))
+            continue
         if state == FiberState.PENDING:
             missing = [n for n in fiber.inject if fiber.context.get(n) is None]
-            failures.append(f"{subject}: 依赖缺失 {', '.join(missing)}，未能激活")
+            noun = "service" if len(missing) == 1 else "services"
+            failures.append((
+                entry,
+                f"{subject}: pending (waiting for {noun}: {', '.join(missing) or 'unknown'})",
+            ))
         else:
-            failures.append(f"{subject}: fiber state {state}")
+            failures.append((entry, f"{subject}: fiber state {state}"))
+    return failures
+
+
+def _activation_diagnostic(bin_name: str, severity: str,
+                           failures: list[tuple[Any, str]]) -> str:
+    """渲染审计诊断（对齐 app-boot activationDiagnostic）。"""
+    noun = "entry" if len(failures) == 1 else "entries"
+    prefix = "" if bin_name == "" else f"{bin_name}: "
+    lines = [f"{prefix}{severity}: {len(failures)} {noun} did not activate"]
+    lines.extend(diagnostic for _, diagnostic in failures)
+    return "\n".join(lines) + "\n"
+
+
+def _assert_loader_activated(loader: Loader, bin_name: str) -> None:
+    """启动审计（对齐 auditStartupEntries）：bootstrap Include 与必需条目未激活
+    即 fail loud。**mini 宿主策略**：无 app 级必需 id 白名单，故全部未激活条目
+    都按必需处理（上游白名单见 app-boot index.ts:711-719）。诊断措辞逐条对齐。"""
+    failures = inactive_entries(loader)
     if failures:
-        raise RuntimeError(f"{bin_name}: 以下条目未激活: " + "; ".join(failures))
+        raise RuntimeError(
+            _activation_diagnostic("", "required startup failure", failures).rstrip("\n"))
 
 
 def boot(

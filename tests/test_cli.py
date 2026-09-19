@@ -244,7 +244,7 @@ class TestCompositionValidation(unittest.TestCase):
             )
             out, err, code = _run_cli(["--config", str(config), "--profile", "headless", "say hi"])
             self.assertEqual(code, 1)
-            self.assertIn("No module named", err)
+            self.assertIn("failed to import", err)
 
     def test_patches_over_empty_base(self):
         with tempfile.TemporaryDirectory() as tmp:

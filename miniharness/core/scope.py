@@ -1157,6 +1157,7 @@ class Context:
         self._listeners: dict[str, list[Callable]] = {}
         self._isolate: dict[str, object] = {}   # 隔离标签：name → label（仅本节点的遮蔽）
         self._intercept: dict[str, Any] = {}    # intercept 配置：name → config（仅本节点的条目）
+        self._delims: dict[object, object] = {}  # isolate 迁移分隔标（delim key → flag）
         self._scope_key: Any = None  # create_scope 打标的身份键（对齐上游 dsh-scope ScopeKey）
         if _fiber is not None:
             self.fiber = _fiber
@@ -1428,16 +1429,18 @@ class Context:
             fn(payload)
 
     def waterfall(self, event: str, payload: Any = None, *,
-                  this_arg: Any = None) -> Any:
+                  this_arg: Any = None, base: Callable | None = None) -> Any:
         """around-middleware：监听器签名 fn(payload, next)。
-        调用 next(new) 继续下一位；不调用即短路，当前返回值就是最终决策。"""
+        调用 next(new) 继续下一位；不调用即短路，当前返回值就是最终决策。
+        base 为链尾终止回调（对齐上游 cordis waterfall 的 callback 末参）：
+        监听器一律调 next() 时最终落到 base(payload)；无 base 时返回 payload。"""
         listeners = self._hooks_for(event, this_arg)
         idx = 0
 
         def step(cur: Any) -> Any:
             nonlocal idx
             if idx >= len(listeners):
-                return cur
+                return base(cur) if base is not None else cur
             fn = listeners[idx]
             idx += 1
             return fn(cur, lambda new=cur: step(new))

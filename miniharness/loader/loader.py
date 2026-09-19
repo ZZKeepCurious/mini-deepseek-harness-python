@@ -1,6 +1,10 @@
+import json
+import os
+import time
 from typing import Any, Callable
 
 from ..core.scope import FiberState, Inject
+from .isolate import install_isolate
 from .model import ENTRY_KEY, GROUP_KEY
 from .tree import EntryTree
 from .utils import interpolate
@@ -27,15 +31,33 @@ class Loader(EntryTree):
         if self.config.get("baseUrl"):
             self.ctx.baseUrl = self.config["baseUrl"]
         self.name = "loader"
+        shared = os.environ.get("CORDIS_SHARED")
+        self.envData = (json.loads(shared) if shared
+                        else {"startTime": int(time.time() * 1000)})
         self.builtins: dict = {}
-        ctx.provide("loader", self, None)
+        ctx.provide("loader", self, self._check)
         ctx.on("internal/config", self._on_config, prepend=True)
         ctx.on("internal/update", self._on_update_write, prepend=True)
         ctx.on("internal/update", self._on_update_log, prepend=True)
         ctx.on("internal/plugin", self._on_plugin, prepend=True)
+        install_isolate(self)
+
+    def _check(self) -> bool:
+        """loader 服务可用性谓词（对齐上游 [Service.check]）：`intercept.await`
+        为真且仍有在途任务时，依赖 loader 的条目保持 PENDING。"""
+        merged: dict = {}
+        for config in self.ctx._resolve_intercept("loader"):
+            if config:
+                merged.update(config)
+        if merged.get("await") and self.get_tasks():
+            return False
+        return True
 
     def write(self) -> None:
         pass
+
+    def exit(self) -> None:
+        """全量重载请求的宿主重启钩子（上游默认 no-op，宿主可覆写）。"""
 
     def _on_config(self, fiber: Any, config: Any, next_func: Callable) -> Any:
         resolved = next_func()

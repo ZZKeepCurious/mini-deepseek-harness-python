@@ -147,6 +147,92 @@ class TestJsExprNode(unittest.TestCase):
             os.environ.pop("MINI_TREE_JS", None)
 
 
+class TestIsolate(unittest.TestCase):
+    def test_global_label_realms_isolate_same_service(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "cordis.yml"
+            config.write_text(
+                "plugins:\n"
+                "  - id: ga\n"
+                "    name: cordis:group\n"
+                "    group: true\n"
+                "    isolate:\n"
+                "      greeter: a\n"
+                "    config:\n"
+                "      - id: pa\n"
+                "        module: miniharness.example_plugins\n"
+                "        config:\n"
+                "          greeting: A\n"
+                "          service_name: greeter\n"
+                "  - id: gb\n"
+                "    name: cordis:group\n"
+                "    group: true\n"
+                "    isolate:\n"
+                "      greeter: b\n"
+                "    config:\n"
+                "      - id: pb\n"
+                "        module: miniharness.example_plugins\n"
+                "        config:\n"
+                "          greeting: B\n"
+                "          service_name: greeter\n",
+                encoding="utf-8",
+            )
+            ctx, activations = boot(config)
+            self.assertEqual([n for n, _ in activations], ["pa", "pb"])
+            self.assertIsNone(ctx.get("greeter"), "根上下文不应命中任何隔离 realm")
+            inc = ctx.get("loader").resolve("include").subtree
+            self.assertEqual(inc.resolve("pa").ctx.get("greeter")("x"), "A, x!")
+            self.assertEqual(inc.resolve("pb").ctx.get("greeter")("x"), "B, x!")
+
+    def test_entry_local_realm_isolates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "cordis.yml"
+            config.write_text(
+                "plugins:\n"
+                "  - id: p1\n"
+                "    module: miniharness.example_plugins\n"
+                "    isolate:\n"
+                "      greeter: true\n"
+                "    config:\n"
+                "      greeting: one\n"
+                "      service_name: greeter\n"
+                "  - id: p2\n"
+                "    module: miniharness.example_plugins\n"
+                "    isolate:\n"
+                "      greeter: true\n"
+                "    config:\n"
+                "      greeting: two\n"
+                "      service_name: greeter\n",
+                encoding="utf-8",
+            )
+            ctx, activations = boot(config)
+            self.assertEqual([n for n, _ in activations], ["p1", "p2"])
+            self.assertIsNone(ctx.get("greeter"))
+            inc = ctx.get("loader").resolve("include").subtree
+            self.assertEqual(inc.resolve("p1").ctx.get("greeter")("x"), "one, x!")
+            self.assertEqual(inc.resolve("p2").ctx.get("greeter")("x"), "two, x!")
+
+    def test_intercept_layer_registered_on_entry_ctx(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "cordis.yml"
+            config.write_text(
+                "plugins:\n"
+                "  - id: p1\n"
+                "    module: miniharness.example_plugins\n"
+                "    intercept:\n"
+                "      greeter:\n"
+                "        greeting: hi\n",
+                encoding="utf-8",
+            )
+            ctx, _ = boot(config)
+            inc = ctx.get("loader").resolve("include").subtree
+            self.assertEqual(inc.resolve("p1").ctx._resolve_intercept("greeter"),
+                             [{"greeting": "hi"}])
+
+
 class TestLazyJsExpr(unittest.TestCase):
     def tearDown(self):
         os.environ.pop("MINI_TREE_GREETING", None)
@@ -182,7 +268,22 @@ class TestAuditFailures(unittest.TestCase):
                 "      nosvc: {}\n",
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(RuntimeError, "nosvc"):
+            with self.assertRaisesRegex(
+                    RuntimeError, r"pending \(waiting for service: nosvc\)"):
+                boot(config)
+
+    def test_failed_import_reports_entry_subject(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "cordis.yml"
+            config.write_text(
+                "plugins:\n"
+                "  - id: missing\n"
+                "    module: miniharness.no_such_module\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                    RuntimeError, r"missing \(miniharness.no_such_module\): failed to import"):
                 boot(config)
 
 
