@@ -5,6 +5,8 @@
 - `local.LocalFileSystem` —— 本地后端（对齐 fs-local）。
 """
 from .local import LocalFileSystem, install_local_fs
+from .observation_policy import ObservedStateGate, install_fs_observation_policy
+from .sandbox import SandboxedFileSystem, install_sandboxed_fs, is_path_under, writable_roots
 from .service import FileSystem
 from .types import (
     FS_ERROR_CODES,
@@ -40,5 +42,11 @@ __all__ = [
     "FsWriteIntent",
     "FsWriteOutcome",
     "LocalFileSystem",
+    "ObservedStateGate",
+    "SandboxedFileSystem",
+    "install_fs_observation_policy",
     "install_local_fs",
+    "install_sandboxed_fs",
+    "is_path_under",
+    "writable_roots",
 ]
