@@ -4,7 +4,7 @@
 L0 地基  = core/session、core/scope、core/dsh_scope、core/schema、core/version、
           core/hmr（同层叶模块互不依赖，core.scope↔core.schema /
           core.scope↔core.dsh_scope / core.hmr→core.scope 有显式例外）
-L1 领域  = llm/*、core/tools、core/system_prompt、boot/*   （仅 L0）
+L1 领域  = llm/*、core/tools、core/system_prompt、boot/*、attachment、fs/*   （仅 L0）
 L2 编排  = core/agent_loop、compaction、commands、goal、jobs、plan、skills   （L0 + L1）
 L3 应用  = cli/*、protocol/*、seams/*、preset、extensions、interaction、client、web、
           shell（L0 ~ L2）
@@ -61,6 +61,7 @@ LAYER_UNITS = [
     ("boot", 1),
     ("attachment", 1),
     ("ptc_runtime", 1),
+    ("fs", 1),
     ("identity", 1),
     ("storage", 1),
     ("core.agent_loop", 2),
