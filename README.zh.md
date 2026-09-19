@@ -26,6 +26,7 @@
 | 插件事件总线（emit / waterfall / parallel / serial、作用域、依赖驱动激活、经 HMR 服务 + `watch_user_patches` 的 epoch 重载） | `vendor/cordis` + `vendor/hmr` + `core/scope` + `core/hmr` |
 | 配置 schema 引擎（schemastery 全量移植：17 类 resolver、meta 克隆、toString/toJSON/i18n/simplify、`~standard` 协议面） | `vendor/schemastery/src/index.ts` |
 | 工具注册表 + 执行管线（schema 校验、pre/execute/post、timeout） | `packages/core/tools` |
+| 文件系统域（`ctx.fs` seam + 本地/沙箱后端 + `read`/`write`/`edit`/`str_replace_editor`/`glob`/`grep`/`present` 模型侧工具；观测态写/编辑守卫 + 沙箱围栏） | `packages/fs/{fs,fs-local,fs-sandbox,fs-observation-policy,tool-fs,tool-str-replace-editor,tool-fs-search,tool-present}` |
 | Agent Loop（async 驱动 turn/step 状态机 + 同步门面经常驻单事件循环驱动、pre-step 拒绝、工具回灌续跑） | `core/agent-loop` |
 | LLM 扩展口（async `stream(messages, tools, signal)` 接口约定、假模型、DeepSeek 官方 SSE 适配器（httpx 异步流式）、reasoning_effort 四档） | `llm/llm` + `llm/llm-deepseek` |
 | 图片输入请求（catalog 能力解析、`ImageRequestTarget` 投影几何、provider vision-token 定价、Files API 上传复用 + durable 索引、inline base64 回退、有界 stale-id 重试、规范化图片诊断；`image/offload` durable 卸载 + `IMAGE_OFFLOAD_REQUIRED` 恢复） | `llm/llm-deepseek`（`common/*`）+ `attachment/attachment-local` + `compaction/compaction-image-offload` |

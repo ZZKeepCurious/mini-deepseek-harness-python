@@ -214,6 +214,11 @@ class ImportDirectionTest(unittest.TestCase):
                     # vendored 部件（上游 vendor/loader 直接建在 cordis 之上），
                     # 复用 Service/fiber/Inject 基座，与 core.hmr 同理落 L0
                     continue
+                if src_unit == "fs" and dst_unit == "core.tools":
+                    # §5 显式例外：fs 单元承载模型侧文件工具（上游 tool-fs 是 fs 域的
+                    # 消费面，register 进 core.tools）：工具实现与 fs seam 同族，落同一
+                    # 单元；core.tools 为 L1 注册表，方向为 fs→core.tools 单方向
+                    continue
                 if src_unit == "core.session" and dst_unit == "llm":
                     # §5 显式例外（单方向）：V2 会话格式的 seed 边界流验证依赖
                     # BlockAssembler/expand_assistant_stream（上游 dsh-session
