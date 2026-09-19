@@ -110,6 +110,10 @@ class ToolExec:
     # 嵌套派发标识：外层工具调用（非顶层）复用外层的持久化检查点，不再刷盘；
     # None = 顶层调用（上游 ToolExecution.parent，session-checkpoint-policy 消费）。
     parent: Any = None
+    # 调用身份（上游 ToolExecution.callId / rootCallId）：PTC run_code 子派发
+    # 用它构造 `tool/ptc-dispatch*` 事件的 subCallId（`<parent>:ptc:<n>`）。
+    call_id: str | None = None
+    root_call_id: str | None = None
 
 
 class FusedSignal:

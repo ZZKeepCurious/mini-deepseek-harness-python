@@ -31,6 +31,7 @@
 | 图片输入请求（catalog 能力解析、`ImageRequestTarget` 投影几何、provider vision-token 定价、Files API 上传复用 + durable 索引、inline base64 回退、有界 stale-id 重试、规范化图片诊断；`image/offload` durable 卸载 + `IMAGE_OFFLOAD_REQUIRED` 恢复） | `llm/llm-deepseek`（`common/*`）+ `attachment/attachment-local` + `compaction/compaction-image-offload` |
 | 会话检查点策略（模型请求前 / 顶层工具体前 / 每步边界三种语义持久化屏障；经 `SessionStore.checkpoint` fail-closed） | `packages/session/session-checkpoint-policy` |
 | PTC 运行时 seam + Python 后端（`PtcRuntime` Service Definition + 全新 CPython 子进程内 `run`，支持顶层 await/return、行 JSON 绑定桥、墙钟/中止/输出上限、正交失败分类） | `packages/ptc-runtime/{ptc-runtime,ptc-runtime-node}` + `packages/experimental/ptc-runtime-python` |
+| PTC 模式 `run_code` 工具（按 runtime 语言取 schema 文案、经 `tools` 绑定嵌套子派发、`tool/ptc-dispatch*` 事件日志、精心挑选外层结果） | `packages/core/tools/src/ptc.ts` |
 | 模型请求重试/退避（normal/always 策略、`agent/request-error`、`llm/retry` 审计对、熔合信号派发前检查 + 事件驱动多信号竞速可取消等待、插件 teardown 排干在途恢复） | `llm/llm-retry` + `llm/llm/src/retry-policy.ts` |
 | token 计量（增量 fold、usage 折入锚、4 字符/token 启发式） | `llm/token-meter` |
 | 上下文压缩（pre-step 压力 + `CONTEXT_WINDOW_EXCEEDED` 恢复、surface-replace 检查点事务、可选 tool-result pruner 阶段） | `compaction/compaction-basic` + `compaction-tool-result-pruner` |

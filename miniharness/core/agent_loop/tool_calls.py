@@ -211,6 +211,10 @@ async def _run_group(
         exec_ = ToolExec(signal=FusedSignal(signal.signal), agent=agent)
         exec_.name = call["name"]
         exec_.arguments = frozen
+        # 调用身份（上游 ToolExecution.callId / rootCallId）：PTC run_code 子派发
+        # 用以构造 `tool/ptc-dispatch*` 的 subCallId；root 取本轮组内首个 callId。
+        exec_.call_id = call.get("id")
+        exec_.root_call_id = call.get("id")
         slot_execs[index] = exec_
         try:
             rejected = await pipeline_policy_async(ctx, tool, frozen, exec_=exec_)

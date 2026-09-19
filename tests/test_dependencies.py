@@ -57,6 +57,7 @@ LAYER_UNITS = [
     ("storage", 1),
     ("core.agent_loop", 2),
     ("compaction", 2),
+    ("ptc", 2),
     ("commands", 2),
     ("goal", 2),
     ("jobs", 2),

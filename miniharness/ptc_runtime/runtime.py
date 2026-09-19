@@ -99,7 +99,10 @@ def _install_bindings(spec):
         for member in members:
             def make(g, m):
                 async def call(*args):
-                    return await _invoke(g, m, list(args))
+                    # 程序按 `await tools.name(args)` 调用：单个位置参数即工具参数
+                    # 对象（上游 binding 收 rawArgs）；多位置参数时按列表传递。
+                    payload = args[0] if len(args) == 1 else list(args)
+                    return await _invoke(g, m, payload)
                 return call
             functions[member] = make(global_name, member)
         error_class = namespace.get("errorClass")
