@@ -84,9 +84,11 @@ class Group(EntryGroup):
         self.update(config)
         return None
 
-    def init(self) -> Callable[[], None]:
+    def init(self) -> None:
+        # 先登记 stop（上游 Service.init 生成器先 yield disposer 再 update）。
+        self.context.effect(lambda: self.stop(), "loader:group.stop")
         _settle_result(self.update(self.config))
-        return self.stop
+        return None
 
 
 setattr(Group, GROUP_KEY, True)

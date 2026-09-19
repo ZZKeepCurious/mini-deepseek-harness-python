@@ -7,6 +7,8 @@ from .group import EntryGroup
 from .model import SEP
 from .utils import base_url_of, settle_gathered
 
+_UNSET = object()
+
 
 class EntryTree:
     """可持久化的加载条目树（对齐 vendor/loader/src/config/tree.ts）。
@@ -105,11 +107,11 @@ class EntryTree:
         entry.parent.remove(id_)
         entry.parent.tree.write()
 
-    def update(self, id_: str, options: dict, parent: str | None = None,
+    def update(self, id_: str, options: dict, parent: Any = _UNSET,
                position: int | None = None) -> Any:
         entry = self.resolve(id_)
         source = entry.parent
-        if parent is not None:
+        if parent is not _UNSET:
             target = self.resolve_group(parent)
             source.unlink(entry.options)
             if position is None:

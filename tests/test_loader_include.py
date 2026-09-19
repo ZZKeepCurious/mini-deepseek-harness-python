@@ -12,7 +12,7 @@ from pathlib import Path
 import yaml
 
 from miniharness.boot import boot
-from miniharness.loader.include import dump_js_expr_yaml
+from miniharness.loader.include import dump_js_expr_yaml, load_entry_list_yaml
 
 SUB = "plugins:\n  - id: greeter\n    module: miniharness.example_plugins\n    config:\n      greeting: 你好\n"
 
@@ -32,6 +32,17 @@ class TestIncludeBoot(unittest.TestCase):
             ctx, activations = boot(root / "cordis.yml")
             self.assertEqual([n for n, _ in activations], ["greeter"])
             self.assertEqual(ctx.get("greeter")("名"), "你好, 名!")
+
+    def test_include_declares_loader_dependency(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(root / "sub.yml", SUB)
+            _write(root / "cordis.yml",
+                   "plugins:\n  - id: inc\n    module: cordis:include\n    config:\n"
+                   "      path: sub.yml\n")
+            ctx, _ = boot(root / "cordis.yml")
+            entry = ctx.get("loader").resolve("include")
+            self.assertIn("loader", entry.fiber.inject)
 
     def test_missing_file_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -104,12 +115,26 @@ class TestIncludeRuntime(unittest.TestCase):
         self.assertEqual(self.ctx.get("second_svc")("名"), "wave, 名!")
 
 
+class TestEntryListSchema(unittest.TestCase):
+    def test_json_schema_scalars(self):
+        data = load_entry_list_yaml(
+            "a: yes\nb: on\nc: 2020-01-01\nd: 0x10\ne: true\nf: null\ng: 1.5\nh: 07\n")
+        self.assertEqual(data, {
+            "a": "yes", "b": "on", "c": "2020-01-01", "d": "0x10",
+            "e": True, "f": None, "g": 1.5, "h": "07",
+        })
+
+    def test_js_tag_node(self):
+        self.assertEqual(load_entry_list_yaml("x: !!js process.env.X"),
+                         {"x": {"__jsExpr": "process.env.X"}})
+
+
 class TestDumpJsExprYaml(unittest.TestCase):
     def test_js_expr_roundtrip(self):
         data = [{"greeting": {"__jsExpr": "process.env.X"}}]
         text = dump_js_expr_yaml(data)
         self.assertIn("!!js", text)
-        self.assertEqual(yaml.safe_load(text), data)
+        self.assertEqual(load_entry_list_yaml(text), data)
 
     def test_flattens_plugins_wrapper(self):
         data = [{"id": "a", "module": "m"}]

@@ -7,12 +7,9 @@ JS_ENV_EXPR = re.compile(r"^process\.env\.([A-Za-z_][A-Za-z0-9_]*)$")
 
 
 def is_js_expr(value: Any) -> bool:
-    """是否 !!js 惰性节点（{'__jsExpr': str}，对齐 config/utils.ts isJsExpr）。"""
-    return (
-        isinstance(value, dict)
-        and set(value) == {"__jsExpr"}
-        and isinstance(value.get("__jsExpr"), str)
-    )
+    """是否 !!js 惰性节点（对齐 config/utils.ts isJsExpr：`'__jsExpr' in value`，
+    不要求单键）。"""
+    return isinstance(value, dict) and "__jsExpr" in value
 
 
 def base_url_of(ctx: Any) -> str:
@@ -52,7 +49,7 @@ def evaluate_js_expr(expr: str, environ: dict[str, str] | None = None) -> str:
 def resolve_js_exprs(value: Any, environ: dict[str, str] | None = None) -> Any:
     """递归求值 __jsExpr 节点（读取时求值，上游为激活时 —— 简化标注）。"""
     if isinstance(value, dict):
-        if set(value) == {"__jsExpr"} and isinstance(value["__jsExpr"], str):
+        if is_js_expr(value):
             return evaluate_js_expr(value["__jsExpr"], environ)
         return {k: resolve_js_exprs(v, environ) for k, v in value.items()}
     if isinstance(value, list):

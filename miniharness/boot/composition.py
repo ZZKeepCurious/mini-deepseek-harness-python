@@ -33,7 +33,7 @@ from .dotenv import (
     is_bootstrap_only,
     parse_dotenv,
 )
-from ..loader.include import _Dumper, _JS_TAG, dump_js_expr_yaml
+from ..loader.include import _Dumper, dump_js_expr_yaml, load_entry_list_yaml
 from ..loader.utils import evaluate_js_expr, resolve_js_exprs
 
 __all__ = [
@@ -49,21 +49,9 @@ __all__ = [
     "resolve_js_exprs",
 ]
 
-def _js_constructor(loader: Any, node: Any) -> dict[str, str]:
-    if not isinstance(node, yaml.nodes.ScalarNode):  # type: ignore[union-attr]
-        text = ""
-    else:
-        text = node.value
-    if not text or not text.strip():
-        raise ValueError("!!js 表达式缺少内容")
-    return {"__jsExpr": text}
-
-
-yaml.SafeLoader.add_constructor(_JS_TAG, _js_constructor)
-
 
 def _load_yaml_text(text: str) -> Any:
-    return yaml.safe_load(text)
+    return load_entry_list_yaml(text)
 
 
 def load_document(
@@ -248,34 +236,6 @@ def compose_with_origins(
                 new_records.append({"origin": label, "patchedBy": []})
         combined, records = applied, new_records
     return combined, records
-
-
-def _represent_dict(dumper: Any, data: dict) -> Any:
-    """__jsExpr 单键节点原样输出为 !!js 标量；其它 dict 走默认代表器。"""
-    if set(data) == {"__jsExpr"} and isinstance(data.get("__jsExpr"), str):
-        return dumper.represent_scalar(_JS_TAG, data["__jsExpr"], style="")
-    return dumper.represent_dict(data)
-
-
-if yaml is not None:
-    class _Dumper(yaml.SafeDumper):
-        pass
-
-    _Dumper.add_representer(dict, _represent_dict)
-
-
-def dump_js_expr_yaml(data: Any) -> str:
-    """把条目树（含 __jsExpr 节点）序列化为单文档 YAML，!!js 原样保留。
-
-    include 的文件回写用此函数（对齐上游 yaml.dump 的 __jsExpr → !!js）。
-    """
-    return yaml.dump(
-        data,
-        Dumper=_Dumper,
-        allow_unicode=True,
-        default_flow_style=False,
-        sort_keys=False,
-    )
 
 
 def render_composition_dump(

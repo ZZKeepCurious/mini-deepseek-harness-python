@@ -81,7 +81,7 @@ _settle_loader(loader)                             # 排空在途转换
 _assert_loader_activated(loader, bin_name)         # 三态审计，未激活即 fail loud
 ```
 
-组合的**依赖驱动激活**仍是第 2 章 `RegistryService` 的机制：每条 entry 的 `inject` 缺失即保持 `PENDING`，提供方在 apply 期 `provide` 后经依赖追踪唤醒到 `ACTIVE`；`_assert_loader_activated` 在启动末尾逐条检查——`ACTIVE` 通过、`FAILED` 重抛原错误、`PENDING` 点名缺失的注入服务。载体简化（`loader` 服务以 `check=None` 直供、intercept 配置层未接入条目 config 解析、Include 无防抖写队列、`module:` 旧方言桥）登记在 `verified-diffs.md` §3.26。
+组合的**依赖驱动激活**仍是第 2 章 `RegistryService` 的机制：每条 entry 的 `inject` 缺失即保持 `PENDING`，提供方在 apply 期 `provide` 后经依赖追踪唤醒到 `ACTIVE`；`_assert_loader_activated` 在启动末尾逐条检查——`ACTIVE` 通过、`FAILED` 重抛原错误、`PENDING` 点名缺失的注入服务。条目 YAML 用上游同款方言 `entryListSchema`（JSON_SCHEMA + `!!js`）解析：只有 JSON 标量与 `!!js` 节点，`yes`/日期等保持字符串。未移植面（`config/isolate.ts` 的 `intercept`/`isolate` 选项、`Loader.Intercept.await`、Node ESM `internal.ts`）逐条登记在 `verified-diffs.md` §3.26。
 
 验证：`python -m unittest tests.test_loader_tree tests.test_loader_include -v`。
 

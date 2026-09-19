@@ -11,6 +11,7 @@ from pathlib import Path
 
 from miniharness.boot import boot
 from miniharness.loader.patch import apply_entry_patches
+from miniharness.loader.utils import is_js_expr, resolve_js_exprs
 
 WARNED: list[str] = []
 
@@ -127,6 +128,23 @@ class TestGroupCarrierBoot(unittest.TestCase):
             self.assertEqual([n for n, _ in activations], ["inner", "extra"])
             self.assertEqual(ctx.get("inner_svc")("x"), "hello, x!")
             self.assertEqual(ctx.get("extra_svc")("x"), "hello, x!")
+
+
+class TestJsExprNode(unittest.TestCase):
+    def test_membership_not_single_key(self):
+        self.assertTrue(is_js_expr({"__jsExpr": "process.env.X"}))
+        self.assertTrue(is_js_expr({"__jsExpr": "process.env.X", "extra": 1}))
+        self.assertFalse(is_js_expr({"other": 1}))
+        self.assertFalse(is_js_expr("plain"))
+
+    def test_resolve_evaluates_env(self):
+        os.environ["MINI_TREE_JS"] = "v"
+        try:
+            self.assertEqual(
+                resolve_js_exprs({"k": {"__jsExpr": "process.env.MINI_TREE_JS"}}),
+                {"k": "v"})
+        finally:
+            os.environ.pop("MINI_TREE_JS", None)
 
 
 class TestLazyJsExpr(unittest.TestCase):
