@@ -59,6 +59,7 @@ from .args import (
     validate_args,
 )
 from .envelope import rpc_error, rpc_result_ok
+from .inventory import build_inventory
 
 __all__ = [
     "WebApi",
@@ -312,11 +313,12 @@ class WebApi:
     """
 
     def __init__(self, ctx: Context, adapter: LlmAdapter, tools: ToolRegistry | None = None,
-                 cwd: str | None = None):
+                 cwd: str | None = None, roster: Any = None):
         self.ctx = ctx
         self.adapter = adapter
         self.tools = tools if tools is not None else ToolRegistry(ctx)
         self.cwd = cwd or os.getcwd()
+        self.roster = roster
         self.store = ctx.get("sessions")
         if self.store is None:
             self.store = SessionStore(ctx)
@@ -348,6 +350,7 @@ class WebApi:
         "session/updateQueue": "update_queue",
         "session/cancel": "cancel",
         "session/page": "page",
+        "pluginInventory/list": "plugin_inventory",
     }
 
     def methods(self) -> frozenset[str]:
@@ -465,6 +468,20 @@ class WebApi:
                            "childSessionId": child_session_id, "reason": "unsupported"})
         raise _Reject("subagent/unauthorized", "subagent does not belong to the supplied parent",
                       {"childSessionId": child_session_id})
+
+    # ---------- pluginInventory/list ----------
+
+    def plugin_inventory(self, payload: dict) -> dict:
+        """Loader 条目 + preset 组合行投影（对齐上游 PluginInventoryGateway.list）。
+
+        读 `ctx.pluginInventory` 服务（有则用其 roster），否则以 WebApi.roster 现场投影；
+        无 loader 服务时 `entries` 为空、无 roster 时省略 `agentPresets`（同上游在
+        `ctx.get('agentPresets') === undefined` 时省略该键）。
+        """
+        service = self.ctx.get("pluginInventory")
+        if service is not None:
+            return service.list()
+        return build_inventory(self.ctx, self.roster)
 
     # ---------- session.list ----------
 

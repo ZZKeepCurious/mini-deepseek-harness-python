@@ -46,6 +46,7 @@
 | headless 一次性任务入口（`--profile headless "task"`：stdout 最终文本、退出码按 turn/end reason） | `packages/bundle/headless` + `apps/cli` |
 | web 传输层与浏览器前端（`--profile web`；两信封 RPC、`/api/remote.mux`、`$events`、follow/control、审批桥、FastAPI 载体、会话导出、`webui/` 前端；详见下文） | `packages/api/gateway` + `packages/api/session-controller` + `packages/api/remotes` + `host/frontend-static` + `host/webserver` |
 | 启动器选项（`--patch`、`--dump-config` / `--dump-default-config`、只读组合导出） | `apps/cli/src/args.ts` |
+| 插件清单投影（`pluginInventory/list`：Loader 条目四字段 `{entryId,moduleName,enabled,fiberPhase}` + preset 组合行 flatten + `!!js` conditional） | `packages/host/plugin-inventory` + `packages/preset/agent-presets` |
 | 会话管理服务（`ctx.sessions`：create/prepare/enter/announce 生命周期、fork 五错误码、flush 检查点、`session/created|disposed|event|flush` 四事件） | `packages/core/session`（SessionStore） |
 | 会话管理 CLI（`miniharness sessions` 列表/恢复/删除/stats；mini 教学扩展；`stats` 渲染 sessionStats/tokenUsage 投影 + 末 turn 用量归账） | web 表面（上游） |
 | 遥测 / 用量统计（sessionStats + tokenUsage 投影真实化为 `session/follow`/`session/control` 与 Remote snapshot/baseline 的 `projections.values`；`derive_turn_token_usage` per-turn 用量推导，任何缺失边界 fail-closed；opt-in `UsageStatsService` 挂 `ctx.usageStats`） | `packages/session/session-stats` + `packages/llm/token-meter` |

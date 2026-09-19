@@ -119,6 +119,7 @@ _SPECS: dict[str, dict[str, tuple[str, bool]]] = {
         "maxMessages": (INT, False),
     },
     "session/control": {},
+    "pluginInventory/list": {},
 }
 
 
