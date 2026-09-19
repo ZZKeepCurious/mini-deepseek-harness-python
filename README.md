@@ -44,6 +44,7 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 | Goals (`goal/change` event-sourced fold, `GoalService`, automatic goal-round continuation, `get_goal`/`create_goal`/`update_goal` tools, `/goal` command) | `packages/goal` (goal + goal-round-driver + tool-goal + command-goal) |
 | System prompt sections (ordered section registration + rendering into each request) | `core/system-prompt` |
 | Boot & composition (YAML/JSON overlays, `!!js` env interpolation, startup assertions) | `packages/boot` |
+| Plugin load tree (Loader service + EntryTree + live fibers: `{plugins}` dynamic load/unload, disabled/`!!js` evaluation at activation, `include` file-backed subtrees + patch expansion, startup inactive audit; `internal/config|update|plugin` hooks) | `vendor/loader` + `vendor/include` |
 | Headless one-shot entry (`--profile headless "task"`: stdout final text, exit code by turn/end reason) | `packages/bundle/headless` + `apps/cli` |
 | Web transport layer + browser frontend (`--profile web`; two-envelope RPC, `/api/remote.mux`, `$events`, follow/control, approval bridge, FastAPI carrier, session export, `webui/` frontend; see details below) | `packages/api/gateway` + `packages/api/session-controller` + `packages/api/remotes` + `host/frontend-static` + `host/webserver` |
 | Launcher options (`--patch`, `--dump-config` / `--dump-default-config`, read-only composition dump) | `apps/cli/src/args.ts` |
@@ -161,6 +162,13 @@ mini-deepseek-harness-python/
 │   │   ├── boot.py          # startup + patch overlays
 │   │   ├── composition.py   # YAML config / !!js interpolation / dump rendering
 │   │   └── dotenv.py        # .env parsing (parse_dotenv)
+│   ├── loader/              # upstream vendor/loader + vendor/include (component live tree)
+│   │   ├── tree.py          # EntryTree (flat store + resolve / import_)
+│   │   ├── entry.py         # Entry (update / disabled / init)
+│   │   ├── group.py         # EntryGroup + Group plugin
+│   │   ├── loader.py        # Loader service (internal/config|update|plugin hooks)
+│   │   ├── include.py       # Include subtree (file rw + !!js-preserving write-back)
+│   │   └── patch.py         # apply_entry_patches
 │   ├── cli/                 # apps/cli
 │   │   ├── main.py          # launcher options (profile / patch / dump)
 │   │   ├── headless.py      # one-shot task entry

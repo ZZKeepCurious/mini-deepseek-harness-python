@@ -42,6 +42,7 @@
 | 目标（`goal/change` 事件溯源 fold、GoalService、自动续跑 goal round、`get_goal`/`create_goal`/`update_goal` 三工具、`/goal` 命令） | `packages/goal`（goal + goal-round-driver + tool-goal + command-goal） |
 | system prompt 分节（有序节注册 + 渲染进每次请求） | `core/system-prompt` |
 | boot 与组合（YAML/JSON 补丁、`!!js` 环境变量插值、启动断言） | `packages/boot` |
+| 插件装载树（Loader 服务 + EntryTree + live fiber：配置条目 `{plugins}` 动态装载/卸载、disabled/`!!js` 激活期求值、`include` 文件背书子树 + 补丁展开、启动未激活审计；`internal/config|update|plugin` 钩子） | `vendor/loader` + `vendor/include` |
 | headless 一次性任务入口（`--profile headless "task"`：stdout 最终文本、退出码按 turn/end reason） | `packages/bundle/headless` + `apps/cli` |
 | web 传输层与浏览器前端（`--profile web`；两信封 RPC、`/api/remote.mux`、`$events`、follow/control、审批桥、FastAPI 载体、会话导出、`webui/` 前端；详见下文） | `packages/api/gateway` + `packages/api/session-controller` + `packages/api/remotes` + `host/frontend-static` + `host/webserver` |
 | 启动器选项（`--patch`、`--dump-config` / `--dump-default-config`、只读组合导出） | `apps/cli/src/args.ts` |
@@ -157,6 +158,13 @@ mini-deepseek-harness-python/
 │   │   ├── boot.py          # 启动 + patch overlay
 │   │   ├── composition.py   # YAML 配置 / !!js 插值 / dump 渲染
 │   │   └── dotenv.py        # .env 解析（parse_dotenv）
+│   ├── loader/              # 上游 vendor/loader + vendor/include（组件系统活树）
+│   │   ├── tree.py          # EntryTree（扁平 store + resolve / import_）
+│   │   ├── entry.py         # Entry（update / disabled / init）
+│   │   ├── group.py         # EntryGroup + Group 插件
+│   │   ├── loader.py        # Loader 服务（internal/config|update|plugin 钩子）
+│   │   ├── include.py       # Include 子树（文件读写 + !!js 原样回写）
+│   │   └── patch.py         # apply_entry_patches
 │   ├── cli/                 # apps/cli
 │   │   ├── main.py          # launcher 选项（profile / patch / dump）
 │   │   ├── headless.py      # 一次性任务入口

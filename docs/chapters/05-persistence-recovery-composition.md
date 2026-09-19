@@ -12,6 +12,7 @@
     - **`turn/end` reason**：本章差异表写 `reason = "interrupted"` 字符串；实现为对象 `{kind:'interrupted'}`（配合 `repair_interrupted_turn` 合成 closers，见第 1 章横幅）。
     - **崩溃演示**：本章 §5.2"kill 进程"实为手动构造未闭合回合来模拟崩溃尾部，非真实 kill（`tests/test_persistence_boot.py` 可复核）。
     - **简化载体**：配置为 YAML（pyyaml 硬依赖承载）+ `!!js` 仅 `process.env.<NAME>` 子集。JSONL 载体**与上游默认形态一致**：zstd 拼接帧容器 + 一行一事件（V3 事件格式——模型流内嵌 `assistant/message`）+ format.ts 目录布局（`root/--<projectKey(cwd)>--/<encodeSegment(id)>/session.v3.jsonl[.zstd]`——generation 版本化文件名，v0 旧名 `session.jsonl` 保留拒读；编码互斥、遗留布局直接拒绝），见 `zstd_frames.py` 与 `tests/test_persistence_zstd.py`。
+    - **组合装载（§5.4）**：本章的 `boot()` 为早期静态数组形态（`json.load` + 逐条 `root.plugin()` + `_drain`）；当前实现是 **Loader 活树 + 根 Include 条目**（`miniharness/loader/`：EntryTree + Entry + Group + Loader + Include；`boot()` 经 `mount_root_include` 装载、补丁展开由 `loader.patch.apply_entry_patches` 承担、启动三态审计）。完整语义见第 08 章 §8.3.1 与 `docs/architecture.md` §2 的 `loader/` 行。
 
 ## 5.1 这一章要做什么
 
@@ -259,6 +260,8 @@ def boot(config_path, *patch_paths, env=None):
     _drain(fibers)                                 # 异步 body 排空在途转换
     _assert_entries_activated(fibers, entries)     # 终态断言（同上游）
 ```
+
+> 当前实现：`boot()` 不再自己 `json.load` + 逐条 `root.plugin()`，而是先 `root.plugin(Loader, {"baseUrl": …})`，再经 `mount_root_include(root, abspath(config_path))` 挂根 `cordis:include` 条目——该条目读文件、用 `apply_entry_patches` 应用补丁层、把条目挂成 `EntryTree` 里的 live fiber，最后 `_assert_loader_activated` 审计未激活条目（ACTIVE 通过 / FAILED 重抛 / PENDING 点名缺失服务）。`group: true` 的条目成为嵌套子树，`!!js` 在各自条目激活期求值。装载树完整语义见第 08 章 §8.3.1。
 
 插件不再声明 `provides`：服务在 apply 期用 `ctx.provide()` 动态登记（与真实 Cordis 一致）。依赖 `inject` 缺失的插件保持 `PENDING`，boot 结束时 `_assert_entries_activated` 点名缺失的注入服务并明确报错——"插件没生效"绝不会是运行期谜题。
 

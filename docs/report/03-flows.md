@@ -244,4 +244,4 @@ flowchart TD
 
 组合层叠顺序（下到上，后压先）：**L1 各 bundle 层**（按 profile 列表顺序）→ **L2 profile 级 cordis.patch.yml** → **L3 home 级 cordis.patch.yml**（压过 profile 级）→ **L4 任何 `--patch` overlay**（层叠到空条目列表结束）。**SEM**：补丁语义 = 按 id 定位**整段替换** / `insert` 插入 / `!!js` 挂载时插值。
 
-> **mini 对照**：`miniharness/boot/boot.py` —— boot 启动链、补丁层叠、`--dump-config` 共用同一补丁算法均一致；`vendor/cordis` 为上游，mini 以 `core/scope.py` 承载作用域、`boot/composition.py` 承载组合（`core/schema.py` 为 schemastery 全量移植）。
+> **mini 对照**：`miniharness/boot/boot.py` —— boot 启动链、补丁层叠、`--dump-config` 共用同一补丁算法均一致；**Loader 活树与根 Include 由 `miniharness/loader/` 承载**（`EntryTree` + `Entry` + `EntryGroup`/`Group` + `Loader` + `Include`，对齐上游 `vendor/loader` + `vendor/include`：`mountRootInclude` 装 `cordis:include`/`cordis:group` 内建、条目依赖驱动激活、启动未激活审计）；`vendor/cordis` 为上游，mini 以 `core/scope.py` 承载作用域、`boot/composition.py` 承载 YAML/`!!js` 组合（`core/schema.py` 为 schemastery 全量移植），补丁展开的纯函数在 `loader/patch.py::apply_entry_patches`。

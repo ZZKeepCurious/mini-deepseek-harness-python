@@ -114,6 +114,15 @@ miniharness/
 │   ├── boot.py            # 启动 + patch overlay
 │   ├── composition.py     # YAML 配置 / !!js 插值 / dump 渲染
 │   └── dotenv.py          # .env 解析（parse_dotenv）
+├── loader/                # vendor/loader + vendor/include（cordis 组件系统，L0）
+│   ├── model.py           # ENTRY_KEY / GROUP_KEY / SEP 载波键
+│   ├── utils.py           # !!js 求值 + baseUrl 上溯 + 瞬态事件循环结算
+│   ├── patch.py           # apply_entry_patches（replace / insert / name 门）
+│   ├── entry.py           # Entry（update / disabled / init）+ module 旧方言桥
+│   ├── group.py           # EntryGroup（一级子列表宿主）+ Group 插件
+│   ├── tree.py            # EntryTree（扁平 store + resolve / import_ / write）
+│   ├── loader.py          # Loader 服务（internal/config|update|plugin 钩子）
+│   └── include.py         # Include 子树（文件读写 + initial + !!js 原样回写）
 ├── cli/                   # apps/cli
 │   ├── main.py            # launcher 选项（profile / patch / dump）
 │   ├── headless.py        # 一次性任务入口
@@ -223,9 +232,10 @@ miniharness/
 | `goal/`（domain + service + prompt + driver + tools + commands） | `packages/goal/`（goal + goal-round-driver + tool-goal + command-goal） | Typert remote（上游命令由 human UI 表面派发，mini 用 `/goal` 命令承载）；`_prepare_mutation` 前置 `assert_live_agent`（R4 agent registry）；driver 模式事件驱动续跑（同步门面保留 `continue_rounds`）；权威判定近似；三工具 canonical value + render 已与上游一致（简化标注见模块 docstring） |
 | `skills/`（registry + filesystem + tool_skill） | `packages/skill/`（skill + skill-filesystem + tool-skill） | 无 chokidar watch、无 ctx.fs 适配；skill 工具 canonical value + render 已与上游一致（简化标注见模块 docstring） |
 | `telemetry/`（folds + service） | `packages/session/session-stats/src/`（projection）+ `packages/llm/token-meter/src/`（usage-projection + turn-usage） | sessionStats/tokenUsage 投影 fold + derive_turn_token_usage（fail-closed）+ opt-in `UsageStatsService`（ctx.usageStats）；wire `projections.values` 现场折叠等价（不建 registry）；contextPressure 与 telemetry-capture 不承载 |
-| `boot/boot.py` | `packages/boot/app-boot` | `load_optional_patches`（缺文件→空层、坏文件 fail loud）+ `watch_user_patches`（与 app-boot watchUserPatches 一致：经 HMR 服务 watch 用户补丁层→刷新重挂；上游经 Include entry.update() 事务性重挂，mini 无 Include 插件由宿主供 remount 回调） |
+| `boot/boot.py` | `packages/boot/app-boot` | `mount_root_include`（Loader 服务 + 根 Include 条目）+ `boot()`（装载根配置→依序补丁→审计未激活条目 fail loud，ACTIVE/FAILED/PENDING 三态对齐 `auditStartupEntries`）+ `load_optional_patches`（缺文件→空层、坏文件 fail loud）+ `watch_user_patches`（与 app-boot watchUserPatches 一致：经 HMR 服务 watch 用户补丁层→刷新重挂；上游经 Include entry.update() 事务性重挂，mini 由宿主供 remount 回调）。载体：旧 `{replace|insert}` 叠层补丁在 boot 侧转成 applyEntryPatches 形态（`_overlay_to_entry_patches`，不做表达式求值） |
 | `boot/composition.py` | `packages/boot/app-boot` + `apps/cli/src/args.ts` | `load_dotenv_file` 与上游 readEnvLayer 一致：ENOENT 静默/其它 warn/已存在不覆盖/bootstrap-only 物化前整体拒绝；`home=` 为 harness-home 时 HOME_LAYER_PROXY_NAMES（HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY）豁免、代理名错误文案明说 home `.env` 第二条出路（index.ts:174-177） |
 | `boot/dotenv.py` | `packages/boot/app-boot`（loadEnv） | bootstrap-only 名单/前缀与 BOOTSTRAP_NAMES/PREFIXES 一致；HOME_LAYER_PROXY_NAMES 同款；豁免判定在 load_dotenv_file（同上游 readEnvLayer） |
+| `loader/`（model/utils/patch/entry/group/tree/loader/include） | `vendor/loader/src/{index,config/{entry,group,tree,utils}}.ts` + `vendor/include/src/index.ts` | cordis 组件系统活树：EntryTree 扁平 store + `entries()/resolve()/import_()/write()`；Entry 生命周期（update/disabled/init、`loader/partial-dispose`、`internal/plugin` 归属）+ module 旧方言 apply 桥；EntryGroup 一级子列表宿主（create/remove/update/stop）+ Group 插件；Loader 服务（`internal/config` 树载体字面/普通条目 interpolate、`internal/update` 写回 + 重载日志、`internal/plugin` 自销毁回写 disabled）+ `apply_entry_patches` + Include（文件读写/initial/dump `!!js` 原样）。载体/适配（登记 §3）：同步门面 + `ctx.plugin(parent=)` 显式归属、baseUrl 沿 ctx 父链上溯、`settle_gathered` 瞬态 loop 结算；**简化**：check 谓词不做 await 门控、intercept/isolate 未移植、无防抖写队列 |
 | `cli/main.py` | `apps/cli/src/args.ts` | |
 | `cli/headless.py` | `packages/bundle/headless` + `apps/cli` | |
 | `cli/default_tools.py` | 无 | 教学扩展（上游是工具插件注册） |
@@ -283,7 +293,7 @@ miniharness/
 
 | 层 | 内容 | 允许依赖 |
 |---|---|---|
-| L0 地基 | `core/session`、`core/scope`、`core/dsh_scope`、`core/schema`、`core/hmr`、`core/home_paths`、`core/tool_timeout` | 无（互不依赖；core.scope ↔ core.dsh_scope / core.schema / core.hmr→core.scope 经 §3 例外豁免；core.tool_timeout 是超时约定常量叶，被 core.tools 与 guard 两侧共享） |
+| L0 地基 | `core/session`、`core/scope`、`core/dsh_scope`、`core/schema`、`core/hmr`、`core/home_paths`、`core/tool_timeout`、`loader` | 无（互不依赖；core.scope ↔ core.dsh_scope / core.schema / core.hmr→core.scope / loader→core.scope 经 §3 例外豁免；core.tool_timeout 是超时约定常量叶，被 core.tools 与 guard 两侧共享） |
 | L1 领域 | `llm/*`、`core/tools`、`core/system_prompt`、`core/session_store`、`core/agents`、`attachment`、`ptc_runtime`、`identity`、`storage`、`boot/*`、`guard` | 仅 L0 |
 | L2 编排 | `core/agent_loop`、`compaction`、`jobs`、`plan`、`commands`、`goal`、`skills`、`telemetry` | L0 + L1 |
 | L3 应用与入口 | `cli/*`、`protocol/*`、`seams/*`、`preset`、`extensions`、`interaction`、`client`、`mcp`、`web`、`shell` | L0 ~ L2 |
@@ -303,9 +313,10 @@ miniharness/
 
 规则：
 
-1. L_n 只依赖 L_{&lt;n}，禁止依赖同层或上层。七条显式例外：
+1. L_n 只依赖 L_{&lt;n}，禁止依赖同层或上层。八条显式例外：
    - `seams/subagent/worker.py` 依赖 `protocol/*`（同层）：worker 是 ACP / SDK 线协议的服务端载体，复用协议层的帧与信封实现；
    - `core/hmr.py` 依赖 `core/scope`（同层）：HMR 是 cordis 家族的 vendored 部件（上游 vendor/hmr 直接建在 cordis 之上），复用 Service/fiber 基座，与 core.dsh_scope 同理归属 L0；
+   - `loader/*` 依赖 `core/scope`（同层）：loader 是 cordis 家族的 vendored 部件（上游 vendor/loader 直接建在 cordis 之上），复用 Service/fiber/Inject 基座，与 core.hmr 同理归属 L0；
    - `cli/main.py` 依赖 `web`（同层，单方向）：launcher 组装 web profile——cli 把 ctx/adapter/tools 交给 web 层运行时，web 层不得反向 import cli；
    - `cli/headless.py` 依赖 `seams` 与 `shell`（同层，单方向）：run_headless 组装沙箱后端链路与 bash 执行器装进 ctx——同上游 bundle/headless 依赖 dsh-sandbox / sandbox-policy / bash-sandbox 的包拓扑；seams/shell 层不得反向 import cli；
    - `shell/bash_sandbox.py` 依赖 `seams/sandbox_local`（同层，单方向）：bash-sandbox 是 ctx.sandbox 的消费者——上游 bash-sandbox 同样依赖 dsh-sandbox，拓扑一致而非分层倒挂；seams 层不得反向 import shell；

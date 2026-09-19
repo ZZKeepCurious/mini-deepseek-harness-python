@@ -59,6 +59,7 @@ flowchart LR
 | `packages/core/agent-loop` | `core/agent_loop/agent.py` | 04 / 06 | 03 §5.1 |
 | `packages/session/session-persistence` | `core/session/persistence.py` | 05 | 03 §5.3 |
 | `packages/extensions/cordis-host-runner + packages/boot` | `boot/boot.py` | 05 | 03 §5.5 |
+| `vendor/loader + vendor/include` | `loader/`（EntryTree + Entry + Group + Loader + Include + patch） | 08 §8.3.1 | 03 §5.5 |
 | `packages/bundle/headless + apps/cli/src` | `cli/headless.py + cli/main.py` | 07 | 04 议题 2 |
 | `apps/cli/config/agent-presets/*` | `preset/presets.py` | 08 | 04 议题 1 |
 | `packages/core/agent（runtime-types）` | `core/agent_loop/agent.py（干预面）` | 09 | 04 议题 4 |

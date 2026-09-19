@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from pathlib import Path
 from typing import Any, Callable
 
@@ -34,10 +33,13 @@ from .dotenv import (
     is_bootstrap_only,
     parse_dotenv,
 )
+from ..loader.include import _Dumper, _JS_TAG, dump_js_expr_yaml
+from ..loader.utils import evaluate_js_expr, resolve_js_exprs
 
 __all__ = [
     "apply_patch",
     "compose_with_origins",
+    "dump_js_expr_yaml",
     "evaluate_js_expr",
     "load_composition",
     "load_document",
@@ -47,15 +49,11 @@ __all__ = [
     "resolve_js_exprs",
 ]
 
-JS_ENV_EXPR = re.compile(r"^process\.env\.([A-Za-z_][A-Za-z0-9_]*)$")
-_JS_TAG = "tag:yaml.org,2002:js"
-
-
 def _js_constructor(loader: Any, node: Any) -> dict[str, str]:
-    """!!js <expr> → {'__jsExpr': <expr>}；无体/非标量 → 解析失败（对齐上游）。"""
     if not isinstance(node, yaml.nodes.ScalarNode):  # type: ignore[union-attr]
-        raise ValueError("!!js 表达式必须为标量")
-    text = node.value
+        text = ""
+    else:
+        text = node.value
     if not text or not text.strip():
         raise ValueError("!!js 表达式缺少内容")
     return {"__jsExpr": text}
@@ -66,27 +64,6 @@ yaml.SafeLoader.add_constructor(_JS_TAG, _js_constructor)
 
 def _load_yaml_text(text: str) -> Any:
     return yaml.safe_load(text)
-
-
-def evaluate_js_expr(expr: str, environ: dict[str, str] | None = None) -> str:
-    """!!js 表达式求值：仅支持 process.env.<NAME> 完整匹配，其它 fail loud。"""
-    m = JS_ENV_EXPR.match(expr.strip())
-    if not m:
-        raise ValueError(
-            f"不支持的 !!js 表达式: {expr!r}（mini 仅支持 process.env.<NAME>）"
-        )
-    return (environ if environ is not None else os.environ).get(m.group(1), "")
-
-
-def resolve_js_exprs(value: Any, environ: dict[str, str] | None = None) -> Any:
-    """递归求值 __jsExpr 节点（读取时求值，上游为激活时 —— 简化标注）。"""
-    if isinstance(value, dict):
-        if set(value) == {"__jsExpr"} and isinstance(value["__jsExpr"], str):
-            return evaluate_js_expr(value["__jsExpr"], environ)
-        return {k: resolve_js_exprs(v, environ) for k, v in value.items()}
-    if isinstance(value, list):
-        return [resolve_js_exprs(v, environ) for v in value]
-    return value
 
 
 def load_document(
@@ -285,6 +262,20 @@ if yaml is not None:
         pass
 
     _Dumper.add_representer(dict, _represent_dict)
+
+
+def dump_js_expr_yaml(data: Any) -> str:
+    """把条目树（含 __jsExpr 节点）序列化为单文档 YAML，!!js 原样保留。
+
+    include 的文件回写用此函数（对齐上游 yaml.dump 的 __jsExpr → !!js）。
+    """
+    return yaml.dump(
+        data,
+        Dumper=_Dumper,
+        allow_unicode=True,
+        default_flow_style=False,
+        sort_keys=False,
+    )
 
 
 def render_composition_dump(

@@ -10,6 +10,13 @@ L3 应用  = cli/*、protocol/*、seams/*、preset、extensions、interaction、
           shell（L0 ~ L2）
   教学层   = demo.py、example_plugins.py（任意层，但不得被业务模块导入）
 
+loader/*（cordis vendored 组件，仅依赖 core.scope，与 core.hmr 同理落 L0；
+boot 层装载它但不得被其反向引用——见下方 loader→core.scope 例外）
+L2 编排  = core/agent_loop、compaction、commands、goal、jobs、plan、skills   （L0 + L1）
+L3 应用  = cli/*、protocol/*、seams/*、preset、extensions、interaction、client、web、
+          shell（L0 ~ L2）
+  教学层   = demo.py、example_plugins.py（任意层，但不得被业务模块导入）
+
 补充规则（§5）：
   - protocol/ 内 acp/sdk/hooks 互不依赖；
   - seams/ 内 sandbox（sandbox_local + sandbox_policy）/ credentials / subagent
@@ -44,6 +51,7 @@ LAYER_UNITS = [
     ("core.tool_timeout", 0),
     ("core.version", 0),
     ("core.home_paths", 0),
+    ("loader", 0),
     ("core.session_store", 1),
     ("core.agents", 1),
     ("core.tools", 1),
@@ -199,6 +207,11 @@ class ImportDirectionTest(unittest.TestCase):
                     # §5 显式例外：L0 基座叶模块——HMR 服务是 cordis 家族的
                     # vendored 部件（上游 vendor/hmr 直接建在 cordis 之上），
                     # 复用 Service/fiber 基座，与 core.dsh_scope 同理落 L0
+                    continue
+                if src_unit == "loader" and dst_unit == "core.scope":
+                    # §5 显式例外：L0 基座叶模块——loader 是 cordis 家族的
+                    # vendored 部件（上游 vendor/loader 直接建在 cordis 之上），
+                    # 复用 Service/fiber/Inject 基座，与 core.hmr 同理落 L0
                     continue
                 if src_unit == "core.session" and dst_unit == "llm":
                     # §5 显式例外（单方向）：V2 会话格式的 seed 边界流验证依赖

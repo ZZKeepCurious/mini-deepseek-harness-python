@@ -38,6 +38,8 @@ loader 的 include 展开（上游由 `@deepseek-ai/cordis-plugin-include` 实�
 2. **插件加载**：每条 entry 的 `plugin` 字段导入真实模块，取回 `inject`/`apply` 元数据（`provides` 已废除——服务在 apply 期动态登记）；
 3. **结算**：把整棵树交给插件管理器，按依赖激活——这正是 mini 第 2 章 `RegistryService` 做的事（`miniharness/core/scope.py`），只是上游还有 scope/fiber/carrier 的完整实现。
 
+> **mini 对照**：这套 loader 已整件移植为 `miniharness/loader/`（对齐 `vendor/loader` + `vendor/include`），见 §8.3.1；`mount_root_include` 装 `cordis:include` / `cordis:group` 内建、补丁展开用 `loader.patch.apply_entry_patches`。
+
 ### 8.2.3 preset roster：目录列表即名单
 
 四种出厂 preset（`apps/cli/config/agent-presets/{standard,code,minimal,cordis}/`）的名单**不维护在代码里**——`packages/preset/README.md:12` 明说：预置名单就是那个目录的列举，目录里有什么就是什么。这避免了"代码里的名单"与"磁盘上的目录"两处漂移。
@@ -49,7 +51,7 @@ loader 的 include 展开（上游由 `@deepseek-ai/cordis-plugin-include` 实�
 
 ## 8.3 mini 复现：preset roster 与挂载
 
-mini 组合层支持 YAML（`boot/composition.py`，pyyaml 硬依赖承载）；preset 清单用 JSON 承载（载体简化，约定与上游一致）。roster 与上游 alpha.1 的**多根分层**一致：`shipped root`（随包分发的内置 preset，system trust、authoring 只读）→ 配置 roots → `harness-home`（user），同 id **first-root-wins**（同上游 discoverPresets 的 resolvedRoots 顺序）；清单文件双读（`preset.json` 或上游形态 `agent.cordis.yml` 经 `translate_cordis_composition` 翻译）。本章演示以仓库自带目录为例：
+mini 组合层有两块：**装载树**（`miniharness/loader/`，§8.3.1）把 YAML 变成活的插件 fiber；**preset roster**（`miniharness/preset/presets.py`，§8.3.2 起）决定一个进程里各 agent 用哪些工具与 prompt。组合层支持 YAML（`boot/composition.py`，pyyaml 硬依赖承载）；preset 清单用 JSON 承载（载体简化，约定与上游一致）。roster 与上游 alpha.1 的**多根分层**一致：`shipped root`（随包分发的内置 preset，system trust、authoring 只读）→ 配置 roots → `harness-home`（user），同 id **first-root-wins**（同上游 discoverPresets 的 resolvedRoots 顺序）；清单文件双读（`preset.json` 或上游形态 `agent.cordis.yml` 经 `translate_cordis_composition` 翻译）。本章演示以仓库自带目录为例：
 
 ```
 miniharness/preset/               # shipped root（system trust）
@@ -57,7 +59,33 @@ miniharness/preset/               # shipped root（system trust）
 └── minimal/preset.json     # 极简模式：2 工具 + fixed-prompt（complete: true）
 ```
 
-### 8.3.1 领域对象（`miniharness/preset/presets.py`）
+### 8.3.1 装载：Loader 活树与根 Include（`miniharness/loader/`）
+
+`boot()` 把 YAML 变成活的插件树，靠的是一套 cordis loader 的整件移植（对齐上游 `vendor/loader` + `vendor/include`）：
+
+- **`EntryTree`**——条目树的载体：扁平 `store`（`id → Entry`）、`entries()` 递归子树、`resolve('include:candies')` 这类 `SEP` 下钻 id、`import_('cordis:include')` 取内建插件；
+- **`Entry`**——一个可配置插件节点：`update()` 三态（已激活则 diff 后经 `internal/update` 重载、未激活则 `init()`、禁用则 dispose），`disabled` 沿 parent 链上溯并对 `!!js` 表达式求值；
+- **`EntryGroup` / `Group`**——`group: true` 条目的子列表宿主（组载体）；
+- **`Loader` 服务**——挂三个钩子：`internal/config`（树载体配置保持字面、普通条目激活期 interpolate）、`internal/update`（写回 `entry.options.config` 并持久化）、`internal/plugin`（插件自销毁时回写 `disabled: true`）；
+- **`Include`**——文件背书子树：读/写目标文件、`initial` 首写、`apply_entry_patches` 展开补丁、YAML 回写时 `!!js` 原样保留。
+
+`boot()` 的形态因此是：
+
+```python
+root = Context(name="root")
+root.baseUrl = os.path.dirname(os.path.abspath(config_path))
+root.plugin(Loader, {"baseUrl": root.baseUrl})     # 装载服务
+mount_root_include(root, abs_config, patches)      # 挂根 cordis:include 条目
+loader = root.get("loader")
+_settle_loader(loader)                             # 排空在途转换
+_assert_loader_activated(loader, bin_name)         # 三态审计，未激活即 fail loud
+```
+
+组合的**依赖驱动激活**仍是第 2 章 `RegistryService` 的机制：每条 entry 的 `inject` 缺失即保持 `PENDING`，提供方在 apply 期 `provide` 后经依赖追踪唤醒到 `ACTIVE`；`_assert_loader_activated` 在启动末尾逐条检查——`ACTIVE` 通过、`FAILED` 重抛原错误、`PENDING` 点名缺失的注入服务。载体简化（`loader` 服务以 `check=None` 直供、intercept 配置层未接入条目 config 解析、Include 无防抖写队列、`module:` 旧方言桥）登记在 `verified-diffs.md` §3.26。
+
+验证：`python -m unittest tests.test_loader_tree tests.test_loader_include -v`。
+
+### 8.3.2 领域对象（`miniharness/preset/presets.py`）
 
 ```python
 @dataclass(frozen=True)
@@ -78,7 +106,7 @@ class Preset:
     broken: str | None = None   # 发现期健康标记：缺 preset.json / 清单损坏 → 挂载期拒绝
 ```
 
-### 8.3.2 roster：目录列表即名单
+### 8.3.3 roster：目录列表即名单
 
 ```python
 class PresetRoster:
@@ -114,7 +142,7 @@ class PresetRoster:
 
 `ids()` 按 `order` 排序返回名单；`resolve(preset_id)` 未知 id → `KeyError`（fail loud）。已开 sessions 的 preset 选择在会话开始（首 turn/start）后锁定（`PresetLockedError`）。新增一个 preset = 新建一个目录，roster 代码一行不改。
 
-### 8.3.3 挂载：只在 agent 作用域开视图
+### 8.3.4 挂载：只在 agent 作用域开视图
 
 `Preset.mount` 是把"host 实现"与"会话选择"粘起来的关键，三条不变量逐条执行：
 
@@ -137,7 +165,7 @@ def mount(self, ctx, agent_scope, host_tools) -> ToolRegistry:
 - **host 缺工具 → fail loud**：preset 声明了 host 没有的东西，就是组合坏了，立刻报错；
 - **进程级冲突 → 拒绝挂载**：preset 声明 `provides` 命中 host 已有服务时拒绝——这就是上游"命名进程级全局服务的行在挂载时被拒绝"的 mini 版。
 
-### 8.3.4 与 loop 对接
+### 8.3.5 与 loop 对接
 
 挂载返回的 `ToolRegistry` 视图可直接喂给 `AgentLoop`：
 
@@ -158,14 +186,17 @@ loop = AgentLoop(session, adapter, view, ctx,
 3. **host 缺工具 fail loud**：preset 声明了 host 没有的工具 → `RuntimeError`。
 4. **进程级冲突拒绝挂载**：`provides` 命中 host 已有服务 → `RuntimeError`，而不是覆盖。
 5. **未知 preset fail loud**：`resolve` 未知名 → `KeyError`。
+6. **装载树按依赖激活**：`group: true` 条目成嵌套子树，`!!js` 在各自条目激活期求值；启动末尾未激活条目即 fail loud（`PENDING` 点名缺失的注入服务、`FAILED` 重抛原错误）。
+7. **Include 回写保真**：`include` 目标文件里的 `!!js` 在回写时（`dump_js_expr_yaml`）原样保留、不被求值。
 
-验证：`python -m unittest tests.test_presets -v`。
+验证：`python -m unittest tests.test_presets tests.test_loader_tree tests.test_loader_include -v`。
 
 ## 8.5 检查点
 
 - [ ] 说出组合树三层归属，并解释"进程级服务挂载时被拒绝"为什么比"下个会话撞车"好；
 - [ ] 给 `PresetRoster` 新增一个 preset 目录，`ids()` 自动包含它（一行代码不改）；
 - [ ] 手动构造一个 `provides` 与 host 冲突的 preset，观察挂载被拒绝且 host 服务未被覆盖；
-- [ ] 说出 mini 相对上游的载体简化（YAML→JSON）与语义一致（组合选择语义不变）。
+- [ ] 说出 mini 相对上游的载体简化（YAML→JSON）与语义一致（组合选择语义不变）；
+- [ ] 画一棵含 `include` 与 `group` 的条目树，说出 `EntryTree.resolve('include:candies')` 如何下钻、`PENDING` 条目在启动审计时报什么。
 
 > 下一章：Agent 干预面——宿主怎么唤醒、转向、取消一个运行中的 agent（steer/inject/cancel/whenIdle）。

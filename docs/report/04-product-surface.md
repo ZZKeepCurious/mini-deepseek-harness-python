@@ -113,6 +113,8 @@ web 传输层（`miniharness/web/`，07 章 §7.5）：两信封 RPC（`client-r
 
 YAML 配置 + `!!js` 插值子集（`miniharness/boot/composition.py`）——pyyaml 硬依赖承载 YAML、`process.env.<NAME>` 子集（其它表达式 fail loud，全量 JS eval 有意不复制、仅放开 env 子集为目标）、`.env` 加载（ENOENT 静默/其它 warn/已存在不覆盖、bootstrap-only 物化前整体拒绝、`home=` 层对 HTTP_PROXY 等代理名豁免——HOME_LAYER_PROXY_NAMES 同款）、组合 dump 渲染；启动器选项（`miniharness/cli/main.py`）——`--patch` 可重复、`--dump-config`/`--dump-default-config` 互斥且 boot-free、dump 不接受任务参数、default 不接受 `--patch`，行级 `# ==` 来源注释 + `!!js` 原样未求值 + skipped patch warn 不失败 + 单文档可再加载；会话管理子命令（`miniharness/cli/session_cmds.py`，mini 教学扩展——上游会话管理在 web 表层；以上测试位于 `tests/test_cli.py`（启动器/会话子命令）与 `tests/test_composition.py`（YAML 组合））；CI（`.github/workflows/ci.yml`：unittest + Python 3.10~3.13 matrix × ubuntu/windows + windows-acl 门控 e2e + demo 冒烟）+ integration 标签真实 API 测试（`tests/test_real_api.py`，`MINIHARNESS_INTEGRATION=1` + key 缺一即跳过）。
 
+组合装载树（`miniharness/loader/`，L0，对齐上游 `vendor/loader` + `vendor/include`）——`boot()` 装 `Loader` 服务后挂根 Include 条目，把配置条目导入并激活为 live fiber：`EntryTree`（扁平 store、`entries()` 递归子树、`resolve()`/`import_()`）、`Entry` 生命周期（`update` 三态 / `disabled` 上溯 / `!!js` 激活期求值）、`EntryGroup`/`Group`（组载体）、`Loader` 服务（`internal/config` 树载体字面 + 普通条目 interpolate、`internal/update` 写回 + 重载日志、`internal/plugin` 自销毁回写 disabled）、`Include` 文件背书子树（读/写、`initial` 首写、`apply_entry_patches`、`!!js` 原样回写）；启动期审计 `ACTIVE`/`FAILED`/`PENDING` 三态并点名未激活条目（对齐 `auditStartupEntries`）。测试位于 `tests/test_loader_tree.py` 与 `tests/test_loader_include.py`。
+
 ## 议题 3：Trajectory 轨迹台账
 
 ### 3.1 产品体验
