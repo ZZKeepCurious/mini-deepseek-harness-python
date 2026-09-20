@@ -107,9 +107,11 @@ miniharness/
 │   ├── timeout_policy.py   # TimeoutPolicy 插件（上游 timeout-policy，仅注册超时执行器约定面）
 │   └── repeat_tool_reminder.py # RepeatToolReminder（重复工具调用提醒：预拒绝计数 + 决策折叠）
 ├── identity/               # packages/identity/anonymous-user-id（harness-home 匿名用户 id）
-├── telemetry/             # packages/session/session-stats + packages/llm/token-meter（投影 fold 切片）
+├── telemetry/             # packages/session/{session-stats,session-telemetry,session-telemetry-otel} + packages/llm/token-meter
 │   ├── folds.py           # fold_session_stats / fold_token_usage / derive_turn_token_usage（纯 fold）
-│   └── service.py         # UsageStatsService（ctx.usageStats）+ projection_values 自由函数
+│   ├── service.py         # UsageStatsService（ctx.usageStats）+ projection_values 自由函数
+│   ├── session_telemetry.py # SessionTelemetryBackend + Coordinator（live/on-demand 采集 + 脱敏 waterfall）
+│   └── session_telemetry_otel.py # OTel 后端（LoggerProvider + OTLP 导出；FEEDBACK_ONLY/DISABLED）
 ├── boot/                  # packages/boot
 │   ├── boot.py            # 启动 + patch overlay
 │   ├── composition.py     # YAML 配置 / !!js 插值 / dump 渲染
@@ -244,6 +246,7 @@ miniharness/
 | `goal/`（domain + service + prompt + driver + tools + commands） | `packages/goal/`（goal + goal-round-driver + tool-goal + command-goal） | Typert remote（上游命令由 human UI 表面派发，mini 用 `/goal` 命令承载）；`_prepare_mutation` 前置 `assert_live_agent`（R4 agent registry）；driver 模式事件驱动续跑（同步门面保留 `continue_rounds`）；权威判定近似；三工具 canonical value + render 已与上游一致（简化标注见模块 docstring） |
 | `skills/`（registry + filesystem + tool_skill） | `packages/skill/`（skill + skill-filesystem + tool-skill） | 无 chokidar watch、无 ctx.fs 适配；skill 工具 canonical value + render 已与上游一致（简化标注见模块 docstring） |
 | `telemetry/`（folds + service） | `packages/session/session-stats/src/`（projection）+ `packages/llm/token-meter/src/`（usage-projection + turn-usage） | sessionStats/tokenUsage 投影 fold + derive_turn_token_usage（fail-closed）+ opt-in `UsageStatsService`（ctx.usageStats）；wire `projections.values` 现场折叠等价（不建 registry）；contextPressure 与 telemetry-capture 不承载 |
+| `telemetry/session_telemetry.py` + `telemetry/session_telemetry_otel.py` | `packages/session/session-telemetry` + `session-telemetry-otel` | 会话遥测（L2）：`SessionTelemetryBackend`（`ctx.sessionTelemetry`）seam + `SessionTelemetryCoordinator`（live 订阅 `session/created|event|disposed|flush` + `agent/error` 并清扫在世会话 / on-demand 读 canonical log；每条事件经 `session-telemetry/record` waterfall 脱敏，本包无规则；模块级 handoff cursor 防重放；contain 单步异常）+ OTel 后端（`LoggerProvider`+`BatchLogRecordProcessor`+OTLP/HTTP；`FEEDBACK_ONLY` 按反馈 on-demand 采集、`DISABLED` 仅告警；`sharing` 模式；shutdown 期限）。载体差异：Node `@opentelemetry/sdk-logs` → Python `opentelemetry-sdk`；匿名 `user.id` 经 `identity`；`feedback/committed` 面板与 `Session.fromRestore` 采集路径不承载（mini 无 feedback 提交面板）|
 | `boot/boot.py` | `packages/boot/app-boot` | `mount_root_include`（Loader 服务 + 根 Include 条目，并登记 `_BOOTSTRAP_INCLUDES` WeakMap）+ `boot()`（装载根配置→依序补丁→审计未激活条目 fail loud，ACTIVE/FAILED/PENDING 三态对齐 `auditStartupEntries`）+ `load_optional_patches`（缺文件→空层、坏文件 fail loud）+ `watch_user_patches`（与 app-boot watchUserPatches 一致：经 HMR 服务 watch 用户补丁层→重读 include 非补丁 config + 用户补丁 → 根 Include `entry.update({config})` 事务性重挂 → `loader.await_all()` → 未激活审计）。载体：旧 `{replace|insert}` 叠层补丁在 boot 侧转成 applyEntryPatches 形态（`_overlay_to_entry_patches`，不做表达式求值） |
 | `boot/composition.py` | `packages/boot/app-boot` + `apps/cli/src/args.ts` | `load_dotenv_file` 与上游 readEnvLayer 一致：ENOENT 静默/其它 warn/已存在不覆盖/bootstrap-only 物化前整体拒绝；`home=` 为 harness-home 时 HOME_LAYER_PROXY_NAMES（HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY）豁免、代理名错误文案明说 home `.env` 第二条出路（index.ts:174-177） |
 | `boot/dotenv.py` | `packages/boot/app-boot`（loadEnv） | bootstrap-only 名单/前缀与 BOOTSTRAP_NAMES/PREFIXES 一致；HOME_LAYER_PROXY_NAMES 同款；豁免判定在 load_dotenv_file（同上游 readEnvLayer） |

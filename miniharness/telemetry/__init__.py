@@ -4,5 +4,17 @@
 """
 from .folds import derive_turn_token_usage
 from .service import install_usage_stats, projection_values
+from .session_telemetry import (
+    SessionTelemetryBackend,
+    SessionTelemetryCoordinator,
+    SessionTelemetryRecord,
+)
 
-__all__ = ["derive_turn_token_usage", "install_usage_stats", "projection_values"]
+__all__ = [
+    "SessionTelemetryBackend",
+    "SessionTelemetryCoordinator",
+    "SessionTelemetryRecord",
+    "derive_turn_token_usage",
+    "install_usage_stats",
+    "projection_values",
+]
