@@ -92,6 +92,9 @@ KNOWN_TYPES = frozenset({
     # SessionEventMap，log-only 非 surface、@messageProjection）：targets 指名
     # 当前 user/message 或 tool/result 节点上要永久卸载的输入图片 occurrence
     "image/offload",
+    # 待办清单整体快照（对齐 tool-todo/src/types.ts SessionEventMap）：log-only 非
+    # surface，最新一条 todo/write 胜出（整表替换），turn/start 清空。
+    "todo/write",
 })
 
 # message-投影事件类型（上游 known-event-types.ts MESSAGE_PROJECTION_EVENT_TYPES）：

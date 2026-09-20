@@ -143,6 +143,14 @@ miniharness/
 │   ├── str_replace_editor.py # str_replace_editor 工具
 │   ├── search.py          # glob / grep 工具（stdlib 承载）
 │   └── present.py         # present 工具
+├── todo/                  # packages/todo
+│   └── __init__.py        # to_todo_list / fold_todos / install_todo_tool（模型侧 todo_write）
+├── spill/                 # packages/spill（spill + spill-local + spill-policy）
+│   └── __init__.py        # SpillStore seam + LocalSpillStore + 大结果落盘策略（tools/post-execute）
+├── workspace/             # packages/workspace/workspace（工作区实体 + 注册表服务）
+│   └── __init__.py        # Workspace / WorkspaceService（ctx.workspaces）+ paths 规范化
+├── settings/              # packages/settings（settings + settings-file）
+│   └── __init__.py        # SettingsProvider + SettingsScope + redact_secrets + 文件 provider
 ├── cli/                   # apps/cli
 │   ├── main.py            # launcher 选项（profile / patch / dump）
 │   ├── headless.py        # 一次性任务入口
@@ -255,6 +263,10 @@ miniharness/
 | `telemetry/`（folds + service） | `packages/session/session-stats/src/`（projection）+ `packages/llm/token-meter/src/`（usage-projection + turn-usage） | sessionStats/tokenUsage 投影 fold + derive_turn_token_usage（fail-closed）+ opt-in `UsageStatsService`（ctx.usageStats）；wire `projections.values` 现场折叠等价（不建 registry）；contextPressure 与 telemetry-capture 不承载 |
 | `telemetry/session_telemetry.py` + `telemetry/session_telemetry_otel.py` | `packages/session/session-telemetry` + `session-telemetry-otel` | 会话遥测（L2）：`SessionTelemetryBackend`（`ctx.sessionTelemetry`）seam + `SessionTelemetryCoordinator`（live 订阅 `session/created|event|disposed|flush` + `agent/error` 并清扫在世会话 / on-demand 读 canonical log；每条事件经 `session-telemetry/record` waterfall 脱敏，本包无规则；模块级 handoff cursor 防重放；contain 单步异常）+ OTel 后端（`LoggerProvider`+`BatchLogRecordProcessor`+OTLP/HTTP；`FEEDBACK_ONLY` 按反馈 on-demand 采集、`DISABLED` 仅告警；`sharing` 模式；shutdown 期限）。载体差异：Node `@opentelemetry/sdk-logs` → Python `opentelemetry-sdk`；匿名 `user.id` 经 `identity`；`feedback/committed` 面板与 `Session.fromRestore` 采集路径不承载（mini 无 feedback 提交面板）|
 | `session_query/`（config/extraction/documents/sqlite/service/tool） | `packages/session-query/{session-query,session-query-sqlite,tool-session-query}` | 会话检索（L2）：`extract_event_text`（一方事件语义文本）+ `build_search_documents`（surface 分类 current/shadowed/log-only）+ `SqliteSearchIndex`（FTS5 bm25 + snippet；查询当数据）+ `SessionQuery`（`ctx.sessionQuery`：`search` 跨会话最佳命中 / `search_events` 会话内 / `read_event` 原始窗口 / `trace_event` 替换来源 / `lineage` 世系；活会话经 `ctx.sessions`、持久化经注入 persistence）+ 五模型工具。**载体差异**：上游 tracing 提供方分层与 observation/lease 不承载（现场解析日志）；授权/workpace 作用域（workspace-access + sessionProjections）不承载（无 workspace 实体，M5）；`session-log-export` 由 `web/downloads.py` 承载 |
+| `todo/__init__.py` | `packages/todo` | 待办清单（L2）：`to_todo_list`（工具入参校验，措辞逐字对齐）+ `fold_todos`（`todo/write` 最新胜出、`turn/start` 清空）+ `install_todo_tool`（模型侧 `todo_write`；事件 `todo/write` 为 log-only，已入 `core/session/types.py` KNOWN_TYPES）。**载体差异**：上游投影单元经 `ctx.sessionProjections` 注册，mini 无投影注册表（随 M7），当前以纯函数 fold + 工具结果承载 |
+| `spill/__init__.py` | `packages/spill/{spill,spill-local,spill-policy}` | 大结果落盘（L2）：`SpillStore`（`ctx.spillStore`）seam + `LocalSpillStore`（每会话私有目录、0600 文件、注入式根）+ `install_spill_policy`（`tools/post-execute` prepend：全文本结果超 `maxInlineBytes` 落盘 + head/tail 预览 + 取回提示；best-effort，失败绝不改写成功结果）。**载体差异**：上游策略依赖 `dsh-output-retention`（TextRetainer/`describeOmitted`），mini 内联简化 head/tail 预览 |
+| `workspace/__init__.py` | `packages/workspace/workspace` | 工作区实体（L2）：`fully_qualified_workspace_path`/`default_workspace_title`/`realpath_normalize`（realpath 为唯一性 canon）+ `Workspace`（稳定 uuid、目录路径、标题、有序会话账户：setTitle/attachSession/insertSessionBefore/detachSession/status）+ `WorkspaceService`（`ctx.workspaces`：create/list/get/remove）。**载体差异**：上游经 `ctx.storage.domain`（storage-domain 表 + 双写恢复标记 + 单写链）持久化并做 header-validated 账户过滤/归档集，mini 以 JSON 注册表 + `os.replace` 原子发布承载（无 pendingMutation 恢复标记、无归档集、无 typert RPC 视图） |
+| `settings/__init__.py` | `packages/settings/{settings,settings-file}` | 用户设置（L2）：`SettingsProvider`（`ctx.settings`：命名空间注册 + 解析值 = schema 默认 → composition `base` → 用户文档 section）+ `SettingsScope`（get/watch/update/replace/mutate）+ 写路径 monotonic revision（陈旧写 `SettingsConflictError`/`SETTINGS_CONFLICT`）+ `settings/updated`（深度相等门控）与 `settings/document-updated` + `redact_secrets`（schema 声明 secret 位置只报 set 状态）+ `SettingsFileProvider`（JSON 文档原子写 + watchdog 外部改动重载，provider 源提交）。**载体差异**：上游 schema 用 schemastery（`role('secret')` + `toJSON` 线视图），mini 以纯 dict 默认值 + 显式 secret 路径集承载；typert RPC 描述视图未承载 |
 | `boot/boot.py` | `packages/boot/app-boot` | `mount_root_include`（Loader 服务 + 根 Include 条目，并登记 `_BOOTSTRAP_INCLUDES` WeakMap）+ `boot()`（装载根配置→依序补丁→审计未激活条目 fail loud，ACTIVE/FAILED/PENDING 三态对齐 `auditStartupEntries`）+ `load_optional_patches`（缺文件→空层、坏文件 fail loud）+ `watch_user_patches`（与 app-boot watchUserPatches 一致：经 HMR 服务 watch 用户补丁层→重读 include 非补丁 config + 用户补丁 → 根 Include `entry.update({config})` 事务性重挂 → `loader.await_all()` → 未激活审计）。载体：旧 `{replace|insert}` 叠层补丁在 boot 侧转成 applyEntryPatches 形态（`_overlay_to_entry_patches`，不做表达式求值） |
 | `boot/composition.py` | `packages/boot/app-boot` + `apps/cli/src/args.ts` | `load_dotenv_file` 与上游 readEnvLayer 一致：ENOENT 静默/其它 warn/已存在不覆盖/bootstrap-only 物化前整体拒绝；`home=` 为 harness-home 时 HOME_LAYER_PROXY_NAMES（HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY）豁免、代理名错误文案明说 home `.env` 第二条出路（index.ts:174-177） |
 | `boot/dotenv.py` | `packages/boot/app-boot`（loadEnv） | bootstrap-only 名单/前缀与 BOOTSTRAP_NAMES/PREFIXES 一致；HOME_LAYER_PROXY_NAMES 同款；豁免判定在 load_dotenv_file（同上游 readEnvLayer） |
@@ -320,7 +332,7 @@ miniharness/
 |---|---|---|
 | L0 地基 | `core/session`、`core/scope`、`core/dsh_scope`、`core/schema`、`core/hmr`、`core/home_paths`、`core/tool_timeout`、`loader` | 无（互不依赖；core.scope ↔ core.dsh_scope / core.schema / core.hmr→core.scope / loader→core.scope 经 §3 例外豁免；core.tool_timeout 是超时约定常量叶，被 core.tools 与 guard 两侧共享） |
 | L1 领域 | `llm/*`、`core/tools`、`core/system_prompt`、`core/session_store`、`core/agents`、`attachment`、`ptc_runtime`、`identity`、`storage`、`fs/*`、`boot/*`、`guard` | 仅 L0（fs 单元还注册模型侧工具进 `core.tools`——§3 规则 1 显式例外） |
-| L2 编排 | `core/agent_loop`、`compaction`、`jobs`、`plan`、`commands`、`goal`、`skills`、`telemetry`、`session_query` | L0 + L1 |
+| L2 编排 | `core/agent_loop`、`compaction`、`jobs`、`plan`、`commands`、`goal`、`skills`、`telemetry`、`session_query`、`todo`、`spill`、`workspace`、`settings` | L0 + L1 |
 | L3 应用与入口 | `cli/*`、`protocol/*`、`seams/*`、`preset`、`extensions`、`interaction`、`client`、`mcp`、`web`、`shell` | L0 ~ L2 |
 | 教学层 | `demo.py`、`example_plugins.py` | 任意层，但不得被业务模块依赖 |
 

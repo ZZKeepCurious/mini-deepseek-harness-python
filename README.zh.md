@@ -53,6 +53,10 @@
 | 遥测 / 用量统计（sessionStats + tokenUsage 投影真实化为 `session/follow`/`session/control` 与 Remote snapshot/baseline 的 `projections.values`；`derive_turn_token_usage` per-turn 用量推导，任何缺失边界 fail-closed；opt-in `UsageStatsService` 挂 `ctx.usageStats`） | `packages/session/session-stats` + `packages/llm/token-meter` |
 | 会话遥测上报（`ctx.sessionTelemetry` seam + 采集协调器：live/on-demand、`session-telemetry/record` 脱敏 waterfall、`agent/error` 运营记录、handoff 游标；OTel 后端 `FEEDBACK_ONLY`/`DISABLED`，OTLP/HTTP 导出） | `packages/session/session-telemetry` + `session-telemetry-otel` |
 | 会话检索（`ctx.sessionQuery` + SQLite FTS5 索引：跨会话/会话内全文检索、原始事件窗口、替换/来源追溯、世系；模型侧 `session_search`/`session_event_search`/`session_event_read`/`session_event_trace`/`session_trace` 五工具；会话日志导出见 `web/downloads.py`） | `packages/session-query/{session-query,session-query-sqlite,tool-session-query}` |
+| 待办清单（`to_todo_list` 入参校验 + `fold_todos` 最新写胜出折叠 + 模型侧 `todo_write` 工具；`todo/write` 为 log-only 事件） | `packages/todo` |
+| 大结果落盘（`ctx.spillStore` seam + 每会话私有目录本地存储 + `tools/post-execute` 策略：全文本超限结果落盘并给 head/tail 预览与取回提示） | `packages/spill/{spill,spill-local,spill-policy}` |
+| 工作区（`ctx.workspaces` 注册表：realpath canon 路径身份、稳定 uuid、有序会话账户 attach/insertBefore/detach、实时目录状态） | `packages/workspace/workspace` |
+| 用户设置（`ctx.settings` provider：命名空间注册、解析值 = schema 默认 → composition base → 用户 section、revision 守卫写与 `SETTINGS_CONFLICT`、secret 脱敏、文件 provider + watchdog 重载） | `packages/settings/{settings,settings-file}` |
 | 能力扩展口（沙箱 / 凭据 / 授权 / 子 agent；详见下文） | capability seams 文档 |
 | 可继续子代理（durable 子会话、异步结算、生命周期事件、控制工具；详见下文） | `packages/subagent` |
 | Agent Teams（roster + mailbox + 共享任务 DAG；详见下文） | `packages/experimental/agent-team` + `tool-agent-team` |
