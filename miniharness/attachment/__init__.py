@@ -83,6 +83,6 @@ __all__ = [
     "save_file_stream_verbatim",
     "save_file_verbatim",
     "stored_file_path",
+    "SubagentAttachmentInvalidError",
     "SubagentFileUnsupportedError",
-    "SubagentImageUnsupportedError",
 ]

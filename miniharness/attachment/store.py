@@ -59,6 +59,7 @@ from .types import (
     AttachmentId,
     Dimensions,
     EncodedFileAttachment,
+    EncodedImageAttachment,
     FileAttachmentRef,
     ImageAttachmentLimits,
     ImageAttachmentRef,

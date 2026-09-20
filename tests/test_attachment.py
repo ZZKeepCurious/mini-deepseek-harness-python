@@ -209,32 +209,66 @@ class TestAdmitEncodedImages(unittest.TestCase):
 
 
 class TestAdmitPromptContent(unittest.TestCase):
-    """子代理 prompt 内容图像拒绝门（align 上游 subagent/control.ts admitPromptContent）。"""
+    """子代理 prompt 内容受理（align 上游 subagent/index.ts:440-448 + rejectPrompt）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="mini-attachment-admit-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(self._tmp, ignore_errors=True))
+        self.store = LocalAttachmentStore(root=self._tmp)
+
+    def _image_part(self, data=None):
+        raw = base64.b64encode(data if data is not None else _png_bytes(2, 2)).decode()
+        return {"type": "image", "mediaType": "image/png", "data": raw}
 
     def test_non_image_blocks_pass_through_in_order(self):
         from miniharness.attachment import admit_prompt_content
         blocks = [{"type": "text", "text": "a"}, {"type": "tool-result", "content": "x"}]
-        self.assertEqual(admit_prompt_content("child-1", blocks), blocks)
+        self.assertEqual(
+            admit_prompt_content("child-1", blocks, attachments=self.store), blocks)
 
-    def test_image_block_refused(self):
-        from miniharness.attachment import SubagentImageUnsupportedError, admit_prompt_content
-        with self.assertRaises(SubagentImageUnsupportedError) as cm:
-            admit_prompt_content("child-1", [{"type": "text", "text": "a"},
-                                             {"type": "image", "image": "base64..."}])
-        # alpha.1：码统一 subagent/attachment-invalid
+    def test_image_admitted_to_durable_ref(self):
+        from miniharness.attachment import admit_prompt_content
+        blocks = [{"type": "text", "text": "a"}, self._image_part()]
+        admitted = admit_prompt_content("child-1", blocks, attachments=self.store)
+        self.assertEqual(admitted[0], {"type": "text", "text": "a"})
+        self.assertEqual(admitted[1]["type"], "image")
+        self.assertIn("attachmentId", admitted[1]["attachment"])
+
+    def test_image_requires_image_capable_child_model(self):
+        from miniharness.attachment import SubagentAttachmentInvalidError, admit_prompt_content
+        with self.assertRaises(SubagentAttachmentInvalidError) as cm:
+            admit_prompt_content("child-1", [self._image_part()],
+                                 attachments=self.store, model_supports_images=False)
         self.assertEqual(cm.exception.code, "subagent/attachment-invalid")
+        self.assertEqual(cm.exception.reason, "MODEL_DOES_NOT_SUPPORT_IMAGES")
         self.assertEqual(cm.exception.child_session_id, "child-1")
+
+    def test_image_without_store_refused(self):
+        from miniharness.attachment import SubagentAttachmentInvalidError, admit_prompt_content
+        with self.assertRaises(SubagentAttachmentInvalidError) as cm:
+            admit_prompt_content("child-1", [self._image_part()], attachments=None)
+        self.assertEqual(cm.exception.code, "subagent/attachment-invalid")
+        self.assertIsNone(cm.exception.reason)
+
+    def test_image_admission_failure_keeps_reason_code(self):
+        from miniharness.attachment import SubagentAttachmentInvalidError, admit_prompt_content
+        bad = {"type": "image", "mediaType": "image/png", "data": "!!not-base64!!"}
+        with self.assertRaises(SubagentAttachmentInvalidError) as cm:
+            admit_prompt_content("child-1", [bad], attachments=self.store)
+        self.assertEqual(cm.exception.code, "subagent/attachment-invalid")
+        self.assertEqual(cm.exception.reason, INVALID_IMAGE_BASE64)
 
     def test_file_part_refused(self):
         from miniharness.attachment import SubagentFileUnsupportedError, admit_prompt_content
         with self.assertRaises(SubagentFileUnsupportedError) as cm:
             admit_prompt_content("child-1", [{"type": "text", "text": "a"},
-                                             {"type": "file", "receiptId": "r1"}])
+                                             {"type": "file", "receiptId": "r1"}],
+                                 attachments=self.store)
         self.assertEqual(cm.exception.code, "subagent/attachment-invalid")
         self.assertEqual(cm.exception.reason, "SUBAGENT_FILE_UNSUPPORTED")
         self.assertEqual(cm.exception.child_session_id, "child-1")
 
-    def test_text_only_str_trivially_accepted(self):
+    def test_text_only_empty_accepted_without_store(self):
         from miniharness.attachment import admit_prompt_content
         self.assertEqual(admit_prompt_content("c", []), [])
 

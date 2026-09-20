@@ -345,6 +345,63 @@ class TestContinuationManager(unittest.TestCase):
         self.assertEqual(self.parent.last_response(), "父响应")
         self.assertEqual(mgr.state_of(cid)["kind"], "idle")
 
+    def test_send_message_admits_image_prompt_to_durable_ref(self):
+        import base64
+        import io
+
+        from PIL import Image
+
+        from miniharness.attachment import LocalAttachmentStore
+
+        store = LocalAttachmentStore(root=self.tmp.name)
+        self.ctx.provide("attachments", store)
+        buf = io.BytesIO()
+        Image.new("RGB", (2, 2)).save(buf, format="PNG")
+        encoded = base64.b64encode(buf.getvalue()).decode()
+        mgr = self._manager()
+        cid = mgr.start_continuable(label="研")
+        message = create_message("user", [
+            {"type": "image", "mediaType": "image/png", "data": encoded},
+            text_block("看这张图"),
+        ], {"kind": "user"})
+        mgr.send_message(cid, message)
+        blocks = [b for e in self.persistence.inspect(cid)["events"]
+                  if e["type"] == "user/message"
+                  for b in e["data"]["content"]]
+        image = next(b for b in blocks if b["type"] == "image")
+        self.assertIn("attachmentId", image["attachment"])
+
+    def test_send_message_refuses_image_for_text_only_child_model(self):
+        import base64
+        import io
+
+        from PIL import Image
+
+        from miniharness.attachment import LocalAttachmentStore, SubagentAttachmentInvalidError
+
+        store = LocalAttachmentStore(root=self.tmp.name)
+        self.ctx.provide("attachments", store)
+        buf = io.BytesIO()
+        Image.new("RGB", (2, 2)).save(buf, format="PNG")
+        encoded = base64.b64encode(buf.getvalue()).decode()
+
+        class _TextOnly(FakeLlmAdapter):
+            def resolve_model_info(self):
+                return {"provider": "fake", "model": "text-only",
+                        "input_modalities": ["text"]}
+
+        mgr = SubagentContinuationManager(
+            self.parent, self.persistence,
+            adapter_factory=lambda provider, model, effort=None: _TextOnly(final_text="x"))
+        cid = mgr.start_continuable(label="研")
+        message = create_message("user", [
+            {"type": "image", "mediaType": "image/png", "data": encoded},
+        ], {"kind": "user"})
+        with self.assertRaises(SubagentAttachmentInvalidError) as cm:
+            mgr.send_message(cid, message)
+        self.assertEqual(cm.exception.code, "subagent/attachment-invalid")
+        self.assertEqual(cm.exception.reason, "MODEL_DOES_NOT_SUPPORT_IMAGES")
+
     def test_child_events_persisted_and_cold_resume(self):
         mgr = self._manager()
         cid = mgr.start_continuable(label="研")

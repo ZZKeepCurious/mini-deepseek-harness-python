@@ -1,11 +1,12 @@
-"""base64 上传的 wire 形态受理 + 子代理 prompt 内容的图像拒绝门。
+"""base64 上传的 wire 形态受理 + 子代理 prompt 内容的图像受理门。
 
 对应 dsh 真实源码：packages/attachment/attachment/src/admission.ts（alpha.1
 已核实）。接受浏览器上传的每个 RPC 端点的共享入口；
-`admit_prompt_content`（模块级，图像拒绝门）对齐上游
-`packages/subagent/subagent/src/control.ts:65-81` 历史 `admitPromptContent`
-——alpha.1 起该门移为 AttachmentStore 实例方法（file 部分穿透），见
-store.py；本模块保留 mini 子代理 seam 用的 refusal-only 形态。
+`admit_prompt_content`（模块级）对齐上游子代理受理路径
+`packages/subagent/subagent/src/index.ts:440-448`：文本原样穿透、图片经
+AttachmentStore 受理为 durable 引用（`AttachmentStore.admitPromptContent`，
+见 store.py），受理失败经 `rejectPrompt`（control.ts:107-112）折为
+`subagent/attachment-invalid`（reason = 底层 code）。
 """
 from __future__ import annotations
 
@@ -22,20 +23,20 @@ from .types import (
 )
 
 __all__ = ["admit_encoded_images", "admit_encoded_file", "decode_base64",
-           "admit_prompt_content", "SubagentImageUnsupportedError",
+           "admit_prompt_content", "SubagentAttachmentInvalidError",
            "SubagentFileUnsupportedError"]
 
 
-class SubagentImageUnsupportedError(AttachmentError):
-    """子代理 continuation 不接受图片（alpha.1：码统一 `subagent/attachment-invalid`）。"""
+class SubagentAttachmentInvalidError(AttachmentError):
+    """子代理 prompt 受理失败：上游 `rejectPrompt` 把 `AttachmentError` 与
+    `SubagentError` 统一折为 `subagent/attachment-invalid`，`reason` 保留底层
+    稳定 code（`control.ts:107-112`）。"""
 
-    def __init__(self, child_session_id: str) -> None:
-        super().__init__(
-            "subagent continuation does not accept images",
-            "subagent/attachment-invalid",
-        )
+    def __init__(self, child_session_id: str, message: str,
+                 reason: str | None = None) -> None:
+        super().__init__(message, "subagent/attachment-invalid")
         self.child_session_id = child_session_id
-        self.reason = None
+        self.reason = reason
 
 
 class SubagentFileUnsupportedError(AttachmentError):
@@ -52,27 +53,43 @@ class SubagentFileUnsupportedError(AttachmentError):
         self.reason = "SUBAGENT_FILE_UNSUPPORTED"
 
 
-def admit_prompt_content(child_session_id: str, content: list) -> list:
-    """子代理 prompt 内容受理：除图片/文件外的所有内容块原样按序通过，
-    遇到任何 `image` 块即抛 `SubagentImageUnsupportedError`、任何 `file`
-    部分即抛 `SubagentFileUnsupportedError`（refusal-only，绝不上报任何
-    attachment store，也绝不静默剥离）。
+def admit_prompt_content(child_session_id: str, content: list, *,
+                         attachments: object | None = None,
+                         model_supports_images: bool = True) -> list:
+    """子代理 prompt 内容受理（对齐上游 subagent/index.ts:440-448 + rejectPrompt）。
 
-    对齐上游：图像受理已移为 AttachmentStore 实例方法（见 store.py，
-    文件部分穿透）；子代理边界对文件一律拒收（上游 client 侧
-    session.ts:256-264 路由前拒绝），图片经 store 受理失败同样折
-    `subagent/attachment-invalid`（control.ts:110-112）。
+    - `file` 部分：宿主边界拒收（上游浏览器客户端在路由前拒绝，
+      session.ts:256-264，reason=`SUBAGENT_FILE_UNSUPPORTED`）；
+    - 无 `image` 部分：文本与其它内容块原样按序通过，不发生任何存储操作；
+    - 有 `image` 部分：子模型须支持图片输入（否则
+      reason=`MODEL_DOES_NOT_SUPPORT_IMAGES`），再经 attachment store 把每张
+      上传图片受理为 durable 引用（`AttachmentStore.admit_prompt_content`）；
+      store 缺席或受理失败折 `SubagentAttachmentInvalidError`
+      （reason = 底层稳定 code）。
     """
-    out = []
-    for block in content:
-        if isinstance(block, dict):
-            btype = block.get("type")
-            if btype == "image":
-                raise SubagentImageUnsupportedError(child_session_id)
-            if btype == "file":
-                raise SubagentFileUnsupportedError(child_session_id)
-        out.append(block)
-    return out
+    blocks = [block for block in content if isinstance(block, dict)]
+    for block in blocks:
+        if block.get("type") == "file":
+            raise SubagentFileUnsupportedError(child_session_id)
+    if all(block.get("type") != "image" for block in blocks):
+        return list(content)
+    if not model_supports_images:
+        raise SubagentAttachmentInvalidError(
+            child_session_id,
+            "subagent model does not accept image input",
+            "MODEL_DOES_NOT_SUPPORT_IMAGES",
+        )
+    if attachments is None:
+        raise SubagentAttachmentInvalidError(
+            child_session_id,
+            "subagent image prompt requires an attachment store",
+            None,
+        )
+    try:
+        return attachments.admit_prompt_content(content)
+    except AttachmentError as error:
+        raise SubagentAttachmentInvalidError(
+            child_session_id, error.message, error.code) from error
 
 
 def decode_base64(data: str) -> bytes:

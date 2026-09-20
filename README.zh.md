@@ -58,7 +58,7 @@
 | 工作区（`ctx.workspaces` 注册表：realpath canon 路径身份、稳定 uuid、有序会话账户 attach/insertBefore/detach、实时目录状态） | `packages/workspace/workspace` |
 | 用户设置（`ctx.settings` provider：命名空间注册、解析值 = schema 默认 → composition base → 用户 section、revision 守卫写与 `SETTINGS_CONFLICT`、secret 脱敏、文件 provider + watchdog 重载） | `packages/settings/{settings,settings-file}` |
 | 能力扩展口（沙箱 / 凭据 / 授权 / 子 agent；详见下文） | capability seams 文档 |
-| 可继续子代理（durable 子会话、异步结算、生命周期事件、控制工具；详见下文） | `packages/subagent` |
+| 可继续子代理（durable 子会话、异步结算、生命周期事件、控制工具、图片 prompt 经 attachment store 受理；详见下文） | `packages/subagent` |
 | Agent Teams（roster + mailbox + 共享任务 DAG；详见下文） | `packages/experimental/agent-team` + `tool-agent-team` |
 | MCP 客户端（stdio / streamable-http、重连、工具归属注册；详见下文） | `packages/mcp/mcp-client` + `mcp-resources` |
 | 预设 / Agent 干预 / 轨迹折叠 / 动态插件 / 审批 | `packages/preset` + `core/agent` + `interaction` |

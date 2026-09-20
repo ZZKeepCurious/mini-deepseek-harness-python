@@ -61,7 +61,7 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 | Session store service (`ctx.sessions`: create/prepare/enter/announce lifecycle, fork with 5 error codes, flush checkpoint, `session/created|disposed|event|flush` events) | `packages/core/session` (SessionStore) |
 | Storage hub (`ctx.storage`: named backend registry + mountable storage forms, schema-validated KV domains with single-writer chain and post-persist `domain/changed` events, JSON medium as a single-unit document or per-record documents with atomic rewrite) | `packages/storage` (storage + storage-domain + storage-json) |
 | Capability seams (sandbox / credentials / authorization / subagent; see details below) | capability seams docs |
-| Continuable subagents (durable child sessions, async settlement, lifecycle events, control tools; see details below) | `packages/subagent` |
+| Continuable subagents (durable child sessions, async settlement, lifecycle events, control tools, image prompt admission through the attachment store; see details below) | `packages/subagent` |
 | Agent Teams (roster + mailbox + shared task DAG; see details below) | `packages/experimental/agent-team` + `tool-agent-team` |
 | MCP client (stdio / streamable-http, reconnect, tool ownership registration; see details below) | `packages/mcp/mcp-client` + `mcp-resources` |
 | Presets / agent intervention / trajectory / dynamic plugins / approval | `packages/preset` + `core/agent` + `interaction` |

@@ -717,8 +717,10 @@ class SubagentContinuationManager:
         send_message_async（内联泵保证确定性结算）。
         @param parent - 委托父（授权与所有权主体）；缺省顶层父。嵌套续跑时
             为发起委托的子代理 loop（其激活将 owned_children 记账孙代）。
-        alpha.1：dict 消息经 admit_prompt_content 图像/文件拒绝门
-        （subagent/attachment-invalid；文件 reason=SUBAGENT_FILE_UNSUPPORTED）。
+        alpha.1：dict 消息经 admit_prompt_content 受理——文本穿透、图片经
+        attachment store 铸 durable 引用（子模型须支持图片输入），文件在宿主
+        边界拒收（reason=SUBAGENT_FILE_UNSUPPORTED）；失败折
+        subagent/attachment-invalid。
         """
         parent = parent or self.parent
         self.assert_admitting(parent)
@@ -736,7 +738,8 @@ class SubagentContinuationManager:
             {"kind": "coordinator", "form": "relay", "senderSessionId": parent.id},
         )
         if isinstance(message, dict):
-            admit_prompt_content(child_id, msg.get("content") or [])
+            msg["content"] = self._admit_child_prompt(
+                parent, activation, child_id, msg.get("content") or [])
         if parent._driver is not None:
             parent._loop.call_soon_threadsafe(self._submit_on_loop, child_id, activation, msg, parent)
         else:
@@ -769,7 +772,8 @@ class SubagentContinuationManager:
             {"kind": "coordinator", "form": "relay", "senderSessionId": parent.id},
         )
         if isinstance(message, dict):
-            admit_prompt_content(child_id, msg.get("content") or [])
+            msg["content"] = self._admit_child_prompt(
+                parent, activation, child_id, msg.get("content") or [])
         if parent._driver is not None:
             parent._loop.call_soon_threadsafe(self._submit_on_loop, child_id, activation, msg, parent)
         else:
@@ -780,6 +784,24 @@ class SubagentContinuationManager:
             else:
                 await self._submit_async(child_id, activation, msg, parent)
         return msg["id"]
+
+    def _admit_child_prompt(self, parent: AgentLoop, activation: dict,
+                            child_id: str, content: list) -> list:
+        """子代理 prompt 内容受理（上游 subagent/index.ts:440-448 + rejectPrompt）。
+
+        文本穿透；图片经父作用域 attachment store 受理为 durable 引用，且子
+        适配器须声明 `image` 输入模态（否则 reason=MODEL_DOES_NOT_SUPPORT_IMAGES）；
+        文件在宿主边界拒收。受理失败折 `subagent/attachment-invalid`
+        （reason = 底层稳定 code）。返回受理后的内容块。
+        """
+        attachments = parent.ctx.get("attachments") if parent.ctx is not None else None
+        info = activation["loop"].adapter.resolve_model_info() or {}
+        modalities = info.get("input_modalities") or []
+        return admit_prompt_content(
+            child_id, content,
+            attachments=attachments,
+            model_supports_images="image" in modalities,
+        )
 
     # ---------- 投递记账原语（上游 submit / admitWaking / wake / 所有权） ----------
 
