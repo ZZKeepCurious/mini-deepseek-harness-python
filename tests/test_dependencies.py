@@ -74,6 +74,7 @@ LAYER_UNITS = [
     ("skills", 2),
     ("telemetry", 2),
     ("schedule", 2),
+    ("session_query", 2),
     ("cli", 3),
     ("protocol", 3),
     ("seams", 3),

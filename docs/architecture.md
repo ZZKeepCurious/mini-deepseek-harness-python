@@ -112,6 +112,13 @@ miniharness/
 │   ├── service.py         # UsageStatsService（ctx.usageStats）+ projection_values 自由函数
 │   ├── session_telemetry.py # SessionTelemetryBackend + Coordinator（live/on-demand 采集 + 脱敏 waterfall）
 │   └── session_telemetry_otel.py # OTel 后端（LoggerProvider + OTLP 导出；FEEDBACK_ONLY/DISABLED）
+├── session_query/         # packages/session-query（session-query + session-query-sqlite + tool-session-query）
+│   ├── config.py          # 配置常量 + SessionQueryError 错误码闭集
+│   ├── extraction.py      # 一方事件语义文本抽取
+│   ├── documents.py       # 事件记录 + 语义文档投影（surface 分类）
+│   ├── sqlite.py          # FTS5 检索索引（bm25 + snippet）
+│   ├── service.py         # SessionQuery（ctx.sessionQuery：search/search_events/read_event/trace_event/lineage）
+│   └── tool.py            # 模型侧五工具（session_search/event_search/trace/event_trace/event_read）
 ├── boot/                  # packages/boot
 │   ├── boot.py            # 启动 + patch overlay
 │   ├── composition.py     # YAML 配置 / !!js 插值 / dump 渲染
@@ -247,6 +254,7 @@ miniharness/
 | `skills/`（registry + filesystem + tool_skill） | `packages/skill/`（skill + skill-filesystem + tool-skill） | 无 chokidar watch、无 ctx.fs 适配；skill 工具 canonical value + render 已与上游一致（简化标注见模块 docstring） |
 | `telemetry/`（folds + service） | `packages/session/session-stats/src/`（projection）+ `packages/llm/token-meter/src/`（usage-projection + turn-usage） | sessionStats/tokenUsage 投影 fold + derive_turn_token_usage（fail-closed）+ opt-in `UsageStatsService`（ctx.usageStats）；wire `projections.values` 现场折叠等价（不建 registry）；contextPressure 与 telemetry-capture 不承载 |
 | `telemetry/session_telemetry.py` + `telemetry/session_telemetry_otel.py` | `packages/session/session-telemetry` + `session-telemetry-otel` | 会话遥测（L2）：`SessionTelemetryBackend`（`ctx.sessionTelemetry`）seam + `SessionTelemetryCoordinator`（live 订阅 `session/created|event|disposed|flush` + `agent/error` 并清扫在世会话 / on-demand 读 canonical log；每条事件经 `session-telemetry/record` waterfall 脱敏，本包无规则；模块级 handoff cursor 防重放；contain 单步异常）+ OTel 后端（`LoggerProvider`+`BatchLogRecordProcessor`+OTLP/HTTP；`FEEDBACK_ONLY` 按反馈 on-demand 采集、`DISABLED` 仅告警；`sharing` 模式；shutdown 期限）。载体差异：Node `@opentelemetry/sdk-logs` → Python `opentelemetry-sdk`；匿名 `user.id` 经 `identity`；`feedback/committed` 面板与 `Session.fromRestore` 采集路径不承载（mini 无 feedback 提交面板）|
+| `session_query/`（config/extraction/documents/sqlite/service/tool） | `packages/session-query/{session-query,session-query-sqlite,tool-session-query}` | 会话检索（L2）：`extract_event_text`（一方事件语义文本）+ `build_search_documents`（surface 分类 current/shadowed/log-only）+ `SqliteSearchIndex`（FTS5 bm25 + snippet；查询当数据）+ `SessionQuery`（`ctx.sessionQuery`：`search` 跨会话最佳命中 / `search_events` 会话内 / `read_event` 原始窗口 / `trace_event` 替换来源 / `lineage` 世系；活会话经 `ctx.sessions`、持久化经注入 persistence）+ 五模型工具。**载体差异**：上游 tracing 提供方分层与 observation/lease 不承载（现场解析日志）；授权/workpace 作用域（workspace-access + sessionProjections）不承载（无 workspace 实体，M5）；`session-log-export` 由 `web/downloads.py` 承载 |
 | `boot/boot.py` | `packages/boot/app-boot` | `mount_root_include`（Loader 服务 + 根 Include 条目，并登记 `_BOOTSTRAP_INCLUDES` WeakMap）+ `boot()`（装载根配置→依序补丁→审计未激活条目 fail loud，ACTIVE/FAILED/PENDING 三态对齐 `auditStartupEntries`）+ `load_optional_patches`（缺文件→空层、坏文件 fail loud）+ `watch_user_patches`（与 app-boot watchUserPatches 一致：经 HMR 服务 watch 用户补丁层→重读 include 非补丁 config + 用户补丁 → 根 Include `entry.update({config})` 事务性重挂 → `loader.await_all()` → 未激活审计）。载体：旧 `{replace|insert}` 叠层补丁在 boot 侧转成 applyEntryPatches 形态（`_overlay_to_entry_patches`，不做表达式求值） |
 | `boot/composition.py` | `packages/boot/app-boot` + `apps/cli/src/args.ts` | `load_dotenv_file` 与上游 readEnvLayer 一致：ENOENT 静默/其它 warn/已存在不覆盖/bootstrap-only 物化前整体拒绝；`home=` 为 harness-home 时 HOME_LAYER_PROXY_NAMES（HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY）豁免、代理名错误文案明说 home `.env` 第二条出路（index.ts:174-177） |
 | `boot/dotenv.py` | `packages/boot/app-boot`（loadEnv） | bootstrap-only 名单/前缀与 BOOTSTRAP_NAMES/PREFIXES 一致；HOME_LAYER_PROXY_NAMES 同款；豁免判定在 load_dotenv_file（同上游 readEnvLayer） |
@@ -312,7 +320,7 @@ miniharness/
 |---|---|---|
 | L0 地基 | `core/session`、`core/scope`、`core/dsh_scope`、`core/schema`、`core/hmr`、`core/home_paths`、`core/tool_timeout`、`loader` | 无（互不依赖；core.scope ↔ core.dsh_scope / core.schema / core.hmr→core.scope / loader→core.scope 经 §3 例外豁免；core.tool_timeout 是超时约定常量叶，被 core.tools 与 guard 两侧共享） |
 | L1 领域 | `llm/*`、`core/tools`、`core/system_prompt`、`core/session_store`、`core/agents`、`attachment`、`ptc_runtime`、`identity`、`storage`、`fs/*`、`boot/*`、`guard` | 仅 L0（fs 单元还注册模型侧工具进 `core.tools`——§3 规则 1 显式例外） |
-| L2 编排 | `core/agent_loop`、`compaction`、`jobs`、`plan`、`commands`、`goal`、`skills`、`telemetry` | L0 + L1 |
+| L2 编排 | `core/agent_loop`、`compaction`、`jobs`、`plan`、`commands`、`goal`、`skills`、`telemetry`、`session_query` | L0 + L1 |
 | L3 应用与入口 | `cli/*`、`protocol/*`、`seams/*`、`preset`、`extensions`、`interaction`、`client`、`mcp`、`web`、`shell` | L0 ~ L2 |
 | 教学层 | `demo.py`、`example_plugins.py` | 任意层，但不得被业务模块依赖 |
 
