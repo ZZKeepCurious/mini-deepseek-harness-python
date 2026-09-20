@@ -77,6 +77,7 @@ LAYER_UNITS = [
     ("session_query", 2),
     ("todo", 2),
     ("spill", 2),
+    ("session_projection", 1),
     ("workspace", 2),
     ("settings", 2),
     ("cli", 3),

@@ -209,7 +209,9 @@ class _FollowSubscription(_Subscription):
                     "cursor": cursor, "records": api._page_records(page),
                     "hasMore": has_more,
                     "projections": {"asOfSeq": cursor,
-                                    "values": projection_values(session, api.ctx.get("usageStats"))}})
+                                    "values": projection_values(
+                                        session, api.ctx.get("usageStats"),
+                                        api.ctx.get("sessionProjections"))}})
         state: dict[str, Any] = {"next_seq": cursor + 1, "pending": []}
 
         def on_event(payload: dict) -> None:
@@ -274,7 +276,9 @@ class _ControlSubscription(_Subscription):
             baseline["jobs"][session.session_id] = []
             baseline["projections"][session.session_id] = {
                 "asOfSeq": session.seq - 1,
-                "values": projection_values(session, api.ctx.get("usageStats"))}
+                "values": projection_values(
+                    session, api.ctx.get("usageStats"),
+                    api.ctx.get("sessionProjections"))}
         self._push({"type": "baseline", "value": baseline})
 
         def on_event(payload: dict) -> None:

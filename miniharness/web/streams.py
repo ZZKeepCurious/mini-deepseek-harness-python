@@ -156,7 +156,9 @@ class GatewayStreams:
         yield {"type": "snapshot", "header": self.api._wire_header(session),
                "cursor": cursor, "records": records, "hasMore": has_more,
                "projections": {"asOfSeq": cursor,
-                               "values": projection_values(session, self.ctx.get("usageStats"))}}
+                               "values": projection_values(
+                                   session, self.ctx.get("usageStats"),
+                                   self.ctx.get("sessionProjections"))}}
         subscribed = cursor + 1
         while True:
             events = await _poll_new_events(self.api, session_id, subscribed, signal)
@@ -209,13 +211,14 @@ class GatewayStreams:
         jobs: dict[str, list] = {}
         projections: dict[str, dict] = {}
         stats = self.ctx.get("usageStats")
+        registry = self.ctx.get("sessionProjections")
         for session in self.api.store.list():
             session_id = session.session_id
             queues[session_id] = self._queue_view(session_id)
             jobs[session_id] = self._jobs_view(session_id)
             projections[session_id] = {
                 "asOfSeq": session.seq - 1,
-                "values": projection_values(session, stats),
+                "values": projection_values(session, stats, registry),
             }
         return {"queues": queues, "jobs": jobs, "projections": projections}
 

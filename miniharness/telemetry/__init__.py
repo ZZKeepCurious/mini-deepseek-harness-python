@@ -3,7 +3,7 @@
 顶层导入 `install_usage_stats` / `projection_values` / `derive_turn_token_usage`。
 """
 from .folds import derive_turn_token_usage
-from .service import install_usage_stats, projection_values
+from .service import install_usage_stats, projection_values, register_telemetry_projections
 from .session_telemetry import (
     SessionTelemetryBackend,
     SessionTelemetryCoordinator,
@@ -17,4 +17,5 @@ __all__ = [
     "derive_turn_token_usage",
     "install_usage_stats",
     "projection_values",
+    "register_telemetry_projections",
 ]

@@ -21,16 +21,35 @@ from __future__ import annotations
 from typing import Any
 
 from ..core.scope import Context, Service
-from .folds import fold_session_stats, fold_token_usage, session_stats_view, token_usage_view
+from .folds import (
+    fold_session_stats,
+    fold_token_usage,
+    init_session_stats,
+    init_token_usage,
+    session_stats_view,
+    token_usage_view,
+)
 
-__all__ = ["UsageStatsService", "install_usage_stats", "projection_values"]
+__all__ = [
+    "UsageStatsService",
+    "install_usage_stats",
+    "projection_values",
+    "register_telemetry_projections",
+]
 
 
-def projection_values(session, service: "UsageStatsService | None" = None) -> dict:
+def projection_values(session, service: "UsageStatsService | None" = None,
+                      registry=None) -> dict:
     """会话的投影视图 `{sessionStats, tokenUsage}`（wire values 块本体）。
 
-    有服务用服务的镜像状态（增量已折叠），否则现场从 session.events 全量折叠。
+    有 `ctx.sessionProjections` 且两个单元已注册 → 读注册表快照（M7 契约路径）；
+    否则有服务用服务的镜像状态（增量已折叠），再否现场从 session.events 全量折叠。
     """
+    if registry is not None:
+        snapshot = registry.snapshot(session, ["sessionStats", "tokenUsage"])
+        values = snapshot["values"]
+        if "sessionStats" in values and "tokenUsage" in values:
+            return values
     if service is not None:
         return service._views(session)
     state = {"session_stats": None, "token_usage": None, "consumedEvents": 0}
@@ -39,6 +58,46 @@ def projection_values(session, service: "UsageStatsService | None" = None) -> di
         "sessionStats": session_stats_view(_ensure_stats(state["session_stats"])),
         "tokenUsage": token_usage_view(_ensure_usage(state["token_usage"])),
     }
+
+
+def register_telemetry_projections(registry) -> list:
+    """把 sessionStats/tokenUsage 注册为 sessionProjections 单元（M7）。
+
+    返回注销 disposer 列表；fold 为纯函数且未命中事件返回同一状态引用，
+    符合注册表的 `is` 变更门。
+    """
+    from ..session_projection import ProjectionDefinition
+
+    def init_stats(header, inherited_event_count):
+        return init_session_stats()
+
+    def apply_stats(state, event):
+        return fold_session_stats(state, event)
+
+    def view_stats(state):
+        return session_stats_view(state)
+
+    def init_usage(header, inherited_event_count):
+        return init_token_usage()
+
+    def apply_usage(state, event):
+        return fold_token_usage(state, event)
+
+    def view_usage(state):
+        return token_usage_view(state)
+
+    return [
+        registry.register(ProjectionDefinition(
+            "sessionStats", init=init_stats, apply=apply_stats,
+            view=view_stats, state_version=SESSION_STATS_STATE_VERSION)),
+        registry.register(ProjectionDefinition(
+            "tokenUsage", init=init_usage, apply=apply_usage,
+            view=view_usage, state_version=TOKEN_USAGE_STATE_VERSION)),
+    ]
+
+
+SESSION_STATS_STATE_VERSION = 1
+TOKEN_USAGE_STATE_VERSION = 1
 
 
 def _ensure_usage(value: Any) -> Any:
@@ -69,6 +128,9 @@ class UsageStatsService(Service):
         self._disposers.append(ctx.on("session/disposed", self._on_session_disposed))
 
     def dispose(self) -> None:
+        for disposer in getattr(self, "_projection_disposers", []):
+            disposer()
+        self._projection_disposers = []
         for disposer in self._disposers:
             disposer()
         self._disposers.clear()
@@ -138,8 +200,16 @@ class UsageStatsService(Service):
 
 
 def install_usage_stats(ctx: Context) -> UsageStatsService:
-    """装配 `ctx.usageStats`（opt-in，重复装返回既有实例；模式同 install_*）。"""
+    """装配 `ctx.usageStats`（opt-in，重复装返回既有实例；模式同 install_*）。
+
+    若已装 `ctx.sessionProjections`（M7），同时把 sessionStats/tokenUsage 注册为
+    投影单元，使注册表成为 wire 视图的权威来源。
+    """
     existing = ctx.get("usageStats")
     if existing is not None:
         return existing
-    return UsageStatsService(ctx)
+    service = UsageStatsService(ctx)
+    registry = ctx.get("sessionProjections")
+    if registry is not None:
+        service._projection_disposers = register_telemetry_projections(registry)
+    return service

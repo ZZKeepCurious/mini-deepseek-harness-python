@@ -52,6 +52,7 @@
 | 会话管理 CLI（`miniharness sessions` 列表/恢复/删除/stats；mini 教学扩展；`stats` 渲染 sessionStats/tokenUsage 投影 + 末 turn 用量归账） | web 表面（上游） |
 | 遥测 / 用量统计（sessionStats + tokenUsage 投影真实化为 `session/follow`/`session/control` 与 Remote snapshot/baseline 的 `projections.values`；`derive_turn_token_usage` per-turn 用量推导，任何缺失边界 fail-closed；opt-in `UsageStatsService` 挂 `ctx.usageStats`） | `packages/session/session-stats` + `packages/llm/token-meter` |
 | 会话遥测上报（`ctx.sessionTelemetry` seam + 采集协调器：live/on-demand、`session-telemetry/record` 脱敏 waterfall、`agent/error` 运营记录、handoff 游标；OTel 后端 `FEEDBACK_ONLY`/`DISABLED`，OTLP/HTTP 导出） | `packages/session/session-telemetry` + `session-telemetry-otel` |
+| 会话投影（`ctx.sessionProjections` 注册 API v2：`ProjectionDefinition` 状态驱动单元、已提交事件 eager drive、按 `is` 变更 feed、`stateOf`/`snapshot`/`cachedSnapshot` 与 checkpoint/restore/hydrate 读梯；telemetry 注册 sessionStats/tokenUsage 单元） | `packages/session/session-projection` |
 | 会话检索（`ctx.sessionQuery` + SQLite FTS5 索引：跨会话/会话内全文检索、原始事件窗口、替换/来源追溯、世系；模型侧 `session_search`/`session_event_search`/`session_event_read`/`session_event_trace`/`session_trace` 五工具；会话日志导出见 `web/downloads.py`） | `packages/session-query/{session-query,session-query-sqlite,tool-session-query}` |
 | 待办清单（`to_todo_list` 入参校验 + `fold_todos` 最新写胜出折叠 + 模型侧 `todo_write` 工具；`todo/write` 为 log-only 事件） | `packages/todo` |
 | 大结果落盘（`ctx.spillStore` seam + 每会话私有目录本地存储 + `tools/post-execute` 策略：全文本超限结果落盘并给 head/tail 预览与取回提示） | `packages/spill/{spill,spill-local,spill-policy}` |
