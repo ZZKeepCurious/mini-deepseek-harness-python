@@ -121,6 +121,23 @@ miniharness/
 │   └── tool.py            # 模型侧五工具（session_search/event_search/trace/event_trace/event_read）
 ├── session_projection/    # packages/session/session-projection（投影注册 API v2，L1）
 │   └── __init__.py        # ProjectionDefinition + SessionProjectionRegistry（ctx.sessionProjections）
+├── terminal/               # packages/terminal/terminal 服务域（L1，仅依赖 core.scope）
+│   ├── types.py            # TerminalError 8 码闭集 + TerminalBackend/TerminalSession Protocol + _utf8_bytes（代理对感知）
+│   ├── sanitize.py         # TerminalSanitizer + normalize_terminal_text（terminal-bash/src/sanitize.ts）
+│   ├── bounded_buffer.py   # BoundedTextBuffer（双限链式 chunk，session.ts:44-156）+ read_scrollback + utf8_tail
+│   ├── operation.py        # LocalSendOperation（单飞 + owner 栅栏 + cancel 结算）
+│   └── service.py          # TerminalSessionService（ctx.terminals：spawn/kill/read/signal/start_send/list）+ install_terminals
+├── terminal_bash/          # packages/terminal/terminal-bash（terminal 后端 P2，层 3 登记，拓扑同 shell）
+│   ├── config.py           # resolve_config 缺省（rows=40/cols=160）+ shell 探测
+│   ├── environment.py      # child_environment（owner.id+sessionId+UTF-8 preamble）+ bash/pwsh prompt 复盘（133;D marker / dsh> ）
+│   ├── emulator.py         # 终端仿真器（CPR/DA2/DA1/DECRQM 应答 + 光标定位 + scrollback 视图/翻页）
+│   ├── provider.py         # 平台拆三（_posix.py / _winpty.py：pywinpty PtyProcess + reader 线程 + SubprocessOutcome）
+│   ├── session.py          # LocalPtySession（poll_readiness 五判据 settle + interrupt + 增量 UTF-8 解码）
+│   └── index.py            # install_terminal_bash（幂等）+ apply（依赖 terminals 先装）
+├── tool_terminal/          # packages/terminal/tool-terminal（六模型工具 P3，层 3 登记，消费 terminal + jobs）
+│   ├── render.py           # render_spawn/send/send_read/read/list + bound_terminal_text（逐字对齐 render.ts）
+│   ├── tools.py            # 六工具（terminal_open/send/read/signal/close/list）+ resolve_config + install_tool_terminal
+│   └── __init__.py         # 导出 + 上游插件形状常量 name/inject
 ├── boot/                  # packages/boot
 │   ├── boot.py            # 启动 + patch overlay
 │   ├── composition.py     # YAML 配置 / !!js 插值 / dump 渲染
@@ -316,6 +333,9 @@ miniharness/
 | `seams/landlock_run.py` | `native/landlock-run`（C11 launcher） | ctypes 复刻同一 CLI 约定与 Landlock UAPI 语义（ABI 协商 / PATH_BENEATH 规则 / PR_SET_NO_NEW_PRIVS → restrict_self → execvp；full ⟺ 内核 ABI ≥ 5，否则 partial 但仍受限；非 Linux 宿主干净退出 125） |
 | `seams/sandbox_policy.py` | `packages/sandbox/sandbox-policy` | ctx.sandboxPolicy：Config {mode 缺省 read-only, workspaceRoot} fail-loud 校验；resolve() = 显式 mode > 会话日志最后一条 `sandbox/mode`（session-mode.ts 的 effectiveSandboxMode fold）> 部署缺省，workspace 根先 canonical 后词法规范化、会话 cwd 即边界；三档策略上下文经 systemPrompt `.context('sandbox:policy', order=110)` 注册，loop 侧投影在变化时把快照注入对话消息流（`core/agent_loop/runtime_context.py`） |
 | `shell/bash_local.py` + `bash_sandbox.py` + `helpers.py` | `packages/shell/{shell, bash-local, bash-sandbox}` | ctx.shell 前台 `bash -c` 执行器族：本地直跑 / 经 ctx.sandbox confine 包裹并报告 {mode, denied, enforcement}；三路归因与 helpers.ts 一致——runner 启动失败（ENOENT/EACCES 且 argv[0] 证据 + cwd 可用性独立校验）与 runner 失败规则命中抛 SandboxUnavailableError 且优先于 denial，denial = 非零退出 + stderr 大小写不敏感签名；danger-full-access 直通不包裹。后台进程未复现（mini 后台面是 jobs registry） |
+| `terminal/`（types/sanitize/bounded_buffer/operation/service/`__init__`） | `packages/terminal/terminal/src/index.ts` + `terminal-bash/src/{session,sanitize}.ts`（P1 核心契约，P2 由 terminal_bash 域承接） | 终端服务域（L1，仅依赖 core.scope）：`TerminalSessionService`（`ctx.terminals`：spawn/kill/read/signal/start_send/list/get_owner_sessions/has_owner_activity/register_backend）+ `TerminalError` 8 码闭集（`TERMINAL_ERROR_CODES`）+ `BoundedTextBuffer`（bytes+maxLines 双限、`consume()={delta,truncated}`、首块永不增长、代理对感知记账与拼接修正、淘汰端逐单元出队）+ `TerminalSanitizer`（CSI/OSC/short 转义 + 跨块 pending + 二进制拒绝）+ `LocalSendOperation`（单飞 + owner 栅栏）。**对齐证据**：service.ts:160 名校验（仅空串拒绝，`PTY session name must be non-empty`）、session.ts:44-156 缓冲语义、service.spec.ts 拒绝面（OWNER_NOT_LIVE/NO_BACKEND/DUPLICATE_NAME/SEND_ACTIVE/FOREIGN_SESSION）。详见 verified-diffs §2.52/§3.29 |
+| `terminal_bash/`（config/environment/emulator/provider/session/index） | `packages/terminal/terminal-bash/src/{index,config,environment,session}.ts` + `packages/shell/pwsh-local/src/index.ts`（P2 后端） | 真实 PTY 后端（层 3 登记，拓扑同 shell）：`resolve_config`（rows=40/cols=160 缺省）+ `child_environment`（owner.id/`DSH_SESSION_ID`/`DSH_PTY_SESSION_ID` + UTF-8 preamble + NO_COLOR/TERM=dumb）+ bash `CONTROLLED_PROMPT` 与 pwsh `133;D` 标记 prompt 复盘 + `LocalPtySession`（poll_readiness 五判据兜底结算 stdin_read/inferred_idle/timeout/session_exit、interrupt：posix 前台组 SIGINT / win sendintr、增量 UTF-8 解码）+ 平台拆三 provider（`_posix.py` pty；`_winpty.py` pywinpty PtyProcess + reader 线程 + `SubprocessOutcome` 退出封装）+ `install_terminal_bash`（幂等）/`apply`（依赖 terminals 先装，镜像上游 install/apply 分离）。**载体差异**：pyte 不含 `?` 私有前缀 CSI（扫描层剥离）、pyte LF 无 CR、Windows 无前台组/无 termios（sendintr）、winpty `write` 收 str / `read` 回 str。详见 verified-diffs §2.53/§3.30 |
+| `tool_terminal/`（render/tools/`__init__`） | `packages/terminal/tool-terminal/src/{index,render}.ts`（P3 六工具） | 终端模型工具族（层 3 登记，消费 terminal P1 + jobs L2 + core.system_prompt）：六工具 `terminal_open`/`terminal_send`/`terminal_read`/`terminal_signal`/`terminal_close`/`terminal_list`（schema/description/output/render/present_call/present_result/finalize_content 全量）+ `render_spawn/send/send_read/read/list` 与 `bound_terminal_text` 逐字对齐 render.ts（`fitWithPrefix`/`boundBodyWithSuffix`）+ `resolve_config`（`DEFAULT_MAX_RESULT_BYTES=256*1024`、`MIN_MAX_RESULT_BYTES=64` fail loud）+ `register_terminal_tools` + `install_tool_terminal`（幂等，缺服务即建：systemPrompt `tool:pty`/order 1700 + terminals + tools 注册）/`apply`；后台 `terminal_send` 经 `jobs.start(kind='pty-send', label='<id>: <text|(input)>', outputLimitBytes=maxResultBytes)` 三钩子桥接（`JobDoneBox` + `_await_settle` 轮询结算 → completed/killed/failed）。**载体差异**：无 `presentationMeta` 通道、无 `tools/execute` 中间件（`finalize_content` 施加在五类 ToolResult 路径）、同步轮询桥接替代 Promise、`tool:pty` order 用字面量 1700、`_SignalAdapter` 映射 ToolExec.signal→terminal Cancellation。详见 verified-diffs §2.54/§3.31 |
 | `seams/credentials_local.py` | `packages/credentials/credentials-local` | 文档为 version-1 JSON 布局 `{version:1, refs, records}`（上游 YAML）：fail-closed 解析 + 可识别 flat 文档启动自动迁移；记录服务侧五件套（read/describe/list/modify/delete_record + `.records` 只读视图，键语法 `[a-z][a-z0-9-]*`、写锁 `DOCUMENT_LOCK_WAIT_SECONDS=30`、modifyRecord 唯一写路径——锁内 reconcile + mutate + 写前准入 = 读路径选择）；**CredentialsService 桥接**：`CredentialsService(Service)` provide="credentials" 包装 `LocalCredentialProvider`，`modify_record`/`delete_record` 成功后发 `credentials/record-updated`(key)（无 carrier ancestor 路由）；`install_credentials(ctx, provider)` 装配；读侧热重载：读入口 `_refresh_if_changed()` 先 `os.stat` 比对 mtime/size、变了才整表重解析（外部编辑/删除即时生效），写路径 `_reconcile_from_disk` 折叠不变，原子写无撕裂读侧不需锁 |
 | `seams/authorization.py` | `packages/credentials/authorization`（src/{index,types,invariant}.ts，全套 437 行） | `AuthorizationService(Service)` provide="authorization" + `install_authorization(ctx)`（显式 opt-in，依赖 `ctx.credentials` 缺失 fail-loud）。错误码闭集 DUPLICATE_FLOW/NO_FLOW/UNKNOWN_METHOD/ALREADY_IN_FLIGHT/NOT_COMMITTED/DECLINED；`registerFlow` effect 登记（disposer 注销，二次 DUPLICATE_FLOW）+ begin 复核 ALREADY_IN_FLIGHT；list/describe；begin 校验序 NO_FLOW→UNKNOWN_METHOD→ALREADY_IN_FLIGHT→pre-aborted（返回 cancelled 不占槽不 settle）→ 占槽（同步 `AbortSignal`）→ `_attempt`（`credentials/record-updated` 记账 + `describe_record` 二次确认、declined/pre-aborted → cancelled 不核 commit、未提交 → NOT_COMMITTED）→ `_settle` 发 `authorization/settled`（payload `(key, settlement)` 元组、listener 异常 contained）；简化标注：async→sync（begin 同步返回）、AbortSignal 无事件机、interaction 回调参数化 |
 | `seams/subprocess_env.py` | `packages/subprocess/subprocess/src/index.ts` + `types.ts` | 环境清洗切片：SENSITIVE_ENV_PATTERN 凭据形启发式 + DSH_ENV_PREFIX 大小写不敏感剔除；显式 env 在 scrub 之后合并（providers spawn 层叠） |
@@ -334,9 +354,9 @@ miniharness/
 | 层 | 内容 | 允许依赖 |
 |---|---|---|
 | L0 地基 | `core/session`、`core/scope`、`core/dsh_scope`、`core/schema`、`core/hmr`、`core/home_paths`、`core/tool_timeout`、`loader` | 无（互不依赖；core.scope ↔ core.dsh_scope / core.schema / core.hmr→core.scope / loader→core.scope 经 §3 例外豁免；core.tool_timeout 是超时约定常量叶，被 core.tools 与 guard 两侧共享） |
-| L1 领域 | `llm/*`、`core/tools`、`core/system_prompt`、`core/session_store`、`core/agents`、`attachment`、`ptc_runtime`、`identity`、`storage`、`fs/*`、`boot/*`、`guard`、`session_projection` | 仅 L0（fs 单元还注册模型侧工具进 `core.tools`——§3 规则 1 显式例外） |
+| L1 领域 | `llm/*`、`core/tools`、`core/system_prompt`、`core/session_store`、`core/agents`、`attachment`、`ptc_runtime`、`identity`、`storage`、`fs/*`、`boot/*`、`guard`、`session_projection`、`terminal` | 仅 L0（fs 单元还注册模型侧工具进 `core.tools`——§3 规则 1 显式例外；terminal 仅依赖 core.scope） |
 | L2 编排 | `core/agent_loop`、`compaction`、`jobs`、`plan`、`commands`、`goal`、`skills`、`telemetry`、`session_query`、`todo`、`spill`、`workspace`、`settings` | L0 + L1 |
-| L3 应用与入口 | `cli/*`、`protocol/*`、`seams/*`、`preset`、`extensions`、`interaction`、`client`、`mcp`、`web`、`shell` | L0 ~ L2 |
+| L3 应用与入口 | `cli/*`、`protocol/*`、`seams/*`、`preset`、`extensions`、`interaction`、`client`、`mcp`、`web`、`shell`、`terminal_bash`、`tool_terminal` | L0 ~ L2 |
 | 教学层 | `demo.py`、`example_plugins.py` | 任意层，但不得被业务模块依赖 |
 
 **三层组织边界**（代码与结构上清晰分离、解耦）：
