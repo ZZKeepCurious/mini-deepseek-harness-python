@@ -256,9 +256,16 @@ def _web_main(host: str | None = None, port: int | None = None) -> None:
     cli→web 是 launcher 语义的单方向依赖（组装面在 cli，运行面在 web，
     test_dependencies.py §5 显式例外）。host/port 为 `--host`/`--port` 显式
     参数（None 由 web/launcher 读环境/缺省，见 _resolve_bind）。
+
+    浏览器终端面（P4）：装配 `ctx.sandboxPolicy` + `ctx.sandbox` + 
+    `ctx.terminalController`（上游 web bundle 同样 compose 这三者），使
+    `terminal/*` 路由与 `terminal/follow` 流可用；终端由会话沙箱策略约束。
     """
     from ..core.scope import Context
     from ..llm import DeepSeekAdapter, LlmFailure
+    from ..seams.sandbox_local import LocalSandboxProvider
+    from ..seams.sandbox_policy import SandboxPolicyService
+    from ..terminal_controller import install_terminal_controller
     from ..web.launcher import run_web
     from .default_tools import default_tools
 
@@ -268,6 +275,9 @@ def _web_main(host: str | None = None, port: int | None = None) -> None:
     except LlmFailure as e:
         sys.stderr.write(f"dsh: {e.failure['code']}: {e.failure['message']}\n")
         sys.exit(1)
+    ctx.provide("sandbox", LocalSandboxProvider())
+    SandboxPolicyService(ctx, {})
+    install_terminal_controller(ctx)
     run_web(adapter, default_tools(ctx), ctx, host=host, port=port)
 
 

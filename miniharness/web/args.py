@@ -120,6 +120,52 @@ _SPECS: dict[str, dict[str, tuple[str, bool]]] = {
     },
     "session/control": {},
     "pluginInventory/list": {},
+    # terminal-controller（packages/api/terminal-controller）：agent 参数的 wire 名
+    # 是 `agentId`（dsh-agent 的 typert lookup wire，见 core/agent/src/index.ts:260），
+    # list 取 `sessionId`（index.ts:141）。
+    "terminal/environment": {
+        "agentId": (STR, True),
+    },
+    "terminal/shells": {
+        "agentId": (STR, True),
+    },
+    "terminal/list": {
+        "sessionId": (STR, True),
+    },
+    "terminal/create": {
+        "agentId": (STR, True),
+        "id": (STR, True),
+        "cols": (INT, True),
+        "rows": (INT, True),
+        "shellPath": (STR, False),
+    },
+    "terminal/follow": {
+        "agentId": (STR, True),
+        "id": (STR, True),
+        "attachmentId": (STR, True),
+    },
+    "terminal/write": {
+        "agentId": (STR, True),
+        "id": (STR, True),
+        "attachmentId": (STR, True),
+        "data": (STR, True),
+    },
+    "terminal/resize": {
+        "agentId": (STR, True),
+        "id": (STR, True),
+        "attachmentId": (STR, True),
+        "cols": (INT, True),
+        "rows": (INT, True),
+    },
+    "terminal/rename": {
+        "agentId": (STR, True),
+        "id": (STR, True),
+        "title": (STR, True),
+    },
+    "terminal/close": {
+        "agentId": (STR, True),
+        "id": (STR, True),
+    },
 }
 
 

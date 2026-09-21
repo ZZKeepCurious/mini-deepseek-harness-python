@@ -31,13 +31,15 @@ web 半（传输层 + 浏览器前端）的 wire 面与上游一致：两信封 
 
 - **会话检查点策略（session-checkpoint-policy）**：`seams/session_checkpoint.py`（L3）+ `SessionStore.checkpoint`（fail-closed）——三种语义持久化屏障（模型请求前 / 顶层工具体前 / 每步边界），经 `agent/checkpoint` / `tools/pre-execute` / `agent/pre-step` 三个挂点；取消落在检查点窗口内折叠为 canonical `ABORTED_BEFORE_DISPATCH`，检查点失败 fail-closed 不进入下游副作用；嵌套工具派发复用外层检查点。`install_checkpoint_policy(ctx)` opt-in 装配。载体差异：上游经 `llm/stream` 服务 waterfall 延迟适配器构造，mini 单一 adapter 直接调用故改用 `agent/checkpoint` waterfall。
 
+- **浏览器终端域（terminal-controller）**：`miniharness/terminal_controller/`（L3）——`ctx.terminalController` 的 Remote namespace `terminal/*`（`environment`/`shells`/`list`/`create`/`follow`/`write`/`resize`/`rename`/`close`）；`BrowserTerminal` 以 pyte `HistoryScreen` 保存有界恢复屏、follow 独占输入并把旧附加降为只读、close 先 terminate→drain→finish；`TerminalFollower` 按 `JSON.stringify(frame)` UTF-8 字节预算并显式失败；`shells.py` 的 `resolve_executable` 对齐 subprocess-local（空拒/相对路径拒/绝对 stat+X_OK/PATH×PATHEXT）；`sandboxPolicy.add_mode_fence` 阻断保留终端时的会话模式切换。与 `terminal`/`terminal_bash`/`tool_terminal` 合成 terminal 域全量对齐，web 侧经 `terminal/*` unary + `terminal/follow` 流暴露（P4，见 verified-diffs §2.55/§3.32）。
+
 ## 上游包观察清单（未复现，暂不纳入范围）
 
 以下上游 `packages/` 包尚未复现，未来想扩充复现范围可从中挑选；多数属于"能力扩展口 + 消费工具"的延伸，核心约定不依赖它们。已实现的家族中也有只做了一部分切片的（如 subprocess 仅环境清洗、client 仅 ui-trajectory、host 为 apiproxy 子集），权威归属以 docs/architecture.md 映射表为准。
 
 - **能力类**：`fs`、`e2b`、`lsp`、`code-runtime`、`spill`、`workspace`、`ssh`
 - **编排类**：`workflow`、`schedule`、`todo`
-- **横切类**：`settings`、`session-query`、`feedback`、`guard`、`runtime-diagnostics`、`api`、`context`、`util`、`web`
+- **横切类**：`settings`、`session-query`、`feedback`、`guard`、`runtime-diagnostics`、`context`、`util`、`web`（`api` 组已主体复现：gateway + session-controller + terminal-controller；残余 `settings-controller` / `workspace-controller` / `workspace-files` 见 status 触发条件档）
 - **平台类**：`typert`、`test-support`
 
 官方 Python SDK（`python/sdk` 的 stdio JSON-RPC 客户端 + `python/sdk-runtime` 运行时）协议面已实现（`protocol/sdk.py`），互操作测试以官方 SDK 为目标（`tests/test_upstream_sdk_interop.py`，缺 pydantic/上游源码自动 skip），不再列观察清单。

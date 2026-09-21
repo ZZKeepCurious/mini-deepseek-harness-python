@@ -67,6 +67,7 @@ LAYER_UNITS = [
     ("terminal", 1),
     ("terminal_bash", 3),
     ("tool_terminal", 3),
+    ("terminal_controller", 3),
     ("core.agent_loop", 2),
     ("compaction", 2),
     ("ptc", 2),
@@ -194,6 +195,11 @@ class ImportDirectionTest(unittest.TestCase):
                     # 提供 ctx.shell（上游 bundle/headless 同样依赖 bash-sandbox）；
                     # shell 层不得反向 import cli
                     continue
+                if src_unit == "cli" and dst_unit == "terminal_controller":
+                    # §5 显式例外（单方向）：web profile 组装浏览器终端面
+                    # （上游 bundle/web compose api-terminal-controller）；运行面在
+                    # terminal_controller，terminal_controller 不得反向 import cli
+                    continue
                 if src_unit == "shell" and dst_unit == "seams":
                     # §5 显式例外（单方向）：bash-sandbox 是 ctx.sandbox 的消费者
                     # （confine + 归因），上游 bash-sandbox 同样依赖 dsh-sandbox；
@@ -238,6 +244,16 @@ class ImportDirectionTest(unittest.TestCase):
                     # attachment 的纯投影几何（longEdgeDimensions）与引用类型；
                     # 上游 llm-deepseek package.json 直接依赖 dsh-attachment
                     # （dsh-llm 本体仅 devDependency 类型）。attachment 不得反向 import llm
+                    continue
+                if src_unit == "terminal_bash" and dst_unit == "seams":
+                    # §5 显式例外（单方向）：PTY provider 在 spawn 边界叠加净身父环境
+                    # （seams/subprocess_env），对齐上游 subprocess-local 的
+                    # `targetEnvironment`；seams 层不得反向 import terminal_bash
+                    continue
+                if src_unit == "terminal_controller" and dst_unit == "terminal_bash":
+                    # §5 显式例外（单方向）：terminal-controller 上游依赖 dsh-subprocess
+                    # 的终端 provider；mini 的 PTY seam 落在 terminal_bash/provider（P2）。
+                    # terminal_bash 不得反向 import terminal_controller
                     continue
                 if dst_layer >= src_layer:
                     violations.append(

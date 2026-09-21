@@ -355,6 +355,14 @@ class WebApi:
         "session/cancel": "cancel",
         "session/page": "page",
         "pluginInventory/list": "plugin_inventory",
+        "terminal/environment": "terminal_environment",
+        "terminal/shells": "terminal_shells",
+        "terminal/list": "terminal_list",
+        "terminal/create": "terminal_create",
+        "terminal/write": "terminal_write",
+        "terminal/resize": "terminal_resize",
+        "terminal/rename": "terminal_rename",
+        "terminal/close": "terminal_close",
     }
 
     def methods(self) -> frozenset[str]:
@@ -487,8 +495,80 @@ class WebApi:
             return service.list()
         return build_inventory(self.ctx, self.roster)
 
-    # ---------- session.list ----------
+    # ---------- terminal 域（terminal-controller 的 Remote 方法面） ----------
+    #
+    # 上游 `packages/api/terminal-controller` 的 wire 契约：agent 参数经 typert
+    # lookup 以 `agentId` 到达，`list` 取 `sessionId`。mini 的控制器服务由组合层
+    # （`install_terminal_controller`）装配；未挂载时如实拒绝（invocation-unavailable）。
 
+    def _terminal_controller(self):
+        controller = self.ctx.get("terminalController")
+        if controller is None:
+            raise _Reject("gateway/invocation-unavailable",
+                          "terminal namespace is not mounted in this deployment", {})
+        return controller
+
+    def resolve_terminal_agent(self, agent_id: Any) -> AgentLoop:
+        """按 agentId 解析 live Agent（冷会话自动 resume，对齐 resolveAgent）。"""
+        found = self._agent_for(_require_id({"agentId": agent_id}, "agentId"))
+        if found is None:
+            raise _Reject("session/not-found", f'session "{agent_id}" not found',
+                          {"sessionId": agent_id})
+        return found[1]
+
+    def _terminal_call(self, call):
+        """执行一次终端控制器调用并把载体错误折成 RPC 错误（fail loud）。"""
+        try:
+            return call()
+        except _Reject:
+            raise
+        except Exception as error:  # noqa: BLE001 - 终端域错误闭集 + gateway/internal
+            code = getattr(error, "code", None)
+            if code in ("terminal/control-unavailable", "terminal/limit-reached"):
+                raise _Reject(code, str(error), getattr(error, "details", None) or {}) from error
+            raise _Reject("gateway/internal", str(error), {}) from error
+
+    def terminal_environment(self, payload: dict) -> dict:
+        agent = self.resolve_terminal_agent(payload.get("agentId"))
+        return self._terminal_call(lambda: self._terminal_controller().environment(agent))
+
+    def terminal_shells(self, payload: dict) -> list:
+        agent = self.resolve_terminal_agent(payload.get("agentId"))
+        return self._terminal_call(lambda: self._terminal_controller().shells(agent))
+
+    def terminal_list(self, payload: dict) -> list:
+        session_id = _require_id(payload, "sessionId")
+        return self._terminal_call(lambda: self._terminal_controller().list(session_id))
+
+    def terminal_create(self, payload: dict) -> dict:
+        agent = self.resolve_terminal_agent(payload.get("agentId"))
+        request: dict[str, Any] = {"id": payload.get("id"),
+                                   "cols": payload.get("cols"), "rows": payload.get("rows")}
+        if payload.get("shellPath") is not None:
+            request["shellPath"] = payload["shellPath"]
+        return self._terminal_call(lambda: self._terminal_controller().create(agent, request))
+
+    def terminal_write(self, payload: dict) -> None:
+        agent = self.resolve_terminal_agent(payload.get("agentId"))
+        self._terminal_call(lambda: self._terminal_controller().write(
+            agent, payload["id"], payload["attachmentId"], payload["data"]))
+
+    def terminal_resize(self, payload: dict) -> None:
+        agent = self.resolve_terminal_agent(payload.get("agentId"))
+        self._terminal_call(lambda: self._terminal_controller().resize(
+            agent, payload["id"], payload["attachmentId"],
+            payload["cols"], payload["rows"]))
+
+    def terminal_rename(self, payload: dict) -> None:
+        agent = self.resolve_terminal_agent(payload.get("agentId"))
+        self._terminal_call(lambda: self._terminal_controller().rename(
+            agent, payload["id"], payload["title"]))
+
+    def terminal_close(self, payload: dict) -> None:
+        agent = self.resolve_terminal_agent(payload.get("agentId"))
+        self._terminal_call(lambda: self._terminal_controller().close(agent, payload["id"]))
+
+    # ---------- session.list ----------
     @staticmethod
     def _list_metadata(session: Session) -> dict:
         """折叠 list 提示投影：blank + lastPromptAt（上游 fold 同款）。"""

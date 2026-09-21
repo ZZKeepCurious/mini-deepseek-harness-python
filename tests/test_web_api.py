@@ -870,7 +870,10 @@ class TestDispatch(WebApiTest):
             "session/modelCatalog", "session/canOpenWorkspacePath",
             "session/openWorkspacePath", "session/rename", "session/fork",
             "session/prompt", "session/attachment", "session/updateQueue",
-            "session/cancel", "session/page", "pluginInventory/list"}))
+            "session/cancel", "session/page", "pluginInventory/list",
+            "terminal/environment", "terminal/shells", "terminal/list",
+            "terminal/create", "terminal/write", "terminal/resize",
+            "terminal/rename", "terminal/close"}))
 
     def test_bad_payload_shape(self):
         error = self._error(self.api.dispatch("session.list", "rid", "nope"))

@@ -109,6 +109,8 @@ class SandboxPolicyService(Service):
         self.default_mode: str = mode
         self.workspace_root: str = _resolve_workspace_root(
             config.get("workspaceRoot") or os.getcwd())
+        #: 模式变更围栏（消费者注册；set_mode 在写路径前逐个调用，抛错即拒绝）。
+        self._mode_fences: list = []
         super().__init__(ctx, "sandboxPolicy")
         # 策略进模型可见上下文：装配时按调用方会话决议当前模式与根
         # （上游 ctx.inject(['systemPrompt'], …) 同款接线）。模型历史经
@@ -154,3 +156,29 @@ class SandboxPolicyService(Service):
     def override_of(self, session: Session) -> str | None:
         """只读会话覆盖：不施加部署缺省（无覆盖返回 None 由调用方兜底）。"""
         return effective_sandbox_mode(session.events)
+
+    # ---------- 模式变更围栏（上游 internal/dispatch 拦截的同步等价面） ----------
+
+    def add_mode_fence(self, fence) -> object:
+        """注册一个模式变更围栏 `fence(session, mode)`；抛错即拒绝该次变更。
+
+        上游 terminal-controller 经 cordis `internal/dispatch` 钩拦截 `sandbox/mode`
+        事件的派发；mini 的 `session/event` 监听异常被 contained（存储层 warn），
+        无法拒绝写入，故把围栏挂在**唯一写路径** `set_mode` 之前，功能等价。
+        返回移除围栏的 disposer（幂等）。
+        """
+        self._mode_fences.append(fence)
+
+        def remove() -> None:
+            try:
+                self._mode_fences.remove(fence)
+            except ValueError:
+                pass
+
+        return remove
+
+    def set_mode(self, session: Session, mode: str) -> None:
+        """模式切换写路径：先过全部围栏，再追加 `sandbox/mode` 事件。"""
+        for fence in list(self._mode_fences):
+            fence(session, mode)
+        set_sandbox_mode(session, mode)

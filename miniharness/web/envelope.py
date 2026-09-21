@@ -64,6 +64,8 @@ RPC_ERROR_CODES = frozenset({
     "subagent/catalog-diagnostic",
     "subagent/not-found",
     "subagent/unauthorized",
+    "terminal/control-unavailable",
+    "terminal/limit-reached",
     "workspace/not-found",
 })
 

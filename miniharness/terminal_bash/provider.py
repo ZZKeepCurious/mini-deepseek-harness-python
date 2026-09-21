@@ -17,6 +17,8 @@ from __future__ import annotations
 import sys
 import threading
 
+from ..seams.subprocess_env import scrubbed_parent_env
+
 __all__ = [
     "SubprocessOutcome",
     "SubprocessForeground",
@@ -128,11 +130,21 @@ class TerminalHandle:
 def spawn_terminal(spec: dict, platform: str | None = None) -> TerminalHandle:
     """按平台分叉创建真实 PTY。spec 需含 argv/cwd/env/rows/cols（optional）。
 
+    环境语义对齐 subprocess 的 `targetEnvironment`：payload = 净身父环境
+    （`seams/subprocess_env.scrubbed_parent_env`）叠加 spec 显式 env，再由
+    provider 覆盖 `TERM=terminalType`（上游 spawnTerminal 同序）。POSIX 载体
+    自身也继承父环境，此合并对 Windows 的 ConPTY（env 替换语义）是必要面。
+
     抛错时 fail loud，不 fallback（黄金法则 #14）。
     """
     platform = platform or sys.platform
+    resolved = dict(spec)
+    env = {**scrubbed_parent_env(), **(spec.get("env") or {})}
+    if spec.get("terminalType"):
+        env["TERM"] = spec["terminalType"]
+    resolved["env"] = env
     if platform.startswith("win"):
         from ._winpty import WinptyTerminalHandle
-        return WinptyTerminalHandle(spec)
+        return WinptyTerminalHandle(resolved)
     from ._posix import PtyTerminalHandle
-    return PtyTerminalHandle(spec)
+    return PtyTerminalHandle(resolved)

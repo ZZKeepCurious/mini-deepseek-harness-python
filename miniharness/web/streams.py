@@ -48,6 +48,8 @@ __all__ = ["GatewayStreams", "RemoteStreamError"]
 
 QUEUE_CAPACITY = 1024
 FOLLOW_POLL_INTERVAL = 0.05
+#: terminal/follow 帧轮询间隔（秒）：同步 follower 非阻塞 pop 的桥接粒度。
+TERMINAL_FOLLOW_POLL = 0.01
 
 
 class RemoteStreamError(RuntimeError):
@@ -94,6 +96,7 @@ class GatewayStreams:
             REMOTE_EVENT_STREAM_ENDPOINT: "$events",
             "session/follow": "follow",
             "session/control": "control",
+            "terminal/follow": "terminal_follow",
         }
 
     def open_stream(self, endpoint: str, payload: Any, signal=None):
@@ -125,6 +128,8 @@ class GatewayStreams:
                 error.code, boundary_error_message(endpoint, error.message)) from error
         if kind == "follow":
             return self._follow(payload["args"], signal)
+        if kind == "terminal_follow":
+            return self._terminal_follow(payload["args"], signal)
         return self._control(signal)
 
     # ---------- session/follow（历史跟随流） ----------
@@ -172,6 +177,42 @@ class GatewayStreams:
     def _record(event: dict) -> dict:
         """SessionEventEntry 包装（上游 history.ts entryFor：`{type:'event', event}`）。"""
         return {"type": "event", "event": _as_plain(event)}
+
+    # ---------- terminal/follow（浏览器终端恢复流） ----------
+
+    async def _terminal_follow(self, args: dict, signal=None):
+        """`terminal/follow`：一个完整有界屏幕（snapshot）后跟有序 output/state 帧。
+
+        对齐上游 Remote stream `follow(agent, id, attachmentId)`：附加即独占输入，
+        分离不杀进程。mini 以 follower 的非阻塞 pop + 短轮询桥接同步载体
+        （进程内输出回调在 provider reader 线程，见 terminal_controller/terminal.py）。
+        取消（mux task.cancel）经 finally 分离。
+        """
+        controller = self.api.ctx.get("terminalController")
+        if controller is None:
+            raise RemoteStreamError(
+                "gateway/invocation-unavailable",
+                "typert gateway: terminal/follow: terminal namespace is not mounted")
+        try:
+            agent = self.api.resolve_terminal_agent(args.get("agentId"))
+            follow = controller.follow(agent, args.get("id"), args.get("attachmentId"))
+        except Exception as error:  # noqa: BLE001 - 折流 error 帧（不关 WS）
+            raise RemoteStreamError(getattr(error, "code", None) or "gateway/internal",
+                                    str(error)) from error
+        try:
+            yield follow.baseline
+            while True:
+                frame = follow.follower.pop()
+                if frame is not None:
+                    yield frame
+                    continue
+                if follow.follower.failure is not None:
+                    raise RemoteStreamError("gateway/internal", str(follow.follower.failure))
+                if follow.follower.finished or follow.follower.closed:
+                    return
+                await asyncio.sleep(TERMINAL_FOLLOW_POLL)
+        finally:
+            follow.detach()
 
     # ---------- session/control（宿主级 live control） ----------
 
