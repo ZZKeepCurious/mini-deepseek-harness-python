@@ -40,6 +40,7 @@ mini 扩展/简化（须标注）：
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -260,13 +261,25 @@ def _web_main(host: str | None = None, port: int | None = None) -> None:
     浏览器终端面（P4）：装配 `ctx.sandboxPolicy` + `ctx.sandbox` + 
     `ctx.terminalController`（上游 web bundle 同样 compose 这三者），使
     `terminal/*` 路由与 `terminal/follow` 流可用；终端由会话沙箱策略约束。
+
+    api 残余控制器（本步）：装配 `ctx.fs`（workspace-files 读面）+ `ctx.workspaces`
+    + `ctx.settings` + `ctx.credentials` + 三个 Remote 控制器（workspace / workspaceFiles
+    / settings+credentials），使对应 namespace 可用（上游 web bundle 同样 compose）。
     """
     from ..core.scope import Context
+    from ..fs import install_local_fs
     from ..llm import DeepSeekAdapter, LlmFailure
+    from ..preset.presets import default_roster
+    from ..seams.credentials_local import install_credentials
     from ..seams.sandbox_local import LocalSandboxProvider
     from ..seams.sandbox_policy import SandboxPolicyService
+    from ..settings import install_settings
+    from ..settings_controller import install_settings_controller
     from ..terminal_controller import install_terminal_controller
     from ..web.launcher import run_web
+    from ..workspace import install_workspaces
+    from ..workspace_controller import install_workspace_controller
+    from ..workspace_files import install_workspace_files
     from .default_tools import default_tools
 
     ctx = Context(name="web")
@@ -278,6 +291,14 @@ def _web_main(host: str | None = None, port: int | None = None) -> None:
     ctx.provide("sandbox", LocalSandboxProvider())
     SandboxPolicyService(ctx, {})
     install_terminal_controller(ctx)
+    install_local_fs(ctx, {"cwd": os.getcwd()})
+    install_settings(ctx, path=os.path.join(os.path.expanduser("~"), ".miniharness", "settings.json"))
+    install_credentials(ctx)
+    install_workspaces(ctx)
+    roster = default_roster()
+    install_workspace_controller(ctx)
+    install_workspace_files(ctx)
+    install_settings_controller(ctx, roster=roster)
     run_web(adapter, default_tools(ctx), ctx, host=host, port=port)
 
 

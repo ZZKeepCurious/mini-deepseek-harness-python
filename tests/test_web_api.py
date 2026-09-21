@@ -873,7 +873,16 @@ class TestDispatch(WebApiTest):
             "session/cancel", "session/page", "pluginInventory/list",
             "terminal/environment", "terminal/shells", "terminal/list",
             "terminal/create", "terminal/write", "terminal/resize",
-            "terminal/rename", "terminal/close"}))
+            "terminal/rename", "terminal/close",
+            "workspace/create", "workspace/rename", "workspace/delete",
+            "workspace/insertBefore", "workspace/insertSessionBefore",
+            "workspace/archiveSession", "workspace/unarchiveSession",
+            "workspaceFiles/read", "workspaceFiles/readBytes", "workspaceFiles/readAll",
+            "workspaceFiles/readRelated", "workspaceFiles/stat", "workspaceFiles/list",
+            "settings/describe", "settings/canOpenAgentPresetDirectory", "settings/update",
+            "settings/replace", "settings/mutate", "settings/openSettingsDocument",
+            "settings/openAgentPresetDirectory",
+            "credentials/describe", "credentials/set", "credentials/unset"}))
 
     def test_bad_payload_shape(self):
         error = self._error(self.api.dispatch("session.list", "rid", "nope"))

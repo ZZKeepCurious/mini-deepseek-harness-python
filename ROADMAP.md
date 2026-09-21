@@ -33,13 +33,15 @@ web 半（传输层 + 浏览器前端）的 wire 面与上游一致：两信封 
 
 - **浏览器终端域（terminal-controller）**：`miniharness/terminal_controller/`（L3）——`ctx.terminalController` 的 Remote namespace `terminal/*`（`environment`/`shells`/`list`/`create`/`follow`/`write`/`resize`/`rename`/`close`）；`BrowserTerminal` 以 pyte `HistoryScreen` 保存有界恢复屏、follow 独占输入并把旧附加降为只读、close 先 terminate→drain→finish；`TerminalFollower` 按 `JSON.stringify(frame)` UTF-8 字节预算并显式失败；`shells.py` 的 `resolve_executable` 对齐 subprocess-local（空拒/相对路径拒/绝对 stat+X_OK/PATH×PATHEXT）；`sandboxPolicy.add_mode_fence` 阻断保留终端时的会话模式切换。与 `terminal`/`terminal_bash`/`tool_terminal` 合成 terminal 域全量对齐，web 侧经 `terminal/*` unary + `terminal/follow` 流暴露（P4，见 verified-diffs §2.55/§3.32）。
 
+- **api 残余三控制器（workspace / workspace-files / settings+credentials）**：`miniharness/{workspace_controller,workspace_files,settings_controller}/`（L3）——`workspace` namespace（七命令 + `follow` 投影流，注册表顺序/归档集扩展）、`workspaceFiles` namespace（有界行 `read`/base64 `readBytes`/`readAll`/`readRelated`/`stat`/工作区限定 `list` + `changes` 观察流）、`settings`/`credentials` namespace（脱敏 describe + 三写 + 文档/预设目录打开 + 引用读写）。api 组主体全部复现（`remotes` 为组装胶水），见 verified-diffs §2.56/§3.33。
+
 ## 上游包观察清单（未复现，暂不纳入范围）
 
 以下上游 `packages/` 包尚未复现，未来想扩充复现范围可从中挑选；多数属于"能力扩展口 + 消费工具"的延伸，核心约定不依赖它们。已实现的家族中也有只做了一部分切片的（如 subprocess 仅环境清洗、client 仅 ui-trajectory、host 为 apiproxy 子集），权威归属以 docs/architecture.md 映射表为准。
 
 - **能力类**：`fs`、`e2b`、`lsp`、`code-runtime`、`spill`、`workspace`、`ssh`
 - **编排类**：`workflow`、`schedule`、`todo`
-- **横切类**：`settings`、`session-query`、`feedback`、`guard`、`runtime-diagnostics`、`context`、`util`、`web`（`api` 组已主体复现：gateway + session-controller + terminal-controller；残余 `settings-controller` / `workspace-controller` / `workspace-files` 见 status 触发条件档）
+- **横切类**：`settings`、`session-query`、`feedback`、`guard`、`runtime-diagnostics`、`context`、`util`、`web`（`api` 组已全部复现：gateway + session-controller + terminal-controller + workspace-controller + workspace-files + settings-controller）
 - **平台类**：`typert`、`test-support`
 
 官方 Python SDK（`python/sdk` 的 stdio JSON-RPC 客户端 + `python/sdk-runtime` 运行时）协议面已实现（`protocol/sdk.py`），互操作测试以官方 SDK 为目标（`tests/test_upstream_sdk_interop.py`，缺 pydantic/上游源码自动 skip），不再列观察清单。

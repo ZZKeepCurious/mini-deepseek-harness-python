@@ -58,7 +58,7 @@ from .args import (
     canonical_endpoint,
     validate_args,
 )
-from .envelope import rpc_error, rpc_result_ok
+from .envelope import RPC_ERROR_CODES, rpc_error, rpc_result_ok
 from .inventory import build_inventory
 
 __all__ = [
@@ -363,6 +363,29 @@ class WebApi:
         "terminal/resize": "terminal_resize",
         "terminal/rename": "terminal_rename",
         "terminal/close": "terminal_close",
+        "workspace/create": "workspace_create",
+        "workspace/rename": "workspace_rename",
+        "workspace/delete": "workspace_delete",
+        "workspace/insertBefore": "workspace_insert_before",
+        "workspace/insertSessionBefore": "workspace_insert_session_before",
+        "workspace/archiveSession": "workspace_archive_session",
+        "workspace/unarchiveSession": "workspace_unarchive_session",
+        "workspaceFiles/read": "workspace_files_read",
+        "workspaceFiles/readBytes": "workspace_files_read_bytes",
+        "workspaceFiles/readAll": "workspace_files_read_all",
+        "workspaceFiles/readRelated": "workspace_files_read_related",
+        "workspaceFiles/stat": "workspace_files_stat",
+        "workspaceFiles/list": "workspace_files_list",
+        "settings/describe": "settings_describe",
+        "settings/canOpenAgentPresetDirectory": "settings_can_open_agent_preset_directory",
+        "settings/update": "settings_update",
+        "settings/replace": "settings_replace",
+        "settings/mutate": "settings_mutate",
+        "settings/openSettingsDocument": "settings_open_document",
+        "settings/openAgentPresetDirectory": "settings_open_agent_preset_directory",
+        "credentials/describe": "credentials_describe",
+        "credentials/set": "credentials_set",
+        "credentials/unset": "credentials_unset",
     }
 
     def methods(self) -> frozenset[str]:
@@ -516,29 +539,29 @@ class WebApi:
                           {"sessionId": agent_id})
         return found[1]
 
-    def _terminal_call(self, call):
-        """执行一次终端控制器调用并把载体错误折成 RPC 错误（fail loud）。"""
+    def _remote_call(self, call):
+        """执行一次域控制器调用并把带稳定 code 的载体错误折成 RPC 错误。"""
         try:
             return call()
         except _Reject:
             raise
-        except Exception as error:  # noqa: BLE001 - 终端域错误闭集 + gateway/internal
+        except Exception as error:  # noqa: BLE001 - 域错误闭集 + gateway/internal
             code = getattr(error, "code", None)
-            if code in ("terminal/control-unavailable", "terminal/limit-reached"):
+            if code in RPC_ERROR_CODES:
                 raise _Reject(code, str(error), getattr(error, "details", None) or {}) from error
             raise _Reject("gateway/internal", str(error), {}) from error
 
     def terminal_environment(self, payload: dict) -> dict:
         agent = self.resolve_terminal_agent(payload.get("agentId"))
-        return self._terminal_call(lambda: self._terminal_controller().environment(agent))
+        return self._remote_call(lambda: self._terminal_controller().environment(agent))
 
     def terminal_shells(self, payload: dict) -> list:
         agent = self.resolve_terminal_agent(payload.get("agentId"))
-        return self._terminal_call(lambda: self._terminal_controller().shells(agent))
+        return self._remote_call(lambda: self._terminal_controller().shells(agent))
 
     def terminal_list(self, payload: dict) -> list:
         session_id = _require_id(payload, "sessionId")
-        return self._terminal_call(lambda: self._terminal_controller().list(session_id))
+        return self._remote_call(lambda: self._terminal_controller().list(session_id))
 
     def terminal_create(self, payload: dict) -> dict:
         agent = self.resolve_terminal_agent(payload.get("agentId"))
@@ -546,27 +569,183 @@ class WebApi:
                                    "cols": payload.get("cols"), "rows": payload.get("rows")}
         if payload.get("shellPath") is not None:
             request["shellPath"] = payload["shellPath"]
-        return self._terminal_call(lambda: self._terminal_controller().create(agent, request))
+        return self._remote_call(lambda: self._terminal_controller().create(agent, request))
 
     def terminal_write(self, payload: dict) -> None:
         agent = self.resolve_terminal_agent(payload.get("agentId"))
-        self._terminal_call(lambda: self._terminal_controller().write(
+        self._remote_call(lambda: self._terminal_controller().write(
             agent, payload["id"], payload["attachmentId"], payload["data"]))
 
     def terminal_resize(self, payload: dict) -> None:
         agent = self.resolve_terminal_agent(payload.get("agentId"))
-        self._terminal_call(lambda: self._terminal_controller().resize(
+        self._remote_call(lambda: self._terminal_controller().resize(
             agent, payload["id"], payload["attachmentId"],
             payload["cols"], payload["rows"]))
 
     def terminal_rename(self, payload: dict) -> None:
         agent = self.resolve_terminal_agent(payload.get("agentId"))
-        self._terminal_call(lambda: self._terminal_controller().rename(
+        self._remote_call(lambda: self._terminal_controller().rename(
             agent, payload["id"], payload["title"]))
 
     def terminal_close(self, payload: dict) -> None:
         agent = self.resolve_terminal_agent(payload.get("agentId"))
-        self._terminal_call(lambda: self._terminal_controller().close(agent, payload["id"]))
+        self._remote_call(lambda: self._terminal_controller().close(agent, payload["id"]))
+
+    # ---------- workspace 域（workspace-controller 的 Remote 方法面） ----------
+
+    def _workspace_controller(self):
+        controller = self.ctx.get("workspaceController")
+        if controller is None:
+            raise _Reject("gateway/invocation-unavailable",
+                          "workspace namespace is not mounted in this deployment", {})
+        return controller
+
+    def workspace_create(self, payload: dict) -> dict:
+        return self._remote_call(
+            lambda: self._workspace_controller().create({"path": payload.get("path")}))
+
+    def workspace_rename(self, payload: dict) -> dict:
+        return self._remote_call(lambda: self._workspace_controller().rename(
+            {"workspaceId": payload.get("workspaceId"), "title": payload.get("title")}))
+
+    def workspace_delete(self, payload: dict) -> dict:
+        return self._remote_call(lambda: self._workspace_controller().delete(
+            {"workspaceId": payload.get("workspaceId")}))
+
+    def workspace_insert_before(self, payload: dict) -> dict:
+        return self._remote_call(lambda: self._workspace_controller().insert_before(
+            {"workspaceId": payload.get("workspaceId"),
+             "beforeWorkspaceId": payload.get("beforeWorkspaceId")}))
+
+    def workspace_insert_session_before(self, payload: dict) -> dict:
+        return self._remote_call(lambda: self._workspace_controller().insert_session_before(
+            {"workspaceId": payload.get("workspaceId"), "sessionId": payload.get("sessionId"),
+             "beforeSessionId": payload.get("beforeSessionId")}))
+
+    def workspace_archive_session(self, payload: dict) -> dict:
+        return self._remote_call(lambda: self._workspace_controller().archive_session(
+            {"sessionId": payload.get("sessionId")}))
+
+    def workspace_unarchive_session(self, payload: dict) -> dict:
+        return self._remote_call(lambda: self._workspace_controller().unarchive_session(
+            {"sessionId": payload.get("sessionId")}))
+
+    # ---------- workspace-files 域（workspace-files 的 Remote 方法面） ----------
+
+    def _workspace_files(self):
+        controller = self.ctx.get("workspaceFiles")
+        if controller is None:
+            raise _Reject("gateway/invocation-unavailable",
+                          "workspaceFiles namespace is not mounted in this deployment", {})
+        return controller
+
+    def workspace_file_scope(self, payload: dict) -> dict:
+        """按会话身份派生文件 scope（header cwd，或 sandboxPolicy 回退根）。"""
+        session_id = _require_id(payload, "workspaceFileScopeId")
+        session = self.store.get(session_id)
+        if session is None:
+            raise _Reject("gateway/lookup-not-found",
+                          f'session "{session_id}" not found for workspace file scope',
+                          {"sessionId": session_id})
+        root = (getattr(session, "meta", {}) or {}).get("cwd")
+        if not root:
+            policy = self.ctx.get("sandboxPolicy")
+            root = getattr(policy, "workspace_root", None) or self.cwd
+        return {"sessionId": session_id, "workspaceRoot": root}
+
+    def workspace_files_read(self, payload: dict) -> dict:
+        scope = self.workspace_file_scope(payload)
+        range_ = {}
+        if payload.get("offset") is not None:
+            range_["offset"] = payload["offset"]
+        if payload.get("limit") is not None:
+            range_["limit"] = payload["limit"]
+        return self._remote_call(
+            lambda: self._workspace_files().read(scope, payload.get("path"), range_))
+
+    def workspace_files_read_bytes(self, payload: dict) -> dict:
+        scope = self.workspace_file_scope(payload)
+        range_ = {}
+        if payload.get("offset") is not None:
+            range_["offset"] = payload["offset"]
+        if payload.get("length") is not None:
+            range_["length"] = payload["length"]
+        return self._remote_call(
+            lambda: self._workspace_files().read_bytes(scope, payload.get("path"), range_))
+
+    def workspace_files_read_all(self, payload: dict) -> dict:
+        scope = self.workspace_file_scope(payload)
+        return self._remote_call(
+            lambda: self._workspace_files().read_all(scope, payload.get("path")))
+
+    def workspace_files_read_related(self, payload: dict) -> dict:
+        scope = self.workspace_file_scope(payload)
+        return self._remote_call(lambda: self._workspace_files().read_related(
+            scope, payload.get("path"), payload.get("relativePath")))
+
+    def workspace_files_stat(self, payload: dict) -> dict:
+        scope = self.workspace_file_scope(payload)
+        return self._remote_call(
+            lambda: self._workspace_files().stat(scope, payload.get("path")))
+
+    def workspace_files_list(self, payload: dict) -> dict:
+        scope = self.workspace_file_scope(payload)
+        return self._remote_call(
+            lambda: self._workspace_files().list(scope, payload.get("path")))
+
+    # ---------- settings / credentials 域（settings-controller 的 Remote 方法面） ----------
+
+    def _settings_controller(self):
+        controller = self.ctx.get("settingsController")
+        if controller is None:
+            raise _Reject("gateway/invocation-unavailable",
+                          "settings namespace is not mounted in this deployment", {})
+        return controller
+
+    def _credentials_controller(self):
+        controller = self.ctx.get("credentialsController")
+        if controller is None:
+            raise _Reject("gateway/invocation-unavailable",
+                          "credentials namespace is not mounted in this deployment", {})
+        return controller
+
+    def settings_describe(self, payload: dict) -> dict:
+        return self._remote_call(lambda: self._settings_controller().describe())
+
+    def settings_can_open_agent_preset_directory(self, payload: dict) -> bool:
+        return self._remote_call(
+            lambda: self._settings_controller().can_open_agent_preset_directory())
+
+    def settings_update(self, payload: dict) -> dict:
+        return self._remote_call(lambda: self._settings_controller().update(
+            payload.get("ns"), payload.get("patch"), payload.get("expectedRevision")))
+
+    def settings_replace(self, payload: dict) -> dict:
+        return self._remote_call(lambda: self._settings_controller().replace(
+            payload.get("ns"), payload.get("section"), payload.get("expectedRevision")))
+
+    def settings_mutate(self, payload: dict) -> dict:
+        return self._remote_call(lambda: self._settings_controller().mutate(
+            payload.get("ns"), payload.get("ops"), payload.get("expectedRevision")))
+
+    def settings_open_document(self, payload: dict) -> dict:
+        return self._remote_call(lambda: self._settings_controller().open_settings_document())
+
+    def settings_open_agent_preset_directory(self, payload: dict) -> dict:
+        return self._remote_call(lambda: self._settings_controller().open_agent_preset_directory(
+            payload.get("agentPreset")))
+
+    def credentials_describe(self, payload: dict) -> dict:
+        return self._remote_call(
+            lambda: self._credentials_controller().describe(payload.get("refs")))
+
+    def credentials_set(self, payload: dict) -> None:
+        self._remote_call(lambda: self._credentials_controller().set(
+            payload.get("ref"), payload.get("value")))
+
+    def credentials_unset(self, payload: dict) -> None:
+        self._remote_call(
+            lambda: self._credentials_controller().unset(payload.get("ref")))
 
     # ---------- session.list ----------
     @staticmethod

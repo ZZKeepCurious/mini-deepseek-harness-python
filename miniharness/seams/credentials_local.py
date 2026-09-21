@@ -1071,6 +1071,20 @@ class CredentialsService(Service):
             self.provider.delete_record(key)
             self.ctx.emit("credentials/record-updated", key)
 
+    # ---------- reference 半边（settings-controller 的 credentials namespace） ----------
+
+    def describe(self, ref: str) -> dict:
+        """一个引用名的配置元数据（`{configured, source?, writable}`）。"""
+        return self.provider.describe(credential_ref(ref))
+
+    def set(self, ref: str, value: str) -> None:
+        """存储一个引用名的值（只写，无读回路径）。"""
+        self.provider.set(credential_ref(ref), value)
+
+    def unset(self, ref: str) -> None:
+        """移除一个引用名。"""
+        self.provider.unset(credential_ref(ref))
+
 
 def install_credentials(ctx: Context, provider: LocalCredentialProvider | None = None) -> CredentialsService:
     """装配 `ctx.credentials` 服务（构造即登记；重复装配返回既有实例）。"""

@@ -166,6 +166,98 @@ _SPECS: dict[str, dict[str, tuple[str, bool]]] = {
         "agentId": (STR, True),
         "id": (STR, True),
     },
+    # workspace-controller（packages/api/workspace-controller）：请求对象字段扁平化。
+    "workspace/create": {
+        "path": (STR, True),
+    },
+    "workspace/rename": {
+        "workspaceId": (STR, True),
+        "title": (STR, True),
+    },
+    "workspace/delete": {
+        "workspaceId": (STR, True),
+    },
+    "workspace/insertBefore": {
+        "workspaceId": (STR, True),
+        "beforeWorkspaceId": (STR, False),
+    },
+    "workspace/insertSessionBefore": {
+        "workspaceId": (STR, True),
+        "sessionId": (STR, True),
+        "beforeSessionId": (STR, False),
+    },
+    "workspace/archiveSession": {
+        "sessionId": (STR, True),
+    },
+    "workspace/unarchiveSession": {
+        "sessionId": (STR, True),
+    },
+    "workspace/follow": {},
+    # workspace-files（packages/api/workspace-files）：scope wire = `workspaceFileScopeId`。
+    "workspaceFiles/read": {
+        "workspaceFileScopeId": (STR, True),
+        "path": (STR, True),
+        "offset": (INT, False),
+        "limit": (INT, False),
+    },
+    "workspaceFiles/readBytes": {
+        "workspaceFileScopeId": (STR, True),
+        "path": (STR, True),
+        "offset": (INT, False),
+        "length": (INT, False),
+    },
+    "workspaceFiles/readAll": {
+        "workspaceFileScopeId": (STR, True),
+        "path": (STR, True),
+    },
+    "workspaceFiles/readRelated": {
+        "workspaceFileScopeId": (STR, True),
+        "path": (STR, True),
+        "relativePath": (STR, True),
+    },
+    "workspaceFiles/stat": {
+        "workspaceFileScopeId": (STR, True),
+        "path": (STR, True),
+    },
+    "workspaceFiles/list": {
+        "workspaceFileScopeId": (STR, True),
+        "path": (STR, True),
+    },
+    "workspaceFiles/changes": {
+        "workspaceFileScopeId": (STR, True),
+    },
+    # settings-controller（packages/api/settings-controller）。
+    "settings/describe": {},
+    "settings/canOpenAgentPresetDirectory": {},
+    "settings/update": {
+        "ns": (STR, True),
+        "patch": (OBJ, True),
+        "expectedRevision": (INT, False),
+    },
+    "settings/replace": {
+        "ns": (STR, True),
+        "section": (OBJ, True),
+        "expectedRevision": (INT, False),
+    },
+    "settings/mutate": {
+        "ns": (STR, True),
+        "ops": (ARR, True),
+        "expectedRevision": (INT, False),
+    },
+    "settings/openSettingsDocument": {},
+    "settings/openAgentPresetDirectory": {
+        "agentPreset": (STR, True),
+    },
+    "credentials/describe": {
+        "refs": (ARR, True),
+    },
+    "credentials/set": {
+        "ref": (STR, True),
+        "value": (STR, True),
+    },
+    "credentials/unset": {
+        "ref": (STR, True),
+    },
 }
 
 

@@ -349,6 +349,17 @@ class SettingsProvider(Service):
         self._document = document if isinstance(document, dict) else {}
         self._has_document = True
 
+    # ---------- 文档（settings-controller 的 openSettingsDocument） ----------
+
+    @property
+    def document_path(self) -> str | None:
+        """provider 拥有的本地文档路径；无本地文档的 provider 返回 None。"""
+        return None
+
+    def prepare_document(self) -> str | None:
+        """物化 provider 拥有的文档并返回其路径；无本地文档返回 None。"""
+        return None
+
 
 class SettingsFileProvider(SettingsProvider):
     """文件承载的设置 provider：JSON 文档 + 原子写 + watchdog 外部改动重载。"""
@@ -375,6 +386,15 @@ class SettingsFileProvider(SettingsProvider):
         pathlib.Path(tmp).write_text(
             json.dumps(self._document, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp, self.path)
+
+    @property
+    def document_path(self) -> str | None:
+        return self.path
+
+    def prepare_document(self) -> str | None:
+        """物化文件（写盘）并返回路径（对齐上游 prepareDocument）。"""
+        self._persist()
+        return self.path
 
     def watch_file(self) -> None:
         if self._watch_observer is not None:

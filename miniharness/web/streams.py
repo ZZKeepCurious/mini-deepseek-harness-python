@@ -97,6 +97,8 @@ class GatewayStreams:
             "session/follow": "follow",
             "session/control": "control",
             "terminal/follow": "terminal_follow",
+            "workspace/follow": "workspace_follow",
+            "workspaceFiles/changes": "workspace_changes",
         }
 
     def open_stream(self, endpoint: str, payload: Any, signal=None):
@@ -130,6 +132,10 @@ class GatewayStreams:
             return self._follow(payload["args"], signal)
         if kind == "terminal_follow":
             return self._terminal_follow(payload["args"], signal)
+        if kind == "workspace_follow":
+            return self._workspace_follow(payload["args"], signal)
+        if kind == "workspace_changes":
+            return self._workspace_changes(payload["args"], signal)
         return self._control(signal)
 
     # ---------- session/follow（历史跟随流） ----------
@@ -213,6 +219,58 @@ class GatewayStreams:
                 await asyncio.sleep(TERMINAL_FOLLOW_POLL)
         finally:
             follow.detach()
+
+    # ---------- workspace/follow（工作区投影流） ----------
+
+    async def _workspace_follow(self, args: dict, signal=None):
+        """`workspace/follow`：一条完整 baseline 后跟有序 upsert/remove/order/archived。
+
+        对齐上游 WorkspaceController.follow：重连开新代次并重发 baseline。mini 以
+        controller 的 WorkspaceFollow（ctx `workspace/changed` 订阅 + 非阻塞 pop）
+        经短轮询桥接同步载体。
+        """
+        controller = self.api.ctx.get("workspaceController")
+        if controller is None:
+            raise RemoteStreamError(
+                "gateway/invocation-unavailable",
+                "typert gateway: workspace/follow: workspace namespace is not mounted")
+        follow = controller.follow()
+        try:
+            yield follow.baseline
+            while True:
+                frame = follow.pop()
+                if frame is not None:
+                    yield frame
+                    continue
+                await asyncio.sleep(TERMINAL_FOLLOW_POLL)
+        finally:
+            follow.close()
+
+    # ---------- workspaceFiles/changes（文件观察流） ----------
+
+    async def _workspace_changes(self, args: dict, signal=None):
+        """`workspaceFiles/changes`：`{kind:'ready'}` 后跟工作区内 `fs/observed` 观察。"""
+        controller = self.api.ctx.get("workspaceFiles")
+        if controller is None:
+            raise RemoteStreamError(
+                "gateway/invocation-unavailable",
+                "typert gateway: workspaceFiles/changes: workspaceFiles namespace is not mounted")
+        try:
+            scope = self.api.workspace_file_scope(args)
+            changes = controller.changes(scope)
+        except Exception as error:  # noqa: BLE001 - 折流 error 帧（不关 WS）
+            raise RemoteStreamError(getattr(error, "code", None) or "gateway/internal",
+                                    str(error)) from error
+        try:
+            yield changes.ready
+            while True:
+                frame = changes.pop()
+                if frame is not None:
+                    yield frame
+                    continue
+                await asyncio.sleep(TERMINAL_FOLLOW_POLL)
+        finally:
+            changes.close()
 
     # ---------- session/control（宿主级 live control） ----------
 

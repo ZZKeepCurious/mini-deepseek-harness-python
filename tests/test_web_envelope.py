@@ -31,11 +31,13 @@ class TestRpcId(unittest.TestCase):
 
 class TestErrorCodeSet(unittest.TestCase):
     def test_closed_set_matches_session_error_details_map(self):
-        # RemoteErrorDetailsMap 键集（alpha.2 命名空间码，typert-protocol/types.ts + 各域注册）26 码
+        # RemoteErrorDetailsMap 键集（alpha.2 命名空间码，typert-protocol/types.ts + 各域注册）40 码
         # （R3 闭合：路由层边界校验新增 gateway/input-invalid；复核批：mux 未知
         # endpoint 对齐上游 gateway/index.ts:660 → gateway/invocation-unavailable；
-        # P4：terminal-controller 新增 terminal/control-unavailable + terminal/limit-reached）
-        self.assertEqual(len(RPC_ERROR_CODES), 26)
+        # P4：terminal-controller 新增 terminal/control-unavailable + terminal/limit-reached；
+        # 残余 api 控制器：workspace / workspace-file / settings / credential /
+        # agent-preset/read-only / gateway/lookup-not-found）
+        self.assertEqual(len(RPC_ERROR_CODES), 40)
 
     def test_known_codes_present(self):
         for code in ("gateway/bad-request", "session/not-found", "session/model-unavailable",
@@ -46,8 +48,13 @@ class TestErrorCodeSet(unittest.TestCase):
                      "session/fork-unavailable", "subagent/not-found",
                      "subagent/unauthorized", "gateway/internal", "gateway/cancelled",
                      "gateway/arguments-invalid", "gateway/input-invalid",
-                     "gateway/invocation-unavailable",
-                     "terminal/control-unavailable", "terminal/limit-reached"):
+                     "gateway/invocation-unavailable", "gateway/lookup-not-found",
+                     "terminal/control-unavailable", "terminal/limit-reached",
+                     "workspace/invalid-path", "workspace/name-conflict",
+                     "workspace/move-invalid", "workspace-file/not-found",
+                     "workspace-file/too-large", "workspace-file/not-text",
+                     "settings/rejected", "settings/conflict", "credential/rejected",
+                     "agent-preset/read-only"):
             self.assertIn(code, RPC_ERROR_CODES)
 
     def test_apiproxy_only_codes_retired(self):
