@@ -6,11 +6,13 @@ import os
 import tempfile
 import unittest
 
+from miniharness.context import install_session_reference
 from miniharness.core.scope import Context
 from miniharness.fs import install_local_fs
 from miniharness.llm.fake import FakeLlmAdapter
 from miniharness.seams.credentials_local import LocalCredentialProvider, install_credentials
 from miniharness.seams.sandbox_policy import SandboxPolicyService
+from miniharness.session_query import SessionQuery
 from miniharness.settings import install_settings
 from miniharness.settings_controller import install_settings_controller
 from miniharness.web.api import WebApi
@@ -36,6 +38,8 @@ class WebResidualTest(unittest.TestCase):
         install_workspace_controller(self.ctx)
         install_workspace_files(self.ctx)
         install_settings_controller(self.ctx, roster=None)
+        SessionQuery(self.ctx)
+        install_session_reference(self.ctx, {"maxReferenceBytes": 4096})
         self.api = WebApi(self.ctx, FakeLlmAdapter())
         self.session_id = self._value(
             self.api.dispatch("session.create", "r0", {"cwd": self.work}))["sessionId"]
@@ -139,6 +143,14 @@ class WebResidualTest(unittest.TestCase):
             return ready
 
         self.assertEqual(asyncio.run(changes_stream()), {"kind": "ready"})
+
+    def test_session_reference_candidates_route(self):
+        value = self._value(self.api.dispatch(
+            "sessionReferenceResolver/candidates", "sr1", {"agentId": self.session_id}))
+        self.assertEqual(value, [])
+        missing = self._error(self.api.dispatch(
+            "sessionReferenceResolver/candidates", "sr2", {}))
+        self.assertEqual(missing["code"], "gateway/arguments-invalid")
 
     def test_unmounted_namespaces_reject_honestly(self):
         bare = Context(name="bare-residual")

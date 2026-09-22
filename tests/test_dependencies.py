@@ -87,6 +87,7 @@ LAYER_UNITS = [
     ("session_projection", 1),
     ("workspace", 2),
     ("settings", 2),
+    ("context", 2),
     ("cli", 3),
     ("protocol", 3),
     ("seams", 3),

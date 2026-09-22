@@ -723,6 +723,8 @@ class AgentLoop:
         decision = await self.ctx.awaterfall("agent/pre-step", {
             "messages": claimed,
             "agent": self,
+            "turn": self._turn,
+            "step": self._step + 1,
             "signal": self._abort_proxy,
         }, this_arg=self._carrier)
         if isinstance(decision, dict) and decision.get("kind") == "reject":

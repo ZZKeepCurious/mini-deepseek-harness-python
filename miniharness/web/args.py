@@ -258,6 +258,11 @@ _SPECS: dict[str, dict[str, tuple[str, bool]]] = {
     "credentials/unset": {
         "ref": (STR, True),
     },
+    # session-reference（packages/context/session-reference）：Remote namespace candidates。
+    "sessionReferenceResolver/candidates": {
+        "agentId": (STR, True),
+        "query": (STR, False),
+    },
 }
 
 

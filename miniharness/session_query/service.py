@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..core.scope import Context, Service
+from ..core.session import SESSION_FORMAT_VERSION
 from .config import (
     SESSION_QUERY_READ_WINDOW_MAX,
     SessionQueryError,
@@ -24,6 +25,10 @@ from .sqlite import SqliteSearchIndex
 __all__ = ["SessionQuery"]
 
 _MAX_LIMIT = 200
+
+#: read_surface 保留的 surface 事件类型（session-reference 投影面）。
+_SURFACE_EVENT_TYPES = frozenset({
+    "user/message", "assistant/message", "system/message", "tool/result"})
 
 
 def _header_of(session: Any) -> dict:
@@ -171,6 +176,28 @@ class SessionQuery(Service):
         return {"items": hits, "nextCursor": next_cursor}
 
     # ---------- 读取 / 追溯 ----------
+
+    def list_sessions(self) -> list[dict]:
+        """列出全部候选会话（活 + 持久化）的 SessionRecord（对齐上游 listSessions）。"""
+        return [self._record(header, live) for header, live in self._candidates().values()]
+
+    def read_surface(self, session_id: str) -> dict:
+        """读取某会话当前 surface 快照（对齐上游 readSurface）。
+
+        返回 `{session: {id, cwd, version}, capturedThroughSeq, events}`；
+        events 只含 surface 事件（user/message、assistant/message、system/message、
+        tool/result），供跨会话引用投影。
+        """
+        events, header, _live = self._resolve(session_id)
+        surface = [event for event in events
+                   if event.get("type") in _SURFACE_EVENT_TYPES]
+        captured = surface[-1].get("seq") if surface else None
+        return {
+            "session": {"id": header.get("id"), "cwd": header.get("cwd"),
+                        "version": SESSION_FORMAT_VERSION},
+            "capturedThroughSeq": captured,
+            "events": surface,
+        }
 
     def read_event(self, request: dict) -> dict:
         session_id = request.get("sessionId")

@@ -386,6 +386,7 @@ class WebApi:
         "credentials/describe": "credentials_describe",
         "credentials/set": "credentials_set",
         "credentials/unset": "credentials_unset",
+        "sessionReferenceResolver/candidates": "session_reference_candidates",
     }
 
     def methods(self) -> frozenset[str]:
@@ -746,6 +747,21 @@ class WebApi:
     def credentials_unset(self, payload: dict) -> None:
         self._remote_call(
             lambda: self._credentials_controller().unset(payload.get("ref")))
+
+    # ---------- session-reference 域（context 组的 candidates Remote 面） ----------
+
+    def _session_reference_resolver(self):
+        resolver = self.ctx.get("sessionReferenceResolver")
+        if resolver is None:
+            raise _Reject("gateway/invocation-unavailable",
+                          "sessionReferenceResolver namespace is not mounted in this deployment",
+                          {})
+        return resolver
+
+    def session_reference_candidates(self, payload: dict) -> list:
+        agent = self.resolve_terminal_agent(payload.get("agentId"))
+        return self._remote_call(lambda: self._session_reference_resolver().remote_export_candidates(
+            agent, payload.get("query")))
 
     # ---------- session.list ----------
     @staticmethod
