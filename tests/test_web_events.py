@@ -175,5 +175,24 @@ class RemoteEventRegistryTest(unittest.TestCase):
         self.assertEqual(kind, "cancelled")
 
 
+    def test_cancel_of_invoke_emits_cancel_frame(self):
+        async def go():
+            client = self.reg.open({"args": {}}).__aiter__()
+            await client.__anext__()  # ready
+            task = asyncio.ensure_future(
+                self.reg.invoke("user-questions/request", "s1", {"questions": []}))
+            await asyncio.sleep(0)
+            frame = await client.__anext__()  # waterfall
+            self.assertEqual(frame["type"], "waterfall")
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            cancel = await client.__anext__()  # cancel 帧（调用方取消）
+            return frame, cancel
+        frame, cancel = _run(go())
+        self.assertEqual(cancel["type"], "cancel")
+        self.assertEqual(cancel["eventId"], frame["eventId"])
+
+
 if __name__ == "__main__":
     unittest.main()

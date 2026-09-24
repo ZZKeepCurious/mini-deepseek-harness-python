@@ -64,7 +64,9 @@ class SchemaShapeTest(unittest.TestCase):
         tool = reg.resolve(ASK_USER_QUESTION)
         props = tool.parameters["properties"]["questions"]["items"]["properties"]
         self.assertEqual(set(props), {"id", "question", "header", "options", "multi_select"})
-        # 上游有 value/recommended/preview 参数（额外信号），mini 无效果参数 → 不注册
+        # mini schema 与上游 tool-ask-user/src/index.ts:31-54 逐字一致：properties
+        # 恰为 id/question/header/options/multi_select，上游同样没有 value/
+        # recommended/preview 等额外信号参数（回归护栏，防止误加非上游字段）。
         self.assertNotIn("value", props)
         self.assertNotIn("recommended", props)
         self.assertNotIn("preview", props)

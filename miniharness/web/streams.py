@@ -10,7 +10,7 @@
     projections）后按变更给 `queue` / `jobs` / `projection` 帧。
   * `$events`         —— 远程事件流（`web/events.py` RemoteEventRegistry），承载
     api-session/* 转发源 + 审批瀑布 + 用户提问瀑布（`web/approvals.py` /
-`web/questions.py` bridge）。
+    `web/questions.py` bridge）。
 
 进程侧数据来自 WebApi（`api._agents` 常驻 AgentLoop、`api.store` 的 Session、
 `ctx` 的 jobs 注册表）。跨进程耦合面只有本类发布给 mux 的 wire 契约（endpoint

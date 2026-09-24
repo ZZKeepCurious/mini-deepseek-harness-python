@@ -92,14 +92,13 @@ def aborted_question(cause: Any = None) -> UserQuestionError:
 def _is_record(value: Any) -> bool:
     """对象且非标量/数组（对齐上游 isRecord：`typeof === 'object'`，非数组）。
 
-    BaseException 实例（含挂 name/message/code 属性的传输形状）按上游语义
-    视为对象；str/bytes/list/tuple/set/type 排除。
+    排除 None / str / bytes / list / tuple / set / type / 数值 / 布尔；其余
+    （dict、BaseException、普通对象）视为记录，字段经 _field 的 `.get` 或
+    属性访问读取——与上游「对象即可」的判定面一致。
     """
     return (value is not None
-            and not isinstance(value, (str, bytes, list, tuple, set, type))
-            and (isinstance(value, BaseException)
-                 or isinstance(value, dict)
-                 or hasattr(value, "get")))
+            and not isinstance(value, (str, bytes, bytearray, list, tuple, set,
+                                       frozenset, type, int, float, complex, bool)))
 
 
 def _field(record: Any, key: str) -> Any:
@@ -173,13 +172,13 @@ class UserQuestionService(Service):
             options = question.get("options") or []
             if not any(option.get("label") == intent.get("approve") for option in options):
                 raise UserQuestionError(
-                    f'question {question["id"]} declares intent {intent["kind"]} '
+                    f'question {question.get("id")} declares intent {intent.get("kind")} '
                     f'whose approve label {json.dumps(intent.get("approve"))} '
                     "names none of its options",
                     BAD_INTENT)
             if question.get("detail") is None:
                 raise UserQuestionError(
-                    f'question {question["id"]} declares intent {intent["kind"]} '
+                    f'question {question.get("id")} declares intent {intent.get("kind")} '
                     "without the detail it reviews",
                     BAD_INTENT)
 

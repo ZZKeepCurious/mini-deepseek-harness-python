@@ -299,7 +299,14 @@ class RemoteEventRegistry:
         self._pending[pending.id] = pending
         for client in list(self._clients.values()):
             self._deliver(pending, client)
-        return await pending.wait()
+        try:
+            return await pending.wait()
+        except asyncio.CancelledError:
+            # 调用方取消（回合 cancel / 宿主拆解）：结束挂起并向客户端发 cancel
+            # 帧，使浏览器侧 pending 问题/审批随即消失（等价上游 request.signal
+            # 中止客户端 pending），再向上传播取消。
+            self._finish(pending)
+            raise
 
     # ---------- 内部 ----------
 

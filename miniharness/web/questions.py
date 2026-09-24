@@ -18,7 +18,10 @@ Remote 转发（remote-events.ts:37 `user-questions/request` waterfall）：
 mini 简化（须标注）：上游应答者持久挂在 Agent-scoped answerer waterfall 上并
 与 AbortSignal 竞争（signal 中断即 abort 请求）；mini 的桥 `install(loop)` 每
 loop 注册一次 async answerer，signal 竞争交由其按序 Awaitable（事件循环）承担
-——同 approval 桥（web/approvals.py）的 wire 上异步投递。
+——同 approval 桥（web/approvals.py）的 wire 上异步投递。wire 不含 `signal`
+（不可序列化）：客户端取消由 `$events` cancel 帧承载——调用方取消（回合 cancel）
+经 `RemoteEventRegistry.invoke` 的 CancelledError 分支向客户端发 cancel 帧
+（等价上游 signal 中止客户端 pending），网关 dispose 则全量 'cancelled'。
 """
 from __future__ import annotations
 

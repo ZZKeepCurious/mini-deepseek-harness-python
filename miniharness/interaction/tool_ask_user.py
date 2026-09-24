@@ -28,7 +28,7 @@ import json
 from typing import Any
 
 from ..core.tools import Tool, ToolResult
-from .user_questions import UserQuestionError, UserQuestionService
+from .user_questions import UserQuestionError
 
 __all__ = ["ASK_USER_QUESTION", "register_ask_user_question"]
 
@@ -128,7 +128,7 @@ def register_ask_user_question(reg: Any, ctx: Any) -> Any:
     disposer（fiber 拆解自动注销）。
     """
     service = ctx.get("userQuestions")
-    if not isinstance(service, UserQuestionService):
+    if service is None:
         return None
 
     async def execute(args: dict, exec_: Any) -> Any:
