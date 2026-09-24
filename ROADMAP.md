@@ -37,6 +37,8 @@ web 半（传输层 + 浏览器前端）的 wire 面与上游一致：两信封 
 
 - **请求上下文插件（context 组）**：`miniharness/context/`（L2）——`time_context`（每步时钟读数 + 浏览器时区策略 + `timeContext` 投影）、`tmux_context`（tmux 方位查询/变化抑制 + `tmuxContext` 投影）、`file_reference`+`file_reference_local`（`@file` 词法 + `WorkspaceFileSearch` 模糊索引 + `ctx.fileReferences`）、`session_reference`（`dsh-session:` URI/提及 + 跨会话有界快照 + `sessionReferenceResolver/candidates` Remote）、`agent_instructions`（AGENTS.md 发现/去重/预算渲染/基线/reconcile + pre-step 注入与 `tools/post-execute` touch）。见 verified-diffs §2.57/§3.34。
 
+- **模型澄清（user-questions）**：`miniharness/interaction/{user_questions,tool_ask_user}.py`（L3）+ `web/questions.py` 桥 + CLI 四入口 seam——`UserQuestionError` 稳定码集（ASK_ABORTED/EMPTY_QUESTIONS/CALLER_NOT_LIVE/DELEGATED_CALLER/BAD_INTENT/NO_PROVIDER/ASK_CANCELLED）、`user-questions/request` waterfall + 无应答者 fail-loud（`core/scope.py` `awaterfall` base 扩展形参）、`restore_user_question_error` 传输恢复、取消归一（在航 signal aborted → ASK_ABORTED）；`ask_user_question` 工具 schema/execute 逐字 + canonical `{"answers":[...]}`（render 返回紧凑 JSON 字符串，mini 全局工具 content 载体等价，见 verified-diffs §3.36）；plan 审查（plan/review.py）与 web 桥（`$events/result` 结算）消费同一 seam；工具只装配了服务处注册（web 组合与 demo），headless 仅装 seam。**测试**：test_user_questions 20 + test_ask_user_question 10 + test_web_user_questions 4 + test_plan_review 20。详见 verified-diffs §2.59/§3.36。
+
 ## 上游包观察清单（未复现，暂不纳入范围）
 
 以下上游 `packages/` 包尚未复现，未来想扩充复现范围可从中挑选；多数属于"能力扩展口 + 消费工具"的延伸，核心约定不依赖它们。已实现的家族中也有只做了一部分切片的（如 subprocess 仅环境清洗、client 仅 ui-trajectory、host 为 apiproxy 子集），权威归属以 docs/architecture.md 映射表为准。

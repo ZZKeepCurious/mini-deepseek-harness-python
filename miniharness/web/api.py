@@ -336,6 +336,7 @@ class WebApi:
         from .streams import GatewayStreams
         self.gateway = GatewayStreams(self)
         self.approvals = self.gateway.approvals
+        self.questions = self.gateway.questions
 
     # ---------- 路由 ----------
 
@@ -422,6 +423,7 @@ class WebApi:
         loop.publish()
         self._agents[session.session_id] = loop
         self.approvals.install(loop)
+        self.questions.install(loop)
         try:
             loop.start_driver()
         except RuntimeError:

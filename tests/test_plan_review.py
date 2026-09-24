@@ -2,6 +2,10 @@
 
 覆盖：工具注册跨模式稳定、plan/headling/agent/通道前置、批准排队 silent 退出、
 keep planning/dismiss 反馈、/plan 四态文案、命令可选性、投影 fold。
+
+M9 起审查通道 = userQuestions 真实 seam：install_user_questions 装配服务，
+控制型应答者注册在 'user-questions/request' 瀑布上（async answerer），工具
+execute 经 interaction.ask 与它走完整校验 + 承诺两段（详见 user_questions.py）。
 """
 
 import asyncio
@@ -10,15 +14,23 @@ from types import SimpleNamespace
 
 from miniharness.commands import install_commands, route_command
 from miniharness.core.agent_loop.agent import AgentLoop
+from miniharness.core.agents import install_agents
 from miniharness.core.scope import Context
 from miniharness.core.session import Session
+from miniharness.core.session_store import install_sessions
 from miniharness.core.system_prompt import install_system_prompt
 from miniharness.core.tools import ToolExec, ToolRegistry
+from miniharness.interaction import (
+    ASK_CANCELLED,
+    UserQuestionError,
+    install_user_questions,
+)
 from miniharness.llm import FakeLlmAdapter
 from miniharness.plan import (
     APPROVE_LABEL,
     EXIT_PLAN_MODE,
     KEEP_PLANNING_LABEL,
+    REVIEW_ID,
     fold_plan_mode,
     fold_plan_projection,
     install_plan_mode,
@@ -27,20 +39,32 @@ from miniharness.plan import (
 
 
 class _Channel:
-    """可编程 userQuestions 通道（sync 回调 .ask(question, agent) -> str | None）。"""
+    """可编程 userQuestions 应答者（waterfall 监听器，async answerer）。
 
-    def __init__(self):
-        self.answers = []
+    answers 语义：None → 取消审查（ASK_CANCELLED）；APPROVE_LABEL → 批准；
+    KEEP_PLANNING_LABEL → 继续规划（无反馈）；其他 str → 继续规划 + 该反馈。
+    """
+
+    def __init__(self, answers=()):
+        self.answers = list(answers)
         self.asked = []
 
-    def ask(self, question, agent):
-        self.asked.append(question)
-        return self.answers.pop(0) if self.answers else None
+    async def answer(self, request, _nxt=None):
+        self.asked.append(request)
+        raw = self.answers.pop(0) if self.answers else None
+        if raw is None:
+            raise UserQuestionError("the user cancelled ask_user_question", ASK_CANCELLED)
+        entry = {"id": REVIEW_ID, "selected": [raw]}
+        if raw not in (APPROVE_LABEL, KEEP_PLANNING_LABEL):
+            entry["custom"] = raw
+        return {"answers": [entry]}
 
 
 def _make(commands=True):
     ctx = Context(name="plan-review")
     install_system_prompt(ctx)
+    install_sessions(ctx)
+    install_agents(ctx)
     if commands:
         install_commands(ctx)
     controller = install_plan_mode(ctx, {"section": "Plan guidance."})
@@ -48,7 +72,16 @@ def _make(commands=True):
     install_plan_review(ctx, controller)
     adapter = FakeLlmAdapter(final_text="完成。")
     loop = AgentLoop(Session("r1"), adapter, reg, ctx)
+    loop.publish()
     return ctx, controller, reg, loop
+
+
+def _with_answerer(ctx, *answers):
+    """装配真实 userQuestions 服务 + 可编程应答者，返回 channel（used by asked）。"""
+    install_user_questions(ctx)
+    channel = _Channel(answers)
+    ctx.on("user-questions/request", channel.answer)
+    return channel
 
 
 def _call(reg, args, exec_=None):
@@ -87,8 +120,7 @@ class ExitPlanModeTest(unittest.TestCase):
 
     def test_dismissed_stays(self):
         ctx, controller, reg, loop = _make()
-        channel = _Channel()
-        ctx.provide("userQuestions", channel)
+        _with_answerer(ctx)
         controller.set(loop, True)
         with self.assertRaises(ValueError) as cm:
             _call(reg, {"plan": "# Plan"}, ToolExec(agent=loop))
@@ -97,19 +129,23 @@ class ExitPlanModeTest(unittest.TestCase):
 
     def test_keep_planning_feedback(self):
         ctx, controller, reg, loop = _make()
-        channel = _Channel()
-        channel.answers.append("make it shorter")
-        ctx.provide("userQuestions", channel)
+        _with_answerer(ctx, "make it shorter")
         controller.set(loop, True)
         with self.assertRaises(ValueError) as cm:
             _call(reg, {"plan": "# Plan"}, ToolExec(agent=loop))
         self.assertIn("feedback: make it shorter", str(cm.exception))
 
+    def test_keep_planning_bare(self):
+        ctx, controller, reg, loop = _make()
+        _with_answerer(ctx, KEEP_PLANNING_LABEL)
+        controller.set(loop, True)
+        with self.assertRaises(ValueError) as cm:
+            _call(reg, {"plan": "# Plan"}, ToolExec(agent=loop))
+        self.assertIn("revise the plan and present it again", str(cm.exception))
+
     def test_approved_queues_exit(self):
         ctx, controller, reg, loop = _make()
-        channel = _Channel()
-        channel.answers.append(APPROVE_LABEL)
-        ctx.provide("userQuestions", channel)
+        _with_answerer(ctx, APPROVE_LABEL)
         controller.set(loop, True)
         out = _call(reg, {"plan": "# Plan"}, ToolExec(agent=loop))
         # execute 返回 canonical 值（上游 {approved:true}），不再直接返回文案
@@ -126,15 +162,15 @@ class ExitPlanModeTest(unittest.TestCase):
 
     def test_question_shapes(self):
         ctx, controller, reg, loop = _make()
-        channel = _Channel()
-        channel.answers.append(APPROVE_LABEL)
-        ctx.provide("userQuestions", channel)
+        channel = _with_answerer(ctx, APPROVE_LABEL)
         controller.set(loop, True)
         _call(reg, {"plan": "# Plan"}, ToolExec(agent=loop))
-        question = channel.asked[0]
-        self.assertEqual(question["id"], "plan-review")
+        question = channel.asked[0]["questions"][0]
+        self.assertEqual(question["id"], REVIEW_ID)
         self.assertEqual([o["label"] for o in question["options"]],
                          [APPROVE_LABEL, KEEP_PLANNING_LABEL])
+        # intent 载荷随 question 携带（上游 index.ts:307-315）
+        self.assertEqual(question["intent"], {"kind": "plan-review", "approve": APPROVE_LABEL})
 
 
 class PlanCommandTest(unittest.TestCase):

@@ -1,5 +1,8 @@
 """端到端演示：假模型 + 工具 + 会话持久化 + 崩溃恢复（无需 API key）。
 
+组合了 M9 的 userQuestions seam 与 ask_user_question 工具（无 UI 应答者时
+工具返回 NO_PROVIDER；演示仅展示装配）。
+
 用法：python -m miniharness.demo
 """
 from __future__ import annotations
@@ -21,6 +24,7 @@ from .core.system_prompt import install_system_prompt
 from .core.tools import Tool, ToolRegistry
 from .jobs import install_jobs, register_job_tools
 from .skills import install_skills, register_skill_tools
+from .interaction import install_user_questions, register_ask_user_question
 
 
 def main() -> None:
@@ -49,6 +53,8 @@ def main() -> None:
     reg = ToolRegistry(ctx)
     register_job_tools(reg, ctx.get("jobs"))
     register_skill_tools(reg, ctx.get("skills"))
+    install_user_questions(ctx)
+    register_ask_user_question(reg, ctx)
     reg.register(Tool(
         name="bash",
         description="Run a shell command.",

@@ -92,4 +92,10 @@ def default_tools(ctx: Context) -> ToolRegistry:
     if skills is not None:
         from ..skills import register_skill_tools
         register_skill_tools(reg, skills)
+    # ctx.web 服务存在时收编 web_search/web_fetch 二工具 + 对应 prompt 节
+    # （install_web 已装配 provider；节需 systemPrompt 服务，见 register_web_tools）
+    web = ctx.get("web")
+    if web is not None:
+        from ..web_tools import register_web_tools
+        register_web_tools(reg, web, ctx.get("systemPrompt"))
     return reg

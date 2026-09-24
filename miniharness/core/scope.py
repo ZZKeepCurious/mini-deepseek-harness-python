@@ -1464,15 +1464,21 @@ class Context:
             await _maybe_await(fn(payload))
 
     async def awaterfall(self, event: str, payload: Any = None, *,
-                         this_arg: Any = None) -> Any:
-        """流水线异步版：语义与 waterfall 相同（next() 委派、不调即短路）。"""
+                         this_arg: Any = None, base: Callable | None = None) -> Any:
+        """流水线异步版：语义与 waterfall 相同（next() 委派、不调即短路）。
+
+        base 为链尾终止回调（对齐上游 cordis waterfall 的 callback 末参）：
+        监听器一律调 next() 时最终落到 base(payload)（可 await）；无 base 时
+        返回 payload。"""
         listeners = self._hooks_for(event, this_arg)
         idx = 0
 
         async def step(cur: Any) -> Any:
             nonlocal idx
             if idx >= len(listeners):
-                return cur
+                if base is None:
+                    return cur
+                return await _maybe_await(base(cur))
             fn = listeners[idx]
             idx += 1
             result = fn(cur, lambda new=cur: step(new))

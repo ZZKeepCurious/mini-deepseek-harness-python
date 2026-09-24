@@ -66,7 +66,7 @@ def _check(value: Any, schema: dict, path: str, errors: list[str]) -> None:
             if k in value:
                 _check(value[k], sub, f"{path}.{k}", errors)
     elif typ == "array":
-        if not isinstance(value, list):
+        if not isinstance(value, (list, tuple)):
             errors.append(f"{path}: 期望 array")
             return
         for i, item in enumerate(value):

@@ -1,4 +1,4 @@
-"""Plan 审查 UI：`exit_plan_mode` 工具 + `/plan` 命令 + 审查通道契约。
+"""Plan 审查 UI：`exit_plan_mode` 工具 + `/plan` 命令 + 审查契约。
 
 上游对照：packages/plan/plan-mode/src/index.ts:305-393（exit 工具，含 userQuestions
 审查与 pendingIntent 排队）与 index.ts:269-303（/plan 命令）。
@@ -11,26 +11,27 @@
   * `/plan` 命令：`/plan off` 关闭（四态文案逐字对齐 index.ts:277-291），
     其余输入开启并向模型 steer 一句 user 消息（index.ts:293-300）。
 
-审查通道（上游 userQuestions 的 mini 形态）：宿主提供 ctx 服务 `userQuestions`
-（sync 回调对象，.ask(question, agent) -> str | None）：
-  返回 APPROVE_LABEL（'Approve'）→ 批准；
-  返回 KEEP_PLANNING_LABEL（'Keep planning'）→ 继续规划（无反馈）；
-  返回其他字符串 → 继续规划 + 该字符串作为用户反馈；
-  返回 None → 用户取消审查（对齐上游 ASK_CANCELLED）。
+审查通道（上游 userQuestions 的真实 seam）：execute 校验 agent/plan mode/标题
+后调用 `interaction.ask({questions, agent, signal})`（async; index.ts:302-318）。
+结果按 REVIEW_ID 过滤（恰好一条才取，index.ts:336-343）：selected 恰为
+[APPROVE_LABEL] 且无 custom → 批准；否则 keep planning（feedback = custom ?? ''）。
+ASK_CANCELLED（用户收回回合）→ 保 plan mode 等待消息（index.ts:325-330）；
+其余 UserQuestionError（ASK_ABORTED / NO_PROVIDER 等）保持原消息透传
+（index.ts:329 `throw cause`）。plan-review intent 载荷随 question 携带
+（detail 即 plan，index.ts:307-315）。
 
-mini 简化（须在文档中标注）：审查为同步回调（上游 async interaction.ask +
-signal）；presentCall/presentResult 已按上游契约提供（index.ts:382-392），但 mini
-无 UI 渲染层消费，仅为契约对齐而存在。execute 已返回 canonical 值 {approved:true}，
-模型可见文案经 Tool.render 分离（上游 output.render，index.ts:319）。
+mini 载体差异（须在文档中标注）：上游 ask 前后还有 `disposed`（插件纤维被
+重载）守卫（index.ts:333-335）——mini 无运行中插件重载，不适用；presentCall/
+presentResult 已按上游契约提供，但 mini 无 UI 渲染层消费，仅为契约对齐而存在。
 """
 from __future__ import annotations
 
-import asyncio
 import re
 from typing import Any, Callable
 
 from ..core.scope import Context
 from ..core.tools import Tool
+from ..interaction.user_questions import ASK_CANCELLED, UserQuestionError
 from .mode import PlanModeController, fold_plan_mode
 
 __all__ = [
@@ -130,8 +131,8 @@ def install_plan_review(ctx: Context, controller: PlanModeController) -> None:
         if not _HEADING_PATTERN.match(plan.strip()):
             raise _exit_plan_mode_error(
                 f"{EXIT_PLAN_MODE} requires a non-empty markdown plan starting with a # heading")
-        channel = ctx.get("userQuestions")
-        if channel is None:
+        interaction = ctx.get("userQuestions")
+        if interaction is None:
             raise _exit_plan_mode_error(
                 "no user-questions channel is available to review the plan; "
                 "ask the user to switch the session mode instead")
@@ -146,18 +147,33 @@ def install_plan_review(ctx: Context, controller: PlanModeController) -> None:
             ],
             "intent": {"kind": "plan-review", "approve": APPROVE_LABEL},
         }
-        # 同步审查通道（简化）：to_thread 防止阻塞事件循环
-        answer = await asyncio.to_thread(channel.ask, question, agent)
-        if answer is None:
-            raise _exit_plan_mode_error(
-                "The user dismissed the plan review to speak instead; stay in plan mode, "
-                "stop here, and wait for their message.")
-        if answer != APPROVE_LABEL:
-            if answer == KEEP_PLANNING_LABEL:
+        try:
+            # 真实 async seam：userQuestions 无应答者瀑布投递（上游 index.ts:302-318）
+            result = await interaction.ask({
+                "questions": [question],
+                "agent": agent,
+                "signal": exec.signal,
+            })
+        except UserQuestionError as error:
+            if error.code == ASK_CANCELLED:
+                # 用户收回回合（dismiss）：保 plan mode，等其消息（上游 index.ts:325-330）
+                raise _exit_plan_mode_error(
+                    "The user dismissed the plan review to speak instead; stay in plan mode, "
+                    "stop here, and wait for their message.") from error
+            raise  # ASK_ABORTED / NO_PROVIDER 等保持原消息透传（上游 throw cause）
+        # 审查结果按 REVIEW_ID 过滤：恰好一条才取（上游 index.ts:336-343）
+        review_items = [a for a in result.get("answers", []) if a.get("id") == REVIEW_ID]
+        item = review_items[0] if len(review_items) == 1 else None
+        if (item is None
+                or len(item.get("selected", [])) != 1
+                or item["selected"][0] != APPROVE_LABEL
+                or item.get("custom") is not None):
+            feedback = item.get("custom", "") if item is not None else ""
+            if feedback == "":
                 raise _exit_plan_mode_error(
                     "The user chose to keep planning; revise the plan and present it again.")
             raise _exit_plan_mode_error(
-                f"The user chose to keep planning; their feedback: {answer}")
+                f"The user chose to keep planning; their feedback: {feedback}")
         # 批准：排队 silent 选择（narrate=False），下次被接受的 in-turn pre-step 提交
         controller._queue_exit(agent)
         # canonical 值（上游 execute 返回 {approved:true}）；模型可见文案经 render 分离

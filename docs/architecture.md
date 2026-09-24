@@ -200,7 +200,9 @@ miniharness/
 ├── extensions/            # packages/extensions
 │   └── dynamic.py         # 动态插件生命周期
 ├── interaction/           # packages/interaction
-│   └── approval.py        # 审批服务
+│   ├── approval.py        # 审批服务
+│   ├── user_questions.py  # user-questions 服务（模型澄清 seam：UserQuestionError + ask 派发 + restore）
+│   └── tool_ask_user.py   # ask_user_question 工具（schema/execute/render，同 tool-ask-user）
 ├── protocol/              # packages/{acp, sdk, hooks}
 │   ├── acp.py             # ACP 服务器子集
 │   ├── sdk.py             # JSON-RPC 信封 + 最小运行服务
@@ -240,12 +242,23 @@ miniharness/
 │   ├── events.py          # $events 注册表（api-session/* 转发源 + waterfall + $events/result 结算）
 │   ├── streams.py         # GatewayStreams（$events 装配 + session/follow/control 流分发表）
 │   ├── approvals.py       # 审批桥（async tools/ask 闸门 ↔ approval/request waterfall + $events/result）
+│   ├── questions.py       # user-questions 桥（user-questions/request waterfall ↔ $events/result 结算）
 │   ├── downloads.py       # GET /api/session.export 会话日志导出（zip 打包 root + 后代 + 媒体）
 │   ├── frontend.py        # 静态服务约定（遍历 403 / SPA 回退 200 / MIME）
 │   ├── inventory.py       # pluginInventory/list 投影（Loader 条目四字段 + preset 组合行 flatten）
 │   ├── static/            # vanilla SPA 教学参照前端（index.html / app.js / style.css，无构建步；消费旧 SSE wire，对新后端不工作——真实对接见仓库顶层 `webui/`）
 │   ├── server.py          # FastAPI 载体（unary {args} 解包 + $events/result 特判 + WS + 静态，stream-server.ts / handler.ts）
 │   └── launcher.py        # web profile 启动器（build_app / run_web）
+├── web_tools/             # packages/web/{web,web-search-deepseek,web-fetch-http}+tool-web（模型可见 web 功能族，默认组合 dsh-base 挂载）
+│   ├── runtime.py         # WebRuntime（ctx.web：URL 策略 + 双 provider 注册表 + 执行期选择六分支 + 配置回落）
+│   ├── network.py         # 整址公网策略（答案集先整体校验再钉桩，防 DNS 重绑定）+ is_public_ip_address
+│   ├── policy.py          # 字节帽（声明超限拒绝/流式截断）+ 字符帽 + redirect 跟随/跨源拒绝
+│   ├── fetch_http.py      # 匿名公共抓取 provider（HttpFetchProvider + build_http_limits）
+│   ├── search_deepseek.py # DeepSeek 搜索 provider（Anthropic /messages 协议 + citation_snippets + 3xx 拒绝）
+│   ├── search_tool.py     # web_search 工具（web_search_section_text + run_search_queries + round-robin 去重 merge）
+│   ├── fetch_tool.py      # web_fetch 工具（web_fetch_section_text + format_fetch_output 三段截断 + MAX_CONVERSION_DEPTH）
+│   ├── trust.py           # 信任域/信任来源判定
+│   └── types.py           # 契约类型（WebSearchResult/WebFetchResult + run_deadlined/is_set_signal）
 ├── demo.py                # 端到端演示（教学入口，python -m miniharness.demo）
 └── example_plugins.py     # boot 演示插件（教学示例）
 ```
@@ -319,6 +332,8 @@ miniharness/
 | `preset/presets.py` | `packages/preset` + `apps/cli/config/agent-presets` | shipped root(system) + 多根 first-root-wins roster、project_preset/project_session_agent_preset 投影、PresetLockedError、PresetNotWritableError、mount 作用域审计；YAML 翻译（agent.cordis.yml → Preset）；数据目录 `preset/{minimal,standard}` |
 | `extensions/dynamic.py` | `packages/extensions/*` | |
 | `interaction/approval.py` | `packages/interaction/user-approval` | |
+| `interaction/user_questions.py` | `packages/interaction/user-questions/src/index.ts` | `UserQuestionError`（name + 稳定 code）、`ask()` 校验序逐字（aborted → ASK_ABORTED / EMPTY_QUESTIONS / CALLER_NOT_LIVE / DELEGATED_CALLER / BAD_INTENT）、waterfall 派发（`user-questions/request` + no-answerer fail-loud → NO_PROVIDER）、`restore_user_question_error` 传输恢复、取消归一（航 signal aborted → ASK_ABORTED）。载体差异：waterfall base 经 `core/scope.py` `awaterfall` 扩展形参承载（见 §3.36） |
+| `interaction/tool_ask_user.py` | `packages/interaction/tool-ask-user/src/index.ts` | `ask_user_question` 工具（schema properties id/question/header/options/multi_select 逐字 + `required` 数组；execute 投影 + canonical `{"answers":[...]}`；UQE → `ToolResult(error="Error: {message}", error_info={name, code})`）；render 直接返回紧凑 JSON 字符串（mini 全局工具 content 载体使列表渲染会包 repr，载体等价见 §3.36）。仅装配 userQuestions 服务后注册 |
 | `client/trajectory.py` | `packages/client/ui-trajectory` | |
 | `mcp/types.py` | `packages/mcp/mcp-client/src/{connection,index}.ts` | ReconnectConfig / RECONNECT_DEFAULTS / Config schema 默认值（serverName 模式 `[A-Za-z0-9_-]{1,32}`、toolCallTimeoutMs 60000、maxInstructionBytes 32768、GENERATION_CLOSE_TIMEOUT_MS 5000）；resolve_reconnect_policy / resolve_mcp_config 以显式解析承载上游 Schemastery loader 的 fail-loud 归一校验 |
 | `mcp/client.py` | `packages/mcp/mcp-client/src/index.ts` | apply(ctx, config)：scope-session 化 serverName 保留集 + resolve → 链接生成；McpServerConnection 同步门面 |
@@ -338,12 +353,14 @@ miniharness/
 | `web/events.py` | `packages/api/gateway/src/index.ts`（remote-event）+ `packages/api/session-controller`（api-session/*）+ `packages/api/remotes` | `$events` 注册表：open 首帧 `ready`{clientId, host.home} → 转发 emit/waterfall/cancel；api-session/* 转发源（created/disposed/status/error/activity）；waterfall 经 `$events/result` 结算（result/next/rejected/cancelled），未知 clientId fail-closed |
 | `web/streams.py` | `packages/api/session-controller/src/{index,remote-events}.ts` | GatewayStreams Remote 方法面：session/follow（快照 snapshot{header,cursor,records,hasMore,projections} + 逐条 event）+ session/control（baseline{queues,jobs} + 实时 queue/jobs）+ `$events` 装配；跨堆非阻塞唤醒线程安全。活体 event 载体 = ≤50ms 短轮询批量提取（`_poll_new_events`，`seq >= cursor`，0 基 seq 不吞首帧）；**wire 无 since**（重连=重开全量） |
 | `web/approvals.py` | `packages/interaction/user-approval` + `packages/api/remotes`（last-resort approval 转发）| 审批桥：async `tools/ask` 闸门 → `approval/request` waterfall（`$events`）+ `$events/result` 结算； outcome 映射 result∈APPROVAL_OUTCOMES（否则 unavailable fail-closed）/rejected→unavailable/next→nxt()/cancelled；审计对 approval/asked+decided；接线点在工具闸门（上游在 approval/request，教学简化） |
+| `web/questions.py` | `packages/bundle/client-ui-user-questions`（应答面）+ `packages/api/remotes`（waterfall）| user-questions 桥：install 挂 async answerer 到会话 loop.ctx 的 `user-questions/request`；wire `{questions, agent: agent.id}`（agent 投影为 id，上游 ui-user-questions 只消费会话上下文中的 agent）；kind result 原样 value / next→await nxt() / rejected→`_restore_wire_error`（dict name/message/code 均有 str → UQE，否则 RuntimeError）/ cancelled→`aborted_question()` |
 | `web/server.py` | `packages/api/gateway/src/{stream-server,index}.ts`（WS mux + 升级拒绝）+ `packages/client/connection/src/rpc.ts`（unary 载体语义） | FastAPI 载体：unary POST `{args}` 严格解包（`/api/<endpoint>`）+ `$events/result` 特判；载体状态码 404/415/400（token 门配置时 /api/* 另有 401，`web/auth.py`——上游 requestRejection 等价物），业务错误恒 200 + result.ok=false + server-response 信封；WS `/api/remote.mux`；`GET /api/session.export` 载体（query 校验→400、调 `build_session_export`）；SPA 静态 fallback；无 CORS（上游同款：靠 415 状态码挡跨站写入） |
 | `web/downloads.py` | `packages/session-query/session-log-export/src/{archive,index}.ts`（导出域）+ `api/session-controller`（下载端点约定面） | 会话日志导出：parse_export_query（sessionId/includeDescendants）、SessionLogExportDeps、safe_session_id_segment、session_log_zip_filename、build_session_export（zip 条目序：根制品逐字原始文件名→后代 BFS+seen-set 去重→媒体、压缩等级缺省 6、私有错误安全壳）；测试 `tests/test_web_export.py` |
 | `web/frontend.py` | `packages/host/frontend-static` | 静态服务约定：遍历 403 / SPA 回退 200 / MIME 按扩展 / 未知扩展 octet-stream；index taps 恒 identity（无 boot-manifest）；`DIST_ROOT` 默认 `web/static/`，经 `MINIHARNESS_WEBUI_DIST` 可指向产品化前端构建产物（`webui/dist/`），约定不变 |
 | `web/inventory.py` | `packages/host/plugin-inventory/src/{index,types}.ts` + `packages/preset/agent-presets/src/composition-inventory.ts` + `discovery.ts`（entryListProblem） | `pluginInventory/list` 投影：`entries_snapshot`（Loader 非 group 条目四字段 `{entryId,moduleName,enabled,fiberPhase}`，无 loader 服务→空）、`file_composition`/`composition_inventory`/`build_inventory`（preset 组合行 flatten：组行跳过、组 disabled 继承、`!!js` 求值被拒→`'conditional'` + condition 原文、无 roster→省略 `agentPresets` 键）、`PluginInventoryService`（`ctx.pluginInventory`）；JSON-schema 方言与 `!!js` 求值子集同 loader。载体差异：preset.json 载体无插件行→`rows: []` |
 | `web/static/`（index.html + app.js + style.css） | `packages/bundle/web-app` + `packages/client` | 教学参照 vanilla SPA（无构建步）：消费**旧 SSE wire**（`events.mux`/`respond`/`host.describe`），alpha.1 后端已删这些端点，故不对新后端工作，仅作历史/教学说明；产品化前端 = 仓库顶层 `webui/` 独立 React 工程（只依赖新 wire 约定，见 §3 三层边界） |
 | `web/launcher.py` | `packages/host/webserver`（Config：host 两值 + port 0）+ `api/gateway` heartbeat | host/port 优先级「CLI `--host`/`--port`（经 cli/main 传入）> env MINIHARNESS_WEB_HOST/PORT > 缺省 127.0.0.1/0」；`0.0.0.0` 无 token fail-loud；**心跳与上游 gateway 约定一致**：`uvicorn_options()` 设 `ws_ping_interval=2 / ws_ping_timeout=4`（transport 级 Ping 2s + 连续 2 周期无 Pong 判定断开 ≈ 上游 `websocketHeartbeatIntervalMs` @default 2000 + `MAX_MISSED_HEARTBEATS=2` terminate） |
+| `web_tools/`（runtime + network + policy + fetch_http + search_deepseek + search_tool + fetch_tool + trust + types） | `packages/web/web` + `web-search-deepseek` + `web-fetch-http` + `web/tool-web` | 模型可见 web 功能族（L2，默认组合 `dsh-base` 挂载；`install_web(ctx)` 经 `ctx.provide("web", ...)` 暴露，四个 CLI 入口同挂，`cli/default_tools.py` 按 `ctx.get("web")` 条件注册工具）：`WebRuntime`（URL 策略 + 凭据检查、双 provider 注册表重复 id → `WEB_DUPLICATE_PROVIDER`、执行期选择六分支、`search` 按 `request.maxResults` 封顶置 `truncated`、配置 id 回落 `DSH_WEB_SEARCH_PROVIDER`/`DSH_WEB_FETCH_PROVIDER`）+ `fetch_http`（匿名公共抓取恒可用 + 整址公网策略防 DNS 重绑定 + 字节帽/字符帽 + 同源重定向跟随 ≤maxRedirects、跨源拒绝）+ `search_deepseek`（Anthropic `/messages` 协议 + `redirect:'error'` 手动 3xx 拒绝 + citation_snippets + 归一 WebSearchResult）+ 两工具 `web_search`/`web_fetch`（schema/描述/输出必需字段逐字 + 节 order 2000/2100 + `format_*_output` 截断规则）。**载体差异（见 verified-diffs §3.35）**：turndown→markdownify+bs4（GFM 表头/colspan 差异如实登记）、AbortSignal→`threading.Event`/FusedSignal 轮询、代理面简化恒直连、无 present 卡片、WebConfig `searchTimeoutMs` 烘焙 base 补丁 60000。**测试**：`tests/test_web_tools.py` 75 测（本地钉桩不触公网）；全量 3048 绿。详见 verified-diffs §2.58 |
 | `protocol/acp.py` | `packages/acp/acp` | 自动化专用 JSON-RPC 服务：initialize（`sessionCapabilities:{close,list,resume}`）、会话生命周期 new/resume/list/close（校验序逐字、keyset 分页 `page.at(-1)` 游标、selectionFor 恢复已提交路由）、模型选择标准配置 `set()`（model/reasoning_effort 逐字文案、切 model 复位 reasoning；目录经可选 `adapter.models_catalog`/`resolve_model_info()['reasoning']` 教学扩展承载）、prompt 同步完整回合（snapshot+pin、turnless/max-tokens/error 结算逐字）+ 更新流投影（agent_message_chunk 带 messageId、agent_thought_chunk、tool_call/_update completed/failed）+ 富媒体受理 + 一次性审批桥 + usage_update 发射（`request/context` 带 contextWindow + `Session.request_context()` + `_emit_usage_update`，assistant/message 带 usage 时发射）+ `session/update` 并发逐块流式通知（`_install_update_stream` 订阅 session/event 逐事件实时投影、`update_sink` 即时外发；in-process 载体收敛 `server.updates` 批量）**+ 可写入磁盘归档**：`AcpServer(persistence=...)` 可选 `JsonlPersistence` 后端——`new_session` declare + `_install_persistence_hook`（`session/event` append / `session/flush` flush）、`close_session` flush、`list_sessions` 合并磁盘 headers、`resume_session` 非 live 经 `repair_and_replay` 物化；磁盘写默认关闭（宿主装配持久化）；简化标注见模块 docstring（磁盘会话仅事件日志重建、不给 live turn 后台执行） |
 | `protocol/sdk.py` | `packages/sdk/protocol` + `sdk/server` | messageId 为真实消息 id（与 inbox 回执一致，官方 SDK 依赖）；互操作测试 `tests/test_upstream_sdk_interop.py`（需 pydantic + 上游 SDK 源码，缺则 skip） |
 | `protocol/hooks.py` | `packages/hooks/hook-protocol` + `hooks-claude-code` | 默认 runner 与 runner.ts 一致：stdin JSON payload + trailing newline、cwd、CLAUDE_PROJECT_DIR env、缺省 600000ms 超时；保留"异步 + signal"同步近似（subprocess） |
@@ -379,7 +396,7 @@ miniharness/
 |---|---|---|
 | L0 地基 | `core/session`、`core/scope`、`core/dsh_scope`、`core/schema`、`core/hmr`、`core/home_paths`、`core/tool_timeout`、`loader` | 无（互不依赖；core.scope ↔ core.dsh_scope / core.schema / core.hmr→core.scope / loader→core.scope 经 §3 例外豁免；core.tool_timeout 是超时约定常量叶，被 core.tools 与 guard 两侧共享） |
 | L1 领域 | `llm/*`、`core/tools`、`core/system_prompt`、`core/session_store`、`core/agents`、`attachment`、`ptc_runtime`、`identity`、`storage`、`fs/*`、`boot/*`、`guard`、`session_projection`、`terminal` | 仅 L0（fs 单元还注册模型侧工具进 `core.tools`——§3 规则 1 显式例外；terminal 仅依赖 core.scope） |
-| L2 编排 | `core/agent_loop`、`compaction`、`jobs`、`plan`、`commands`、`goal`、`skills`、`telemetry`、`session_query`、`todo`、`spill`、`workspace`、`settings`、`context` | L0 + L1 |
+| L2 编排 | `core/agent_loop`、`compaction`、`jobs`、`plan`、`commands`、`goal`、`skills`、`telemetry`、`session_query`、`todo`、`spill`、`workspace`、`settings`、`context`、`web_tools` | L0 + L1 |
 | L3 应用与入口 | `cli/*`、`protocol/*`、`seams/*`、`preset`、`extensions`、`interaction`、`client`、`mcp`、`web`、`shell`、`terminal_bash`、`tool_terminal`、`terminal_controller`、`workspace_controller`、`workspace_files`、`settings_controller` | L0 ~ L2 |
 | 教学层 | `demo.py`、`example_plugins.py` | 任意层，但不得被业务模块依赖 |
 
@@ -397,7 +414,7 @@ miniharness/
 
 规则：
 
-1. L_n 只依赖 L_{&lt;n}，禁止依赖同层或上层。九条显式例外：
+1. L_n 只依赖 L_{&lt;n}，禁止依赖同层或上层。十二条显式例外：
    - `seams/subagent/worker.py` 依赖 `protocol/*`（同层）：worker 是 ACP / SDK 线协议的服务端载体，复用协议层的帧与信封实现；
    - `core/hmr.py` 依赖 `core/scope`（同层）：HMR 是 cordis 家族的 vendored 部件（上游 vendor/hmr 直接建在 cordis 之上），复用 Service/fiber 基座，与 core.dsh_scope 同理归属 L0；
    - `loader/*` 依赖 `core/scope`（同层）：loader 是 cordis 家族的 vendored 部件（上游 vendor/loader 直接建在 cordis 之上），复用 Service/fiber/Inject 基座，与 core.hmr 同理归属 L0；
@@ -407,6 +424,9 @@ miniharness/
    - `shell/bash_sandbox.py` 依赖 `seams/sandbox_local`（同层，单方向）：bash-sandbox 是 ctx.sandbox 的消费者——上游 bash-sandbox 同样依赖 dsh-sandbox，拓扑一致而非分层倒挂；seams 层不得反向 import shell；
    - `mcp/connection.py` 依赖 `seams/subprocess_env`（同层，单方向）：stdio 子进程 env 组装复用 seam 的净身切片（上游 mcp-client spawn 透传 env），同 cli→seams 先例；seams 层不得反向 import mcp；
    - `cli/main.py` 依赖 `demo`（教学层）：无 profile 时以 `demo` 兜底（教学扩展入口）。
+   - `plan/*` 依赖 `interaction`（同层，单方向）：plan-mode 审查经 userQuestions 通道（`interaction.ask`，上游 plan-mode peerDep `@deepseek-ai/dsh-user-questions`），interaction 不得反向 import plan；
+   - `web/questions.py` 依赖 `interaction`（同层，单方向）：user-questions 桥消费 UserQuestionsService（上游 web-app 组合 dsh-client-ui-user-questions），interaction 不得反向 import web；
+   - `cli/*` 依赖 `interaction`（同层，单方向）：四个入口安装 userQuestions 服务 seam（上游 base bundle 依赖 dsh-user-questions，同 cli→web 先例），interaction 不得反向 import cli。
 2. `protocol/` 内三个模块互不依赖（acp、sdk、hooks 各自独立）。
 3. `seams/` 内 sandbox（sandbox_local + sandbox_policy）、credentials、subagent 互不依赖；policy 与 local 同属沙箱子域——上游 dsh-sandbox-policy 同样依赖 dsh-sandbox。
 4. `seams/credentials_local.py` 从 `boot/dotenv.py` 导入 `parse_dotenv`（L3 → L1）：凭据文档解析复用 boot 层的 `.env` 解析器，方向合法。

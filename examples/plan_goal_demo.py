@@ -2,7 +2,8 @@
 
 演示（议题 8）：
   * `/plan` 命令进出 plan mode；模型经 `exit_plan_mode` 工具提交计划，
-    userQuestions 审查通道批准后静默退出（下次被接受的 pre-step 提交）。
+    userQuestions 审查通道（waterfall answerer）批准后静默退出（下次被接受的
+    pre-step 提交）。
   * `/goal` 命令 show/create/pause/resume/clear；模型经 `create_goal` 工具建目标；
     GoalDriver.continue_rounds 自动续跑轮次；`update_goal complete` 收尾。
 
@@ -25,6 +26,8 @@ from miniharness import (
 )
 from miniharness.core.agent_loop.agent import AgentLoop
 from miniharness.commands import install_commands, route_command
+from miniharness.core.agents import install_agents
+from miniharness.core.session_store import install_sessions
 from miniharness.core.system_prompt import install_system_prompt
 from miniharness.goal import (
     install_goal_commands,
@@ -32,6 +35,7 @@ from miniharness.goal import (
     install_goals,
     register_goal_tools,
 )
+from miniharness.interaction import ASK_CANCELLED, UserQuestionError, install_user_questions
 from miniharness.llm import FakeLlmAdapter
 from miniharness.plan import APPROVE_LABEL, KEEP_PLANNING_LABEL, install_plan_mode, install_plan_review
 
@@ -95,36 +99,40 @@ def _created_goal_ref(session):
 
 
 class ReviewChannel:
-    """审查通道：自动批准（--approve）或交互询问。
+    """审查应答者（user-questions/request 瀑布 answerer）：自动批准或交互询问。
 
-    ask() 返回 APPROVE_LABEL / KEEP_PLANNING_LABEL / 反馈文本 / None（取消）。
+    answer(request, _nxt) 返回 canonical answers；取消时抛 ASK_CANCELLED
+    （对齐上游应答者取消语义，plan 审查把其翻译为 dismiss 文案）。
     """
 
     def __init__(self, auto_approve=False):
         self._auto = auto_approve
 
-    def ask(self, question, agent):
+    async def answer(self, request, _nxt=None):
+        question = request["questions"][0]
         if self._auto:
-            return APPROVE_LABEL
+            return {"answers": [{"id": question["id"], "selected": [APPROVE_LABEL]}]}
         print("\n--- 计划审查 ---")
-        print(question["detail"])
+        print(question.get("detail", ""))
         print("选项: [Approve] / [Keep planning] / 输入反馈 / 回车=取消")
         try:
             choice = input("→ ").strip()
         except EOFError:
-            return None
+            choice = ""
         if choice == "":
-            return None
+            raise UserQuestionError("the user cancelled ask_user_question", ASK_CANCELLED)
         if choice.lower().startswith("a"):
-            return APPROVE_LABEL
+            return {"answers": [{"id": question["id"], "selected": [APPROVE_LABEL]}]}
         if choice.lower().startswith("k"):
-            return KEEP_PLANNING_LABEL
-        return choice
+            return {"answers": [{"id": question["id"], "selected": [KEEP_PLANNING_LABEL]}]}
+        return {"answers": [{"id": question["id"], "selected": [choice], "custom": choice}]}
 
 
 def _build(adapter, auto_approve=False):
     ctx = Context(name="plan-goal-demo")
     install_system_prompt(ctx)
+    install_sessions(ctx)
+    install_agents(ctx)
     install_commands(ctx)
     controller = install_plan_mode(ctx, {"section": "Plan first, then act."})
     reg = ToolRegistry(ctx)
@@ -133,8 +141,10 @@ def _build(adapter, auto_approve=False):
     register_goal_tools(reg, goals, ctx)
     driver = install_goal_driver(ctx, goals)
     install_goal_commands(ctx, goals)
-    ctx.provide("userQuestions", ReviewChannel(auto_approve))
+    install_user_questions(ctx)
+    ctx.on("user-questions/request", ReviewChannel(auto_approve).answer)
     loop = AgentLoop(Session("plan-goal-demo"), adapter, reg, ctx)
+    loop.publish()
     return ctx, controller, reg, loop, goals, driver
 
 

@@ -17,6 +17,8 @@ from ..llm.retry import apply_retry_planner
 from ..compaction import install_compaction, install_tool_result_pruner
 from ..jobs import install_jobs
 from ..core.system_prompt import install_system_prompt
+from ..web_tools import install_web
+from ..interaction import install_user_questions
 from .default_tools import default_tools
 from .headless import summarize
 from ..llm import DeepSeekAdapter, LlmAdapter, LlmFailure
@@ -113,6 +115,8 @@ def resume_session(
     install_tool_result_pruner(ctx)
     install_jobs(ctx)
     install_system_prompt(ctx)
+    install_web(ctx)
+    install_user_questions(ctx)
     store = install_sessions(ctx)
     install_agents(ctx)
     # 三段式（对齐 headless / 上游 agent-loop 工厂）：prepare → 构造 loop →

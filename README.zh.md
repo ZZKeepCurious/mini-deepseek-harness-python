@@ -39,6 +39,7 @@
 | 后台作业（`job_output`/`job_list`/`job_kill`、完成 notice、per-owner 上限；无 `job/*` 会话事件） | `packages/jobs`（jobs-local + tool-jobs） |
 | plan 模式（log-only `plan/mode` 状态、plan:policy prompt 分节注入、in-turn queued 提交） | `packages/plan/plan-mode` |
 | plan 审查 UI（`/plan` 命令、`exit_plan_mode` 审查工具、userQuestions 通道、plan 投影单元） | `packages/plan/plan-mode` |
+| 用户澄清（`UserQuestionError` 稳定码集含 ASK_ABORTED / EMPTY_QUESTIONS / CALLER_NOT_LIVE / DELEGATED_CALLER / BAD_INTENT / NO_PROVIDER、`user-questions/request` waterfall + 无应答者 fail-loud、`restore_user_question_error` 传输恢复、`ask_user_question` 工具 canonical `{"answers":[...]}` JSON render、web 桥经 `$events/result` 结算；工具只装配了服务处注册——web 组合与 demo） | `packages/interaction/user-questions` + `tool-ask-user` + `bundle/client-ui-user-questions` |
 | 命令表面（`/` 命令注册表、`command/run` + `command/done` 配对） | `packages/interaction/commands` |
 | 目标（`goal/change` 事件溯源 fold、GoalService、自动续跑 goal round、`get_goal`/`create_goal`/`update_goal` 三工具、`/goal` 命令） | `packages/goal`（goal + goal-round-driver + tool-goal + command-goal） |
 | system prompt 分节（有序节注册 + 渲染进每次请求） | `core/system-prompt` |
@@ -46,6 +47,7 @@
 | 插件装载树（Loader 服务 + EntryTree + live fiber：配置条目 `{plugins}` 动态装载/卸载、disabled/`!!js` 激活期求值、`include` 文件背书子树 + 补丁展开、启动未激活审计；`internal/config|update|plugin` 钩子） | `vendor/loader` + `vendor/include` |
 | headless 一次性任务入口（`--profile headless "task"`：stdout 最终文本、退出码按 turn/end reason） | `packages/bundle/headless` + `apps/cli` |
 | web 传输层与浏览器前端（`--profile web`；两信封 RPC、`/api/remote.mux`、`$events`、follow/control、审批桥、FastAPI 载体、会话导出、`webui/` 前端；详见下文） | `packages/api/gateway` + `packages/api/session-controller` + `packages/api/remotes` + `host/frontend-static` + `host/webserver` |
+| 模型可见 web 工具族（`ctx.web` 运行时 + DeepSeek 搜索 provider + 匿名 HTTP 抓取 provider + `web_search`/`web_fetch` 两工具：URL 策略与凭据检查、双 provider 注册表 `WEB_DUPLICATE_PROVIDER`、执行期选择六分支、配置回落 `DSH_WEB_SEARCH_PROVIDER`/`DSH_WEB_FETCH_PROVIDER`、防 DNS 重绑定的整址公网策略、字节/字符帽、`redirect:'error'` 手动 3xx 拒绝、citation snippets、round-robin 去重 merge、HTML→Markdown） | `packages/web/{web,web-search-deepseek,web-fetch-http}` + `packages/web/tool-web` |
 | 启动器选项（`--patch`、`--dump-config` / `--dump-default-config`、只读组合导出） | `apps/cli/src/args.ts` |
 | 插件清单投影（`pluginInventory/list`：Loader 条目四字段 `{entryId,moduleName,enabled,fiberPhase}` + preset 组合行 flatten + `!!js` conditional） | `packages/host/plugin-inventory` + `packages/preset/agent-presets` |
 | 会话管理服务（`ctx.sessions`：create/prepare/enter/announce 生命周期、fork 五错误码、flush 检查点、`session/created|disposed|event|flush` 四事件） | `packages/core/session`（SessionStore） |
@@ -190,6 +192,7 @@ mini-deepseek-harness-python/
 │   ├── goal/  plan/  jobs/  skills/  commands/  attachment/
 │   ├── web/                 # apiproxy 子集：envelope / api / streams / approvals / server / downloads / frontend / launcher
 │   ├── web/static/          # vanilla SPA 教学参照（旧 SSE wire；产品化前端 = 仓库顶层 webui/）
+│   ├── web_tools/           # 模型可见 web 工具族（web + web-search-deepseek + web-fetch-http + tool-web）
 │   ├── preset/  extensions/  interaction/  client/
 │   ├── demo.py              # 端到端演示
 │   └── example_plugins.py   # boot 演示插件

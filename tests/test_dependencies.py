@@ -79,6 +79,7 @@ LAYER_UNITS = [
     ("jobs", 2),
     ("plan", 2),
     ("skills", 2),
+    ("web_tools", 2),
     ("telemetry", 2),
     ("schedule", 2),
     ("session_query", 2),
@@ -203,6 +204,27 @@ class ImportDirectionTest(unittest.TestCase):
                     # §5 显式例外（单方向）：web profile 组装浏览器终端面
                     # （上游 bundle/web compose api-terminal-controller）；运行面在
                     # terminal_controller，terminal_controller 不得反向 import cli
+                    continue
+                if src_unit == "plan" and dst_unit == "interaction":
+                    # §5 显式例外（单方向）：plan 审查消费 interaction 的
+                    # user-questions 能力 seam（上游 plan-mode peerDep
+                    # `@deepseek-ai/dsh-user-questions`，
+                    # packages/plan/plan-mode/package.json）——plan.review 经
+                    # interaction.ask 提交 review 问答；interaction 不得反向 import plan
+                    continue
+                if src_unit == "web" and dst_unit == "interaction":
+                    # §5 显式例外（单方向）：web 层装载 ui-user-questions 应答者
+                    # 并承载 user-questions 瀑布桥（上游 web-app 依赖并 compose
+                    # dsh-client-ui-user-questions，
+                    # packages/bundle/web-app/cordis.patch.yml:350：id: ui-user-questions）；
+                    # interaction 不得反向 import web
+                    continue
+                if src_unit == "cli" and dst_unit == "interaction":
+                    # §5 显式例外（单方向）：launcher 组装 user-questions 服务
+                    # seam 与 ask_user_question 工具（上游 base bundle 依赖
+                    # dsh-user-questions、web-app 依赖 dsh-client-ui-user-questions，
+                    # packages/bundle/{base,web-app}/package.json；同 cli→web 先例）；
+                    # interaction 不得反向 import cli
                     continue
                 if src_unit == "cli" and dst_unit in (
                         "workspace_controller", "workspace_files", "settings_controller"):

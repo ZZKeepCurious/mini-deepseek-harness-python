@@ -9,7 +9,8 @@
   * `session/control` —— 宿主级 live control：首个 `baseline` 帧（queues/jobs/
     projections）后按变更给 `queue` / `jobs` / `projection` 帧。
   * `$events`         —— 远程事件流（`web/events.py` RemoteEventRegistry），承载
-    api-session/* 转发源 + 审批 waterfall（`web/approvals.py` bridge）。
+    api-session/* 转发源 + 审批瀑布 + 用户提问瀑布（`web/approvals.py` /
+`web/questions.py` bridge）。
 
 进程侧数据来自 WebApi（`api._agents` 常驻 AgentLoop、`api.store` 的 Session、
 `ctx` 的 jobs 注册表）。跨进程耦合面只有本类发布给 mux 的 wire 契约（endpoint
@@ -84,6 +85,8 @@ class GatewayStreams:
         self.events.setup_source(api)
         from .approvals import RemoteApprovalBridge
         self.approvals = RemoteApprovalBridge(self)
+        from .questions import RemoteQuestionBridge
+        self.questions = RemoteQuestionBridge(self)
         self._control_queues: dict[asyncio.Queue, None] = {}
         self._attached = False
         self._disposers: list[Any] = []
@@ -411,6 +414,7 @@ class GatewayStreams:
         self._attached = False
         self.events.dispose()
         self.approvals.dispose()
+        self.questions.dispose()
 
 
 async def _poll_new_events(api: Any, session_id: str, from_seq: int, signal=None):

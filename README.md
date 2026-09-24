@@ -41,6 +41,7 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 | Background jobs (`job_output`/`job_list`/`job_kill`, completion notices, per-owner cap; no `job/*` session events) | `packages/jobs` (jobs-local + tool-jobs) |
 | Plan mode (log-only `plan/mode` state, plan:policy prompt-section injection, queued in-turn commit) | `packages/plan/plan-mode` |
 | Plan review UI (`/plan` command, `exit_plan_mode` tool, user-questions channel, plan projection) | `packages/plan/plan-mode` |
+| User questions (`UserQuestionError` stable-code set incl. ASK_ABORTED / EMPTY_QUESTIONS / CALLER_NOT_LIVE / DELEGATED_CALLER / BAD_INTENT / NO_PROVIDER, `user-questions/request` waterfall with no-answerer fail-loud, `restore_user_question_error` wire recovery, `ask_user_question` tool with canonical `{"answers":[...]}` JSON render, web bridge over `$events/result`; the tool is registered only where the service is assembled — web composition + demo) | `packages/interaction/user-questions` + `tool-ask-user` + `bundle/client-ui-user-questions` |
 | Command surface (`/`-command registry, `command/run` + `command/done` pairing) | `packages/interaction/commands` |
 | Goals (`goal/change` event-sourced fold, `GoalService`, automatic goal-round continuation, `get_goal`/`create_goal`/`update_goal` tools, `/goal` command) | `packages/goal` (goal + goal-round-driver + tool-goal + command-goal) |
 | System prompt sections (ordered section registration + rendering into each request) | `core/system-prompt` |
@@ -48,6 +49,7 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 | Plugin load tree (Loader service + EntryTree + live fibers: `{plugins}` dynamic load/unload, disabled/`!!js` evaluation at activation, `include` file-backed subtrees + patch expansion, startup inactive audit; `internal/config|update|plugin` hooks) | `vendor/loader` + `vendor/include` |
 | Headless one-shot entry (`--profile headless "task"`: stdout final text, exit code by turn/end reason) | `packages/bundle/headless` + `apps/cli` |
 | Web transport layer + browser frontend (`--profile web`; two-envelope RPC, `/api/remote.mux`, `$events`, follow/control, approval bridge, FastAPI carrier, session export, `webui/` frontend; see details below) | `packages/api/gateway` + `packages/api/session-controller` + `packages/api/remotes` + `host/frontend-static` + `host/webserver` |
+| Model-visible web tools (`ctx.web` runtime + DeepSeek search provider + anonymous HTTP fetch provider + `web_search`/`web_fetch` tools: URL policy + credential checks, dual-provider registry with `WEB_DUPLICATE_PROVIDER`, six-branch execution selection, config fallback to `DSH_WEB_SEARCH_PROVIDER`/`DSH_WEB_FETCH_PROVIDER`, DNS-rebinding-safe whole-address public policy, byte/char caps, `redirect:'error'` 3xx rejection, citation snippets, round-robin dedup merge, markdown conversion) | `packages/web/{web,web-search-deepseek,web-fetch-http}` + `packages/web/tool-web` |
 | Launcher options (`--patch`, `--dump-config` / `--dump-default-config`, read-only composition dump) | `apps/cli/src/args.ts` |
 | Plugin inventory projection (`pluginInventory/list`: loader entries four fields `{entryId,moduleName,enabled,fiberPhase}` + preset composition rows flatten + `!!js` conditional) | `packages/host/plugin-inventory` + `packages/preset/agent-presets` |
 | Session management CLI (`miniharness sessions` list/resume/delete/stats; mini teaching extension; `stats` renders sessionStats/tokenUsage projection + last-turn token accounting) | web surface (upstream) |
@@ -194,6 +196,7 @@ mini-deepseek-harness-python/
 │   ├── goal/  plan/  jobs/  skills/  commands/  attachment/
 │   ├── web/                 # apiproxy subset: envelope / api / streams / approvals / server / downloads / frontend / launcher
 │   ├── web/static/          # vanilla SPA teaching reference (old SSE wire; product frontend = ../webui)
+│   ├── web_tools/           # model-visible web tools (web + web-search-deepseek + web-fetch-http + tool-web)
 │   ├── preset/  extensions/  interaction/  client/
 │   ├── demo.py              # end-to-end demo
 │   └── example_plugins.py   # boot demo plugins

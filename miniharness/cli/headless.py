@@ -35,6 +35,8 @@ from ..core.session.persistence import JsonlPersistence
 from ..core.session_store import install_sessions
 from ..core.agents import install_agents
 from ..core.system_prompt import install_system_prompt
+from ..web_tools import install_web
+from ..interaction import install_user_questions
 from ..core.tools import ToolRegistry
 from .default_tools import default_tools
 
@@ -105,6 +107,8 @@ def run_headless(
     install_jobs(ctx)
     install_skills(ctx)
     install_system_prompt(ctx)
+    install_web(ctx)
+    install_user_questions(ctx)
     if sandbox:
         from ..seams.sandbox_local import LocalSandboxProvider
         from ..seams.sandbox_policy import SandboxPolicyService
