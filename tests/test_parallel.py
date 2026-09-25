@@ -249,7 +249,8 @@ class TestScheduleTools(unittest.TestCase):
                    for e in session.events if e["type"] == "tool/result"]
         self.assertEqual(results, ["a", "b"])
         err = [e for e in session.events if e["type"] == "tool/result" and "error" in e["data"]][0]
-        self.assertEqual(err["data"]["message"]["content"][0]["isError"], True)
+        # V4：role 'tool' 平铺 content + 顶层 isError
+        self.assertEqual(err["data"]["message"]["isError"], True)
 
     def test_timeout_isolated_does_not_set_shared_signal_and_drains(self):
         session, ctx, reg = _env([])
@@ -268,8 +269,8 @@ class TestScheduleTools(unittest.TestCase):
         # 不置位调用方共享 step 信号——并行组内其它工具不受传染
         self.assertFalse(signal.signal.is_set())
         err = [e for e in session.events if e["type"] == "tool/result"][0]
-        self.assertTrue(err["data"]["message"]["content"][0]["isError"])
-        text = err["data"]["message"]["content"][0]["content"][0]["text"]
+        self.assertTrue(err["data"]["message"]["isError"])
+        text = err["data"]["message"]["content"][0]["text"]
         self.assertIn("Error: tool call timed out", text)
         self.assertEqual(err["data"]["error"],
                          {"name": "ToolTimeoutError", "code": "TOOL_TIMEOUT"})
@@ -438,6 +439,36 @@ class TestParallelBarrier(unittest.TestCase):
 
     def test_cap_one_is_serial(self):
         self.assertEqual(ParallelBarrier(max_parallel=1).max_parallel, 1)
+
+
+class TestMaxParallelConfig(unittest.TestCase):
+    """maxParallelToolCalls 为经校验的普通配置值（对齐上游 Config 校验 + getter）。"""
+
+    def _loop(self, **kw):
+        session = Session("par")
+        ctx = Context()
+        reg = ToolRegistry(ctx)
+        return AgentLoop(session, FakeLlmAdapter(), reg, ctx, **kw)
+
+    def test_default_value(self):
+        self.assertEqual(self._loop().max_parallel_tool_calls,
+                         DEFAULT_MAX_PARALLEL_TOOL_CALLS)
+
+    def test_explicit_value_read_via_getter(self):
+        loop = self._loop(max_parallel_tool_calls=3)
+        self.assertEqual(loop.max_parallel_tool_calls, 3)
+
+    def test_rejects_non_positive_and_non_integer(self):
+        for bad in (0, -1, 1.5, True, "10"):
+            with self.assertRaises(ValueError):
+                self._loop(max_parallel_tool_calls=bad)
+
+    def test_runtime_setter_validates(self):
+        loop = self._loop()
+        loop.max_parallel_tool_calls = 2
+        self.assertEqual(loop.max_parallel_tool_calls, 2)
+        with self.assertRaises(ValueError):
+            loop.max_parallel_tool_calls = 0
 
 
 if __name__ == "__main__":

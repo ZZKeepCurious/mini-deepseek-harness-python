@@ -11,7 +11,6 @@
 """
 from __future__ import annotations
 
-import threading
 import unittest
 
 from miniharness.core.scope import Context
@@ -26,7 +25,7 @@ from miniharness.core.session import Session
 from miniharness.core.agent_loop.agent import AgentLoop
 from miniharness.llm import FakeLlmAdapter
 from miniharness.core.tools import ToolRegistry
-from miniharness.jobs import install_jobs
+from miniharness.jobs import JobDoneBox, install_jobs
 
 
 def _loop(ctx: Context, session_id: str = "s1") -> AgentLoop:
@@ -151,33 +150,77 @@ class TestAssertLive(unittest.TestCase):
         loop.dispose()
 
 
+class TestTurnArchiveAdmission(unittest.IsolatedAsyncioTestCase):
+    """`turn` 归档准入家族（对齐 packages/core/agent/src/archive-admission.ts）。
+
+    注册表构造点安装：运行中的会话答 `{kind:'turn'}` 并接受 stop 取消。
+    """
+
+    def setUp(self):
+        self.ctx = Context(name="root")
+        install_sessions(self.ctx)
+        self.agents = install_agents(self.ctx)
+
+    def _running(self, session_id: str = "s1") -> AgentLoop:
+        loop = _loop(self.ctx, session_id)
+        loop.publish()
+        loop.status = "running"     # 等价 _open_turn 的运行态（无活跃 driver）
+        return loop
+
+    def test_activity_reports_turn_while_running(self):
+        loop = self._running("s1")
+        activity = self.ctx.waterfall("workspace/session-activity",
+                                      {"sessionId": "s1"}, base=lambda _p: [])
+        self.assertEqual([entry["kind"] for entry in activity], ["turn"])
+        loop.dispose()
+
+    def test_activity_silent_while_idle(self):
+        loop = _loop(self.ctx, "s1")
+        loop.publish()               # status 仍为 idle
+        activity = self.ctx.waterfall("workspace/session-activity",
+                                      {"sessionId": "s1"}, base=lambda _p: [])
+        self.assertEqual(activity, [])
+        loop.dispose()
+
+    def test_activity_unknown_session_silent(self):
+        activity = self.ctx.waterfall("workspace/session-activity",
+                                      {"sessionId": "ghost"}, base=lambda _p: [])
+        self.assertEqual(activity, [])
+
+    async def test_stop_cancels_running_agent_as_user(self):
+        loop = self._running("s1")
+        loop._turn_open = True       # 有活跃回合，cancel 才置 aborted 结束原因
+        await self.ctx.aparallel("workspace/session-stop", {"sessionId": "s1"})
+        self.assertTrue(loop._cancelled)
+        self.assertEqual(loop._turn_end, {"kind": "aborted", "reason": {"kind": "user"}})
+        loop.dispose()
+
+    async def test_stop_ignores_idle_agent(self):
+        loop = _loop(self.ctx, "s1")
+        loop.publish()
+        await self.ctx.aparallel("workspace/session-stop", {"sessionId": "s1"})
+        self.assertFalse(loop._cancelled)
+        loop.dispose()
+
+
 class TestJobsGoalBoundary(unittest.TestCase):
-    def test_jobs_reject_stale_caller(self):
+    def test_jobs_access_fenced_by_session_id(self):
+        # rc.1：caller 是 SessionId，作业访问按 owner 会话 id 栅栏（不再断言精确 live 实例）
         ctx = Context(name="root")
         install_sessions(ctx)
         install_agents(ctx)
         registry = install_jobs(ctx)
         live = _loop(ctx, "s1")
         live.publish()
-        # 直接注入一个完整形态的 job 条目（等价 registry.start 注册结果）
-        job: dict = {
-            "id": "bash-1", "kind": "bash", "label": "x", "outputLimitBytes": None,
-            "owner": None, "cancel": lambda *a: None, "readOutput": None,
-            "status": "running", "detail": None, "output": None,
-            "startedAt": 0, "finishedAt": None, "reported": False, "waiters": 0,
-            "settled": threading.Event(), "done": None,
-        }
-        registry._store["bash-1"] = job
-        registry.get("bash-1", live)          # live 调用方通过
-        stale = _loop(ctx, "s1")              # 同 id 未登记实例
-        with self.assertRaises(AgentNotLive):
-            registry.get("bash-1", stale)
-        with self.assertRaises(AgentNotLive):
-            registry.kill("bash-1", stale)
-        with self.assertRaises(AgentNotLive):
-            registry.read("bash-1", stale)
-        with self.assertRaises(AgentNotLive):
-            registry.wait("bash-1", 5, stale)
+        box = JobDoneBox()
+        tid = registry.start({"kind": "bash", "label": "x", "owner": "s1",
+                              "run": lambda job: {"done": box,
+                                                  "cancel": lambda r=None: None}})
+        self.assertEqual(registry.get(tid, "s1")["id"], tid)
+        with self.assertRaises(RuntimeError):
+            registry.get(tid, "s2")
+        live.status = "running"   # busy → notice 注入而非唤醒，避免额外回合
+        box.settle({"status": "completed"})
         live.dispose()
 
     def test_goal_reject_stale_agent(self):

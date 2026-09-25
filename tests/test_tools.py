@@ -191,6 +191,89 @@ class TestPipeline(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.content, {"approved": True})
 
+    def test_project_content_installs_before_post_execute(self):
+        # projectContent 在 post-execute 政策之前安装内容（对齐上游
+        # finalizeScheduledExecution）；政策读到的是投影后的 content。
+        ctx = Context()
+        seen = {}
+
+        def post(payload, nxt):
+            seen["content"] = payload["result"]["content"]
+            return nxt()
+
+        ctx.on("tools/post-execute", post)
+        tool = _make(lambda a, e: "raw", render=lambda value: "rendered",
+                     project_content=lambda exec_, result: ["projected"])
+        result = run_pipeline(ctx, tool, {})
+        self.assertEqual(seen["content"], ("projected",))  # 政策看到投影内容
+        self.assertEqual(result.content, ("projected",))
+
+    def test_project_content_skipped_for_errors(self):
+        # 错误/拒绝结果不带 content 进入政策段前，projectContent 不应用。
+        ctx = Context()
+        calls = []
+        tool = _make(lambda a, e: (_ for _ in ()).throw(RuntimeError("boom")),
+                     project_content=lambda exec_, result: calls.append(result) or ["x"])
+        result = run_pipeline(ctx, tool, {})
+        self.assertTrue(result.is_error)
+        self.assertEqual(calls, [])
+
+    def test_project_content_policy_replacement_wins(self):
+        # post-execute 政策替换 content 仍权威（覆盖投影内容）。
+        ctx = Context()
+        ctx.on("tools/post-execute",
+               lambda p, nxt: {"kind": "accept", "content": ["policy"]})
+        tool = _make(lambda a, e: "raw",
+                     project_content=lambda exec_, result: ["projected"])
+        result = run_pipeline(ctx, tool, {})
+        self.assertEqual(result.content, ("policy",))
+
+    def test_project_content_throw_normalizes_to_error(self):
+        ctx = Context()
+
+        def bad(exec_, result):
+            raise RuntimeError("projector failed")
+
+        result = run_pipeline(ctx, _make(lambda a, e: "ok", project_content=bad), {})
+        self.assertTrue(result.is_error)
+        self.assertIn("projector failed", result.error)
+
+
+class TestToolSchemaProjection(unittest.TestCase):
+    def test_defer_loading_marker_passes_through(self):
+        # 上游 schemaOf 仅 name/description/parameters + deferLoading=true；
+        # mini 运行期不产出该标记，但必须能经注册表 schema 透传。
+        ctx = Context()
+        reg = ToolRegistry(ctx)
+        reg.register(_make(lambda a, e: "x", name="plain"))
+        reg.register(_make(lambda a, e: "x", name="deferred", defer_loading=True))
+        schemas = {s["name"]: s for s in reg.schemas()}
+        self.assertNotIn("deferLoading", schemas["plain"])
+        self.assertIs(schemas["deferred"]["deferLoading"], True)
+        self.assertNotIn("execute", schemas["deferred"])
+
+
+class TestAbortedCancelCause(unittest.TestCase):
+    def test_string_and_missing_cause(self):
+        from miniharness.core.agent_loop.agent import aborted_cancel_cause
+        self.assertEqual(aborted_cancel_cause("user"), {"kind": "user"})
+        self.assertEqual(aborted_cancel_cause("parent"), {"kind": "parent"})
+        self.assertEqual(aborted_cancel_cause(""), {"kind": "user"})
+        self.assertIsNone(aborted_cancel_cause(None))
+
+    def test_dict_cause_copies_only_recorded_fields(self):
+        from miniharness.core.agent_loop.agent import aborted_cancel_cause
+        self.assertEqual(aborted_cancel_cause({"kind": "disposed"}), {"kind": "disposed"})
+        self.assertEqual(
+            aborted_cancel_cause({"kind": "hook", "reason": "gate", "stack": "..."}),
+            {"kind": "hook", "reason": "gate"})
+
+    def test_live_reason_extra_fields_never_reach_turn_end(self):
+        # 模拟一个带 fetch 附加字段（如 stack）的 live AbortSignal.reason
+        from miniharness.core.agent_loop.agent import aborted_cancel_cause
+        reason = {"kind": "user", "stack": "Error\n at fetch", "extra": 1}
+        self.assertEqual(aborted_cancel_cause(reason), {"kind": "user"})
+
 
 if __name__ == "__main__":
     unittest.main()

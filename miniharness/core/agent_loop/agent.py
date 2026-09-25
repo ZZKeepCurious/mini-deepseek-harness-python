@@ -55,7 +55,7 @@ from .assistant_stream import AssistantStreamAttempt
 from .inbox import Inbox
 from .resident_loop import run_on_resident
 from .runtime_context import RuntimeContextProjection
-from .tool_calls import schedule_tool_calls
+from .tool_calls import DEFAULT_MAX_PARALLEL_TOOL_CALLS, schedule_tool_calls
 from ..session import (
     Session,
     create_message,
@@ -109,12 +109,27 @@ def system_prompt_update_capability(adapter: LlmAdapter) -> str | None:
 
 def create_system_message(text: str) -> dict:
     """系统消息工厂（上游 llm/src/message.ts createSystemMessage）：role 'system'
-    + plugin source；空文本 = 「无系统提示词」节点（content 为空数组）。
+    + system-prompt source（V4 命名 kind）；空文本 = 「无系统提示词」节点
+    （content 为空数组）。
     """
     return create_message(
         "system",
         [text_block(text)] if text else [],
-        {"kind": "plugin", "plugin": "system-prompt"})
+        {"kind": "system-prompt"})
+
+
+def _injected_source(source: str) -> dict:
+    """注入消息的 V4 生产者 source（上游 sources.ts 的命名 kind 规则）：
+
+    `'user'` 保留人类来源；第一方生产者直接以自己的 kind 署名；通用
+    `'plugin'` 退化名按迁移规则前缀为 `plugin:plugin`（解释过的消息槽禁止
+    kind 恰为 `'plugin'`）。
+    """
+    if source == "user":
+        return {"kind": "user"}
+    if source == "plugin":
+        return {"kind": "plugin:plugin"}
+    return {"kind": source}
 
 
 def _replayed_next_turn(session) -> int:
@@ -154,6 +169,30 @@ class _AbortProxy:
         return self._owner._cancel_event
 
 
+def aborted_cancel_cause(cause: Any) -> dict | None:
+    """把 cancel() 传入的取消原因裁剪为 `turn/end` 记录的字段。
+
+    对齐上游 abortedCancelCause（agent.ts:79-94）：只复制 `{kind}`，hook 类原因
+    额外复制 `reason`。cancel() 传入的字符串原因（"" / None / "user"…）归一为
+    `{kind: <字符串>}`；`cause` 为 None → None（信号尚未取消）。live 的
+    fetch/AbortSignal 原因对象上多余字段（如 `stack`）绝不进入 `turn/end` data。
+    """
+    if cause is None:
+        return None
+    if isinstance(cause, str):
+        return {"kind": cause or "user"}
+    if isinstance(cause, dict):
+        kind = cause.get("kind")
+        if kind == "hook":
+            return {"kind": "hook", "reason": cause.get("reason")}
+        if kind in ("user", "parent", "disposed"):
+            return {"kind": kind}
+        if isinstance(kind, str) and kind:
+            return {"kind": kind}
+        return {"kind": "user"}
+    return {"kind": "user"}
+
+
 class AgentLoop:
     def __init__(
         self,
@@ -163,7 +202,7 @@ class AgentLoop:
         ctx: Context,
         system_prompt: str = "你是一个助手。",
         max_steps: int | None = None,
-        max_parallel_tool_calls: int = 10,
+        max_parallel_tool_calls: int = DEFAULT_MAX_PARALLEL_TOOL_CALLS,
     ):
         self.session = session
         self.adapter = adapter
@@ -200,7 +239,11 @@ class AgentLoop:
                     raise ValueError(
                         f"MINIHARNESS_MAX_STEPS 必须是非负整数，收到 {env_val!r}"
                     )
-        self.max_parallel_tool_calls = max_parallel_tool_calls   # 阶段 7：并行池上限（上游 DEFAULT_MAX_PARALLEL_TOOL_CALLS）
+        # 阶段 7：并行池上限（上游 maxParallelToolCalls Volatile<number> 配置，
+        # 经 `z.number().step(1).min(1).default(DEFAULT_MAX_PARALLEL_TOOL_CALLS)`
+        # 校验；mini 无 schemastery，在构造点做等价校验，运行期经 getter 读取）。
+        self._max_parallel_tool_calls = self._validate_max_parallel_tool_calls(
+            max_parallel_tool_calls)
         self.status = "idle"
         # 双队列 Inbox（上游 agent/src/inbox.ts）：followup → next-turn，
         # steer/inject → next-step；每次变更落 durable agent/inbox/spliced。
@@ -260,6 +303,30 @@ class AgentLoop:
         # P2-19：loop 侧 runtime-context 投影（上游 agent.ts 构造里
         # new RuntimeContextProjection(ctx, session)）——懒建于首次投影
         self._rt_projection: RuntimeContextProjection | None = None
+
+    @staticmethod
+    def _validate_max_parallel_tool_calls(value: Any) -> int:
+        """校验并行池上限（对齐上游 `z.number().step(1).min(1)` 语义）。
+
+        必须是大于等于 1 的整数（bool 拒绝）；非法 → fail loud（上游配置校验
+        在装载时报错）。缺省值由构造参数默认给出（DEFAULT_MAX_PARALLEL_TOOL_CALLS）。
+        """
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(
+                f"maxParallelToolCalls 必须是 >= 1 的整数，收到 {value!r}")
+        return value
+
+    @property
+    def max_parallel_tool_calls(self) -> int:
+        """当前并行池上限（上游 `config.maxParallelToolCalls.get()`）。
+
+        运行期经 getter 读取：配置是可变的普通值，调度器每次读取拿到最新值。
+        """
+        return self._max_parallel_tool_calls
+
+    @max_parallel_tool_calls.setter
+    def max_parallel_tool_calls(self, value: Any) -> None:
+        self._max_parallel_tool_calls = self._validate_max_parallel_tool_calls(value)
 
     def publish(self, source: str = "startup") -> "AgentLoop":
         """把本 agent 发布为运行态（上游 prepare().publish()，index.ts:556-570）：
@@ -351,8 +418,7 @@ class AgentLoop:
         同步 pump。清 _parked（waking send 恢复 interrupt 驻留队列）。
         """
         message = content if isinstance(content, dict) else create_message(
-            "user", [text_block(content)],
-            {"kind": "user"} if source == "user" else {"kind": "plugin", "plugin": source},
+            "user", [text_block(content)], _injected_source(source),
         )
         self.inbox.append("next-turn", message)
         self._parked = False
@@ -372,8 +438,7 @@ class AgentLoop:
         （子代理结算通知经此送达 running 父，对齐上游 steer(message) 全消息
         语义）。"""
         message = content if isinstance(content, dict) else create_message(
-            "user", [text_block(content)],
-            {"kind": "user"} if source == "user" else {"kind": "plugin", "plugin": source},
+            "user", [text_block(content)], _injected_source(source),
         )
         self.inbox.append("next-step", message)
         self._parked = False
@@ -388,8 +453,7 @@ class AgentLoop:
         字符串时构造文本 user 消息；为 dict 时按预建消息逐字入队（子代理
         结算通知经此送达 idle 父代理前的非唤醒路径）。"""
         message = content if isinstance(content, dict) else create_message(
-            "user", [text_block(content)],
-            {"kind": "plugin", "plugin": source},
+            "user", [text_block(content)], _injected_source(source),
         )
         self.inbox.append("next-step", message)
 
@@ -416,7 +480,9 @@ class AgentLoop:
             self._cancelled = True
             # 对齐上游：turn/end {kind:'aborted', reason: AgentCancelCause}
             # （session/types.ts:158；cause 默认 user，与上游 cancel() 默认一致）
-            self._turn_end = {"kind": "aborted", "reason": {"kind": cause or "user"}}
+            # 经 aborted_cancel_cause 裁剪，只保留 {kind}（hook 类另带 reason），
+            # 避免 live 原因的额外字段进入 turn/end data。
+            self._turn_end = {"kind": "aborted", "reason": aborted_cancel_cause(cause) or {"kind": "user"}}
             if self._step_signal is not None:
                 self._step_signal.signal.set()
             self._set_cancel_event()
@@ -620,9 +686,18 @@ class AgentLoop:
     def _close_turn(self, reason: dict | None = None) -> None:
         if not self._turn_open:
             return
+        final_reason = reason or self._turn_end or {"kind": "completed"}
+        # abort 闭合的最后一道防线：无论 `_turn_end` 从何处写入，只让裁剪后的
+        # AgentCancelCause 到达 turn/end（live fetch/AbortSignal 的额外字段
+        # 如 stack 绝不落日志；玩家 reason 为 code/message 的 error 不受影响）。
+        if isinstance(final_reason, dict) and final_reason.get("kind") == "aborted":
+            final_reason = {
+                "kind": "aborted",
+                "reason": aborted_cancel_cause(final_reason.get("reason")) or {"kind": "user"},
+            }
         self.session.append("turn/end", {
             "turn": self._turn,
-            "reason": reason or self._turn_end or {"kind": "completed"},
+            "reason": final_reason,
         })
         self._turn_open = False
         self._cancelled = False
@@ -1173,13 +1248,6 @@ class AgentLoop:
             self._step_signal = None
 
     def _tool_definitions(self) -> list[dict]:
-        defs = []
-        for name in self.tools.names():
-            tool = self.tools.resolve(name)
-            if tool:
-                defs.append({
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": tool.parameters,
-                })
-        return defs
+        # 模型可见 schema 经注册表白名单投影（对齐上游 registry.schemas()）：
+        # 仅 name/description/parameters +（存在时）deferLoading 标记透传。
+        return self.tools.schemas(self.ctx)

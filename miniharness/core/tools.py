@@ -163,9 +163,14 @@ class Tool:
     timeout_ms: int | None = None                       # 由管线 wrapper 强制
     present_call: Callable | None = None                # UI 挂起卡片（纯函数）
     present_result: Callable | None = None              # UI 完成卡片（纯函数）
+    presentation_meta: Callable | None = None          # 落盘 meta 投影（上游 output.presentationMeta；仅顶层调用）
     render: Callable[..., Any] | None = None            # canonical 值 → 模型可见 content；优先 (args, value) 双参（上游
                                                         # output.render(args, value)），单参 (value) 为 mini 既存简写
+    project_content: Callable[[ToolExec, dict], Any] | None = None   # 政策前内容安装（上游 projectContent；
+                                                                     # 调用开始时快照，collapsed 调用跳过）
     finalize_content: Callable[[ToolExec, dict], Any] | None = None  # 结算前内容收口（上游 finalizeContent）
+    defer_loading: bool = False                         # schema 延迟加载标记（上游 ToolSchema.deferLoading）；
+                                                        # mini 运行期不产出，仅随注册表 schema / 装配透传
 
 
 @dataclass(frozen=True)
@@ -248,6 +253,31 @@ class ToolRegistry:
     def names(self, scope: Context | None = None) -> list[str]:
         merged = self._layers.merge(self._lookup_key(scope), lambda layer: layer)
         return sorted(merged)
+
+    def schema_of(self, tool: Tool) -> dict:
+        """把一个工具定义投影为模型可见 schema 字段（对齐上游 schemaOf）。
+
+        白名单 name/description/parameters + 仅当 `deferLoading is True` 时携带
+        `deferLoading`（对齐上游 tools/src/index.ts:1281-1293）。mini 运行期
+        不产出 deferLoading，但标记必须能经注册表 schema 与系统提示装配透传。
+        """
+        schema = {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": tool.parameters,
+        }
+        if tool.defer_loading is True:
+            schema["deferLoading"] = True
+        return schema
+
+    def schemas(self, scope: Context | None = None) -> list[dict]:
+        """按可见性投影全部工具的模型可见 schema（对齐上游 schemas(scope)）。"""
+        out = []
+        for name in self.names(scope):
+            tool = self.resolve(name, scope)
+            if tool is not None:
+                out.append(self.schema_of(tool))
+        return out
 
     def restrict(self, allow: set[str] | None = None, deny: set[str] | None = None) -> Callable[[str], bool]:
         """ToolRestriction：deny 优先，其次 allow 白名单（继承过滤）。"""
@@ -388,12 +418,15 @@ def _sync_execute(tool: Tool, frozen_args: Any, exec_: ToolExec) -> tuple[Any, E
 def pipeline_body(
     ctx: Context, tool: Tool, frozen_args: Any, exec_: ToolExec, *,
     async_: bool = False,
-) -> tuple[Any, Exception | None]:
-    """执行体段：execute（可选线程超时）+ post-execute。返回 (raw, error)。
+) -> tuple[ToolResult, Exception | None]:
+    """执行体段：execute（可选线程超时）→ 规范化 → projectContent → post-execute。
 
-    超时强制：超时发生时返回 (tool_timeout_result, None)——由管线 wrapper
-    用 TOOL_TIMEOUT 结构化错误替换工具体结果（对齐 upstream timeout-policy
-    timer-wins 语义：工具体 abort 形状错误一律被 TOOL_TIMEOUT 替换）。
+    返回 (result, error)：`result` 为已应用 projectContent 与 post-execute 决策的
+    规范化 ToolResult；`error` 仅用于 post-execute block（反馈文本），此时 result
+    为超时结构化结果（错误路径不进入政策）。对齐上游 finalizeScheduledExecution：
+    政策前先 project、政策 content 替换覆盖投影内容。
+    超时强制：超时发生时返回 (tool_timeout_result, None)——用 TOOL_TIMEOUT 结构化
+    错误替换工具体结果（对齐 upstream timeout-policy timer-wins 语义）。
     post-execute 决策携带 additionalContexts 时追加到 exec_.additional_contexts
     （对齐 upstream post-execute decision.additionalContexts，供守卫插件
     如 repeat-tool-reminder 注入上下文）。
@@ -416,17 +449,41 @@ def pipeline_body(
         target()
 
     raw = box.get("value")
-    post = ctx.waterfall("tools/post-execute", {"tool": tool.name, "result": raw, "exec": exec_})
+    error = box.get("error")
+    if error is not None:
+        result = ToolResult(ok=False, is_error=True, error=f"Error: {error}")
+    elif isinstance(raw, ToolResult):
+        result = raw
+    elif isinstance(raw, dict) and raw.get("isError"):
+        result = ToolResult(ok=False, content=raw.get("content"), is_error=True, error=raw.get("error"))
+    elif not is_json_safe(raw):
+        result = ToolResult(ok=False, is_error=True, error="工具返回了不可 JSON 序列化的值")
+    else:
+        rendered = call_render(tool, dict(frozen_args), raw)
+        meta = call_presentation_meta(tool, dict(frozen_args), raw, exec_)
+        result = ToolResult(ok=True, content=deep_freeze(rendered), value=raw,
+                            meta=meta)
+
+    # projectContent 在 post-execute 政策之前安装内容（对齐上游 finalizeScheduledExecution）
+    projected = project_tool_result(tool, exec_, result)
+    post = ctx.waterfall("tools/post-execute", {
+        "tool": tool.name,
+        "result": {"content": projected.content, "isError": projected.is_error},
+        "exec": exec_,
+    })
     if isinstance(post, dict):
         # 对齐上游 PostToolDecision（tools/src/index.ts:599-602）：
         # {kind:'accept'|'block', feedback?, additionalContexts?}
         if post.get("kind") == "block":
             # block decision 的 feedback 是 ContentBlock[]（text 块）
             return None, RuntimeError(_feedback_text(post.get("feedback", "blocked by tools/post-execute")))
+        replacement = post.get("content")
+        if replacement is not None:
+            projected = replace(projected, content=deep_freeze(replacement))
         contexts = post.get("additionalContexts")
         if isinstance(contexts, list) and contexts:
             exec_.additional_contexts.extend(contexts)
-    return raw, box.get("error")
+    return projected, None
 
 
 def _feedback_text(feedback: Any) -> str:
@@ -444,6 +501,33 @@ def _single_text_content(content: Any) -> str | None:
             text = block.get("text")
             return text if isinstance(text, str) else None
     return None
+
+
+def project_tool_result(tool: Tool, exec_: ToolExec, result: ToolResult) -> ToolResult:
+    """政策段前应用 project_content（对齐上游 finalizeScheduledExecution →
+    projectContent，tools/src/index.ts:1640-1647）。
+
+    projectContent(exec, result) -> ContentBlock[] | undefined：在
+    `tools/post-execute` 政策之前安装执行期准备好的内容，返回 undefined 表示
+    保持当前内容。只有成功且非政策的规范化结果会带着 content 进入政策段——
+    mini 的拒绝/错误结果在政策前就以 error 文本成形，故此处仅在非错误结果上
+    应用；政策替换（block/accept）仍然权威。钩子抛错 → 规范化为 Error 工具错误。
+    """
+    hook = tool.project_content
+    if hook is None or result.is_error:
+        return result
+    try:
+        replacement = hook(exec_, {
+            "content": result.content,
+            "value": result.value,
+            "is_error": result.is_error,
+        })
+    except Exception as e:
+        return replace(result, ok=False, is_error=True, error=f"Error: {e}",
+                       content=None, value=None)
+    if replacement is None:
+        return result
+    return replace(result, content=deep_freeze(replacement))
 
 
 def finalize_tool_result(tool: Tool, exec_: ToolExec, result: ToolResult) -> ToolResult:
@@ -495,6 +579,18 @@ def call_render(tool: Tool, args: dict, raw: Any) -> Any:
     return tool.render(raw)
 
 
+def call_presentation_meta(tool: Tool, args: dict, raw: Any,
+                           exec_: ToolExec) -> dict:
+    """result 投影派发（上游 `output.presentationMeta`）：仅顶层调用产出落盘 meta。
+
+    嵌套派发（`exec_.parent` 非空）不产出（上游 `exec.parent === undefined` 门）；
+    无投影 → 空 meta（对齐上游不携带 `meta` 键）。
+    """
+    if tool.presentation_meta is None or exec_.parent is not None:
+        return {}
+    return tool.presentation_meta(args, raw)
+
+
 def run_pipeline(ctx: Context, tool: Tool, args: dict, exec_: ToolExec | None = None) -> ToolResult:
     """pre-execute → 守卫 → execute → post-execute → 规范化 → 冻结结果。"""
     exec_ = exec_ or ToolExec()
@@ -512,25 +608,12 @@ def run_pipeline(ctx: Context, tool: Tool, args: dict, exec_: ToolExec | None = 
     if rejected is not None:
         return finalize_tool_result(tool, exec_, rejected)
 
-    # 5-6. 执行体段
-    raw, error = pipeline_body(ctx, tool, frozen_args, exec_)
+    # 5-6. 执行体段（含 projectContent + post-execute 政策；失败已规范化为 ToolResult）
+    result, error = pipeline_body(ctx, tool, frozen_args, exec_)
 
-    # 7. 外层规范化：异常 / 非法值 → isError
-    # 对齐上游 toolErrorResult（core/tools/src/index.ts:1870-1878）：
-    # 错误文本统一 `Error: ${message}`，不带 Python 类型名前缀
     if error is not None:
-        e = error
-        result = ToolResult(ok=False, is_error=True, error=f"Error: {e}")
-    elif isinstance(raw, ToolResult):
-        result = raw
-    elif isinstance(raw, dict) and raw.get("isError"):
-        result = ToolResult(ok=False, content=raw.get("content"), is_error=True, error=raw.get("error"))
-    elif not is_json_safe(raw):
-        result = ToolResult(ok=False, is_error=True, error="工具返回了不可 JSON 序列化的值")
-    else:
-        # 8. 冻结的权威结果：render 将 canonical 值转为模型可见 content（上游 output.render）
-        rendered = call_render(tool, dict(frozen_args), raw)
-        result = ToolResult(ok=True, content=deep_freeze(rendered), value=raw)
+        # post-execute block feedback（已规范化为可冻结结果）之外的异常路径
+        result = ToolResult(ok=False, is_error=True, error=f"Error: {error}")
     return finalize_tool_result(tool, exec_, result)
 
 
@@ -576,20 +659,8 @@ async def pipeline_async_body(
         except Exception as e:
             raw, error = None, e
 
-    # post-execute 回事件循环（与上游 finalize 在事件循环跑一致）
-    post = await ctx.awaterfall("tools/post-execute", {"tool": tool.name, "result": raw, "exec": exec_})
-    if isinstance(post, dict):
-        # 对齐上游 PostToolDecision（tools/src/index.ts:599-602）
-        if post.get("kind") == "block":
-            # block decision 的 feedback 是 ContentBlock[]（text 块）
-            error = RuntimeError(_feedback_text(post.get("feedback", "blocked by tools/post-execute")))
-        contexts = post.get("additionalContexts")
-        if isinstance(contexts, list) and contexts:
-            exec_.additional_contexts.extend(contexts)
-
     if error is not None:
-        e = error
-        result = ToolResult(ok=False, is_error=True, error=f"Error: {e}")
+        result = ToolResult(ok=False, is_error=True, error=f"Error: {error}")
     elif isinstance(raw, ToolResult):
         result = raw
     elif isinstance(raw, dict) and raw.get("isError"):
@@ -598,8 +669,37 @@ async def pipeline_async_body(
         result = ToolResult(ok=False, is_error=True, error="工具返回了不可 JSON 序列化的值")
     else:
         rendered = call_render(tool, dict(frozen_args), raw)
-        result = ToolResult(ok=True, content=deep_freeze(rendered), value=raw)
-    return finalize_tool_result(tool, exec_, result)
+        meta = call_presentation_meta(tool, dict(frozen_args), raw, exec_)
+        result = ToolResult(ok=True, content=deep_freeze(rendered), value=raw,
+                            meta=meta)
+
+    # projectContent 在 post-execute 政策之前安装内容（对齐上游 finalizeScheduledExecution）
+    projected = project_tool_result(tool, exec_, result)
+
+    # post-execute 回事件循环（与上游 finalize 在事件循环跑一致）：
+    # 政策读到的是 projectContent 安装后的规范化结果（content + isError）
+    post = await ctx.awaterfall("tools/post-execute", {
+        "tool": tool.name,
+        "result": {"content": projected.content, "isError": projected.is_error},
+        "exec": exec_,
+    })
+    if isinstance(post, dict):
+        # 对齐上游 PostToolDecision（tools/src/index.ts:599-602）
+        if post.get("kind") == "block":
+            # block decision 的 feedback 是 ContentBlock[]（text 块）
+            blocked = RuntimeError(_feedback_text(post.get("feedback", "blocked by tools/post-execute")))
+            result = ToolResult(ok=False, is_error=True, error=f"Error: {blocked}")
+            projected = result
+        else:
+            replacement = post.get("content")
+            if replacement is not None:
+                projected = replace(projected, content=deep_freeze(replacement))
+                result = projected
+        contexts = post.get("additionalContexts")
+        if isinstance(contexts, list) and contexts:
+            exec_.additional_contexts.extend(contexts)
+
+    return finalize_tool_result(tool, exec_, projected)
 
 
 async def run_pipeline_async(

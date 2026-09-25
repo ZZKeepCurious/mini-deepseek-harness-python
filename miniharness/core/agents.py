@@ -41,6 +41,7 @@ __all__ = [
     "AgentRegistry",
     "current_initiator",
     "install_agents",
+    "install_turn_archive_admission",
     "assert_live_agent",
 ]
 
@@ -70,6 +71,10 @@ class AgentRegistry(Service):
     def __init__(self, ctx: Context):
         super().__init__(ctx, "agents")
         self._store: dict[str, dict] = {}
+        # 归档准入的 `turn` 家族由注册表构造点安装（对齐上游 AgentRegistry
+        # 构造里 installTurnArchiveAdmission(ctx, lookup)），因此对注册表发布的
+        # 每个 Agent 都生效；监听器随 ctx 的 fiber 存活。
+        install_turn_archive_admission(ctx, self.get)
 
     # ---------- 发布 / 注销 ----------
 
@@ -134,6 +139,40 @@ class AgentRegistry(Service):
             logger = getattr(self.ctx, "logger", None)
             if logger is not None and hasattr(logger, "warn"):
                 logger.warn(f"agent {payload.get('agent', {}).get('id')}: {event} dispatch threw: {error}")
+
+
+def install_turn_archive_admission(ctx: Context, lookup: Any) -> None:
+    """安装 `turn` 归档准入家族（对齐上游 archive-admission.ts）。
+
+    - `workspace/session-activity`（waterfall）：会话的 Agent 运行中
+      （status == 'running'）时，把 `{kind:'turn'}` 家族前插到 `next()` 的结果；
+      否则原样返回下游结果。
+    - `workspace/session-stop`（aparang 观察式）：Agent 运行中以用户自己的停止
+      方式取消该回合——`cancel(cause='user')`，但不带停止按钮的 keep_inbox，
+      故排队输入随取消丢弃。不等待回合结算。
+
+    `lookup` 为按会话 id 解析 live Agent 的回调（本注册表 `get`）。
+    """
+    agent_status_running = "running"
+
+    def on_session_activity(payload: Any, next_: Any) -> list:
+        session_id = payload.get("sessionId") if isinstance(payload, dict) else None
+        agent = lookup(session_id) if session_id is not None else None
+        running = agent is not None and getattr(agent, "status", None) == agent_status_running
+        rest = next_()
+        if not running:
+            return rest
+        own = {"kind": "turn"}
+        return [own, *(rest or [])]
+
+    def on_session_stop(payload: Any) -> None:
+        session_id = payload.get("sessionId") if isinstance(payload, dict) else None
+        agent = lookup(session_id) if session_id is not None else None
+        if agent is not None and getattr(agent, "status", None) == agent_status_running:
+            agent.cancel("user")
+
+    ctx.on("workspace/session-activity", on_session_activity)
+    ctx.on("workspace/session-stop", on_session_stop)
 
 
 def install_agents(ctx: Context) -> AgentRegistry:
