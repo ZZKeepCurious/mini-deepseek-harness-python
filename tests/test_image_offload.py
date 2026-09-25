@@ -16,6 +16,7 @@ from miniharness.core.session import (
     image_block,
     offload_message_images,
     thaw,
+    tool_result_message,
 )
 from miniharness.core.session.released import read_released_header
 from miniharness.llm import LlmFailure
@@ -38,15 +39,13 @@ def _user(content):
 
 
 def _floor(session):
-    """每个 surface 节点派生消息的图片 offloaded 标记（深度优先）。"""
+    """每个 surface 节点派生消息顶层的图片 offloaded 标记（深度优先索引）。"""
     marks = []
 
     def visit(blocks):
         for block in blocks:
             if block.get("type") == "image":
                 marks.append(block.get("offloaded") is True)
-            elif block.get("type") == "tool-result":
-                visit(block.get("content") or [])
 
     for message in derive_messages(session.events, default_message_projections()):
         visit(thaw(message.get("content") or []))
@@ -58,7 +57,8 @@ class ProjectionTest(unittest.TestCase):
         session = Session("proj")
         event = session.append("user/message", _user([
             {"type": "text", "text": "before"}, _img(),
-            {"type": "tool-result", "toolCallId": "n", "content": [_img(), {"type": "text", "text": "after"}]},
+            _img(), {"type": "text", "text": "after"},
+            {"type": "text", "text": "unchanged"},
             _img(),
         ]), surfaceOp="append")
         before = derive_messages(session.events, default_message_projections())
@@ -101,11 +101,8 @@ class ProjectionTest(unittest.TestCase):
 
     def test_tool_result_target(self):
         session = Session("tool")
-        message = create_message(
-            "user",
-            [{"type": "tool-result", "toolCallId": "shot", "isError": False,
-              "content": [_img(), _img()]}],
-            {"kind": "user"})
+        # V4：tool/result 消息 role 'tool' 平铺 content + 顶层 toolCallId
+        message = tool_result_message("shot", [_img(), _img()], is_error=False)
         # tool/result 事件用 {turn, step, message} 包裹
         event = session.append("tool/result",
                                {"turn": 1, "step": 1, "message": message},
@@ -179,10 +176,10 @@ class CatalogSurfaceTest(unittest.TestCase):
         result = read_released_header(old)
         self.assertEqual(result["status"], "migration-required")
         self.assertEqual(result["storedVersion"], 0)
-        self.assertEqual(result["targetVersion"], 3)
-        self.assertEqual(result["header"]["version"], 3)
+        self.assertEqual(result["targetVersion"], 4)
+        self.assertEqual(result["header"]["version"], 4)
 
-        current = {"type": "session", "version": 3, "id": "c", "createdAt": 1,
+        current = {"type": "session", "version": 4, "id": "c", "createdAt": 1,
                    "isSeeded": False, "delegationDepth": 0}
         now = read_released_header(current)
         self.assertEqual(now["status"], "current")
@@ -192,7 +189,7 @@ class CatalogSurfaceTest(unittest.TestCase):
         from miniharness.core.session.released import SESSION_FORMAT_CATALOG
 
         header = SESSION_FORMAT_CATALOG.encode_current_header(
-            {"version": 3, "id": "x", "createdAt": 1, "isSeeded": True,
+            {"version": 4, "id": "x", "createdAt": 1, "isSeeded": True,
              "delegationDepth": 2}, 4)
         self.assertEqual(header["type"], "session")
         self.assertTrue(header["isSeeded"])

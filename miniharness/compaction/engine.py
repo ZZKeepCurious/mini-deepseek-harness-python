@@ -42,6 +42,34 @@ class CompactionEngine:
         """按 target 合并全局策略 + modelPolicies 精确覆盖（对齐 resolveTargetPolicy）。"""
         return resolve_target_policy(self.config, target)
 
+    def _reserved_completion_tokens(self, agent) -> int:
+        """一次路由请求预留的输出 token（对齐上游 reservedCompletionTokens）。
+
+        有效请求信封自身的 maxTokens 优先；否则适配器每请求默认上限；都无 → 0。
+        """
+        configured = None
+        session = getattr(agent, "session", None)
+        if session is not None and hasattr(session, "request_header"):
+            header = session.request_header()
+            config = (header or {}).get("config") if isinstance(header, dict) else None
+            if isinstance(config, dict):
+                configured = config.get("maxTokens")
+        if configured is None:
+            adapter = getattr(agent, "adapter", None)
+            if adapter is not None and hasattr(adapter, "resolve_model_info"):
+                try:
+                    info = adapter.resolve_model_info()
+                except Exception:  # noqa: BLE001 - 能力解析失败按未声明默认处理
+                    info = None
+                if isinstance(info, dict):
+                    configured = info.get("defaultMaxTokens")
+        if configured is None:
+            adapter = getattr(agent, "adapter", None)
+            configured = getattr(adapter, "max_tokens", None)
+            if configured is None:
+                configured = getattr(adapter, "_max_tokens", None)
+        return configured if configured is not None else 0
+
     # ---------- 自动压缩监听 ----------
 
     def _register_automatic(self) -> None:
@@ -157,7 +185,7 @@ class CompactionEngine:
                 "configure contextWindow on that adapter model",
             )
         merged = self._target_policy(target)
-        spec = resolve_spec(merged, context_window)
+        spec = resolve_spec(merged, context_window, self._reserved_completion_tokens(agent))
         if measurement["totalTokens"] < spec["thresholdTokens"]:
             return None
         # 压力达标后先落模型无关裁剪，再重新测量；若已降到阈值以下则无需摘要

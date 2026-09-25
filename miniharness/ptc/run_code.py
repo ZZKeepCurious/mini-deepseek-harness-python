@@ -151,6 +151,12 @@ def create_run_code_tool(registry: ToolRegistry, *, runtime, ctx=None,
                     raise RuntimeError(f"run_code: tool {name!r} is not available to this agent")
                 sub_exec = ToolExec(agent=agent, parent=exec_, name=name, arguments=sub_args)
                 result = run_pipeline(ctx, tool, dict(sub_args), sub_exec)
+                # 嵌套派发的 post-execute additionalContexts（如 spill-policy 把被
+                # 省略整图的预览重注为 ptc-mode user 消息）只在成功结果上转发给外层
+                # run_code 调用（对齐上游 result.additionalContexts 语义）。
+                if not result.is_error and sub_exec.additional_contexts:
+                    exec_.additional_contexts.extend(sub_exec.additional_contexts)
+                    sub_exec.additional_contexts.clear()
                 if agent_session is not None:
                     agent_session.append("tool/ptc-dispatch", {
                         "rootCallId": root_call_id,

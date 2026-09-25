@@ -2,23 +2,32 @@
 
 上游对照：packages/compaction/compaction-basic/src/config.ts（resolveConfig /
 resolveModelPolicies / resolveTargetPolicy / resolveCompactSpec）。
-配置键与默认值对齐：thresholdRatio 0.8 / retainRatio 0.16 / maxTokens 8192 /
-compactionRetries 1 / maxOverflowRetries 1 / auto True。retainTokens 与 retainRatio
-互斥。modelPolicies 为可选的 provider/model 精确覆盖表——每个条目可单独覆盖
-thresholdRatio / retainRatio / retainTokens，与全局默认策略合并后走同一校验管线。
+
+配置键与默认值对齐：thresholdRatio 0.8 / headroomTokens 65536 / retainRatio 0.16 /
+maxTokens（缺省取 headroomTokens，不再固定 8192）/ compactionRetries 1 /
+maxOverflowRetries 1 / auto True。retainTokens 与 retainRatio 互斥。modelPolicies
+为可选的 provider/model 精确覆盖表——每个条目可单独覆盖 thresholdRatio /
+headroomTokens / retainRatio / retainTokens 等，与全局默认策略合并后走同一校验管线。
+
+resolve_spec(policy, contextWindow, reservedCompletionTokens) 对齐上游：
+messageBudget = contextWindow - reservedCompletionTokens；
+pressureBudget = messageBudget - headroomTokens；
+threshold = floor(min(contextWindow × thresholdRatio, pressureBudget))；
+retain = 显式 retainTokens 或 floor(messageBudget × retainRatio)。
+任一步预算非正抛 TargetPressureConfigError（fail-closed）。
 """
 from __future__ import annotations
 
-import copy
-
-__all__ = ["DEFAULT_RETAIN_RATIO", "DEFAULT_THRESHOLD_RATIO", "TargetPressureConfigError",
-           "resolve_config", "resolve_spec", "resolve_target_policy"]
+__all__ = ["DEFAULT_HEADROOM_TOKENS", "DEFAULT_RETAIN_RATIO", "DEFAULT_THRESHOLD_RATIO",
+           "TargetPressureConfigError", "resolve_config", "resolve_spec",
+           "resolve_target_policy"]
 
 DEFAULT_THRESHOLD_RATIO = 0.8
 DEFAULT_RETAIN_RATIO = 0.16
+DEFAULT_HEADROOM_TOKENS = 65_536
 
 POLICY_KEYS = frozenset({
-    "thresholdRatio", "retainRatio", "retainTokens", "maxTokens",
+    "thresholdRatio", "headroomTokens", "retainRatio", "retainTokens", "maxTokens",
     "compactionRetries", "maxOverflowRetries", "auto", "modelPolicies",
 })
 
@@ -36,8 +45,8 @@ def resolve_config(config: dict | None = None) -> dict:
 
     modelPolicies 为可选的 Provider/Model 精确覆盖列表——每个条目必须带
     provider（非空字符串）和 model（非空字符串），可单独覆盖 thresholdRatio /
-    retainRatio / retainTokens 等；同一 provider/model 不可重复。加载期逐条
-    校验 ratio 约束（同全局默认）。
+    headroomTokens / retainRatio / retainTokens 等；同一 provider/model 不可重复。
+    加载期逐条校验 ratio 约束（同全局默认）。
     """
     config = dict(config or {})
     unknown = set(config) - POLICY_KEYS
@@ -60,7 +69,10 @@ def resolve_config(config: dict | None = None) -> dict:
         _assert_non_negative_int("retainTokens", retain_tokens)
     else:
         retain_ratio = DEFAULT_RETAIN_RATIO
-    max_tokens = config.get("maxTokens", 8192)
+    headroom_tokens = config.get("headroomTokens", DEFAULT_HEADROOM_TOKENS)
+    _assert_non_negative_int("headroomTokens", headroom_tokens)
+    max_tokens_explicit = "maxTokens" in config
+    max_tokens = config.get("maxTokens", headroom_tokens)
     _assert_positive_int("maxTokens", max_tokens)
     compaction_retries = config.get("compactionRetries", 1)
     _assert_non_negative_int("compactionRetries", compaction_retries)
@@ -71,9 +83,11 @@ def resolve_config(config: dict | None = None) -> dict:
         raise ValueError("BasicCompactionConfig: auto must be a boolean")
     model_policies = _resolve_model_policies(
         config.get("modelPolicies"), threshold, retain_ratio, retain_tokens,
+        headroom_tokens, max_tokens, max_tokens_explicit,
     )
     return {
         "thresholdRatio": threshold,
+        "headroomTokens": headroom_tokens,
         "retainRatio": retain_ratio,
         "retainTokens": retain_tokens,
         "maxTokens": max_tokens,
@@ -84,27 +98,55 @@ def resolve_config(config: dict | None = None) -> dict:
     }
 
 
-def resolve_spec(policy: dict, context_window: int) -> dict:
-    """按模型上下文容量换算具体 token 预算（上游 resolveCompactSpec）。
+def resolve_spec(policy: dict, context_window: int,
+                 reserved_completion_tokens: int = 0) -> dict:
+    """按模型上下文容量与保留的输出 token 换算具体预算（上游 resolveCompactSpec）。
 
-    thresholdTokens = floor(contextWindow × thresholdRatio)；
-    retainTokens = 显式值或 floor(contextWindow × retainRatio)。
+    @param policy - 合并后的精确路由策略（须含 headroomTokens）。
+    @param context_window - 适配器声明的正容量。
+    @param reserved_completion_tokens - 一次路由请求预留的输出 token。
     """
     target_key = policy.get("target", "?")
-    if not isinstance(context_window, int) or context_window <= 0:
+    if not isinstance(context_window, int) or isinstance(context_window, bool) \
+            or context_window <= 0:
         raise TargetPressureConfigError(
             target_key,
             f"BasicCompactionConfig: contextWindow ({context_window}) must be a positive integer",
         )
-    threshold_tokens = int(context_window * policy["thresholdRatio"])
+    if not isinstance(reserved_completion_tokens, int) \
+            or isinstance(reserved_completion_tokens, bool) \
+            or reserved_completion_tokens < 0:
+        raise TargetPressureConfigError(
+            target_key,
+            f"BasicCompactionConfig: reservedCompletionTokens ({reserved_completion_tokens}) "
+            "must be a non-negative integer",
+        )
+    message_budget = context_window - reserved_completion_tokens
+    if message_budget <= 0:
+        raise TargetPressureConfigError(
+            target_key,
+            f"compaction-basic: {target_key} reserves {reserved_completion_tokens} completion "
+            f"tokens of its {context_window}-token context window, leaving no message budget; "
+            "configure the adapter model's contextWindow above the effective request maxTokens",
+        )
+    pressure_budget = message_budget - policy["headroomTokens"]
+    if pressure_budget <= 0:
+        raise TargetPressureConfigError(
+            target_key,
+            f"compaction-basic: {target_key} reserves {reserved_completion_tokens} completion "
+            f"tokens and {policy['headroomTokens']} headroom tokens of its {context_window}-token "
+            "context window, leaving no pressure budget; reduce the effective request maxTokens "
+            "or compaction headroomTokens, or configure a larger adapter model contextWindow",
+        )
+    threshold_tokens = int(min(context_window * policy["thresholdRatio"], pressure_budget))
     retain_tokens = policy.get("retainTokens")
     if retain_tokens is None:
-        retain_tokens = int(context_window * policy["retainRatio"])
+        retain_tokens = int(message_budget * policy["retainRatio"])
     if retain_tokens >= threshold_tokens:
         raise TargetPressureConfigError(
             target_key,
-            f"BasicCompactionConfig: retainTokens ({retain_tokens}) must be less than "
-            f"threshold tokens ({threshold_tokens})",
+            f"BasicCompactionConfig: {target_key} retainTokens ({retain_tokens}) must be less "
+            f"than threshold tokens {threshold_tokens}",
         )
     return {
         "contextWindow": context_window,
@@ -123,12 +165,12 @@ def _assert_ratio(name: str, value) -> None:
 
 
 def _assert_positive_int(name: str, value) -> None:
-    if not isinstance(value, int) or value <= 0:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"BasicCompactionConfig: {name} must be a positive integer")
 
 
 def _assert_non_negative_int(name: str, value) -> None:
-    if not isinstance(value, int) or value < 0:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"BasicCompactionConfig: {name} must be a non-negative integer")
 
 
@@ -171,11 +213,15 @@ def _validate_ratio_retention(name: str, threshold_ratio: float,
 def _resolve_model_policies(configured: object,
                             global_threshold: float,
                             global_retain_ratio: float | None,
-                            global_retain_tokens: int | None) -> list[dict]:
+                            global_retain_tokens: int | None,
+                            global_headroom: int,
+                            global_max_tokens: int,
+                            global_max_tokens_explicit: bool) -> list[dict]:
     """解析并校验 modelPolicies 数组（对齐 resolveModelPolicies）。
 
     每条必须带 provider/model 非空字符串，不可重复；各条的 ratio/retention
-    按全局默认做独立校验（加载期 fail-closed）。
+    按全局默认做独立校验（加载期 fail-closed）。条目未给 maxTokens 且全局未
+    显式设置时，其 headroomTokens 作为该条目的生成上限（对齐上游）。
     """
     if configured is None:
         return []
@@ -202,12 +248,19 @@ def _resolve_model_policies(configured: object,
         entry_threshold = source.get("thresholdRatio", global_threshold)
         if "thresholdRatio" in source:
             _assert_ratio(f"{name}.thresholdRatio", entry_threshold)
+        headroom = source.get("headroomTokens")
+        if headroom is not None:
+            _assert_non_negative_int(f"{name}.headroomTokens", headroom)
         retain_ratio, retain_tokens = _resolve_retention(
             source, global_retain_ratio, global_retain_tokens,
         )
-        max_tokens = source.get("maxTokens")
-        if max_tokens is not None:
-            _assert_positive_int(f"{name}.maxTokens", max_tokens)
+        entry_max = source.get("maxTokens")
+        if entry_max is None and not global_max_tokens_explicit and headroom is not None:
+            entry_max = headroom
+        _assert_positive_int(
+            f"{name}.maxTokens",
+            entry_max if entry_max is not None else global_max_tokens,
+        )
         compaction_retries = source.get("compactionRetries")
         if compaction_retries is not None:
             _assert_non_negative_int(f"{name}.compactionRetries", compaction_retries)
@@ -220,12 +273,14 @@ def _resolve_model_policies(configured: object,
             1000 * entry_threshold if retain_tokens is None else None,
         )
         entry = {"provider": provider, "model": model, "thresholdRatio": entry_threshold}
+        if headroom is not None:
+            entry["headroomTokens"] = headroom
         if retain_ratio is not None:
             entry["retainRatio"] = retain_ratio
         if retain_tokens is not None:
             entry["retainTokens"] = retain_tokens
-        if max_tokens is not None:
-            entry["maxTokens"] = max_tokens
+        if entry_max is not None:
+            entry["maxTokens"] = entry_max
         if compaction_retries is not None:
             entry["compactionRetries"] = compaction_retries
         if max_overflow_retries is not None:
@@ -258,6 +313,7 @@ def resolve_target_policy(config: dict, target: dict) -> dict:
     )
     result = {
         "thresholdRatio": src.get("thresholdRatio", config["thresholdRatio"]),
+        "headroomTokens": src.get("headroomTokens", config["headroomTokens"]),
         "retainRatio": retain_ratio,
         "retainTokens": retain_tokens,
         "maxTokens": src.get("maxTokens", config["maxTokens"]),

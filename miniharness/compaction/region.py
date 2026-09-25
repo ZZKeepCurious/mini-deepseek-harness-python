@@ -99,7 +99,7 @@ async def compact_surface_region(session, meter, agent, config: dict, start: int
         checkpoint = create_message(
             "user",
             frame_summary(summary_result["summary"]),
-            {"kind": "plugin", "plugin": "compact", "compactionId": compaction_id},
+            {"kind": "compact-checkpoint", "compactionId": compaction_id},
         )
         framed_tokens = meter.estimate_message(checkpoint)
         if framed_tokens >= shadowed_tokens:

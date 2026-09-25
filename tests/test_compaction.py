@@ -28,7 +28,7 @@ from miniharness.core.session import (
     create_message,
     derive_messages,
     text_block,
-    tool_result_block,
+    tool_result_message,
 )
 from miniharness.core.tools import ToolRegistry
 from miniharness.llm import LlmAdapter, LlmFailure
@@ -44,7 +44,8 @@ class ResolveConfigTest(unittest.TestCase):
         self.assertEqual(c["thresholdRatio"], 0.8)
         self.assertEqual(c["retainRatio"], 0.16)
         self.assertIsNone(c["retainTokens"])
-        self.assertEqual(c["maxTokens"], 8192)
+        self.assertEqual(c["headroomTokens"], 65536)
+        self.assertEqual(c["maxTokens"], 65536)  # 缺省取 headroomTokens，不再固定 8192
         self.assertEqual(c["compactionRetries"], 1)
         self.assertEqual(c["maxOverflowRetries"], 1)
         self.assertTrue(c["auto"])
@@ -69,7 +70,16 @@ class ResolveConfigTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             resolve_config({"maxTokens": -1})
         with self.assertRaises(ValueError):
+            resolve_config({"headroomTokens": -1})
+        with self.assertRaises(ValueError):
             resolve_config({"auto": "yes"})
+
+    def test_max_tokens_defaults_to_headroom(self):
+        c = resolve_config({"headroomTokens": 4096})
+        self.assertEqual(c["maxTokens"], 4096)
+        # 显式 maxTokens 覆盖 headroom 缺省
+        c = resolve_config({"headroomTokens": 4096, "maxTokens": 2048})
+        self.assertEqual(c["maxTokens"], 2048)
 
     def test_explicit_retain_tokens(self):
         c = resolve_config({"retainTokens": 2000})
@@ -79,26 +89,54 @@ class ResolveConfigTest(unittest.TestCase):
 
 class ResolveSpecTest(unittest.TestCase):
     def _policy(self, **over):
+        over.setdefault("headroomTokens", 0)
+        over.setdefault("maxTokens", 1000)
         p = resolve_config(over)
         return {**p, "target": "p/m"}
 
     def test_default_conversion(self):
-        spec = resolve_spec(self._policy(), 1000)
+        spec = resolve_spec(self._policy(), 1000, 0)
         self.assertEqual(spec["thresholdTokens"], 800)
         self.assertEqual(spec["retainTokens"], 160)
 
+    def test_reserved_completion_tokens_subtract_from_both_budgets(self):
+        # messageBudget = 1000 - 200 = 800；threshold = min(800, 800 - 0) = 800
+        # retain = floor(800 × 0.16) = 128
+        spec = resolve_spec(self._policy(), 1000, 200)
+        self.assertEqual(spec["thresholdTokens"], 800)
+        self.assertEqual(spec["retainTokens"], 128)
+
+    def test_headroom_caps_threshold_below_ratio(self):
+        # window×ratio = 800，但 window - headroom = 500 → threshold 取 500
+        spec = resolve_spec(self._policy(headroomTokens=500), 1000, 0)
+        self.assertEqual(spec["thresholdTokens"], 500)
+
+    def test_no_message_budget_rejected(self):
+        with self.assertRaises(TargetPressureConfigError) as cm:
+            resolve_spec(self._policy(), 1000, 1000)
+        self.assertIn("no message budget", str(cm.exception))
+
+    def test_no_pressure_budget_rejected(self):
+        with self.assertRaises(TargetPressureConfigError) as cm:
+            resolve_spec(self._policy(headroomTokens=1000), 1000, 0)
+        self.assertIn("no pressure budget", str(cm.exception))
+
+    def test_negative_reserved_rejected(self):
+        with self.assertRaises(TargetPressureConfigError):
+            resolve_spec(self._policy(), 1000, -1)
+
     def test_invalid_context_window(self):
         with self.assertRaises(TargetPressureConfigError):
-            resolve_spec(self._policy(), 0)
+            resolve_spec(self._policy(), 0, 0)
         with self.assertRaises(TargetPressureConfigError):
-            resolve_spec(self._policy(), 1.5)
+            resolve_spec(self._policy(), 1.5, 0)
 
     def test_retain_tokens_above_threshold_rejected(self):
         with self.assertRaises(TargetPressureConfigError):
-            resolve_spec(self._policy(retainTokens=900), 1000)
+            resolve_spec(self._policy(retainTokens=900), 1000, 0)
 
     def test_explicit_retain_tokens(self):
-        spec = resolve_spec(self._policy(retainTokens=100), 1000)
+        spec = resolve_spec(self._policy(retainTokens=100), 1000, 0)
         self.assertEqual(spec["retainTokens"], 100)
 
 
@@ -302,7 +340,8 @@ class EnginePressureTest(unittest.TestCase):
         self.session = Session("e1")
         self.adapter = _SummaryAdapter(context_window=100)  # 阈值 80 token
         self.agent = _agent(self.session, self.adapter, self.ctx)
-        self.engine = CompactionEngine(self.ctx)
+        # headroomTokens=0：小窗口测试不被缺省 65536 headroom 抬出压力预算
+        self.engine = CompactionEngine(self.ctx, {"headroomTokens": 0, "maxTokens": 1000})
 
     def test_below_threshold_no_compaction(self):
         _seed_history(self.session, n=2)
@@ -437,11 +476,7 @@ def _seed_tool_result(session: Session, text: str, call_id: str = "a") -> int:
     call = session.append("tool/call",
                           {"turn": 1, "step": 1, "callId": call_id, "name": "ls",
                            "arguments": "{}"})
-    msg = create_message(
-        "user",
-        [tool_result_block(call_id, [text_block(text)], is_error=False)],
-        {"kind": "tool", "callId": call_id},
-    )
+    msg = tool_result_message(call_id, [text_block(text)], is_error=False)
     session.append("tool/result", {"turn": 1, "step": 1, "message": msg},
                   surfaceOp="append", sourceEventSeqs=[call["seq"]])
     return call["seq"]
@@ -514,7 +549,7 @@ class ToolResultPrunerSessionTest(unittest.TestCase):
         self.assertEqual(replace_ev["surfaceOp"], {"op": "replace", "startSeq": entry["originalSeq"],
                                                     "endSeq": entry["originalSeq"]})
         self.assertEqual(list(replace_ev["sourceEventSeqs"]), [entry["originalSeq"]])
-        repl_text = replace_ev["data"]["message"]["content"][0]["content"][0]["text"]
+        repl_text = replace_ev["data"]["message"]["content"][0]["text"]
         self.assertIn(PRUNE_MARKER, repl_text)
 
     def test_prune_session_idempotent_converges(self):
@@ -543,7 +578,7 @@ class ToolResultPrunerEngineWiringTest(unittest.TestCase):
             context_window = 2500  # thresholdTokens = 2000
 
         agent = type("A", (), {"session": session, "adapter": _Adapter()})()
-        engine = CompactionEngine(ctx, {})
+        engine = CompactionEngine(ctx, {"headroomTokens": 0, "maxTokens": 1000})
         result = asyncio.run(engine.compact_if_needed(agent, "pressure"))
         self.assertIsNone(result)
         types = [e["type"] for e in session.events]
@@ -661,10 +696,28 @@ class ResolveTargetPolicyTest(unittest.TestCase):
         c = resolve_config()
         policy = resolve_target_policy(c, {"provider": "any", "model": "any"})
         self.assertEqual(policy["thresholdRatio"], 0.8)
+        self.assertEqual(policy["headroomTokens"], 65536)
         self.assertEqual(policy["retainRatio"], 0.16)
         self.assertIsNone(policy["retainTokens"])
-        self.assertEqual(policy["maxTokens"], 8192)
+        self.assertEqual(policy["maxTokens"], 65536)
         self.assertEqual(policy["target"], "any/any")
+
+    def test_override_headroom_tokens(self):
+        c = resolve_config({"modelPolicies": [
+            {"provider": "p", "model": "m", "headroomTokens": 4096},
+        ]})
+        policy = resolve_target_policy(c, {"provider": "p", "model": "m"})
+        self.assertEqual(policy["headroomTokens"], 4096)
+        # 全局未显式设置 maxTokens → 条目以自身 headroom 作为生成上限
+        self.assertEqual(policy["maxTokens"], 4096)
+
+    def test_explicit_global_max_tokens_wins_over_policy_headroom(self):
+        c = resolve_config({"maxTokens": 2048, "modelPolicies": [
+            {"provider": "p", "model": "m", "headroomTokens": 4096},
+        ]})
+        policy = resolve_target_policy(c, {"provider": "p", "model": "m"})
+        self.assertEqual(policy["headroomTokens"], 4096)
+        self.assertEqual(policy["maxTokens"], 2048)
 
     def test_exact_match_applies_override(self):
         c = resolve_config({"modelPolicies": [
@@ -719,11 +772,11 @@ class ResolveTargetPolicyTest(unittest.TestCase):
 
     def test_spec_from_merged_policy(self):
         """resolve_target_policy 的输出可直接喂给 resolve_spec。"""
-        c = resolve_config({"modelPolicies": [
+        c = resolve_config({"headroomTokens": 0, "maxTokens": 1000, "modelPolicies": [
             {"provider": "small", "model": "s", "thresholdRatio": 0.5, "retainTokens": 120},
         ]})
         policy = resolve_target_policy(c, {"provider": "small", "model": "s"})
-        spec = resolve_spec(policy, 1000)
+        spec = resolve_spec(policy, 1000, 0)
         self.assertEqual(spec["thresholdTokens"], 500)
         self.assertEqual(spec["retainTokens"], 120)
 
@@ -744,6 +797,8 @@ class EngineModelPoliciesTest(unittest.TestCase):
         agent = _agent(session, adapter, ctx)
         engine = CompactionEngine(ctx, {
             "thresholdRatio": 0.8,  # 0.8 * 500 = 400，不触发
+            "headroomTokens": 0,
+            "maxTokens": 1000,
             "modelPolicies": [
                 {"provider": "small", "model": "s", "thresholdRatio": 0.5},  # 0.5 * 500 = 250，触发
             ],
@@ -764,6 +819,8 @@ class EngineModelPoliciesTest(unittest.TestCase):
         agent = _agent(session, adapter, ctx)
         engine = CompactionEngine(ctx, {
             "thresholdRatio": 0.8,  # 0.8 * 500 = 400
+            "headroomTokens": 0,
+            "maxTokens": 1000,
             "modelPolicies": [
                 {"provider": "small", "model": "s", "thresholdRatio": 0.3},  # 不匹配 fake/fake-model
             ],
@@ -784,6 +841,8 @@ class EngineModelPoliciesTest(unittest.TestCase):
         agent = _agent(session, adapter, ctx)
         engine = CompactionEngine(ctx, {
             "thresholdRatio": 0.8,
+            "headroomTokens": 0,
+            "maxTokens": 1000,
             "modelPolicies": [
                 {"provider": "p", "model": "m",
                  "thresholdRatio": 0.5, "retainTokens": 50},
@@ -800,12 +859,14 @@ class EngineModelPoliciesTest(unittest.TestCase):
         """per-model maxOverflowRetries 覆盖全局。"""
         c = resolve_config({
             "maxOverflowRetries": 5,
+            "headroomTokens": 0,
+            "maxTokens": 1000,
             "modelPolicies": [
                 {"provider": "p", "model": "m", "maxOverflowRetries": 1},
             ],
         })
         policy = resolve_target_policy(c, {"provider": "p", "model": "m"})
-        spec = resolve_spec(policy, 1000)
+        spec = resolve_spec(policy, 1000, 0)
         self.assertEqual(spec["maxOverflowRetries"], 1)
 
     def test_per_model_summarization_fields_pass_through(self):

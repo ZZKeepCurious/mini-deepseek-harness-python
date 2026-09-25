@@ -37,8 +37,6 @@ def _collect_retained(blocks: list, state: dict, seq: int) -> list[int]:
                 indexes.append(state["image"])
                 state["count"] -= 1
             state["image"] += 1
-        elif btype == "tool-result":
-            indexes.extend(_collect_retained(block.get("content") or [], state, seq))
     return indexes
 
 
