@@ -33,7 +33,7 @@ _SIGNAL_MAP = {
 
 
 class PtyTerminalHandle(TerminalHandle):
-    def __init__(self, spec: dict):
+    def __init__(self, spec: dict, shell_activity=None):
         self._rows = spec.get("rows") or 40
         self._cols = spec.get("cols") or 160
         pid, master_fd = pty.fork()
@@ -45,7 +45,7 @@ class PtyTerminalHandle(TerminalHandle):
             self._apply_winsize()
         except OSError:
             pass
-        super().__init__(pid, TerminalOutputChannel())
+        super().__init__(pid, TerminalOutputChannel(), shell_activity)
         threading.Thread(target=self._read_loop, name="pty-reader", daemon=True).start()
 
     def _child_entry(self, spec: dict) -> None:
@@ -90,7 +90,7 @@ class PtyTerminalHandle(TerminalHandle):
     def _apply_winsize(self) -> None:
         fcntl.ioctl(self._master_fd, termios.TIOCSWINSZ, struct.pack("HHHH", self._rows, self._cols, 0, 0))
 
-    def write(self, text: str) -> None:
+    def _write(self, text: str) -> None:
         os.write(self._master_fd, text.encode("utf-8"))
 
     def resize(self, cols: int, rows: int) -> None:
@@ -105,7 +105,7 @@ class PtyTerminalHandle(TerminalHandle):
         except OSError:
             return self._fg_cache
 
-    def signal_foreground(self, signal: str) -> int | None:
+    def _signal_foreground(self, signal: str) -> int | None:
         if signal in _SHELL_SIGNAL_GUARD:
             raise RuntimeError(f"refusing to send {signal} to the shell process group")
         foreground = self.inspect_foreground()
@@ -113,7 +113,7 @@ class PtyTerminalHandle(TerminalHandle):
         os.killpg(target, _SIGNAL_MAP[signal])
         return target
 
-    def terminate(self) -> None:
+    def _terminate(self) -> None:
         try:
             os.kill(self.pid, signal.SIGTERM)
         except ProcessLookupError:

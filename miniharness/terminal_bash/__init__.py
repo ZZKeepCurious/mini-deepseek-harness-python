@@ -21,11 +21,13 @@ from .index import BashTerminalBackend, apply, install_terminal_bash, spawn_argv
 from .provider import (
     SubprocessForeground,
     SubprocessOutcome,
+    SubprocessTerminalActivity,
     TerminalHandle,
     TerminalOutputChannel,
     spawn_terminal,
 )
 from .session import LocalPtySession
+from .shell_activity import ShellActivity, prepare_shell_activity
 
 from ..terminal.types import TerminalError
 
@@ -39,8 +41,10 @@ __all__ = [
     "SCHEMA_DEFAULTS",
     "BashTerminalBackend",
     "LocalPtySession",
+    "ShellActivity",
     "SubprocessForeground",
     "SubprocessOutcome",
+    "SubprocessTerminalActivity",
     "TerminalError",
     "TerminalHandle",
     "TerminalOutputChannel",
@@ -48,6 +52,7 @@ __all__ = [
     "apply",
     "child_environment",
     "install_terminal_bash",
+    "prepare_shell_activity",
     "resolve_config",
     "resolve_pwsh_path",
     "spawn_argv",

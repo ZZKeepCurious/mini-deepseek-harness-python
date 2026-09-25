@@ -28,7 +28,7 @@ class WinptyTerminalHandle(TerminalHandle):
     _CONSOLE_SIGNALS = {"SIGINT", "SIGBREAK"}
     _UNREACHABLE_SIGNALS = {"SIGTSTP", "SIGHUP", "SIGQUIT", "SIGCONT", "SIGTERM", "SIGKILL"}
 
-    def __init__(self, spec: dict):
+    def __init__(self, spec: dict, shell_activity=None):
         from winpty import PtyProcess
         self._proc = PtyProcess.spawn(
             list(spec["argv"]),
@@ -37,7 +37,7 @@ class WinptyTerminalHandle(TerminalHandle):
             dimensions=(spec.get("rows") or 40, spec.get("cols") or 160),
         )
         channel = TerminalOutputChannel()
-        super().__init__(self._proc.pid, channel)
+        super().__init__(self._proc.pid, channel, shell_activity)
         reader = threading.Thread(target=self._read_loop, name="winpty-reader", daemon=True)
         reader.start()
 
@@ -65,7 +65,7 @@ class WinptyTerminalHandle(TerminalHandle):
             except Exception:
                 pass
 
-    def write(self, text: str) -> None:
+    def _write(self, text: str) -> None:
         # pywinpty 契约：PtyProcess.write 收 str（内部编码），read 回 str。
         self._proc.write(text)
 
@@ -75,7 +75,7 @@ class WinptyTerminalHandle(TerminalHandle):
     def inspect_foreground(self) -> SubprocessForeground | None:
         return None
 
-    def signal_foreground(self, signal: str) -> int | None:
+    def _signal_foreground(self, signal: str) -> int | None:
         if signal in self._UNREACHABLE_SIGNALS:
             raise RuntimeError(f"signal {signal} is not deliverable to a ConPTY foreground; use close() instead")
         if signal == "SIGINT":
@@ -84,7 +84,7 @@ class WinptyTerminalHandle(TerminalHandle):
         self._proc.sendcontrol("c")
         return None
 
-    def terminate(self) -> None:
+    def _terminate(self) -> None:
         try:
             self._proc.terminate()
         except Exception:
