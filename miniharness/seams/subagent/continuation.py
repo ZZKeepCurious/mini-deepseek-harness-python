@@ -51,6 +51,7 @@ import json
 import logging
 import threading
 import uuid
+import weakref
 from types import MappingProxyType
 from typing import Any, Callable
 
@@ -67,6 +68,7 @@ from ...core.system_prompt import (
 from ...core.tools import Tool, ToolExec, ToolRegistry
 from ...attachment import admit_prompt_content
 from ...llm import FakeLlmAdapter, LlmAdapter
+from .archive_admission import install_subagent_archive_admission
 from .descriptor import CONTINUATION_PROVIDER, fold_subagent_descriptor, seed_descriptor_turn
 from .providers import completed_turn_prefix
 
@@ -79,6 +81,7 @@ __all__ = [
     "epoch_stop_reason",
     "final_assistant_output",
     "fold_consumed_work",
+    "install_subagent_archive_admission",
     "install_subagent_control_tools",
     "limit_diagnostic",
     "settlement_summary",
@@ -143,6 +146,12 @@ def delegation_depth_of(loop: AgentLoop) -> int:
     if isinstance(depth, int) and not isinstance(depth, bool) and depth >= 0:
         return depth
     return 0
+
+
+def _assert_max_depth(max_depth: Any) -> None:
+    """拒绝无法表示精确委托深度的递归上限（上游 assertSubagentMaxDepth）。"""
+    if (not isinstance(max_depth, int) or isinstance(max_depth, bool) or max_depth < 0):
+        raise TypeError("subagent maxDepth must be a non-negative safe integer")
 
 
 def _reason_kind(reason: Any) -> Any:
@@ -327,12 +336,43 @@ def _resolve_child_route(parent: AgentLoop, requested: dict | None) -> dict:
         resolved.pop("reasoningEffort", None)
     return resolved
 
+class ActivationPool:
+    """进程内激活槽：经不间断的 continuable 父链共享（对齐上游 ActivationPool）。
+
+    物化前在池上预留一个槽位；池满即抛 `ACTIVATION_LIMIT_REACHED`。释放回
+    disposer（结算 / 物化回滚）。根池按根 AgentLoop 记在 WeakKeyDictionary，
+    中间父离开注册表不钉住根。
+    """
+
+    def __init__(self) -> None:
+        self._slots: set = set()
+
+    def reserve(self, capacity: int) -> Callable[[], None]:
+        """预留一个槽位；返回的 release 可容忍未发布的回滚。"""
+        if len(self._slots) >= capacity:
+            raise SubagentError(
+                f"subagent limit reached (active child limit: {capacity}); wait for an "
+                "existing child to finish or complete this work with the current agents",
+                "ACTIVATION_LIMIT_REACHED",
+            )
+        slot = object()
+        self._slots.add(slot)
+
+        def release() -> None:
+            self._slots.discard(slot)
+
+        return release
+
+
 class SubagentContinuationManager:
     """可继续子代理管理器：创建 / 续跑 / 中断 / 结算投递 / 枚举。
 
     @param parent - 父 AgentLoop（子代理的宿主与投递目标）。
     @param persistence - 会话持久化后端（declare / inspect / list_headers）。
-    @param max_depth - 委托深度上限（上游 subagent-max-depth 默认 8）。
+    @param max_depth - 委托深度上限（上游 runtime Config.maxDepth，rc.1 默认 1；
+        工具未显式限制时经 resolve_max_depth 落到此值）。
+    @param max_active_subagents - 经不间断 continuable 父链共享的活体子代理上限
+        （上游 runtime Config.maxActiveSubagents，默认 8）。
     @param adapter_factory - 冷恢复时按 (provider, model, reasoning_effort)
         重建适配器；缺省仅支持 'fake'（复用父适配器当 provider 一致时）。
     @param report_delivery - report 工具的部署级投递配置（上游
@@ -343,18 +383,23 @@ class SubagentContinuationManager:
         self,
         parent: AgentLoop,
         persistence: SessionPersistence,
-        max_depth: int = 8,
+        max_depth: int = 1,
         adapter_factory: Callable[[str, str, str | None], LlmAdapter] | None = None,
         report_delivery: str = "next-step",
+        max_active_subagents: int = 8,
     ):
         if report_delivery not in REPORT_DELIVERIES:
             raise ValueError(
                 f"unknown report delivery {report_delivery!r}; "
                 f"expected one of {REPORT_DELIVERIES}"
             )
+        if not isinstance(max_active_subagents, int) or isinstance(max_active_subagents, bool) \
+                or max_active_subagents < 1:
+            raise ValueError("max_active_subagents must be a positive integer")
         self.parent = parent
         self.persistence = persistence
         self.max_depth = max_depth
+        self.max_active_subagents = max_active_subagents
         self.report_delivery = report_delivery
         self._adapter_factory = adapter_factory or _default_adapter_factory
         self._activations: dict[str, dict] = {}
@@ -373,12 +418,39 @@ class SubagentContinuationManager:
         # 命名 provider 注册表（上游 provider 注册表的最小同构面）：注销发布
         # 无载体 subagent/provider-removed 边
         self._providers: dict[str, Callable[[str], LlmAdapter]] = {}
+        # 根激活池（上游 rootPools WeakMap）：经根 AgentLoop 认池，中间父离店
+        # 不钉住根；后代物化时直接继承在世父激活的池。
+        self._root_pools: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+        # 归档准入：running 后代回答 workspace/session-activity，session-stop
+        # 以 parent 身份取消（上游在 runtime 构造点 installSubagentArchiveAdmission）。
+        # 注册在根上下文：workspace 事件无载波、按祖先链派发，根监听器对任何
+        # 作用域的 workspace waterfall 都可见（agent 自有 scope 注册收不到根派发）。
+        install_subagent_archive_admission(
+            parent.ctx.root,
+            lambda: list(self._live.values()),
+            lambda cid: (self._activations.get(cid) or {}).get("label"),
+        )
 
     @property
     def activations(self) -> dict[str, dict]:
         """簿记视图：激活中的子代理（同步模型下仅 sendMessage 期间存在）。"""
         return {cid: {"status": a["status"], "label": a["label"]}
                 for cid, a in self._activations.items()}
+
+    def resolve_max_depth(self, configured: int | str | None = None) -> int | None:
+        """按当前配置解析委托深度上限（上游 resolveMaxDepth）。
+
+        @param configured - 工具显式限制；`'provider-managed'` → None（外部
+            provider 自管预算）；数字 → 原样；缺省 → runtime max_depth。
+        @returns 生效数字上限，或 None 表示 provider 自管。
+        """
+        if configured == "provider-managed":
+            return None
+        if configured is not None:
+            _assert_max_depth(configured)
+            return configured
+        _assert_max_depth(self.max_depth)
+        return self.max_depth
 
     # ---------- 准入截止与排水（对齐上游 draining / closingScopes / drain） ----------
 
@@ -605,10 +677,11 @@ class SubagentContinuationManager:
         """
         parent = parent or self.parent
         self.assert_admitting(parent)
+        max_depth = self.resolve_max_depth()
         depth = delegation_depth_of(parent)
-        if depth >= self.max_depth:
+        if max_depth is not None and depth >= max_depth:
             raise SubagentError(
-                f"子代理嵌套深度 {depth} 达到上限 {self.max_depth}", "MAX_DEPTH_EXCEEDED",
+                f"子代理嵌套深度 {depth} 达到上限 {max_depth}", "MAX_DEPTH_EXCEEDED",
             )
         # 上游 start 流程在 locks.run 临界区内先 assertChildIdAvailable 再物化；
         # mini 物化同步无 await 窗口，入口单点检查即等价（+ 活体注册表 +
@@ -640,10 +713,11 @@ class SubagentContinuationManager:
         """
         parent = parent or self.parent
         self.assert_admitting(parent)
+        max_depth = self.resolve_max_depth()
         depth = delegation_depth_of(parent)
-        if depth >= self.max_depth:
+        if max_depth is not None and depth >= max_depth:
             raise SubagentError(
-                f"子代理嵌套深度 {depth} 达到上限 {self.max_depth}", "MAX_DEPTH_EXCEEDED",
+                f"子代理嵌套深度 {depth} 达到上限 {max_depth}", "MAX_DEPTH_EXCEEDED",
             )
         child_id = child_id or ("child-" + uuid.uuid4().hex[:12])
         self._assert_child_id_available(child_id)
@@ -1110,66 +1184,69 @@ class SubagentContinuationManager:
     # ---------- 枚举 ----------
 
     def list_children(self) -> list[dict]:
-        """直属子代理：meta.parentSession == 本父的所有持久化子会话 + 激活中。"""
-        return [self._child_entry(cid) for cid in self._known_child_ids()]
+        """直属子代理：meta.parentSession == 本父的持久化子会话 + 激活中。
+
+        非 continuable / 描述符不可读的子不供模型选择（上游 project 省略），
+        经 `_child_entry` 折叠为 None 后过滤。"""
+        entries = (self._child_entry(cid) for cid in self._known_child_ids())
+        return [entry for entry in entries if entry is not None]
 
     def list_descendants(self) -> list[dict]:
         """全部后代：从本父出发沿持久化 meta.parentSession 链 BFS（嵌套续跑
-        后孙代及更深后代的 parentSession 指向各自直属父）。"""
+        后孙代及更深后代的 parentSession 指向各自直属父），每个 continuable
+        后代附 durable 直属父与深度。"""
         headers = {}
         for header in self.persistence.list_headers():
             hid = header.get("id")
             meta = header.get("meta")
             if hid and isinstance(meta, dict):
                 headers[hid] = meta
-        descendants: list[str] = []
-        frontier = [self.parent.id]
+        positioned: list[tuple[str, str, int]] = []
+        frontier = [(self.parent.id, 0)]
         seen = {self.parent.id}
         while frontier:
-            current = frontier.pop()
+            current, depth = frontier.pop(0)
             for cid, meta in headers.items():
                 if cid in seen or meta.get("parentSession") != current:
                     continue
                 seen.add(cid)
-                descendants.append(cid)
-                frontier.append(cid)
-        return [self._child_entry(cid) for cid in sorted(descendants)]
+                positioned.append((cid, current, depth + 1))
+                frontier.append((cid, depth + 1))
+        positioned.sort(key=lambda item: item[0])
+        entries = (self._child_entry(cid, parent_id=parent_id, depth=depth)
+                   for cid, parent_id, depth in positioned)
+        return [entry for entry in entries if entry is not None]
 
-    def _descriptor_label(self, child_id: str) -> str | None:
-        """从持久化日志恢复子代理 label（v2 header 键闭集后 label 随
-        `subagent/descriptor` 事件持久化，header meta 不再携带）。"""
+    def _descriptor_data(self, child_id: str) -> dict | None:
+        """从激活或持久化日志恢复子代理描述符（mode/label）。"""
+        act = self._activations.get(child_id)
+        if act is not None:
+            return act.get("descriptor")
         try:
             events = self.persistence.load(child_id)
         except Exception:
             return None
-        for event in reversed(events):
-            if event.get("type") == "subagent/descriptor":
-                label = (event.get("data") or {}).get("label")
-                return label if label else None
-        return None
+        return fold_subagent_descriptor(events)
 
-    def _child_entry(self, child_id: str) -> dict:
-        depth = 0
-        label = child_id
-        status = "idle"
-        for header in self.persistence.list_headers():
-            if header.get("id") != child_id:
-                continue
-            meta = header.get("meta")
-            if isinstance(meta, dict):
-                d = meta.get("delegationDepth")
-                if isinstance(d, int) and not isinstance(d, bool) and d >= 0:
-                    depth = d
-            break
-        descriptor_label = self._descriptor_label(child_id)
-        if descriptor_label:
-            label = descriptor_label
+    def _child_entry(self, child_id: str, parent_id: str | None = None,
+                     depth: int | None = None) -> dict | None:
+        """一个 continuable 子代理行：status 取自活体 loop（running/inactive），
+        非 continuable 或描述符不可读 → None（上游 project 省略同款）。
+
+        `parent_id`/`depth` 仅在后代枚举时携带（上游 descendants 位置注记）。"""
+        descriptor = self._descriptor_data(child_id)
+        if descriptor is None or descriptor.get("mode") != "continuable":
+            return None
+        label = descriptor.get("label") or child_id
         act = self._activations.get(child_id)
-        if act is not None:
-            status = act["status"]
-            if act.get("label"):
-                label = act["label"]
-        return {"kind": "child", "id": child_id, "label": label, "status": status, "depth": depth}
+        if act is not None and act.get("label"):
+            label = act["label"]
+        status = "running" if act is not None and act["loop"].status == "running" else "inactive"
+        entry: dict = {"kind": "child", "id": child_id, "label": label, "status": status}
+        if parent_id is not None:
+            entry["parent"] = parent_id
+            entry["depth"] = depth if depth is not None else 0
+        return entry
 
     def _known_child_ids(self) -> list[str]:
         ids = set(self._activations)
@@ -1218,7 +1295,29 @@ class SubagentContinuationManager:
 
     def _build_activation(self, child_session: Session, descriptor: dict, persisted: int,
                           parent: AgentLoop | None = None) -> dict:
+        """物化入口：预留激活槽（物化失败回滚），转交 _materialize_activation。"""
         parent = parent or self.parent
+        pact = self._activations.get(parent.id)
+        pool = pact["pool"] if pact is not None else self._root_pool_for(parent)
+        release_slot = pool.reserve(self.max_active_subagents)
+        try:
+            return self._materialize_activation(
+                child_session, descriptor, persisted, parent, pool, release_slot)
+        except BaseException:
+            release_slot()
+            raise
+
+    def _root_pool_for(self, parent: AgentLoop) -> ActivationPool:
+        """解析一个根的池；后代直接继承在世父激活的池（上游 rootPool）。"""
+        pool = self._root_pools.get(parent)
+        if pool is None:
+            pool = ActivationPool()
+            self._root_pools[parent] = pool
+        return pool
+
+    def _materialize_activation(self, child_session: Session, descriptor: dict, persisted: int,
+                                parent: AgentLoop, pool: ActivationPool,
+                                release_slot: Callable[[], None]) -> dict:
         child_id = child_session.session_id
         child_ctx = parent.ctx.create_scope(f"subagent:{child_id}")
         # 子作用域独立的 tools/systemPrompt 服务标签（对齐上游 agent scope 层：
@@ -1278,6 +1377,8 @@ class SubagentContinuationManager:
             "label": descriptor.get("label") or child_id,
             "status": "running",
             "parent_loop": parent,              # durable 直属父（结算投递目标）
+            "pool": pool,                       # 经不间断父链共享的激活池
+            "release_slot": release_slot,       # 结算/回滚时释放的槽位
             "run_id": uuid.uuid4().hex,         # 生命周期事件对的唯一标识
             "ancestry": tuple([child, *lineage]),
             "persisted": persisted,          # == epoch_start：结算 delta 起点
@@ -1468,6 +1569,9 @@ class SubagentContinuationManager:
                 logger.warn(f'subagent "{child_id}" activation teardown failed: {error}')
             self._activations.pop(child_id, None)
             self._live.pop(child_id, None)
+            release_slot = activation.get("release_slot")
+            if release_slot is not None:
+                release_slot()              # 结算释放池槽（上游 finishDisposal）
         # 锁外收尾：先摘激活再投递，父 pump 可对同一子代理再次 send_message
         # （此时必须冷恢复而非撞既有激活）
         self._notify_settlement(activation, stop, output, child_id)
@@ -1647,12 +1751,47 @@ def _interrupt_agent_tool(manager: SubagentContinuationManager) -> Tool:
 
 
 def _list_agents_tool(manager: SubagentContinuationManager) -> Tool:
+    """`list_agents`：continuable 子代理枚举（上游 tool-subagent-control/list-agents.ts）。
+
+    默认 `children` 只列直属子；`descendants` 走全树并附 durable 直属父与深度。
+    status 取活体 registry（running/inactive，inactive 不描述完成/失败/等待）；
+    非 continuable 子不供模型选择，故省略。mini 无 diagnostics 面（缺读子会在
+    `_child_entry` 折为 None，不产生 diagnostic 行）。
+    """
+
     async def execute(args: dict, exec_: ToolExec):
-        return json.dumps(manager.list_descendants(), ensure_ascii=False, indent=2)
+        scope = args.get("scope") or "children"
+        entries = (manager.list_descendants() if scope == "descendants"
+                   else manager.list_children())
+        return json.dumps(entries, ensure_ascii=False, indent=2)
 
     return Tool(
         name="list_agents",
-        description="List the subagents that this agent owns.",
-        parameters={"type": "object", "properties": {}},
+        description=(
+            "List your continuable background subagents by durable id and label. Use it to recall which "
+            "ones you started, not to poll for completion — you are told when one finishes. Status comes "
+            "from the live registry: running means the agent is working right now; inactive means no turn "
+            "is executing, whether the child is loaded or must be resumed. inactive does not describe task "
+            "completion, success, failure, or waiting for other agents. A `send_message` steers a running "
+            "child at its nearest step boundary or starts or resumes a turn for an inactive child, and a "
+            "direct child remains a `send_message` candidate in every status. The snapshot is not a "
+            "delivery promise — `send_message` performs the authoritative check and may still fail. Scope "
+            "`descendants` walks the whole tree below you, annotating each entry with its durable "
+            "direct-parent session id and depth. You may use `send_message` only for depth-1 entries; "
+            "deeper entries are candidates for `interrupt_agent` only."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "scope": {
+                    "type": "string",
+                    "enum": ["children", "descendants"],
+                    "description": (
+                        "children (default) lists direct children only; descendants walks the complete "
+                        "tree below you."
+                    ),
+                },
+            },
+        },
         execute=execute,
     )

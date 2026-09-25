@@ -594,9 +594,13 @@ class TestContinuationManager(unittest.TestCase):
         self.assertEqual([e["id"] for e in entries], sorted([cid1, cid2]))
         by_id = {e["id"]: e for e in entries}
         self.assertEqual(by_id[cid1]["label"], "甲")
-        self.assertEqual(by_id[cid1]["depth"], 1)
-        self.assertEqual(by_id[cid1]["status"], "idle")
-        self.assertEqual(mgr.list_descendants(), entries)   # 无嵌套时 descendants == children
+        # rc.1 status 词汇：非运行中 = inactive；children 行不带后代位置注记
+        self.assertEqual(by_id[cid1]["status"], "inactive")
+        self.assertNotIn("depth", by_id[cid1])
+        descendants = mgr.list_descendants()
+        self.assertEqual([e["id"] for e in descendants], sorted([cid1, cid2]))
+        self.assertEqual(descendants[0]["depth"], 1)
+        self.assertEqual(descendants[0]["parent"], self.parent.id)
 
 
 class TestReportTool(unittest.TestCase):
@@ -666,7 +670,7 @@ class TestControlTools(unittest.TestCase):
         self.assertEqual(self.parent.last_response(), "父响应")
         tool_results = [e for e in self.parent.session.events if e["type"] == "tool/result"]
         self.assertIn("Message sent to subagent",
-                      tool_results[0]["data"]["message"]["content"][0]["content"][0]["text"])
+                      tool_results[0]["data"]["message"]["content"][0]["text"])
         # 子会话已完成回合并持久化
         events = self.persistence.inspect(self.parent.adapter.cid)["events"]
         self.assertEqual(events[-1]["type"], "turn/end")
@@ -677,12 +681,12 @@ class TestControlTools(unittest.TestCase):
         self.parent.run("看看有哪些子代理")
         results = [e for e in self.parent.session.events if e["type"] == "tool/result"]
         self.assertEqual(len(results), 1)
-        content = results[0]["data"]["message"]["content"][0]["content"][0]["text"]
+        content = results[0]["data"]["message"]["content"][0]["text"]
         parsed = json.loads(content)
         self.assertEqual(len(parsed), 1)
         self.assertEqual(parsed[0]["kind"], "child")
         self.assertEqual(parsed[0]["label"], "研")
-        self.assertEqual(parsed[0]["status"], "idle")
+        self.assertEqual(parsed[0]["status"], "inactive")
 
     def test_interrupt_agent_tool_inactive_noop(self):
         # A8：interrupt_agent 对缺省目标返回成功文案而非错误（上游 no-op）。
@@ -691,9 +695,9 @@ class TestControlTools(unittest.TestCase):
         self.parent.run("中断子代理")
         results = [e for e in self.parent.session.events if e["type"] == "tool/result"]
         self.assertEqual(len(results), 1)
-        block = results[0]["data"]["message"]["content"][0]
-        self.assertIn("Interrupted subagent", block["content"][0]["text"])
-        self.assertFalse(block.get("isError"))
+        message = results[0]["data"]["message"]
+        self.assertIn("Interrupted subagent", message["content"][0]["text"])
+        self.assertFalse(message.get("isError"))
 
 
 class TestAsyncContinuation(unittest.TestCase):

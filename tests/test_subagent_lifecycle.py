@@ -342,8 +342,10 @@ class TestNestedOwnership(unittest.TestCase):
         # 共享脚本适配器：首次调用发 spawn_gc，之后固定文本（子与孙共用；
         # 孙代对 spawn_gc 的调用被工具守卫短路为叶节点）
         shared = FakeLlmAdapter(tool_call={"name": "spawn_gc", "arguments": {}})
+        # max_depth=2：rc.1 runtime 默认 1（仅一层委托），测试要造孙代故显式放宽
         mgr = SubagentContinuationManager(
-            parent, persistence, adapter_factory=lambda p, m, r=None: shared)
+            parent, persistence, max_depth=2,
+            adapter_factory=lambda p, m, r=None: shared)
         cid = mgr.start_continuable(label="子")
 
         async def spawn_gc(args, exec_):
@@ -395,6 +397,100 @@ class TestNestedOwnership(unittest.TestCase):
             self.assertEqual(depths[gc], 2)
 
         asyncio.run(scenario())
+
+
+class TestArchiveAdmission(unittest.TestCase):
+    """subagent 归档准入（上游 archive-admission.ts）：activity 报 running 后代，
+    session-stop 逐个以 parent 身份取消。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.persistence = JsonlPersistence(self.tmp.name)
+        self.parent, self.ctx, self.reg = _parent_loop()
+        self.mgr = SubagentContinuationManager(self.parent, self.persistence)
+
+    def test_activity_reports_running_descendants_with_label(self):
+        cid = self.mgr.start_continuable(label="研")
+        act = self.mgr._get_or_resume(cid)
+        act["loop"].status = "running"
+        activity = self.ctx.waterfall(
+            "workspace/session-activity", {"sessionId": self.parent.id},
+            base=lambda _p: [])
+        self.assertEqual([entry.kind for entry in activity], ["subagent"])
+        self.assertEqual([item.id for item in activity[0].items], [cid])
+        self.assertEqual(activity[0].items[0].label, "研")
+        self.mgr._settle(cid, act, force=True)
+
+    def test_stop_cancels_running_descendant_as_parent(self):
+        cid = self.mgr.start_continuable(label="研")
+        act = self.mgr._get_or_resume(cid)
+        act["loop"].status = "running"
+        act["loop"]._turn_open = True
+        asyncio.run(self.ctx.aparallel(
+            "workspace/session-stop", {"sessionId": self.parent.id}))
+        self.assertEqual(act["loop"]._turn_end,
+                         {"kind": "aborted", "reason": {"kind": "parent"}})
+        self.mgr._settle(cid, act, force=True)
+
+    def test_activity_silent_when_descendant_idle(self):
+        cid = self.mgr.start_continuable(label="研")
+        act = self.mgr._get_or_resume(cid)     # loop.status 仍 idle
+        activity = self.ctx.waterfall(
+            "workspace/session-activity", {"sessionId": self.parent.id},
+            base=lambda _p: [])
+        self.assertEqual(activity, [])
+        self.mgr._settle(cid, act, force=True)
+
+
+class TestActivationCapacity(unittest.TestCase):
+    """ActivationPool（上游 continuation-activation.ts）：进程内容量经不间断
+    continuable 父链共享，物化前预留、结算释放。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.persistence = JsonlPersistence(self.tmp.name)
+        self.parent, self.ctx, self.reg = _parent_loop()
+
+    def test_limit_reached_then_released_on_settle(self):
+        mgr = SubagentContinuationManager(
+            self.parent, self.persistence, max_active_subagents=1)
+        c1 = mgr.start_continuable(label="甲")
+        c2 = mgr.start_continuable(label="乙")
+        a1 = mgr._get_or_resume(c1)
+        with self.assertRaises(SubagentError) as cm:
+            mgr._get_or_resume(c2)
+        self.assertEqual(cm.exception.code, "ACTIVATION_LIMIT_REACHED")
+        # 结算释放槽位后可再物化
+        mgr._settle(c1, a1, force=True)
+        a2 = mgr._get_or_resume(c2)
+        self.assertIsNotNone(a2)
+        mgr._settle(c2, a2, force=True)
+
+    def test_pool_shared_through_parent_link(self):
+        # 孙代继承在世父激活的池：根池已占 1 槽 → 孙代同池即满
+        mgr = SubagentContinuationManager(
+            self.parent, self.persistence, max_depth=2, max_active_subagents=1)
+        c1 = mgr.start_continuable(label="子")
+        a1 = mgr._get_or_resume(c1)
+        grandchild = mgr.start_continuable(label="孙", parent=a1["loop"])
+        with self.assertRaises(SubagentError) as cm:
+            mgr._get_or_resume(grandchild, parent=a1["loop"])
+        self.assertEqual(cm.exception.code, "ACTIVATION_LIMIT_REACHED")
+        mgr._settle(c1, a1, force=True)
+
+    def test_resolve_max_depth_default_one(self):
+        mgr = SubagentContinuationManager(self.parent, self.persistence)
+        self.assertEqual(mgr.resolve_max_depth(), 1)
+        self.assertIsNone(mgr.resolve_max_depth("provider-managed"))
+        self.assertEqual(mgr.resolve_max_depth(3), 3)
+        child = mgr.start_continuable(label="子")     # depth 0 < 1
+        act = mgr._get_or_resume(child)
+        with self.assertRaises(SubagentError) as cm:
+            mgr.start_continuable(label="孙", parent=act["loop"])   # depth 1 >= 1
+        self.assertEqual(cm.exception.code, "MAX_DEPTH_EXCEEDED")
+        mgr._settle(child, act, force=True)
 
 
 if __name__ == "__main__":

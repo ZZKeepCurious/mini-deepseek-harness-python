@@ -113,6 +113,7 @@ class _InProcessSubAgent(SubAgent):
 
 # ---------- 可继续子代理（A7 durable 子会话 + 冷恢复；A8 异步事件驱动） ----------
 
+from .archive_admission import install_subagent_archive_admission  # noqa: E402
 from .continuation import (  # noqa: E402
     CONTEXT_SUMMARY_MAX_CHARS,
     SubagentContinuationManager,

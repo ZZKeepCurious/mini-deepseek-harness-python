@@ -63,13 +63,13 @@ _PROMPT_DESCRIPTION = (
     "freely and state only what is new."
 )
 
-# 描述后缀（逐字 index.ts:301-308）
+# 描述后缀（逐字 index.ts:386-388，rc.1：send_message 措辞 inactive 化）
 _SUFFIX_CONTINUABLE = (
     " This tool runs in the background by default, immediately returns a durable subagent id, and keeps "
     "the child conversation available for later turns. When that run settles, the runtime sends the "
-    "parent a notice containing its outcome and any final assistant message; `send_message` starts a "
-    "later turn in the same child conversation. Set `run_in_background: false` only when your next "
-    "action depends on receiving the result."
+    "parent a notice containing its outcome and any final assistant message; `send_message` steers the "
+    "child's nearest step while it is running and starts or resumes a turn while it is inactive. Set "
+    "`run_in_background: false` only when your next action depends on receiving the result."
 )
 _SUFFIX_ONE_SHOT = (
     " This call waits for the result by default. Set `run_in_background: true` to return a job id; "
@@ -546,7 +546,7 @@ def _job_outcome(stop: str, diagnostic: str | None = None,
     进入 jobs 通道；诊断本身不进 subagent/end）。
     """
     if stop == "completed":
-        return {"status": "completed", "output": output or ""}
+        return {"status": "completed", "result": output or ""}
     if stop == "aborted":
         if diagnostic is None:
             return {"status": "killed"}
@@ -591,8 +591,10 @@ def _start_background(
     job_id_ = jobs.start({
         "kind": "subagent",
         "label": label,
-        "owner": parent,
-        "run": lambda: {
+        # owner 是 SessionId（上游 JobSpec.owner；mini 的 Agent.id 即会话 id）
+        "owner": parent.id,
+        # 无输出源：子会话拥有中间细节，最终文本经 outcome.result 交出（index.ts:557）
+        "run": lambda _job: {
             "done": box,
             # kill 语义：以委托方 ancestor 身份中断激活中的子代理
             # （已结算 → 接受性 no-op）
