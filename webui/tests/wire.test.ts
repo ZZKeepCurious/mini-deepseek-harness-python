@@ -231,6 +231,141 @@ describe("RemoteMuxConnection", () => {
     const frame = await p;
     expect(frame.type).toBe("error");
   });
+
+  it("sends uplink item frames behind the open frame", () => {
+    const conn = new RemoteMuxConnection({
+      url: "/api/remote.mux",
+      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket,
+    });
+    conn.connect();
+    const sock = FakeWebSocket.instances[0];
+    sock.open();
+
+    const handle = conn.openStream("session/follow", { args: {} });
+    handle.send({ seq: 1 });
+    handle.send("text");
+    const frames = sock.sent.map((text) => JSON.parse(text) as { type: string; streamId: number });
+    expect(frames.map((f) => f.type)).toEqual(["open", "item", "item"]);
+    expect(frames[1]).toEqual({ type: "item", streamId: handle.streamId, value: { seq: 1 } });
+    expect(frames[2]).toEqual({ type: "item", streamId: handle.streamId, value: "text" });
+  });
+
+  it("carries a top-level undefined item as an item frame without value", () => {
+    const conn = new RemoteMuxConnection({
+      url: "/api/remote.mux",
+      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket,
+    });
+    conn.connect();
+    const sock = FakeWebSocket.instances[0];
+    sock.open();
+
+    const handle = conn.openStream("session/follow", { args: {} });
+    sock.sent.length = 0;
+    handle.send(undefined);
+    expect(sock.sent[0]).toBe(`{"type":"item","streamId":${handle.streamId}}`);
+  });
+
+  it("rejects uplink items that are not lossless JSON values", () => {
+    const conn = new RemoteMuxConnection({
+      url: "/api/remote.mux",
+      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket,
+    });
+    conn.connect();
+    const sock = FakeWebSocket.instances[0];
+    sock.open();
+
+    const handle = conn.openStream("session/follow", { args: {} });
+    sock.sent.length = 0;
+    for (const item of [Number.NaN, Infinity, { nested: undefined }, new Date(0), () => 1]) {
+      expect(() => handle.send(item)).toThrow(/not a lossless JSON value/);
+    }
+    expect(sock.sent).toEqual([]);
+  });
+
+  it("half-closes the uplink once and refuses items after it", () => {
+    const conn = new RemoteMuxConnection({
+      url: "/api/remote.mux",
+      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket,
+    });
+    conn.connect();
+    const sock = FakeWebSocket.instances[0];
+    sock.open();
+
+    const handle = conn.openStream("session/follow", { args: {} });
+    sock.sent.length = 0;
+    handle.endUplink();
+    handle.endUplink();
+    expect(sock.sent).toEqual([`{"type":"end","streamId":${handle.streamId}}`]);
+    expect(() => handle.send(1)).toThrow(/uplink was ended/);
+  });
+
+  it("stops accepting uplink items once a terminal frame arrives", () => {
+    const conn = new RemoteMuxConnection({
+      url: "/api/remote.mux",
+      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket,
+    });
+    conn.connect();
+    const sock = FakeWebSocket.instances[0];
+    sock.open();
+
+    const handle = conn.openStream("session/follow", { args: {} });
+    sock.serverSend({ type: "end", streamId: handle.streamId });
+    sock.sent.length = 0;
+    expect(() => handle.send(1)).toThrow(/stream has terminated/);
+    handle.endUplink();
+    expect(sock.sent).toEqual([]);
+  });
+
+  it("refuses uplink items after the handle is closed", () => {
+    const conn = new RemoteMuxConnection({
+      url: "/api/remote.mux",
+      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket,
+    });
+    conn.connect();
+    const sock = FakeWebSocket.instances[0];
+    sock.open();
+
+    const handle = conn.openStream("session/follow", { args: {} });
+    handle.close();
+    sock.sent.length = 0;
+    expect(() => handle.send(1)).toThrow(/stream has terminated/);
+    expect(sock.sent).toEqual([]);
+  });
+
+  it("fails every open stream when the socket closes", async () => {
+    const conn = new RemoteMuxConnection({
+      url: "/api/remote.mux",
+      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket,
+    });
+    conn.connect();
+    const sock = FakeWebSocket.instances[0];
+    sock.open();
+
+    const handle = conn.openStream("session/follow", { args: {} });
+    const pending = handle.next();
+    sock.readyState = 3;
+    sock.onclose?.();
+
+    await expect(pending).rejects.toThrow(/socket closed/);
+    expect(() => handle.send(1)).toThrow(/stream has terminated/);
+    expect(() => handle.endUplink()).not.toThrow();
+    await expect(handle.next()).rejects.toThrow(/socket closed/);
+  });
+
+  it("fails every open stream on disconnect", async () => {
+    const conn = new RemoteMuxConnection({
+      url: "/api/remote.mux",
+      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket,
+    });
+    conn.connect();
+    FakeWebSocket.instances[0].open();
+
+    const handle = conn.openStream("session/control", { args: {} });
+    conn.disconnect();
+
+    await expect(handle.next()).rejects.toThrow(/disposed/);
+    expect(() => handle.send(1)).toThrow(/stream has terminated/);
+  });
 });
 
 // ---------- $events ----------

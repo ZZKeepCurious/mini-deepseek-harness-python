@@ -7,7 +7,7 @@
 
 核心约定已全部实现，能力清单见 README「已实现能力」表；每个模块与上游包的权威归属见 [docs/architecture.md](docs/architecture.md) 映射表。
 
-web 半（传输层 + 浏览器前端）的 wire 面与上游一致：两信封 RPC、Remote 流（单条 `/api/remote.mux` WebSocket 承载 `open/item/end/cancel/error` 帧，帧字段集合精确匹配，每流一条 256 KiB 有界上行 inbox + `$events/result` unary 结算）、unary 结果的二进制附件（结果含字节时 `multipart/form-data`：`metadata` part + `bytes-<i>` part，JSON 槽位 `null` 占位，客户端按 path 写回 `Uint8Array`）、`$events` 注册表（api-session/* 转发 + `approval/request` waterfall 审批桥）、`session.follow`/`session.control` 流、静态服务约定、会话日志导出 `GET /api/session.export`（zip 打包 root + 子代理后代 + 被引用媒体）。上游 React 客户端指向 mini 后端可工作。浏览器前端有两种形态：产品化 `webui/`（仓库顶层独立 React+TS+Vite 工程，只依赖 wire 约定；`vite build` 产物经 `MINIHARNESS_WEBUI_DIST` 由后端静态承载）+ `web/static/` vanilla SPA 教学参照（旧 SSE wire，不对新后端工作）。设计与决策记录在 `status/mini-harness/`。
+web 半（传输层 + 浏览器前端）的 wire 面与上游一致：两信封 RPC、Remote 流（单条 `/api/remote.mux` WebSocket 承载 `open/item/end/cancel/error` 帧，帧字段集合精确匹配，每流一条 256 KiB 有界上行 inbox + 方法侧调用上下文逐项按该方法 codec 解码上行项 + `$events/result` unary 结算）、unary 结果的二进制附件（结果含字节时 `multipart/form-data`：`metadata` part + `bytes-<i>` part，JSON 槽位 `null` 占位，客户端按 path 写回 `Uint8Array`）、`$events` 注册表（api-session/* 转发 + `approval/request` waterfall 审批桥）、`session.follow`/`session.control` 流、客户端每流一个句柄（`send`/`endUplink`/`close`/`next`）、静态服务约定、会话日志导出 `GET /api/session.export`（zip 打包 root + 子代理后代 + 被引用媒体）。上游 React 客户端指向 mini 后端可工作。浏览器前端有两种形态：产品化 `webui/`（仓库顶层独立 React+TS+Vite 工程，只依赖 wire 约定；`vite build` 产物经 `MINIHARNESS_WEBUI_DIST` 由后端静态承载）+ `web/static/` vanilla SPA 教学参照（旧 SSE wire，不对新后端工作）。设计与决策记录在 `status/mini-harness/`。
 
 ## 规划
 

@@ -45,9 +45,10 @@ from .args import (
 )
 from .events import RemoteEventRegistry
 from .stream_protocol import REMOTE_EVENT_STREAM_ENDPOINT
+from .uplink import UplinkInbox, UplinkItems
 from ..telemetry import projection_values
 
-__all__ = ["GatewayStreams", "RemoteStreamError"]
+__all__ = ["GatewayStreams", "RemoteStreamError", "StreamInvocation"]
 
 FOLLOW_POLL_INTERVAL = 0.05
 #: terminal/follow 帧轮询间隔（秒）：同步 follower 非阻塞 pop 的桥接粒度。
@@ -66,6 +67,49 @@ class RemoteStreamError(RuntimeError):
         self.message = message
 
 
+class StreamInvocation:
+    """一次 Remote 流调用在方法侧看到的上下文（上游 `ctx.invocation` 的 mini 面）。
+
+    上游每个 Remote 方法都经 `this.ctx.invocation` 读本次调用的 request /
+    service / peer / signal / uplink（`GatewayInvocation`，index.ts:1287-1335）：
+    `uplink()` 每次调用取一次（第二次抛错），下行结束时 `close()` 释放——没人取
+    用的上行被立即释放，取用过的关闭并丢弃未读项。
+
+    @param endpoint - canonical endpoint（codec 失败进 details）。
+    @param uplink - 该逻辑流的有界上行 inbox（`web/uplink.py`）。
+    @param signal - 取消句柄（mux 关闭 / 客户端 cancel）。
+    @param codec - 该方法声明的上行 codec；`None` 表示未声明，走无损 JSON 校验
+        （上游 `prepared.descriptor.uplink?.codec ?? SRC_JSON_CODEC`）。
+    """
+
+    def __init__(self, endpoint: str, uplink: UplinkInbox | None, signal,
+                 codec=None):
+        self.endpoint = endpoint
+        self.signal = signal
+        self._uplink = uplink
+        self._codec = codec
+        self._items: UplinkItems | None = None
+        self._taken = False
+
+    def uplink(self) -> UplinkItems:
+        """取本调用的上行项迭代器（逐项过 codec）；每次调用只能取一次。"""
+        if self._taken:
+            raise RuntimeError(
+                f"typert gateway: {self.endpoint}: invocation.uplink() is "
+                "available once per call")
+        self._taken = True
+        self._items = UplinkItems(self._uplink, self.endpoint, self._codec)
+        return self._items
+
+    def close(self) -> None:
+        """下行结束：释放上行（上游 `invocation.close()`）。"""
+        if self._items is not None:
+            self._items.close()
+            return
+        self._taken = True
+        release_uplink(self._uplink)
+
+
 def _as_plain(value: Any) -> Any:
     from ..core.session.json import thaw
     return thaw(value)
@@ -77,13 +121,13 @@ def release_uplink(uplink: Any) -> None:
         uplink.release()
 
 
-async def _with_uplink(stream: Any, uplink: Any):
-    """代理一条流，结束时释放它的上行 inbox（上游 `invocation.close()` 的释放点）。"""
+async def _with_uplink(stream: Any, invocation: StreamInvocation):
+    """代理一条流，结束时释放它的上行（上游 `invocation.close()` 的释放点）。"""
     try:
         async for value in stream:
             yield value
     finally:
-        release_uplink(uplink)
+        invocation.close()
 
 
 class GatewayStreams:
@@ -106,6 +150,9 @@ class GatewayStreams:
         self._control_queues: dict[asyncio.Queue, None] = {}
         self._attached = False
         self._disposers: list[Any] = []
+        #: endpoint → 声明的上行 codec；出厂为空（rc.1 全部 Remote 方法 `In = never`），
+        #: 声明点见 `uplink_codecs`。
+        self._uplink_codecs: dict[str, Any] = {}
 
     # ---------- mux 分发入口 ----------
 
@@ -119,6 +166,16 @@ class GatewayStreams:
             "workspace/follow": "workspace_follow",
             "workspaceFiles/changes": "workspace_changes",
         }
+
+    def uplink_codecs(self) -> dict[str, Any]:
+        """endpoint → 该方法声明的上行 codec（缺省即不声明，走无损 JSON 校验）。
+
+        上游这份声明来自 typert 生成的 `InvocationDescriptor.uplink.codec`
+        （types.ts:355-357）；rc.1 出厂的 Remote 方法全是 `In = never`
+        （session/follow、control、terminal/follow、workspace/follow、
+        workspaceFiles/changes、$events），故本表出厂为空。
+        """
+        return self._uplink_codecs
 
     def open_stream(self, endpoint: str, payload: Any, uplink: Any = None, signal=None):
         """按 endpoint 打开一个流：返回 async 生成器（帧 value 序列）。
@@ -140,8 +197,7 @@ class GatewayStreams:
                 "gateway/invocation-unavailable",
                 f"typert gateway: {endpoint}: no active Remote method exports this endpoint")
         if kind == "$events":
-            if uplink is not None:
-                release_uplink(uplink)
+            release_uplink(uplink)
             return self.events.open(payload, signal=signal)
         if (not isinstance(payload, dict) or set(payload) != {"args"}
                 or not isinstance(payload["args"], dict)):
@@ -153,19 +209,24 @@ class GatewayStreams:
         except BoundaryReject as error:
             raise RemoteStreamError(
                 error.code, boundary_error_message(endpoint, error.message)) from error
+        invocation = StreamInvocation(
+            endpoint, uplink, signal, self._uplink_codecs.get(endpoint))
         if kind == "follow":
-            return _with_uplink(self._follow(payload["args"], signal), uplink)
+            return _with_uplink(self._follow(payload["args"], invocation), invocation)
         if kind == "terminal_follow":
-            return _with_uplink(self._terminal_follow(payload["args"], signal), uplink)
+            return _with_uplink(
+                self._terminal_follow(payload["args"], invocation), invocation)
         if kind == "workspace_follow":
-            return _with_uplink(self._workspace_follow(payload["args"], signal), uplink)
+            return _with_uplink(
+                self._workspace_follow(payload["args"], invocation), invocation)
         if kind == "workspace_changes":
-            return _with_uplink(self._workspace_changes(payload["args"], signal), uplink)
-        return _with_uplink(self._control(signal), uplink)
+            return _with_uplink(
+                self._workspace_changes(payload["args"], invocation), invocation)
+        return _with_uplink(self._control(invocation), invocation)
 
     # ---------- session/follow（历史跟随流） ----------
 
-    async def _follow(self, args: dict, signal=None):
+    async def _follow(self, args: dict, invocation: StreamInvocation):
         address = args.get("address")
         if (address.get("kind") != "session"
                 or not isinstance(address.get("sessionId"), str)
@@ -204,7 +265,8 @@ class GatewayStreams:
                                    self.ctx.get("sessionProjections"))}}
         subscribed = cursor + 1
         while True:
-            events = await _poll_new_events(self.api, session_id, subscribed, signal)
+            events = await _poll_new_events(
+                self.api, session_id, subscribed, invocation.signal)
             if events is None:
                 return
             for event in events:
@@ -218,7 +280,7 @@ class GatewayStreams:
 
     # ---------- terminal/follow（浏览器终端恢复流） ----------
 
-    async def _terminal_follow(self, args: dict, signal=None):
+    async def _terminal_follow(self, args: dict, invocation: StreamInvocation):
         """`terminal/follow`：一个完整有界屏幕（snapshot）后跟有序 output/state 帧。
 
         对齐上游 Remote stream `follow(agent, id, attachmentId)`：附加即独占输入，
@@ -254,7 +316,7 @@ class GatewayStreams:
 
     # ---------- workspace/follow（工作区投影流） ----------
 
-    async def _workspace_follow(self, args: dict, signal=None):
+    async def _workspace_follow(self, args: dict, invocation: StreamInvocation):
         """`workspace/follow`：一条完整 baseline 后跟有序 upsert/remove/order/archived。
 
         对齐上游 WorkspaceController.follow：重连开新代次并重发 baseline。mini 以
@@ -280,7 +342,7 @@ class GatewayStreams:
 
     # ---------- workspaceFiles/changes（文件观察流） ----------
 
-    async def _workspace_changes(self, args: dict, signal=None):
+    async def _workspace_changes(self, args: dict, invocation: StreamInvocation):
         """`workspaceFiles/changes`：目标级 OS watch 就绪后 `{kind:'ready'}`，
         随后命中目标的失效重 stat 产出 `change` 帧（`path` 必填）。"""
         controller = self.api.ctx.get("workspaceFiles")
@@ -320,11 +382,12 @@ class GatewayStreams:
             return
         self._disposers = [registry.on_changed(self._on_projection_changed)]
 
-    async def _control(self, signal=None):
+    async def _control(self, invocation: StreamInvocation):
         self._attach_control()
         # 上游 ControlQueue 无界（Deque）；projection 帧不经丢帧窗口。
         queue: asyncio.Queue = asyncio.Queue()
         self._control_queues[queue] = None
+        signal = invocation.signal
         try:
             yield {"type": "baseline", "value": self._control_baseline()}
             while True:

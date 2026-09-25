@@ -3,7 +3,8 @@
 > 仓库顶层独立 React + TypeScript + Vite 工程（独立于 Python 内核）。
 > **只依赖后端发布的 wire 约定**：两信封 RPC（`/api/<endpoint>`，含 `multipart/form-data`
 > 的二进制结果附件）+ `/api/remote.mux`
-> WebSocket 承载 Remote 流 + `$events`/`$events/result` + `session.follow`/`session.control`。
+> WebSocket 承载 Remote 流（含流的上行 `item`/`end`）+ `$events`/`$events/result` +
+> `session.follow`/`session.control`。
 > 禁止 import / hack Python 内部。约定权威参考：`../docs/interface-wire.md`。
 
 ## 功能面
@@ -66,13 +67,20 @@ MINIHARNESS_WEBUI_DIST=webui/dist python -m miniharness.cli --profile web
 
 ```
 webui/
-├── src/wire/      # 约定客户端层（纯 TS，可单测）：rpc / mux / follow / control / events / auth
+├── src/wire/      # 约定客户端层（纯 TS，可单测）：rpc / mux / json-value / follow / control / events / auth
 ├── src/app/       # React 编排 hooks（useBackend）
 ├── src/ui/        # 无状态展示组件（SessionList / Trajectory / ApprovalPanel / ControlPanel）
 ├── tests/         # vitest 单测（jsdom，mock fetch/WS；wire-binary.test.ts 走 node 环境解析 multipart）
 ├── vite.config.ts # dev 代理 + 构建 + vitest 配置
 └── index.html     # Vite 入口
 ```
+
+### 流的上行（`src/wire/mux.ts`）
+
+`openStream(endpoint, payload)` 返回 `StreamHandle`（同上游 `RemoteStreamHandle`）：
+`send(item)` 发一条上行项（先过 `json-value.ts` 的无损 JSON 校验，失败即本地抛错）、
+`endUplink()` 半关上行、`close()` 取消本流、`next()` 取下一帧下行。终态帧（`error`/`end`）
+或连接断开后 `send()` 抛错——对齐上游「终态即停 pump / 断连 `failAll` 终结全部流」。
 
 ## 测试与类型检查
 

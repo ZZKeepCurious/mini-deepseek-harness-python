@@ -181,11 +181,18 @@ client `connection/src/client/rpc.ts` 按 `/` 切两段）；`web/args.canonical
 - 每条 open 同时建一条**有界上行 inbox**（`web/uplink.py`）：单消费者，缓冲按整帧 UTF-8 字节
   记账，上限 262144 字节（`create_app(stream_inbox_bytes=...)` 可调，同上游 `streamInboxBytes`）。
   `end` 是半关（已缓冲的 `item` 仍可读尽）；`end` 之后再收 `item` → 该流以 Remote failure 中止，
-  终态 `error` 帧 code `gateway/protocol`；缓冲超限 → `gateway/uplink-overflow`（消息带
-  `limit` 与 `buffered` 字节数，`details` 带 `{endpoint}`）。两者都只杀本流、不关 WS。
+  终态 `error` 帧 code `gateway/protocol`；缓冲超限 → `gateway/uplink-overflow`（消息带字节上限，
+  `details` 带 `{endpoint}`）。两者都只杀本流、不关 WS。
   紧跟 open 的 `item` 会排在该流 inbox 里等消费者，不因「先建流后派发」而丢。
-  `$events` 由网关自有（不走上行），open 即释放；`session/follow`、`session/control`、
-  `workspaceFiles/changes` 在流结束/取消/断连时释放。
+  `$events` 由网关自有（不走上行），open 即释放；其余端点的上行活到该流结束/取消/断连时释放。
+- 上行项由方法侧逐项解码（`web/uplink.py` 的 `UplinkItems`，上游 `GatewayInvocation.uplink()`
+  的 `UplinkDecoder`）：过该 endpoint 声明的 codec，未声明则走无损 JSON 校验（`NaN`/Infinity、
+  `-0`、循环引用、Date、函数、symbol、不可枚举属性等一律拒），解码结果本身也再校验一次。
+  被拒项 → 该流以 `gateway/input-invalid` 中止，终态 `error` 帧消息
+  `typert gateway: <endpoint>: wire field "uplink" failed boundary validation`，
+  `details` 为 `{endpoint, field: "uplink"}`。每次调用 `uplink()` 只能取一次（第二次抛错）；
+  rc.1 出厂的全部 Remote 方法都是 `In = never`，故 `GatewayStreams.uplink_codecs()` 出厂为空表
+  ——声明点即 typert 生成的描述符 `uplink.codec`（`packages/typert/protocol/src/types.ts:355-357`）。
 - 关键 `endpoint`（`GatewayStreams.stream_kinds`）：`$events`、`session/follow`、`session/control`；
    未知 endpoint → `error` 帧 `gateway/internal`。
 - `workspaceFiles/changes`（`{args:{workspaceFileScopeId, path}}`）：先以 `ctx.fs.watch`
@@ -362,7 +369,8 @@ outcome 归一（`APPROVAL_OUTCOMES = {allowed-once, rejected, cancelled, unavai
 | 文件 | 对应 |
 |---|---|
 | `rpc.ts` | §1 unary 载体 + §2 信封 + §3.1 multipart 重组（`parseBinaryResponse`）+ §5 `$events/result`（`RpcFailure` 折叠 transport_error） |
-| `mux.ts` | §4 客户端 open/cancel 帧 + item/end/error 消费（流队列 + waiter） |
+| `mux.ts` | §4 客户端 open/item/end/cancel 帧（`StreamHandle.send`/`endUplink`/`close`/`next`）+ item/end/error 消费（流队列 + waiter；断连即 `failAll` 终结本连接全部流） |
+| `json-value.ts` | §4 上行项无损 JSON 校验（`isRemoteUplinkItem`，同上游 typert `isRemoteUplinkItem`） |
 | `events.ts` | §4.3 `$events` ready/emit/waterfall/cancel + §5 结算（settled 集合 fail-closed） |
 | `follow.ts` | §4.1 snapshot/event 帧 + seq 去重（`TrajectoryBuffer`） |
 | `control.ts` | §4.2 baseline/queue/jobs 替换帧（`applyControlFrame`） |

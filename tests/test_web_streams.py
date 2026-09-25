@@ -13,7 +13,12 @@ from miniharness.core.scope import Context
 from miniharness.core.session import create_message, text_block
 from miniharness.llm.fake import FakeLlmAdapter
 from miniharness.web.api import WebApi
-from miniharness.web.streams import GatewayStreams, RemoteStreamError
+from miniharness.web.streams import (
+    GatewayStreams,
+    RemoteStreamError,
+    StreamInvocation,
+)
+from miniharness.web.uplink import UplinkInbox
 
 
 def _zero_projection():
@@ -365,6 +370,70 @@ class TestReconnectResilience(GatewayStreamsTest):
             return settled
 
         self.assertEqual(_run(go()), ("result", "ok"))
+
+
+class StreamInvocationTest(unittest.TestCase):
+    """方法侧调用上下文（上游 `ctx.invocation`：`uplink()` 一次 + `close()` 释放）。"""
+
+    def test_no_endpoint_declares_an_uplink_codec(self):
+        ctx = Context(name="test")
+        api = WebApi(ctx, _fake())
+        try:
+            self.assertEqual(api.gateway.uplink_codecs(), {})
+        finally:
+            api.gateway.dispose()
+            ctx.dispose()
+
+    def test_uplink_is_available_once_per_call(self):
+        invocation = StreamInvocation("ns/e", UplinkInbox(1024, "ns/e"), None)
+        invocation.uplink()
+        with self.assertRaises(RuntimeError) as caught:
+            invocation.uplink()
+        self.assertIn("invocation.uplink() is available once per call",
+                      str(caught.exception))
+
+    def test_in_process_call_has_an_exhausted_uplink(self):
+        invocation = StreamInvocation("ns/e", None, None)
+
+        async def drain():
+            return [value async for value in invocation.uplink()]
+
+        self.assertEqual(_run(drain()), [])
+        invocation.close()
+
+    def test_close_releases_an_untaken_uplink(self):
+        inbox = UplinkInbox(1024, "ns/e")
+        inbox.push("a", 4)
+        StreamInvocation("ns/e", inbox, None).close()
+        self.assertIsNone(inbox.push("b", 4))
+
+    def test_close_closes_a_taken_uplink(self):
+        inbox = UplinkInbox(1024, "ns/e")
+        invocation = StreamInvocation("ns/e", inbox, None)
+        items = invocation.uplink()
+        invocation.close()
+        self.assertIsNone(inbox.push("b", 4))
+
+        async def drain():
+            return [value async for value in items]
+
+        self.assertEqual(_run(drain()), [])
+
+    def test_declared_codec_is_applied_to_the_uplink(self):
+        def codec(value):
+            if not isinstance(value, int):
+                raise ValueError("int required")
+            return value * 10
+        inbox = UplinkInbox(1024, "ns/e")
+        invocation = StreamInvocation("ns/e", inbox, None, codec)
+        items = invocation.uplink()
+        inbox.push(2, 4)
+        inbox.end()
+
+        async def drain():
+            return [value async for value in items]
+
+        self.assertEqual(_run(drain()), [20])
 
 
 if __name__ == "__main__":
