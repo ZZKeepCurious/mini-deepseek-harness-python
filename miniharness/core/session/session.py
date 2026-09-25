@@ -13,6 +13,7 @@ from .invariant import validate_event
 from .json import deep_freeze, is_json_safe, now_ms, thaw
 from .surface import (
     _surface_nodes,
+    assert_developer_header,
     assert_provenance,
     assert_system_head_rewrite,
     assert_tool_result_rewrite,
@@ -90,12 +91,14 @@ class Session:
         self.session_id = session_id
         self.created_at = created_at or now_ms()
         self.meta = dict(meta) if meta else {}
+        self._mode = mode
         self._events: list[dict[str, Any]] = []
         self._replace_count = 0
         self._on_append = on_append
 
         # 对齐上游 isSeeded + inheritedEventCount 语义（rc.1）
         self._is_seeded: bool = self.meta.get("isSeeded", False)
+        self._first_live_seq: int = len(seed) if seed is not None else 0
         if inherited_event_count is not None:
             self._inherited_event_count = inherited_event_count
         elif seed and self._is_seeded:
@@ -122,21 +125,37 @@ class Session:
                 f"session inherited event count {self._inherited_event_count} "
                 f"exceeds its event log length {len(self._events)}"
             )
-        # V2: seeded snapshot 的 seed 必须恰好等于继承前缀（上游 index.ts
-        # 'seeded session constructor seed must equal its inherited prefix'）
-        if mode == "snapshot" and self._is_seeded and self._inherited_event_count != len(self._events):
-            raise ValueError("seeded session constructor seed must equal its inherited prefix")
+        # V4: 快照 seeded 的 seed 必须恰等于继承前缀，**或在切点带 inherited marker**
+        # （fork seed 已含 marker + 子会话自有闭包；上游 index.ts markedSeed）。
+        seed_marker = self._events[self._inherited_event_count] \
+            if self._inherited_event_count < len(self._events) else None
+        marked_seed = (
+            isinstance(seed_marker, (dict, MappingProxyType))
+            and seed_marker.get("type") == "session/end-seed"
+            and (seed_marker.get("data") or {}).get("inherited") is True
+        )
+        if mode == "snapshot" and self._is_seeded \
+                and self._inherited_event_count != len(self._events) and not marked_seed:
+            raise ValueError(
+                "seeded session constructor seed must equal its inherited prefix "
+                "or mark its inherited cut")
+        if marked_seed and any(
+            isinstance(ev, (dict, MappingProxyType))
+            and ev.get("type") == "session/end-seed"
+            and (ev.get("data") or {}).get("inherited") is True
+            for ev in self._events[self._inherited_event_count + 1:]
+        ):
+            raise ValueError("session inherited event count must identify the final inherited marker")
 
         # V2 end-seed marker（上游 index.ts constructor）：snapshot 的 seeded 子会话
-        # 恒在继承切割点带 {inherited:true}；restore / unseeded 走普通 {} 边界
-        # （上游 types.ts 'session/end-seed': { inherited?: true }——仅可选 true，
-        # resume 标记不带 inherited 键；空 seed 同样补记——上游 at(-1) 为
-        # undefined ≠ end-seed → 追加）。
+        # 在继承切割点带 {inherited:true}（fork seed 已带则不重复）；restore /
+        # unseeded 走普通 {} 边界（上游 types.ts 'session/end-seed': { inherited?: true }
+        # ——仅可选 true，resume 标记不带 inherited 键；空 seed 同样补记）。
         # 直接落 _events（构造期未注册 store，不走 on_append，上游该 marker 是
         # constructor 内部 append，store 发布在会话完整接线后才发生）。
         if seed is not None:
             if mode == "snapshot" and self._is_seeded:
-                marker_data: dict[str, Any] = {"inherited": True}
+                marker_data: dict[str, Any] | None = {"inherited": True} if not marked_seed else None
             elif not self._events or self._events[-1]["type"] != "session/end-seed":
                 marker_data = {}
             else:
@@ -164,6 +183,17 @@ class Session:
     def inherited_event_count(self) -> int:
         """fork 继承前缀长度（对齐上游 Session.inheritedEventCount）。"""
         return self._inherited_event_count
+
+    @property
+    def first_lifecycle_seq(self) -> int:
+        """本会话自有生命周期的起始 seq（上游 Session.firstLifecycleSeq）。
+
+        snapshot seeded = 继承切点（fork 子会话的 marker/闭包属子会话自有）；
+        其余 = 构造 seed 长度（未 append 任何构造期 marker 前的偏移）。
+        """
+        if self._mode == "snapshot" and self._is_seeded:
+            return self._inherited_event_count
+        return self._first_live_seq
 
     @property
     def replace_generation(self) -> int:
@@ -244,6 +274,8 @@ class Session:
         """
         payload = validate_event(type_, data, surfaceOp, sourceEventSeqs)
         validate_session_event_data(type_, data if data is not None else {})
+        assert_developer_header({"type": type_, "data": data if data is not None else {},
+                                 "seq": self.seq}, list(self._events))
         if type_ in MESSAGE_PROJECTION_EVENT_TYPES:
             _validate_message_projection(self, type_, data if data is not None else {})
         if surfaceOp is not None and surfaceOp != "append":
@@ -305,6 +337,7 @@ class Session:
             surface_op = ev.get("surfaceOp")
             source_seqs = ev.get("sourceEventSeqs")
             validate_session_event_data(etype, data)
+            assert_developer_header(dict(ev), list(self._events))
             if etype in SURFACE_TYPES:
                 if surface_op not in ("append",) and not (
                     isinstance(surface_op, (dict, MappingProxyType))

@@ -157,7 +157,7 @@ class PlanModeController:
             else "The user switched this session back to the default mode."
         return create_message(
             "user", [text_block(text)],
-            {"kind": "plugin", "plugin": "plan-mode"},
+            {"kind": "plan-mode"},
         )
 
     # ---------- 公开 API（对齐上游 PlanModeController.get/set） ----------

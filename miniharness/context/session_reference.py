@@ -167,8 +167,7 @@ def _text_content(content: Any) -> str:
 
 
 def _is_checkpoint_source(source: Any) -> bool:
-    return (isinstance(source, dict) and source.get("kind") == "plugin"
-            and source.get("plugin") == "compact")
+    return (isinstance(source, dict) and source.get("kind") == "compact-checkpoint")
 
 
 def _project_session_conversation(snapshot: dict) -> list:

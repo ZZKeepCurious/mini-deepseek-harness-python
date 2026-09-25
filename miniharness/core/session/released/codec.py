@@ -26,12 +26,15 @@ from .validate import (
     assert_released_v0_source_artifact,
     assert_released_v1_physical_artifact,
 )
+from .validate_v2 import assert_released_v2_physical_artifact
 from ..seq_ranges import decode_seq_ranges
 
 __all__ = [
     "RELEASED_V0_CODEC",
     "RELEASED_V1_CODEC",
     "RELEASED_V2_CODEC",
+    "RELEASED_V3_CODEC",
+    "RELEASED_V4_CODEC",
     "PackedRowError",
     "create_released_codec",
     "decode_released_header",
@@ -268,13 +271,15 @@ def _decode_physical_header_v2(value: Any, version: int) -> dict:
     return {"header": logical, "inherited_event_count": None}
 
 
-def create_released_v2_codec() -> dict:
-    """v2 released codec：物理 header（isSeeded）+ 一行一事件（V2 起 chunk
-    打包行废止）；cut 由继承 marker 派生（persistence.inherited_cut 同语义）。"""
+def create_released_isSeeded_codec(version: int, validator) -> dict:
+    """v2+ released codec 共享工厂：物理 header（`isSeeded` 必填 boolean）+
+    一行一事件（V2 起 chunk 打包行废止）；cut 由继承 marker 派生
+    （persistence.inherited_cut 同语义）。v2/v3/v4 唯一值差异是 `version` 与
+    源侧物理校验器（各自代际的 physical artifact 校验）。"""
 
     def decode(header_value: Any, row_values: list[Any], recoverable: bool) -> dict:
-        physical = _decode_physical_header_v2(header_value, 2)
-        events = _scan_rows(row_values, 2, recoverable=recoverable)
+        physical = _decode_physical_header_v2(header_value, version)
+        events = _scan_rows(row_values, version, recoverable=recoverable)
         # cut 派生复用现行读路径单一实现（延迟导入避免 persistence↔released
         # 模块载入环；调用期无环）。
         from ..persistence import inherited_cut  # noqa: PLC0415
@@ -282,7 +287,7 @@ def create_released_v2_codec() -> dict:
         artifact = {"header": physical["header"],
                     "inherited_event_count": cut,
                     "events": events}
-        assert_released_v2_physical_artifact(artifact)
+        validator(artifact)
         return artifact
 
     def decode_artifact(header_value: Any, row_values: list[Any]) -> dict:
@@ -292,11 +297,28 @@ def create_released_v2_codec() -> dict:
         return decode(header_value, row_values, recoverable=True)
 
     return {
-        "version": 2,
-        "decode_header": lambda header_value: _decode_physical_header_v2(header_value, 2)["header"],
+        "version": version,
+        "decode_header": lambda header_value: _decode_physical_header_v2(header_value, version)["header"],
         "decode_artifact": decode_artifact,
         "decode_recoverable_artifact": decode_recoverable_artifact,
     }
+
+
+def create_released_v2_codec() -> dict:
+    """v2 released codec（词表中立物理档）。"""
+    return create_released_isSeeded_codec(2, assert_released_v2_physical_artifact)
+
+
+def create_released_v3_codec() -> dict:
+    """v3 released codec（V3 物理头沿用 v2 `isSeeded` 形状；读向走 v3 物理档）。"""
+    from .validate_v3 import assert_released_v3_physical_artifact  # noqa: PLC0415
+    return create_released_isSeeded_codec(3, assert_released_v3_physical_artifact)
+
+
+def create_released_v4_codec() -> dict:
+    """v4 released codec（当前代；物理头键闭集与 v2/v3 相同，读向走 v4 物理档）。"""
+    from .validate_v4 import assert_released_v4_physical_artifact  # noqa: PLC0415
+    return create_released_isSeeded_codec(4, assert_released_v4_physical_artifact)
 
 
 def create_released_codec(version: int,
@@ -342,3 +364,5 @@ def create_released_codec(version: int,
 RELEASED_V0_CODEC = create_released_codec(0, assert_released_v0_source_artifact)
 RELEASED_V1_CODEC = create_released_codec(1, assert_released_v1_physical_artifact)
 RELEASED_V2_CODEC = create_released_v2_codec()
+RELEASED_V3_CODEC = create_released_v3_codec()
+RELEASED_V4_CODEC = create_released_v4_codec()

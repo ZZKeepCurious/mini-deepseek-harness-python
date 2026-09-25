@@ -19,7 +19,7 @@ from .core.session import (
     reasoning_block,
     text_block,
     tool_call_block,
-    tool_result_block,
+    tool_result_message,
     turn_balance,
 )
 from .core.scope import Context, RegistryService
@@ -117,6 +117,6 @@ __all__ = [
     "run_headless",
     "text_block",
     "tool_call_block",
-    "tool_result_block",
+    "tool_result_message",
     "turn_balance",
 ]

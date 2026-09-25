@@ -487,7 +487,7 @@ def render_instruction_changes(items: list, max_bytes: int) -> dict:
 
 
 def agent_instructions_message(text: str) -> dict:
-    return create_message("user", [text_block(text)], {"kind": "plugin", "plugin": NAME})
+    return create_message("user", [text_block(text)], {"kind": NAME})
 
 
 def _is_agent_instructions_source(source: Any) -> bool:

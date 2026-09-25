@@ -113,8 +113,8 @@ class TestJsonlCarrierLayout(unittest.TestCase):
             p.append("s1", _plain(0))
             p.flush()
             path = p.path_of("s1")
-            # v2 generation 制品名（上游 sessionFormatLogFilename：vN 段）
-            self.assertEqual(path.name, "session.v3.jsonl.zstd")
+            # v4 generation 制品名（上游 sessionFormatLogFilename：vN 段）
+            self.assertEqual(path.name, "session.v4.jsonl.zstd")
             buf = path.read_bytes()
             self.assertEqual(buf[:4], ZSTD_MAGIC.to_bytes(4, "little"))
             first = read_first_frame(lambda: buf)
@@ -149,7 +149,7 @@ class TestJsonlCarrierLayout(unittest.TestCase):
             p.append("s1", _plain(0))
             p.flush()
             path = p.path_of("s1")
-            self.assertEqual(path.name, "session.v3.jsonl")
+            self.assertEqual(path.name, "session.v4.jsonl")
             lines = path.read_text(encoding="utf-8").splitlines()
             self.assertEqual(json.loads(lines[0])["type"], "session")
 
@@ -207,7 +207,7 @@ class TestJsonlCarrierLayout(unittest.TestCase):
             other.mkdir(parents=True)
             header = {"type": "session", "version": SESSION_FORMAT_VERSION, "id": "dup",
                       "createdAt": 1, "isSeeded": False, "delegationDepth": 0, "cwd": "/w2"}
-            (other / "session.v3.jsonl.zstd").write_bytes(
+            (other / "session.v4.jsonl.zstd").write_bytes(
                 compress_zstd_frame((json.dumps(header) + "\n").encode("utf-8")))
             with self.assertRaises(ValueError) as ctx:
                 second_root.list_headers()
@@ -240,8 +240,8 @@ class TestJsonlCarrierLayout(unittest.TestCase):
 
     def test_version_refusal_newer_and_older(self):
         for version, fragment in (
-            (99, "but this harness reads only v3"),
-            (-1, "older than the supported v3"),
+            (99, "but this harness reads only v4"),
+            (-1, "older than the supported v4"),
         ):
             with tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp) / "v"
@@ -251,7 +251,8 @@ class TestJsonlCarrierLayout(unittest.TestCase):
                 header = {"type": "session", "version": version, "id": "s1",
                           "createdAt": 1, "isSeeded": False, "delegationDepth": 0,
                           "cwd": str(tmp)}
-                (d / "session.v3.jsonl.zstd").write_bytes(
+                # 当前代文件名（v4）承载未来/过旧 header → load 阶段版本拒读
+                (d / "session.v4.jsonl.zstd").write_bytes(
                     compress_zstd_frame((json.dumps(header) + "\n").encode("utf-8")))
                 with self.assertRaises(SessionFormatUnsupportedError) as ctx:
                     JsonlPersistence(root).load("s1")
@@ -295,9 +296,9 @@ class TestDirectoryLayout(unittest.TestCase):
     def test_v2_generation_artifact_name(self):
         """generation 制品名版本化（上游 sessionFormatLogFilename）：v2 带 vN 段。"""
         self.assertEqual(_log_path(Path("r"), None, "s", "zstd").name,
-                         "session.v3.jsonl.zstd")
+                         "session.v4.jsonl.zstd")
         self.assertEqual(_log_path(Path("r"), None, "s", "none").name,
-                         "session.v3.jsonl")
+                         "session.v4.jsonl")
 
     def test_header_key_closure_write_rejects_unknown(self):
         """物理 header 键闭集（上游 format.ts HEADER_KEYS）：未知键写侧 fail loud。"""
@@ -473,7 +474,7 @@ class TestUpstreamInterop(unittest.TestCase):
             self.assertEqual(meta["cwd"], cwd)
             self.assertIsNotNone(q.read_raw("s-lossy"))
             self.assertEqual(q.path_of("s-lossy"), q.path_of("s-lossy"))
-            self.assertTrue(str(q.path_of("s-lossy")).endswith("session.v3.jsonl.zstd"))
+            self.assertTrue(str(q.path_of("s-lossy")).endswith("session.v4.jsonl.zstd"))
 
 
 if __name__ == "__main__":

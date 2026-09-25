@@ -9,7 +9,7 @@ from miniharness.core.session import (
     create_message,
     derive_messages,
     text_block,
-    tool_result_block,
+    tool_result_message,
 )
 from miniharness.llm.token_meter import (
     BLOCK_OVERHEAD,
@@ -34,14 +34,13 @@ class EstimateTest(unittest.TestCase):
                          2 + BLOCK_OVERHEAD)  # 5 字符 → ceil(5/4)=2
         self.assertEqual(estimate_content([text_block("a")]), 1 + BLOCK_OVERHEAD)
 
-    def test_tool_call_and_result(self):
-        blocks = [
-            {"type": "tool-call", "id": "c1", "name": "bash", "arguments": "{}"},
-            tool_result_block("c1", [text_block("out")], is_error=False),
-        ]
-        expected = (1 + 1 + BLOCK_OVERHEAD) \
-            + (estimate_content([text_block("out")]) + BLOCK_OVERHEAD)
-        self.assertEqual(estimate_content(blocks), expected)
+    def test_tool_call_and_flat_result(self):
+        call = {"type": "tool-call", "id": "c1", "name": "bash", "arguments": "{}"}
+        self.assertEqual(estimate_content([call]), 1 + 1 + BLOCK_OVERHEAD)
+        # V4 tool/result 消息平铺 content：文本按 text 块定价 + 角色开销
+        msg = tool_result_message("c1", [text_block("out")])
+        self.assertEqual(estimate_message(msg),
+                         estimate_content([text_block("out")]) + ROLE_OVERHEAD)
 
     def test_message_includes_role_overhead(self):
         msg = _text_message("user", "hi")

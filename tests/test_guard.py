@@ -143,7 +143,7 @@ class TestRepeatToolReminder(unittest.IsolatedAsyncioTestCase):
         contexts = d.get("additionalContexts", [])
         self.assertEqual(len(contexts), 1)
         self.assertEqual(contexts[0]["content"][0]["text"], _GENTLE_REMINDER)
-        self.assertEqual(contexts[0]["source"]["plugin"], "repeat-tool-reminder")
+        self.assertEqual(contexts[0]["source"]["kind"], "repeat-tool-reminder")
         self.assertIn("× 3", contexts[0]["source"]["summary"])
 
     async def test_detailed_after_first_threshold(self):
@@ -333,8 +333,7 @@ class TestRepeatToolReminderLoop(unittest.IsolatedAsyncioTestCase):
         # 3 次重复后：第 3 次 tool/result 之后紧跟的 user/message = gentle 提醒
         reminders = [e["data"] for e in session.events
                      if e["type"] == "user/message"
-                     and (e["data"].get("source") or {}).get("kind") == "plugin"
-                     and e["data"]["source"].get("plugin") == "repeat-tool-reminder"]
+                     and (e["data"].get("source") or {}).get("kind") == "repeat-tool-reminder"]
         self.assertEqual(len(reminders), 1)
         self.assertEqual(reminders[0]["source"]["form"], "notice")
         self.assertIn("bash × 3", reminders[0]["source"]["summary"])
@@ -344,7 +343,7 @@ class TestRepeatToolReminderLoop(unittest.IsolatedAsyncioTestCase):
                   if e["type"] == "tool/call"][2]
         rem_seq = [e["seq"] for e in session.events if e is not None
                    and e["type"] == "user/message"
-                   and (e["data"].get("source") or {}).get("kind") == "plugin"][0]
+                   and (e["data"].get("source") or {}).get("kind") == "repeat-tool-reminder"][0]
         self.assertGreater(rem_seq, t3_seq)
         # 模型不可见的投影事件（tool/result 消息本身）不含提醒文本（模型 1 次只见）
         # ——提醒已固化进日志，下一次请求的派生历史携带它
@@ -363,7 +362,7 @@ class TestRepeatToolReminderLoop(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(text, "搞定。")
         reminders = [e for e in session.events
                      if e["type"] == "user/message"
-                     and (e["data"].get("source") or {}).get("plugin") == "repeat-tool-reminder"]
+                     and (e["data"].get("source") or {}).get("kind") == "repeat-tool-reminder"]
         self.assertEqual(reminders, [])
 
 

@@ -10,7 +10,8 @@
   * prepare 校验 id/元数据（cwd 绝对路径、origin 恒 'subagent'、createdAt 非负整数、
     字符串与整数字段类型）——坏 meta 进不了店，等价上游 validateSessionHeader
   * fork 五种错误码：SESSION_NOT_FOUND / SESSION_NOT_LIVE / SESSION_ALREADY_EXISTS /
-    INVALID_BOUNDARY / OPEN_TURN；boundary 缺省 = 源最后事件 seq（空会话 → 空 seed）
+    INVALID_BOUNDARY；boundary 缺省 = 源最后事件 seq（空会话 → 空 seed）
+    （V4：`OPEN_TURN` 移除——开放 turn 由 `forked` cause 合成闭包）
 
 实现待载与上游一致（2026-08-29，§3.2 结构对齐）：SessionStore extends Service
 （对齐 index.ts:790 `class SessionStore extends Service`），构造即经
@@ -41,6 +42,7 @@ import os
 from typing import Any
 
 from .session.session import Session
+from .session.repair import build_fork_seed
 from .dsh_scope import scope_of, scope_target
 from .scope import Context, Service
 
@@ -49,7 +51,6 @@ __all__ = [
     "SESSION_NOT_LIVE",
     "SESSION_ALREADY_EXISTS",
     "INVALID_BOUNDARY",
-    "OPEN_TURN",
     "SessionCheckpointError",
     "SessionForkError",
     "SessionStore",
@@ -60,7 +61,6 @@ SESSION_NOT_FOUND = "SESSION_NOT_FOUND"
 SESSION_NOT_LIVE = "SESSION_NOT_LIVE"
 SESSION_ALREADY_EXISTS = "SESSION_ALREADY_EXISTS"
 INVALID_BOUNDARY = "INVALID_BOUNDARY"
-OPEN_TURN = "OPEN_TURN"
 
 
 class SessionCheckpointError(RuntimeError):
@@ -247,13 +247,17 @@ class SessionStore(Service):
                 f'session "{child_session_id}" already exists',
             )
         live_source = self._resolve_fork_source(source)
-        seed = self._fork_seed(live_source, boundary)
+        seed, resolved_boundary = self._fork_seed(live_source, boundary)
         meta: dict[str, Any] = {}
         if live_source.meta.get("cwd") is not None:
             meta["cwd"] = live_source.meta["cwd"]
         meta["parentSession"] = live_source.session_id
         meta["isSeeded"] = True
-        return self.create(child_session_id, {"seed": seed, "meta": meta})
+        return self.create(child_session_id, {
+            "seed": seed,
+            "meta": meta,
+            "inheritedEventCount": 0 if resolved_boundary is None else resolved_boundary + 1,
+        })
 
     def _resolve_fork_source(self, source: Session | str) -> Session:
         if isinstance(source, str):
@@ -271,11 +275,11 @@ class SessionStore(Service):
             )
         return source
 
-    def _fork_seed(self, session: Session, requested_boundary: int | None) -> list:
+    def _fork_seed(self, session: Session, requested_boundary: int | None) -> tuple[list, int | None]:
         events = list(session.events)
         if requested_boundary is None:
             if not events:
-                return []
+                return [], None
             boundary = events[-1]["seq"]
         else:
             boundary = requested_boundary
@@ -299,17 +303,8 @@ class SessionStore(Service):
                 f"fork boundary {boundary} does not match a contiguous event seq in "
                 f'session "{session.session_id}"',
             )
-        last_turn = None
-        for event in events[: boundary + 1]:
-            if event["type"] in ("turn/start", "turn/end"):
-                last_turn = event
-        if last_turn is not None and last_turn["type"] == "turn/start":
-            raise SessionForkError(
-                OPEN_TURN,
-                f'fork boundary {boundary} in session "{session.session_id}" ends inside '
-                f'open turn {last_turn["data"]["turn"]}',
-            )
-        return events[: boundary + 1]
+        # V4：开放 turn 不再拒绝；buildForkSeed 以 `forked` cause 合成闭包。
+        return build_fork_seed(events, boundary), boundary
 
     # ---------- 内部 ----------
 

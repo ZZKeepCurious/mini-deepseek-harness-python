@@ -7,6 +7,11 @@ V3（上游 dsh-v0.1.5-alpha.1，SESSION_FORMAT_VERSION 2→3）：system prompt
 surface node 0（新 surface 事件 `system/message`，第 4 种 surface 类型）；
 `tool/code-dispatch{,-start}` 持久词汇改名 `tool/ptc-dispatch{,-start}`；新增
 feedback/message-put|delete 反馈域事件（上游 feedback/message-feedback 包）。
+
+V4（上游 dsh-v0.1.7-rc.1，SESSION_FORMAT_VERSION 3→4）：tool/result 消息由
+role `'user'` + 内嵌 `tool-result` 块改为 role `'tool'` 平铺 content + 顶层
+`toolCallId`/`isError`；新增 surface 事件 `developer/message`（工具增删块 +
+`deferLoading`）；`workspace/changes` 成为已知事件类型。
 """
 from __future__ import annotations
 
@@ -19,11 +24,11 @@ __all__ = [
     "TOOL_OUTCOME_UNKNOWN",
 ]
 
-SESSION_FORMAT_VERSION = 3
+SESSION_FORMAT_VERSION = 4
 
 KNOWN_TYPES = frozenset({
     "turn/start", "turn/end", "step/start", "step/end",
-    "system/message",
+    "system/message", "developer/message",
     "user/message", "assistant/message", "assistant/attempt",
     "tool/call", "tool/result",
     # 请求信封（上游 agent-loop/src/agent.ts SessionEventMap，log-only 非
@@ -95,6 +100,10 @@ KNOWN_TYPES = frozenset({
     # 待办清单整体快照（对齐 tool-todo/src/types.ts SessionEventMap）：log-only 非
     # surface，最新一条 todo/write 胜出（整表替换），turn/start 清空。
     "todo/write",
+    # 工作区变更通知（上游 workspace/workspace/src/index.ts SessionEventMap，
+    # V4 起为已知事件类型）：log-only 非 surface；mini 无工作区文件观察面，
+    # 仅为读侧词汇一致性登记。
+    "workspace/changes",
 })
 
 # message-投影事件类型（上游 known-event-types.ts MESSAGE_PROJECTION_EVENT_TYPES）：
@@ -103,10 +112,11 @@ MESSAGE_PROJECTION_EVENT_TYPES = frozenset({
     "image/offload",
 })
 
-# 只有这四种事件产生模型消息，可带 surfaceOp（上游 types.ts SurfaceEventType；
-# V3 新增 system/message：系统提示词是 surface node 0 的派生历史）
+# 只有这五种事件产生模型消息，可带 surfaceOp（上游 types.ts SurfaceEventType；
+# V3 新增 system/message：系统提示词是 surface node 0 的派生历史；
+# V4 新增 developer/message：工具增删的派生历史，空节点投影为零消息）
 SURFACE_TYPES = frozenset({
-    "system/message", "user/message", "assistant/message", "tool/result",
+    "system/message", "developer/message", "user/message", "assistant/message", "tool/result",
 })
 
 # 崩溃恢复码（上游 session/src/repair.ts）

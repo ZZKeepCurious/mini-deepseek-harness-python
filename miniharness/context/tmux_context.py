@@ -55,14 +55,14 @@ def query_tmux_location(shell: Any, logger: Any, process_id: int, signal: Any) -
         f"exec tmux display-message -t \"$TMUX_PANE\" -p '{fmt}'",
     ])
     try:
-        result = shell.run(shell.resolve({"command": command, "signal": signal}))
+        result = shell.execute(shell.resolve({"command": command, "signal": signal})).result()
     except Exception as error:  # noqa: BLE001 - 可选上下文：查询失败 only warn
         if logger is not None and hasattr(logger, "warn"):
             logger.warn(f"tmux location query failed: {error}; injecting no location this turn")
         return None
     if result.get("exitCode") != 0:
         return None
-    stdout = result.get("stdout") or ""
+    stdout = (result.get("stdout") or {}).get("text", "")
     line = stdout.split("\n", 1)[0]
     parts = line.split(FIELD_SEP)
     if len(parts) != len(TMUX_FIELDS):
@@ -109,7 +109,7 @@ def _apply_projection(state: Any, event: dict) -> Any:
         return state
     data = event.get("data") or {}
     source = data.get("source") or {}
-    if source.get("kind") != "plugin" or source.get("plugin") != NAME:
+    if source.get("kind") != NAME:
         return state
     content = data.get("content") or []
     block = content[0] if content else None
@@ -166,7 +166,7 @@ def apply_tmux_context(ctx: Context, config: dict | None = None) -> None:
             return decision
         text = render_reading(location, turn)
         message = create_message("user", [text_block(text)], {
-            "kind": "plugin", "plugin": NAME, "form": "snapshot",
+            "kind": NAME, "form": "snapshot",
             "sections": [{"name": NAME, "text": text}]})
         messages = decision.get("messages") if isinstance(decision, dict) else None
         existing = list(messages) if isinstance(messages, list) else []

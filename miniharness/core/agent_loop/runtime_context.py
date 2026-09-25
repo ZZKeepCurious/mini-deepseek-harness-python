@@ -6,9 +6,8 @@ project() 仅在渲染结果变化时铸出候选快照消息，由调用方（A
 落盘为 durable user/message（模型可见 ⟺ 已记录）。投影类自身不提交任何事件。
 
 关键契约（逐条对齐上游 runtime-context.ts）：
-  * SOURCE：owned 判定 = ``source.kind == 'plugin'`` 且 ``plugin == SOURCE``
-    （上游保留 npm 包名字面量；mini system 基底消息的教学短名
-    'system-prompt' 是既有简化，不属本契约）。
+  * KIND：owned 判定 = ``source.kind == 'runtime-context'``（V4 起生产者
+    source 是命名 kind，不再用 ``{kind:'plugin', plugin:...}`` 包裹）。
   * CLEARED：全部动态上下文消失时的哨兵文本，逐字对齐。
   * retained 三态：_NEVER（从未有过快照，对应上游 undefined）/
     None（曾有但已被 replace 遮蔽）/ {"seq", "text"}。restore 从日志倒序找
@@ -27,7 +26,7 @@ from ..session import create_message, text_block
 from ..session.surface import is_replace_op
 from ..session.types import SURFACE_TYPES
 
-SOURCE = "@deepseek-ai/dsh-system-prompt"
+KIND = "runtime-context"
 
 # 上游 CLEARED 常量（逐字）
 CLEARED = (
@@ -45,8 +44,7 @@ def _is_owned(message: Any) -> bool:
     source = message.get("source")
     return (
         isinstance(source, Mapping)
-        and source.get("kind") == "plugin"
-        and source.get("plugin") == SOURCE
+        and source.get("kind") == KIND
     )
 
 
@@ -140,11 +138,10 @@ class RuntimeContextProjection:
                 and self._retained["text"] == snapshot:
             return None
         # cleared 哨兵无节可归因：不带 form/sections
-        source = {"kind": "plugin", "plugin": SOURCE}
+        source = {"kind": KIND}
         if sections:
             source = {
-                "kind": "plugin",
-                "plugin": SOURCE,
+                "kind": KIND,
                 "form": "snapshot",
                 "sections": [dict(s) for s in sections],
             }

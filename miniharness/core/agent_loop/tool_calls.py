@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from ..scope import Context
-from ..session import Session, create_message, deep_freeze, text_block, tool_result_block
+from ..session import Session, create_message, deep_freeze, text_block, tool_result_message
 from ..tools import (
     FusedSignal,
     ToolExec,
@@ -69,11 +69,7 @@ def emit_tool_result(session: Session, turn: int, step: int, call_id: str,
     content = result.content
     if result.is_error and result.error is not None:
         content = result.error
-    message = create_message(
-        "user",
-        [tool_result_block(call_id, [text_block(str(content))], is_error=result.is_error)],
-        {"kind": "tool", "callId": call_id},
-    )
+    message = tool_result_message(call_id, [text_block(str(content))], is_error=result.is_error)
     data: dict[str, Any] = {"turn": turn, "step": step, "message": message}
     if result.is_error:
         # 对齐上游 tool/result error 字段（llm/src/types.ts:295）：
@@ -81,6 +77,10 @@ def emit_tool_result(session: Session, turn: int, step: int, call_id: str,
         info = getattr(result, "error_info", None)
         if info is not None:
             data["error"] = info
+    # 工具私有 meta 投影（上游 output.presentationMeta）：与 tool/result
+    # 同事件落盘、随会话日志回放（tool-fs write 的 operation + diffs）。
+    if result.meta:
+        data["meta"] = result.meta
     session.append("tool/result", data, surfaceOp="append", sourceEventSeqs=[call_seq])
 
 

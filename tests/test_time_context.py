@@ -114,8 +114,7 @@ class TimeContextCase(unittest.TestCase):
                               {"kind": "user", "rpcId": "r1", "clientTimeZone": "Asia/Shanghai"})
         decision = self._pre_step(messages=[user])
         injected = decision["messages"][-1]
-        self.assertEqual(injected["source"]["kind"], "plugin")
-        self.assertEqual(injected["source"]["plugin"], NAME)
+        self.assertEqual(injected["source"]["kind"], NAME)
         self.assertEqual(injected["source"]["form"], "snapshot")
         text = injected["content"][0]["text"]
         self.assertIn("Time sampled while preparing turn 1, step 1:", text)
@@ -162,7 +161,7 @@ class TimeContextCase(unittest.TestCase):
         self.session.append("turn/start", {"turn": 1})
         self.session.append("user/message", create_message(
             "user", [text_block("t")],
-            {"kind": "plugin", "plugin": NAME, "form": "snapshot", "sections": []}),
+            {"kind": NAME, "form": "snapshot", "sections": []}),
             surfaceOp="append")
         state = self.projections.state_of(self.session, "timeContext")
         self.assertIsNotNone(state["lastInjectionTime"])

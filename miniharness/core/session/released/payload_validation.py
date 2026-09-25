@@ -187,6 +187,9 @@ def content_block_value(value: Any, label: str, version: int) -> None:
         string_value(block.get("arguments"), f"{label} arguments")
         return
     if block_type == "tool-result":
+        if version >= 4:
+            # V4 废止内嵌 tool-result 包裹块（tool/result 消息平铺 role 'tool'）。
+            raise fail(f"{label} must not contain a released tool-result wrapper")
         exact_keys(block, ("type", "toolCallId", "content"), ("isError",), label)
         non_empty_string(block.get("toolCallId"), f"{label} toolCallId")
         content_blocks_value(block.get("content"), f"{label} content", version)
@@ -216,9 +219,23 @@ def image_attachment_value(value: Any, label: str) -> None:
         positive_integer_value(dimensions.get("height"), f"{label} original height")
 
 
+def _message_record(value: Any, label: str, version: int, required: list[str],
+                    optional: list[str] | None = None) -> dict:
+    """消息记录键校验：v4 起允许附加 JSON 元数据（merge-extensible），只要求
+    必需成员在场；v0~v3 保持键闭集（上游历史语义）。"""
+    record = released_v0_record(value, label)
+    if version >= 4:
+        for key in required:
+            if key not in record:
+                raise fail(f'{label} lacks required member "{key}"')
+        return record
+    exact_keys(record, required, optional or [], label)
+    return record
+
+
 def message_value(value: Any, label: str, version: int,
                   expected: str | None = None) -> None:
-    message = exact_record(value, label, ["id", "role", "content", "source"])
+    message = _message_record(value, label, version, ["id", "role", "content", "source"])
     non_empty_string(message.get("id"), f"{label} id")
     if expected == "assistant":
         role = "assistant"
@@ -242,6 +259,59 @@ def message_value(value: Any, label: str, version: int,
             raise fail(f"{label} must contain exactly one tool-result block")
 
 
+def tool_result_message_value(value: Any, label: str, version: int) -> None:
+    """V4 tool/result 消息（上游 assertV4ToolResultMessage）：role `'tool'` 平铺
+    content + 顶层 toolCallId/isError；source `{kind:'tool', callId}` 与顶层
+    toolCallId 一致；content 不得再含废止的 tool-result 包裹块。"""
+    message = _message_record(value, label, version,
+                              ["id", "role", "toolCallId", "source", "content"], ["isError"])
+    non_empty_string(message.get("id"), f"{label} id")
+    literal_value(message.get("role"), ["tool"], f"{label} role")
+    tool_call_id = message.get("toolCallId")
+    non_empty_string(tool_call_id, f"{label} toolCallId")
+    source = exact_record(message.get("source"), f"{label} source", ["kind", "callId"], [])
+    literal_value(source.get("kind"), ["tool"], f"{label} source kind")
+    non_empty_string(source.get("callId"), f"{label} source callId")
+    if source.get("callId") != tool_call_id:
+        raise fail(f"{label} requires toolCallId matching its tool source")
+    content_blocks_value(message.get("content"), f"{label} content", version)
+    if message.get("isError") is not None:
+        boolean_value(message.get("isError"), f"{label} isError")
+
+
+def developer_message_value(data: dict, label: str, version: int) -> None:
+    """V4 developer/message 载荷（上游 assertV4DeveloperData）：正 turn/step +
+    role `'developer'` 消息 + 生产者自有 source；tool-addition/removal 要求非空
+    toolName；tool-addition 必须省略内联 tool；headerSeq 恰在有新增块时出现。"""
+    exact_keys(data, ("turn", "step", "message"), ("headerSeq",), f"{label} data")
+    for coordinate in ("turn", "step"):
+        if count_value(data.get(coordinate), f"{label} {coordinate}") == 0:
+            raise fail(f"{label} {coordinate} must be positive")
+    message = _message_record(data.get("message"), f"{label} message", version,
+                              ["id", "role", "content", "source"])
+    non_empty_string(message.get("id"), f"{label} message id")
+    literal_value(message.get("role"), ["developer"], f"{label} message role")
+    content_blocks_value(message.get("content"), f"{label} message content", version)
+    message_source_value(message.get("source"), f"{label} message source", version, None)
+    content = message.get("content")
+    has_additions = False
+    for block in content if isinstance(content, list) else []:
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+        if block_type not in ("tool-addition", "tool-removal"):
+            continue
+        non_empty_string(block.get("toolName"), f"{label} {block_type} toolName")
+        if block_type == "tool-addition":
+            has_additions = True
+            if "tool" in block:
+                raise fail(f"{label} tool-addition must omit inline tool definitions")
+    if has_additions:
+        count_value(data.get("headerSeq"), f"{label} headerSeq")
+    elif "headerSeq" in data:
+        raise fail(f"{label} must omit headerSeq without tool additions")
+
+
 def message_source_value(value: Any, label: str, version: int,
                          expected: str | None = None) -> None:
     source = released_v0_record(value, label)
@@ -250,6 +320,9 @@ def message_source_value(value: Any, label: str, version: int,
     if expected == "tool" and source.get("kind") != "tool":
         raise fail(f"{label} must be tool source")
     kind = source.get("kind")
+    if version >= 4 and kind == "plugin":
+        # V4：解释过的消息槽要求生产者自有的 kind（非 plugin 包裹）。
+        raise fail(f"{label} requires a producer-owned source kind")
     if kind == "user":
         exact_keys(source, ("kind",), ("rpcId", "clientTimeZone"), label)
         if source.get("rpcId") is not None:
@@ -561,13 +634,19 @@ def system_message_value(data: dict, label: str, version: int) -> None:
     for coordinate in ("turn", "step"):
         if count_value(data.get(coordinate), f"{label} {coordinate}") == 0:
             raise fail(f"{label} {coordinate} must be positive")
-    message = exact_record(data.get("message"), f"{label} system message",
-                           ["id", "role", "source", "content"], [])
+    message = _message_record(data.get("message"), f"{label} system message", version,
+                              ["id", "role", "source", "content"])
     non_empty_string(message.get("id"), f"{label} system message id")
     literal_value(message.get("role"), ["system"], f"{label} system message role")
-    source = exact_record(message.get("source"), f"{label} system source", ["kind", "plugin"], [])
-    literal_value(source.get("kind"), ["plugin"], f"{label} system source kind")
-    non_empty_string(source.get("plugin"), f"{label} system source plugin")
+    if version >= 4:
+        source = released_v0_record(message.get("source"), f"{label} system source")
+        kind = source.get("kind")
+        if not isinstance(kind, str) or len(kind) == 0 or kind == "plugin":
+            raise fail(f"{label} system source requires a producer-owned kind")
+    else:
+        source = exact_record(message.get("source"), f"{label} system source", ["kind", "plugin"], [])
+        literal_value(source.get("kind"), ["plugin"], f"{label} system source kind")
+        non_empty_string(source.get("plugin"), f"{label} system source plugin")
     assert_released_payload_semantics(
         {"type": "user/message", "seq": 0, "time": 0,
          "data": {**message, "role": "user"}}, version)
@@ -1106,22 +1185,39 @@ def assert_released_payload_semantics(event: dict, version: int) -> None:
             content_blocks_value(data.get("content"), f"{label} content", version)
     elif etype == "tool/result":
         coordinate_pair(data, label)
-        message_value(data.get("message"), f"{label} message", version, "tool")
-        if data.get("error") is not None:
-            error = exact_record(data.get("error"), f"{label} error", ["name", "code"])
-            non_empty_string(error.get("name"), f"{label} error name")
-            non_empty_string(error.get("code"), f"{label} error code")
-            if version >= 3:
-                # V3 canonical（上游 assertCanonicalPayload）：error 元数据必须
-                # 伴随恰好一个 isError:true 的 tool-result 块，矛盾即拒不补写。
+        if version >= 4:
+            # V4：role 'tool' 平铺 content + 顶层 toolCallId/isError；source 与
+            # toolCallId 一致；data.error 只在 message.isError === true 时合法。
+            tool_result_message_value(data.get("message"), f"{label} message", version)
+            if data.get("error") is not None:
+                error = exact_record(data.get("error"), f"{label} error", ["name", "code"])
+                non_empty_string(error.get("name"), f"{label} error name")
+                non_empty_string(error.get("code"), f"{label} error code")
                 message = data.get("message")
-                content = message.get("content") if isinstance(message, dict) else None
-                if (not isinstance(content, list) or len(content) != 1
-                        or not isinstance(content[0], dict)
-                        or content[0].get("type") != "tool-result"
-                        or content[0].get("isError") is not True):
+                if not isinstance(message, dict) or message.get("isError") is not True:
                     raise fail(
                         f"{label} carries error metadata for a non-error tool result")
+        else:
+            message_value(data.get("message"), f"{label} message", version, "tool")
+            if data.get("error") is not None:
+                error = exact_record(data.get("error"), f"{label} error", ["name", "code"])
+                non_empty_string(error.get("name"), f"{label} error name")
+                non_empty_string(error.get("code"), f"{label} error code")
+                if version >= 3:
+                    # V3 canonical（上游 assertCanonicalPayload）：error 元数据必须
+                    # 伴随恰好一个 isError:true 的 tool-result 块，矛盾即拒不补写。
+                    message = data.get("message")
+                    content = message.get("content") if isinstance(message, dict) else None
+                    if (not isinstance(content, list) or len(content) != 1
+                            or not isinstance(content[0], dict)
+                            or content[0].get("type") != "tool-result"
+                            or content[0].get("isError") is not True):
+                        raise fail(
+                            f"{label} carries error metadata for a non-error tool result")
+    elif etype == "developer/message":
+        developer_message_value(data, label, version)
+    elif etype == "workspace/changes":
+        count_value(data.get("turn"), f"{label} turn")
     elif etype == "turn/end":
         count_value(data.get("turn"), f"{label} turn")
         turn_end_reason_value(data.get("reason"), f"{label} reason")

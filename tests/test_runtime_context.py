@@ -15,7 +15,7 @@ import unittest
 from miniharness.core.agent_loop.agent import AgentLoop
 from miniharness.core.agent_loop.runtime_context import (
     CLEARED,
-    SOURCE,
+    KIND,
     RuntimeContextProjection,
 )
 from miniharness.core.scope import Context
@@ -27,7 +27,7 @@ from miniharness.llm import FakeLlmAdapter
 
 def _owned(text: str) -> dict:
     return create_message(
-        "user", [text_block(text)], {"kind": "plugin", "plugin": SOURCE})
+        "user", [text_block(text)], {"kind": KIND})
 
 
 def _prune_over(session: Session, seq: int, summary: str) -> None:
@@ -37,7 +37,7 @@ def _prune_over(session: Session, seq: int, summary: str) -> None:
     session.append(
         "user/message",
         create_message("user", [text_block(summary)],
-                       {"kind": "plugin", "plugin": "compact"}),
+                       {"kind": "compact-checkpoint"}),
         surfaceOp={"op": "replace", "startSeq": seq, "endSeq": seq},
         sourceEventSeqs=[seq],
     )
@@ -80,7 +80,7 @@ class RestoreTest(unittest.TestCase):
         s.append("user/message", create_message(
             "user", [text_block("普通输入")], {"kind": "user"}), surfaceOp="append")
         s.append("user/message", create_message(
-            "user", [text_block("别的插件")], {"kind": "plugin", "plugin": "other"}),
+            "user", [text_block("别的插件")], {"kind": "other"}),
             surfaceOp="append")
         p = RuntimeContextProjection(s)
         # 从未有过 owned 快照（undefined）+ 空 current → None
@@ -95,8 +95,7 @@ class ProjectTest(unittest.TestCase):
         msg = p.project("v1", [{"name": "sandbox:policy", "text": "v1"}])
         self.assertEqual(msg["role"], "user")
         self.assertEqual(msg["content"], [{"type": "text", "text": "v1"}])
-        self.assertEqual(msg["source"]["kind"], "plugin")
-        self.assertEqual(msg["source"]["plugin"], SOURCE)
+        self.assertEqual(msg["source"]["kind"], KIND)
         self.assertEqual(msg["source"]["form"], "snapshot")
         self.assertEqual(msg["source"]["sections"],
                          [{"name": "sandbox:policy", "text": "v1"}])
@@ -117,8 +116,7 @@ class ProjectTest(unittest.TestCase):
         p = RuntimeContextProjection(s)
         msg = p.project("", [])
         self.assertEqual(msg["content"][0]["text"], CLEARED)
-        self.assertEqual(msg["source"],
-                         {"kind": "plugin", "plugin": SOURCE})
+        self.assertEqual(msg["source"], {"kind": KIND})
 
     def test_follow_log_incrementally(self):
         s = Session("s1")
@@ -154,7 +152,7 @@ class LoopIntegrationTest(unittest.TestCase):
     def _snapshots(session):
         return [e for e in session.events if e["type"] == "user/message"
                 and isinstance(e["data"].get("source"), Mapping)
-                and e["data"]["source"].get("plugin") == SOURCE]
+                and e["data"]["source"].get("kind") == KIND]
 
     @staticmethod
     def _plain_user_seqs(session):
@@ -206,7 +204,7 @@ class LoopIntegrationTest(unittest.TestCase):
         self.assertEqual(len(snaps), 2)
         second = snaps[1]["data"]
         self.assertEqual(second["content"][0]["text"], CLEARED)
-        self.assertEqual(second["source"], {"kind": "plugin", "plugin": SOURCE})
+        self.assertEqual(second["source"], {"kind": KIND})
 
     def test_explicit_enter_decision_takes_over_without_snapshot(self):
         session, loop, _, state = self._env()

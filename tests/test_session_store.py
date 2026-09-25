@@ -12,7 +12,6 @@ from miniharness.core.scope import Context
 from miniharness.core.session import Session, create_message, text_block
 from miniharness.core.session_store import (
     INVALID_BOUNDARY,
-    OPEN_TURN,
     SESSION_ALREADY_EXISTS,
     SESSION_NOT_FOUND,
     SESSION_NOT_LIVE,
@@ -284,16 +283,17 @@ class TestFork(unittest.TestCase):
             store.fork(parent, boundary=-1)
         self.assertEqual(cm.exception.code, INVALID_BOUNDARY)
 
-    def test_fork_boundary_in_open_turn(self):
+    def test_fork_boundary_in_open_turn_closed_with_forked(self):
+        # V4：开放 turn 不再拒绝——buildForkSeed 以 `forked` cause 合成闭包
         ctx, store = _fresh_store()
         parent = store.create("p")
         parent.append("turn/start", {"turn": 1})
         parent.append("user/message", create_message(
             "user", [text_block("hi")], {"kind": "user"},
         ), surfaceOp="append")
-        with self.assertRaises(SessionForkError) as cm:
-            store.fork(parent, boundary=1)
-        self.assertEqual(cm.exception.code, OPEN_TURN)
+        child = store.fork(parent, boundary=1)
+        reasons = [e["data"]["reason"] for e in child.events if e["type"] == "turn/end"]
+        self.assertEqual(reasons, [{"kind": "forked"}])
 
     def test_fork_inherits_cwd(self):
         ctx, store = _fresh_store()

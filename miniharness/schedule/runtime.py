@@ -313,7 +313,7 @@ class ScheduleRuntime:
                     else render_every_reminder_batch_framing(decision["reminders"]))
             self.agent.followup(
                 create_message("user", [text_block(text)],
-                               {"kind": "plugin", "plugin": "schedule"})
+                               {"kind": "schedule"})
             )
         except BaseException as error:
             if self.is_live():

@@ -44,8 +44,8 @@ __all__ = [
     "resolve_generation_in_directory",
 ]
 
-#: 本构建写出的当前代版本（SESSION_FORMAT_VERSION，V3）。
-CURRENT_GENERATION_VERSION = 3
+#: 本构建写出的当前代版本（SESSION_FORMAT_VERSION，V4）。
+CURRENT_GENERATION_VERSION = 4
 
 _CANONICAL_LOG_FILENAME = re.compile(r"^session(?:\.v([1-9][0-9]*))?\.jsonl$")
 
@@ -297,15 +297,15 @@ def _validate_staged_current(path: Path, compression: str, expected_bytes: bytes
 
 
 def _assert_current_generation(parsed: dict) -> None:
-    """v3 物理件 → 迁移产物 restore 校验（上游 restoreReleasedV3Artifact，§2.24/
-    §2.21 同构 + V3 系统头三保护）：
+    """v4 物理件 → 迁移产物 restore 校验（上游 restoreReleasedV4Artifact，§2.24/
+    §2.21 同构 + V4 系统/开发者/工具结果本地校验）：
 
-    header 闭集 + 事件信封（field 方言，V3 replace 端点 startSeq/endSeq）+
+    header 闭集 + 事件信封（field 方言，V4 replace 端点 startSeq/endSeq）+
     时间/密集 + marker/cut 双向一致性 + 安装门（KNOWN_TYPES 外非 ignorable
-    类型拒读）+ system/message 开步/保护头/压缩头校验。已知词表 = mini 现行
-    可安装集（上游 restore 传入当前 Session 包已知类型同语义）；target 全量
-    语义面（payload + 内嵌流三事实）属于迁移/编码路径
-    （validate_v3.assert_released_v3_artifact），load 只做信封级（上游 load
+    类型拒读）+ system/developer/tool-result 消息形状 + 退役语法 + 关系状态机。
+    已知词表 = mini 现行可安装集（上游 restore 传入当前 Session 包已知类型
+    同语义）；target 全量语义面（payload + 内嵌流三事实）属于迁移/编码路径
+    （validate_v4.assert_released_v4_artifact），load 只做信封级（上游 load
     策略同款）。
     """
     from .json import thaw  # noqa: PLC0415
@@ -315,16 +315,16 @@ def _assert_current_generation(parsed: dict) -> None:
         _is_header_line,
         inherited_cut,
     )
-    from .released import restore_released_v3_artifact  # noqa: PLC0415
+    from .released import restore_released_v4_artifact  # noqa: PLC0415
     header_value = parsed["header"]
     if not _is_header_line(header_value):
-        raise fail("staged session generation header is not a current v3 header")
+        raise fail("staged session generation header is not a current v4 header")
     meta = _from_header_line(dict(header_value))
     events = [_decode_storage_event(thaw(row)) for row in parsed["rows"]]
     cut = inherited_cut(meta, events)
     artifact = {"header": {k: v for k, v in dict(header_value).items() if k != "type"},
                 "inherited_event_count": cut, "events": events}
-    restore_released_v3_artifact(artifact, KNOWN_TYPES)
+    restore_released_v4_artifact(artifact, KNOWN_TYPES)
 
 
 def ensure_generation_current(

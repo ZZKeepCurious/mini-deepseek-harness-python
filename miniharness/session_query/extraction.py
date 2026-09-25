@@ -25,12 +25,6 @@ def _block_text(block: object) -> list:
         return []
     if kind == "tool-call":
         return [block.get("name", ""), block.get("arguments", "")]
-    if kind == "tool-result":
-        content = block.get("content") or []
-        out: list = []
-        for inner in content:
-            out.extend(_block_text(inner))
-        return out
     return []
 
 

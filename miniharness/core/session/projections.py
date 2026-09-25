@@ -68,10 +68,6 @@ def offload_message_images(message: dict, indexes: list[int]) -> dict:
                     projected = {**block, "offloaded": True}
                     state["selected"] += 1
                 state["image"] += 1
-            elif block.get("type") == "tool-result":
-                content = visit(block.get("content") or [])
-                if content is not (block.get("content") or []):
-                    projected = {**block, "content": content}
             if projected is not block:
                 if next_blocks is None:
                     next_blocks = list(blocks[:index])

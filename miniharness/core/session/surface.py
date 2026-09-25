@@ -16,6 +16,7 @@ from .seq_ranges import decode_seq_ranges
 from .types import SURFACE_TYPES
 
 __all__ = [
+    "assert_developer_header",
     "assert_provenance",
     "assert_system_head_rewrite",
     "assert_tool_result_rewrite",
@@ -99,12 +100,45 @@ def validate_session_event_data(event_type: str, data: Any) -> None:
     * request/header：data/header 必须是对象；**禁止 header.system**（系统
       提示词是 system/message 事件）；空 tools 数组与空 adapterDefaults
       对象必须省略。
-    * tool/result：data.error 存在时 message.content[0].isError 必须 === true
+    * surface 消息：developer/message ⇔ role 'developer'；工具增删块要求
+      developer 角色；tool-addition/tool-removal 要求非空 toolName；
+      tool-addition 必须省略内联 `tool`；headerSeq 恰在有新增块时出现。
+    * tool/result：data.error 存在时 message.isError 必须 === true
       （矛盾即拒、绝不补写）。
 
     兼容冻结事件（data 可能是 MappingProxyType，先浅展开）。
     """
     data = _plain(data)
+    if event_type in SURFACE_TYPES and isinstance(data, dict):
+        message = data if event_type == "user/message" else _plain(data.get("message"))
+        if isinstance(message, dict):
+            if (event_type == "developer/message") != (message.get("role") == "developer"):
+                raise ValueError(
+                    "developer/message and developer role must occur together")
+            content = message.get("content")
+            if message.get("role") != "developer" and isinstance(content, list) \
+                    and any(isinstance(_plain(b), dict)
+                            and _plain(b).get("type") in ("tool-addition", "tool-removal")
+                            for b in content):
+                raise ValueError("tool-change blocks require developer role")
+            if event_type == "developer/message" and isinstance(content, list):
+                has_additions = False
+                for raw in content:
+                    block = _plain(raw)
+                    if not isinstance(block, dict) \
+                            or block.get("type") not in ("tool-addition", "tool-removal"):
+                        continue
+                    tool_name = block.get("toolName")
+                    if not isinstance(tool_name, str) or tool_name == "":
+                        raise ValueError(f"{block.get('type')} requires a nonempty toolName")
+                    if block.get("type") == "tool-addition":
+                        has_additions = True
+                        if "tool" in block:
+                            raise ValueError("tool-addition must omit inline tool definitions")
+                if has_additions != _is_event_seq(data.get("headerSeq")):
+                    if has_additions:
+                        raise ValueError("developer/message requires headerSeq when tool additions are present")
+                    raise ValueError("developer/message must omit headerSeq when there are no tool additions")
     if event_type == "request/header":
         if not isinstance(data, dict):
             raise ValueError("request/header data must be an object")
@@ -124,10 +158,58 @@ def validate_session_event_data(event_type: str, data: Any) -> None:
         if data.get("error") is None:
             return
         message = _plain(data.get("message"))
-        content = message.get("content") if isinstance(message, dict) else None
-        block = _plain(content[0]) if isinstance(content, list) and content else None
-        if not isinstance(block, dict) or block.get("isError") is not True:
-            raise ValueError("tool/result error requires message content[0].isError === true")
+        if not isinstance(message, dict) or message.get("isError") is not True:
+            raise ValueError("tool/result error requires message.isError === true")
+
+
+def assert_developer_header(event: dict, events: list) -> None:
+    """developer/message 的 headerSeq 绑定校验（上游 surface.ts assertDeveloperHeader）。
+
+    headerSeq 必须指向更早的 request/header；每个 tool-addition 的 toolName
+    必须在该 header 的工具定义中恰好命中一个，且该定义含 string description
+    与 object parameters；被引用工具的 deferLoading 若存在必须为 true。
+    """
+    if event["type"] != "developer/message":
+        return
+    data = _plain(event["data"])
+    validate_session_event_data("developer/message", data)
+    if not isinstance(data, dict):
+        return
+    header_seq = data.get("headerSeq")
+    if header_seq is None:
+        return
+    if not _is_event_seq(header_seq) or header_seq >= event["seq"] \
+            or header_seq >= len(events):
+        raise ValueError("developer/message headerSeq must reference an earlier request/header")
+    header_event = events[header_seq]
+    if not isinstance(header_event, (dict, MappingProxyType)) \
+            or header_event.get("type") != "request/header":
+        raise ValueError("developer/message headerSeq must reference an earlier request/header")
+    header_data = _plain(header_event.get("data"))
+    header = _plain(header_data.get("header")) if isinstance(header_data, dict) else None
+    tools = header.get("tools") if isinstance(header, dict) else None
+    tools = tools if isinstance(tools, list) else []
+    message = _plain(data.get("message"))
+    content = message.get("content") if isinstance(message, dict) else None
+    for raw in content or []:
+        block = _plain(raw)
+        if not isinstance(block, dict) or block.get("type") != "tool-addition":
+            continue
+        tool_name = block.get("toolName")
+        definitions = [_plain(t) for t in tools
+                       if isinstance(_plain(t), dict) and _plain(t).get("name") == tool_name]
+        if len(definitions) != 1:
+            raise ValueError(
+                f'developer/message tool-addition "{tool_name}" must name exactly one '
+                f"tool in headerSeq {header_seq}")
+        definition = definitions[0]
+        if not isinstance(definition.get("description"), str) \
+                or not isinstance(_plain(definition.get("parameters")), dict):
+            raise ValueError(
+                f'developer/message tool-addition "{tool_name}" requires a complete '
+                f"tool definition in headerSeq {header_seq}")
+        if "deferLoading" in definition and definition.get("deferLoading") is not True:
+            raise ValueError("developer/message referenced tool deferLoading must be true when present")
 
 
 def assert_provenance(type_: str, source_event_seqs: Any, seq: int,
@@ -201,8 +283,9 @@ def assert_tool_result_rewrite(event: dict, shadowed_seqs: list[int],
                                events: list[dict]) -> None:
     """tool/result surface replace 重写规则（上游 assertToolResultRewrite）：
 
-    恰好遮蔽 1 个节点、被遮蔽节点必须是 tool/result、除 content 外其余字段深相等
-    （只允许改结果 content——崩溃恢复合成/改写结果内容的唯一通道）。
+    恰好遮蔽 1 个节点、被遮蔽节点必须是 tool/result、除 message.content 外其余
+    字段深相等（只允许改结果 content——崩溃恢复合成/改写结果内容的唯一通道）。
+    V4：content 是平铺的块数组，整体置 null 后比较。
     """
     if event["type"] != "tool/result":
         return
@@ -216,16 +299,10 @@ def assert_tool_result_rewrite(event: dict, shadowed_seqs: list[int],
         replacement_data = dict(event["data"])
         original_message = dict(original_data.get("message") or {})
         replacement_message = dict(replacement_data.get("message") or {})
-        original_content = (original_message.get("content") or [])
-        replacement_content = (replacement_message.get("content") or [])
-        if not original_content or not replacement_content:
-            raise ValueError("tool/result surface replacement must target content-bearing tool/result")
-        original_rest = dict(original_message)
-        replacement_rest = dict(replacement_message)
-        original_rest["content"] = [dict(original_content[0], content=None)]
-        replacement_rest["content"] = [dict(replacement_content[0], content=None)]
-        original_data["message"] = original_rest
-        replacement_data["message"] = replacement_rest
+        original_message["content"] = None
+        replacement_message["content"] = None
+        original_data["message"] = original_message
+        replacement_data["message"] = replacement_message
         if not _json_equal(original_data, replacement_data):
             raise ValueError("tool/result surface replacement may change only content")
 
@@ -233,14 +310,14 @@ def assert_tool_result_rewrite(event: dict, shadowed_seqs: list[int],
 def derive_event_message(ev: dict) -> dict | None:
     """单事件 → 模型消息：surface 节点投影规则（上游 surface.ts deriveEventMessage）。
 
-    空内容 assistant/message（如 max-tokens 只含 usage 的 step）与空内容
-    system/message（「无系统提示词」节点，保留 surface 位置）派生为 None，
-    不入转录；非 surface 事件派生为 None。
+    空内容 assistant/message（如 max-tokens 只含 usage 的 step）、空内容
+    system/message（「无系统提示词」节点）与空内容 developer/message（工具
+    增删的占位节点）派生为 None，不入转录；非 surface 事件派生为 None。
     """
     data = ev["data"]
     if ev["type"] == "user/message":
         return data
-    if ev["type"] in ("system/message", "assistant/message"):
+    if ev["type"] in ("system/message", "developer/message", "assistant/message"):
         message = data.get("message")
         if message and not message.get("content"):
             return None

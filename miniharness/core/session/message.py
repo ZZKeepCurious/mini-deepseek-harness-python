@@ -9,12 +9,15 @@ import uuid
 
 __all__ = [
     "create_message",
+    "developer_message",
     "file_block",
     "image_block",
     "reasoning_block",
     "text_block",
+    "tool_addition_block",
     "tool_call_block",
-    "tool_result_block",
+    "tool_removal_block",
+    "tool_result_message",
 ]
 
 
@@ -30,6 +33,26 @@ def create_message(role: str, content: list, source: dict | None = None) -> dict
         "content": list(content),
         "source": source or {"kind": role},
     }
+
+
+def tool_result_message(tool_call_id: str, content: list, is_error: bool = False) -> dict:
+    """构造 V4 tool/result 消息：role `'tool'` + 平铺 content + 顶层字段。
+
+    对齐上游 ToolResultMessage（llm/llm/src/message.ts）：role `'tool'`、
+    顶层 `toolCallId`、可选 `isError`，content 是直接的 ContentBlock[]（V4 前
+    是 user 角色包裹一个 `tool-result` 块）。source 由调用方补齐
+    `{kind:'tool', callId}`（与顶层 toolCallId 一致）。
+    """
+    message = create_message("tool", content, {"kind": "tool", "callId": tool_call_id})
+    message["toolCallId"] = tool_call_id
+    if is_error:
+        message["isError"] = True
+    return message
+
+
+def developer_message(content: list, source: dict | None = None) -> dict:
+    """构造 developer 角色消息（上游 DeveloperMessage，V4 surface 事件载荷）。"""
+    return create_message("developer", content, source or {"kind": "tool-registry"})
 
 
 def text_block(text: str) -> dict:
@@ -66,8 +89,15 @@ def tool_call_block(call_id: str, name: str, arguments: str) -> dict:
     return {"type": "tool-call", "id": call_id, "name": name, "arguments": arguments}
 
 
-def tool_result_block(tool_call_id: str, content: list, is_error: bool = False) -> dict:
-    block = {"type": "tool-result", "toolCallId": tool_call_id, "content": list(content)}
-    if is_error:
-        block["isError"] = True
-    return block
+def tool_addition_block(tool_name: str) -> dict:
+    """V4 工具新增块（上游 ToolAdditionBlock）：{type:'tool-addition', toolName}。
+
+    只出现在 developer/message；`tool` 内联定义被禁止（定义由 headerSeq
+    指向的 request/header 承载）。
+    """
+    return {"type": "tool-addition", "toolName": tool_name}
+
+
+def tool_removal_block(tool_name: str) -> dict:
+    """V4 工具移除块（上游 ToolRemovalBlock）：{type:'tool-removal', toolName}。"""
+    return {"type": "tool-removal", "toolName": tool_name}

@@ -198,7 +198,7 @@ def _apply_projection(state: dict, event: dict) -> dict:
             else {**state, "lastTurnInjectionTime": None}
     if type_ == "user/message":
         source = data.get("source") or {}
-        injected = source.get("kind") == "plugin" and source.get("plugin") == NAME
+        injected = source.get("kind") == NAME
         with_message = (state if state["lastMessageTime"] == event.get("time")
                         else {**state, "lastMessageTime": event.get("time")})
         if not injected:
@@ -262,7 +262,7 @@ def apply_time_context(ctx: Context, config: dict | None = None) -> None:
         text = _render_text(now, turn, step, previous, formatter_for(selected),
                             selected, browser)
         message = create_message("user", [text_block(text)], {
-            "kind": "plugin", "plugin": NAME, "form": "snapshot",
+            "kind": NAME, "form": "snapshot",
             "sections": [{"name": NAME, "text": text}]})
         return {**decision, "messages": [*proposed, message]}
 

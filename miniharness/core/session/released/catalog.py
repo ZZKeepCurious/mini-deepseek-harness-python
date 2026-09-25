@@ -16,12 +16,15 @@ from .codec import (
     RELEASED_V0_CODEC,
     RELEASED_V1_CODEC,
     RELEASED_V2_CODEC,
+    RELEASED_V3_CODEC,
+    RELEASED_V4_CODEC,
     decode_released_header,
 )
 from .helpers import SessionFormatError, SessionFormatUnsupportedMigrationError, fail, unsupported
 from .migrate_v0_v1 import V0_TO_V1
 from .migrate_v1_to_v2 import V1_TO_V2
 from .migrate_v2_to_v3 import V2_TO_V3
+from .migrate_v3_to_v4 import V3_TO_V4
 
 __all__ = [
     "SESSION_FORMAT_CATALOG",
@@ -42,8 +45,8 @@ class _Chain:
     """唯一相邻链（当前 v3）：plan(from) = ordered[from:]；migrate 逐边执行。"""
 
     def __init__(self) -> None:
-        self.current_version = 3
-        ordered = [V0_TO_V1, V1_TO_V2, V2_TO_V3]
+        self.current_version = 4
+        ordered = [V0_TO_V1, V1_TO_V2, V2_TO_V3, V3_TO_V4]
         self._ordered = ordered
 
     def plan(self, from_version: int) -> list[dict]:
@@ -98,8 +101,8 @@ def _encode_current(artifact: dict) -> dict:
     from ..json import thaw
     from ..seq_ranges import encode_seq_ranges
     header = artifact["header"]
-    if header.get("version") != 3:
-        raise fail("encodeCurrent requires Session format v3")
+    if header.get("version") != 4:
+        raise fail("encodeCurrent requires Session format v4")
     physical: dict[str, Any] = {"type": "session"}
     for key in ("version", "id", "createdAt"):
         physical[key] = header[key]
@@ -124,7 +127,8 @@ def _encode_current(artifact: dict) -> dict:
 class _Catalog:
     def __init__(self) -> None:
         self.chain = _Chain()
-        self.codecs = {0: RELEASED_V0_CODEC, 1: RELEASED_V1_CODEC, 2: RELEASED_V2_CODEC}
+        self.codecs = {0: RELEASED_V0_CODEC, 1: RELEASED_V1_CODEC, 2: RELEASED_V2_CODEC,
+                       3: RELEASED_V3_CODEC, 4: RELEASED_V4_CODEC}
 
     @property
     def current_version(self) -> int:
@@ -203,10 +207,10 @@ def read_released_header(header_value: Any) -> dict:
     stored = decode_released_header(header_value)
     if stored == SESSION_FORMAT_CATALOG.current_version:
         # 当前版本：校验逻辑头（物理 `type` 标签剥离）并在结果中返回逻辑头。
-        from .validate_v3 import assert_released_v3_header
+        from .validate_v4 import assert_released_v4_header
 
         logical = {key: value for key, value in header_value.items() if key != "type"}
-        assert_released_v3_header(logical)
+        assert_released_v4_header(logical)
         return {"status": "current", "storedVersion": stored,
                 "targetVersion": stored, "header": logical}
     # 旧版本：物理头先经存储版本 codec 解码为逻辑头（seedLength→isSeeded），再走相邻头迁移。

@@ -14,6 +14,8 @@ __all__ = [
     "RELEASED_V2_EVENT_TYPES",
     "RELEASED_V3_EVENT_DISPOSITIONS",
     "RELEASED_V3_EVENT_TYPES",
+    "RELEASED_V4_EVENT_DISPOSITIONS",
+    "RELEASED_V4_EVENT_TYPES",
 ]
 
 
@@ -159,3 +161,22 @@ RELEASED_V3_EVENT_DISPOSITIONS: dict[str, dict] = _v3_table()
 
 #: released-v3 稳定词表。
 RELEASED_V3_EVENT_TYPES: list[str] = sorted(RELEASED_V3_EVENT_DISPOSITIONS)
+
+
+def _v4_table() -> dict[str, dict]:
+    """v4 修订表（上游 session-format-v3-to-v4 canonical 词表）：
+    新增 surface 事件 `developer/message`（工具增删的派生历史，可选 headerSeq）
+    与已知 log-only 事件 `workspace/changes`（{turn}）；`tool/result` 顶层成员
+    闭集不变（消息载荷内部由 user+tool-result 包裹改为 role `'tool'` 平铺——
+    该形态差异在 payload 语义层校验，不改变顶层键集）。"""
+    table = dict(RELEASED_V3_EVENT_DISPOSITIONS)
+    table["developer/message"] = _disposition(["turn", "step", "message"], ["headerSeq"])
+    table["workspace/changes"] = _disposition(["turn"])
+    return table
+
+
+#: released-v4（canonical）事件 × payload 成员闭集。
+RELEASED_V4_EVENT_DISPOSITIONS: dict[str, dict] = _v4_table()
+
+#: released-v4 稳定词表。
+RELEASED_V4_EVENT_TYPES: list[str] = sorted(RELEASED_V4_EVENT_DISPOSITIONS)

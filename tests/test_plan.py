@@ -203,6 +203,20 @@ class SystemPromptAssemblyTest(unittest.TestCase):
         self.assertEqual(assembly["variables"], {"cwd": "/tmp"})
         self.assertIn("cwd: /tmp", render_context_snapshot(assembly))
 
+    def test_tool_schema_defer_loading_marker_passes_through_assembly(self):
+        # 上游 system-prompt 装配显式重建 schemas 并保留 deferLoading=true
+        # （system-prompt/src/index.ts:586-590）；mini 装配器透传该标记，
+        # 由 provider serialize 侧拒收，不在装配处丢弃。
+        service = SystemPromptService(self.ctx)
+        service.tools(lambda ctx: {"schemas": [
+            {"name": "deferred", "description": "d", "parameters": {}, "deferLoading": True},
+            {"name": "plain", "description": "d", "parameters": {}},
+        ]})
+        assembly = service.assemble({})
+        by_name = {t["name"]: t for t in assembly["tools"]}
+        self.assertIs(by_name["deferred"]["deferLoading"], True)
+        self.assertNotIn("deferLoading", by_name["plain"])
+
     def test_variables_rendering_rules(self):
         service = SystemPromptService(self.ctx)
         service.section("v", 0, "值={{value}}")
@@ -447,7 +461,7 @@ class PlanLoopIntegrationTest(unittest.TestCase):
         narrations = [
             e for e in loop.session.events
             if e["type"] == "user/message"
-            and e["data"]["source"].get("plugin") == "plan-mode"
+            and e["data"]["source"].get("kind") == "plan-mode"
         ]
         self.assertEqual(len(narrations), 1)
         self.assertIn("plan mode", narrations[0]["data"]["content"][0]["text"].lower())
@@ -470,7 +484,7 @@ class PlanLoopIntegrationTest(unittest.TestCase):
         loop.followup("开始")
         user_msgs = [e for e in loop.session.events if e["type"] == "user/message"]
         plugin = user_msgs[0]["data"]["source"]
-        self.assertEqual(plugin, {"kind": "plugin", "plugin": "plan-mode"})
+        self.assertEqual(plugin, {"kind": "plan-mode"})
         self.assertIn("plan mode", user_msgs[0]["data"]["content"][0]["text"].lower())
 
     def test_no_narration_when_last_header_matches(self):

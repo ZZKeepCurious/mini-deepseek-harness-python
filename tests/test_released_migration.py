@@ -25,6 +25,7 @@ from miniharness.core.session.released import (
     RELEASED_V1_CODEC,
     V0_TO_V1,
     V1_TO_V2,
+    V3_TO_V4,
     SessionFormatError,
     SessionFormatUnsupportedMigrationError,
     migrate_released_header,
@@ -107,7 +108,7 @@ class GenerationDirectoryTest(unittest.TestCase):
             resolved = resolve_generation_in_directory(d, "none")
             self.assertEqual(resolved["source_version"], 3)
             self.assertEqual(resolved["source_path"].name, "session.v3.jsonl")
-            self.assertEqual(resolved["current_path"].name, "session.v3.jsonl")
+            self.assertEqual(resolved["current_path"].name, "session.v4.jsonl")
 
     def test_opposite_encoding_refused(self):
         with TemporaryDirectory() as tmp:
@@ -188,9 +189,9 @@ class GenerationEnsureTest(unittest.TestCase):
                 resolved["source_path"], 1, resolved["current_path"], "none")
             self.assertEqual(result["status"], "migrated")
             self.assertEqual(result["from_version"], 1)
-            self.assertEqual(result["to_version"], 3)
+            self.assertEqual(result["to_version"], 4)
             self.assertTrue((session_dir / "session.v1.jsonl").exists())
-            self.assertTrue((session_dir / "session.v3.jsonl").exists())
+            self.assertTrue((session_dir / "session.v4.jsonl").exists())
             # persistence 直接打开迁移后的会话
             p = JsonlPersistence(root, compression="none")
             loaded = p.load("s-v1")
@@ -207,9 +208,9 @@ class GenerationEnsureTest(unittest.TestCase):
             self.assertIn("stream", message["data"])
             # 再次打开 = 已是当前代（幂等）
             again = resolve_generation_in_directory(session_dir, "none")
-            self.assertEqual(again["source_version"], 3)
+            self.assertEqual(again["source_version"], 4)
             result2 = ensure_generation_current(
-                again["source_path"], 3, again["current_path"], "none")
+                again["source_path"], 4, again["current_path"], "none")
             self.assertEqual(result2["status"], "current")
 
     def test_v1_surface_before_first_step_refused(self):
@@ -230,7 +231,7 @@ class GenerationEnsureTest(unittest.TestCase):
                     resolved["source_path"], 1, resolved["current_path"], "none")
             self.assertIn("surface before first step", str(ctx.exception))
             # 拒绝后源字节不动、不发布后继代
-            self.assertFalse((session_dir / "session.v3.jsonl").exists())
+            self.assertFalse((session_dir / "session.v4.jsonl").exists())
 
     def test_filename_header_version_mismatch_refused(self):
         with TemporaryDirectory() as tmp:
@@ -251,14 +252,14 @@ class GenerationEnsureTest(unittest.TestCase):
     def test_newer_generation_refused(self):
         with TemporaryDirectory() as tmp:
             root, session_dir = self._layout(tmp, [])
-            source = session_dir / "session.v4.jsonl"
+            source = session_dir / "session.v5.jsonl"
             source.write_text(json.dumps({
-                "type": "session", "version": 4, "id": "s-v1", "createdAt": 1,
+                "type": "session", "version": 5, "id": "s-v1", "createdAt": 1,
                 "isSeeded": False, "delegationDepth": 0}) + "\n", encoding="utf-8")
             resolved = resolve_generation_in_directory(session_dir, "none")
-            self.assertEqual(resolved["source_version"], 4)
+            self.assertEqual(resolved["source_version"], 5)
             with self.assertRaises(JsonlGenerationNewerVersionError):
-                ensure_generation_current(resolved["source_path"], 4,
+                ensure_generation_current(resolved["source_path"], 5,
                                           resolved["current_path"], "none")
 
     def test_target_conflict_on_foreign_current(self):
@@ -660,12 +661,115 @@ class V0ToV1MigrationTest(unittest.TestCase):
         self.assertEqual(target["events"][3]["data"]["message"]["id"], "am0")
 
 
+class V3ToV4MigrationTest(unittest.TestCase):
+    """V3→V4 相邻边：tool-result 提升为 role `'tool'` 平铺 + 消息 source 改名。
+
+    上游 session-format-v3-to-v4/src/{migration,tool-role,sources}.ts。
+    """
+
+    def _artifact_v3(self, events):
+        return {"header": {"version": 3, "id": "s-v3", "createdAt": 1,
+                           "isSeeded": False, "delegationDepth": 0},
+                "inherited_event_count": 0, "events": events}
+
+    def test_lifts_tool_result_and_renames_sources(self):
+        wrapper = {"type": "tool-result", "toolCallId": "c1",
+                   "content": [text_block("out")]}
+        events = [
+            ev(0, 100, "turn/start", {"turn": 1}),
+            ev(1, 101, "step/start", {"turn": 1, "step": 1}),
+            ev(2, 102, "system/message",
+               {"turn": 1, "step": 1,
+                "message": {"id": "s1", "role": "system", "content": [],
+                            "source": {"kind": "plugin",
+                                       "plugin": "@deepseek-ai/dsh-system-prompt"}}},
+               surfaceOp="append"),
+            ev(3, 103, "user/message",
+               {"id": "u1", "role": "user", "content": [text_block("hi")],
+                "source": {"kind": "plugin", "plugin": "plan-mode"}},
+               surfaceOp="append"),
+            ev(4, 104, "assistant/message",
+               {"turn": 1, "step": 1,
+                "message": {"id": "a1", "role": "assistant",
+                            "content": [{"type": "tool-call", "id": "c1",
+                                         "name": "read", "arguments": "{}"}],
+                            "source": {"kind": "model", "provider": "fake",
+                                       "model": "fake"}},
+                "stream": [
+                    {"type": "tool-call-chunks", "time0": 104, "index": 0,
+                     "dt": [], "id": "c1", "name": "read", "args": ["{}"]},
+                    {"type": "chunk", "time": 105,
+                     "chunk": {"type": "finish", "reason": {"kind": "stop"}}},
+                ]},
+               surfaceOp="append"),
+            ev(5, 106, "tool/call",
+               {"turn": 1, "step": 1, "callId": "c1", "name": "read",
+                "arguments": "{}"}),
+            ev(6, 107, "tool/result",
+               {"turn": 1, "step": 1,
+                "message": {"id": "r1", "role": "user", "content": [wrapper],
+                            "source": {"kind": "tool", "callId": "c1"}}},
+               sourceEventSeqs=[5], surfaceOp="append"),
+            ev(7, 108, "step/end", {"turn": 1, "step": 1}),
+            ev(8, 109, "turn/end", {"turn": 1, "reason": {"kind": "completed"}}),
+        ]
+        target = V3_TO_V4["migrate"](self._artifact_v3(events))
+        self.assertEqual(target["header"]["version"], 4)
+        system = next(e for e in target["events"] if e["type"] == "system/message")
+        self.assertEqual(system["data"]["message"]["source"], {"kind": "system-prompt"})
+        user = next(e for e in target["events"] if e["type"] == "user/message")
+        self.assertEqual(user["data"]["source"], {"kind": "plan-mode"})
+        result = next(e for e in target["events"] if e["type"] == "tool/result")
+        message = result["data"]["message"]
+        self.assertEqual(message["role"], "tool")
+        self.assertEqual(message["toolCallId"], "c1")
+        self.assertEqual(message["content"], [text_block("out")])
+        self.assertNotIn("isError", message)
+        self.assertEqual(message["source"], {"kind": "tool", "callId": "c1"})
+
+    def test_error_result_sets_top_level_is_error(self):
+        wrapper = {"type": "tool-result", "toolCallId": "c1",
+                   "content": [text_block("boom")], "isError": True}
+        events = [
+            ev(0, 100, "turn/start", {"turn": 1}),
+            ev(1, 101, "step/start", {"turn": 1, "step": 1}),
+            ev(2, 102, "assistant/message",
+               {"turn": 1, "step": 1,
+                "message": {"id": "a1", "role": "assistant",
+                            "content": [{"type": "tool-call", "id": "c1",
+                                         "name": "read", "arguments": "{}"}],
+                            "source": {"kind": "model", "provider": "fake",
+                                       "model": "fake"}},
+                "stream": [
+                    {"type": "tool-call-chunks", "time0": 102, "index": 0,
+                     "dt": [], "id": "c1", "name": "read", "args": ["{}"]},
+                    {"type": "chunk", "time": 103,
+                     "chunk": {"type": "finish", "reason": {"kind": "stop"}}},
+                ]},
+               surfaceOp="append"),
+            ev(3, 104, "tool/call",
+               {"turn": 1, "step": 1, "callId": "c1", "name": "read",
+                "arguments": "{}"}),
+            ev(4, 105, "tool/result",
+               {"turn": 1, "step": 1,
+                "message": {"id": "r1", "role": "user", "content": [wrapper],
+                            "source": {"kind": "tool", "callId": "c1"}},
+                "error": {"name": "ToolError", "code": "TOOL_ERROR"}},
+               sourceEventSeqs=[3], surfaceOp="append"),
+            ev(5, 106, "step/end", {"turn": 1, "step": 1}),
+            ev(6, 107, "turn/end", {"turn": 1, "reason": {"kind": "completed"}}),
+        ]
+        target = V3_TO_V4["migrate"](self._artifact_v3(events))
+        result = next(e for e in target["events"] if e["type"] == "tool/result")
+        self.assertTrue(result["data"]["message"]["isError"])
+
+
 class HeaderTranslationTest(unittest.TestCase):
-    def test_v1_header_translates_to_v3_without_body(self):
+    def test_v1_header_translates_to_v4_without_body(self):
         header = {"version": 1, "id": "s", "createdAt": 5, "isSeeded": True,
                   "delegationDepth": 0, "parentSession": "p"}
         translated = migrate_released_header(header)
-        self.assertEqual(translated["version"], 3)
+        self.assertEqual(translated["version"], 4)
         self.assertEqual(translated["parentSession"], "p")
         self.assertTrue(translated["isSeeded"])
 

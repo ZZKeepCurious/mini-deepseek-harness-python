@@ -12,7 +12,7 @@ CHECKPOINT_PREAMBLE / SUMMARY_OPEN_TAG / frameSummary / finishError / summaryTex
 """
 from __future__ import annotations
 
-from ..core.session import create_message, text_block
+from ..core.session import deep_freeze
 
 __all__ = ["CHECKPOINT_PREAMBLE", "COMPACTION_INSTRUCTION", "SUMMARY_CLOSE_TAG",
            "SUMMARY_OPEN_TAG", "frame_summary", "summarize_with_adapter"]
@@ -86,11 +86,12 @@ async def summarize_with_adapter(agent, config: dict, input_: dict) -> dict:
 
     adapter = agent.adapter
     messages = list(input_.get("messages", []))
-    messages.append(create_message(
-        "user",
-        [text_block(COMPACTION_INSTRUCTION)],
-        {"kind": "plugin", "plugin": "dsh-compaction-basic"},
-    ))
+    # 压缩指令是**原始请求消息**（无 source——不引入消息来源署名），深冻结后
+    # 作为重放会话之后的最后一条 user 消息（对齐 upstream summarizer.ts）。
+    messages.append(deep_freeze({
+        "role": "user",
+        "content": [{"type": "text", "text": COMPACTION_INSTRUCTION}],
+    }))
     assembler = BlockAssembler()
     async for chunk in adapter.stream(messages, input_.get("tools", [])):
         assembler.push(chunk)

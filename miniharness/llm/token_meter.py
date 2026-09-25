@@ -56,8 +56,6 @@ def estimate_content(blocks) -> int:
             tokens += _ceil_len(block.get("text", "")) + BLOCK_OVERHEAD
         elif btype == "tool-call":
             tokens += _ceil_len(block.get("name", "")) + _ceil_len(block.get("arguments", "")) + BLOCK_OVERHEAD
-        elif btype == "tool-result":
-            tokens += estimate_content(block.get("content", [])) + BLOCK_OVERHEAD
         else:
             tokens += BLOCK_OVERHEAD + _ceil_len(str(block))
     return tokens

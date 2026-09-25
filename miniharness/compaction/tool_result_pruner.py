@@ -163,8 +163,7 @@ class ToolResultPruner:
         chars_removed = 0
         for seq, event in candidates:
             message = event["data"]["message"]
-            result_block = message["content"][0]
-            inner = result_block["content"]
+            inner = message["content"]
             content = self.prune_content(inner)
             if content is None:
                 continue
@@ -173,7 +172,7 @@ class ToolResultPruner:
             # source 是上游冻结的 mappingproxy，重发事件须转回可 JSON 序列化的普通 dict
             new_message = {
                 **message,
-                "content": [{**result_block, "content": content}],
+                "content": content,
                 "source": dict(message.get("source") or {}),
             }
             # 影子计价协议：计价事件与替换同步相邻追加

@@ -29,8 +29,10 @@ from miniharness.core.session import (
     repair_interrupted_turn,
     text_block,
     thaw,
+    tool_addition_block,
     tool_call_block,
-    tool_result_block,
+    tool_removal_block,
+    tool_result_message,
     turn_balance,
 )
 from miniharness.llm import (
@@ -65,7 +67,8 @@ class SessionModuleSurfaceTest(unittest.TestCase):
             "TOOL_NOT_STARTED", "TOOL_OUTCOME_UNKNOWN", "Session",
             "create_message", "deep_freeze", "derive_messages", "is_json_safe",
             "now_ms", "reasoning_block", "repair_interrupted_turn", "text_block",
-            "thaw", "tool_call_block", "tool_result_block", "turn_balance",
+            "thaw", "tool_addition_block", "tool_call_block", "tool_removal_block",
+            "tool_result_message", "turn_balance",
         }
         self.assertLessEqual(expected, set(session.__all__ if hasattr(session, "__all__") else dir(session)))
 
@@ -87,7 +90,9 @@ class SessionModuleSurfaceTest(unittest.TestCase):
         self.assertIs(text_block, message.text_block)
         self.assertIs(reasoning_block, message.reasoning_block)
         self.assertIs(tool_call_block, message.tool_call_block)
-        self.assertIs(tool_result_block, message.tool_result_block)
+        self.assertIs(tool_result_message, message.tool_result_message)
+        self.assertIs(tool_addition_block, message.tool_addition_block)
+        self.assertIs(tool_removal_block, message.tool_removal_block)
         self.assertIs(repair_interrupted_turn, repair.repair_interrupted_turn)
         self.assertIs(turn_balance, repair.turn_balance)
         self.assertIs(derive_messages, surface.derive_messages)

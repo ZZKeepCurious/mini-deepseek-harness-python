@@ -83,15 +83,14 @@ class TestLoop(unittest.TestCase):
         # 同 turn 内模型再次被请求（看到工具结果后给出最终回答）
         self.assertEqual(adapter.calls, 2)
         self.assertEqual(loop.last_response(), "搞定。")
-        # 模型历史：assistant 消息带 tool-call 块，工具结果以 role 'user' 的
-        # tool-result 块回灌（上游 ToolResultMessage 模型）
+        # 模型历史：assistant 消息带 tool-call 块，工具结果以 role 'tool' 的
+        # 平铺消息回灌（V4 ToolResultMessage 模型）
         msgs = derive_messages(session.events)
         assistant = [m for m in msgs if m["role"] == "assistant"][0]
         self.assertTrue(any(b["type"] == "tool-call" for b in assistant["content"]))
-        tool_msgs = [m for m in msgs if any(b["type"] == "tool-result" for b in m["content"])]
+        tool_msgs = [m for m in msgs if m["role"] == "tool"]
         self.assertEqual(len(tool_msgs), 1)
-        self.assertEqual(tool_msgs[0]["role"], "user")
-        self.assertEqual(tool_msgs[0]["content"][0]["toolCallId"], "call_0")
+        self.assertEqual(tool_msgs[0]["toolCallId"], "call_0")
 
     def test_rejected_pre_step_blocked_turn(self):
         session, loop, _ = _make_env()
@@ -138,9 +137,9 @@ class TestLoop(unittest.TestCase):
         # 未知工具同样先落 tool/call 再出 error 结果（上游 appendToolCall 先于派发）
         self.assertEqual([c["data"]["name"] for c in calls], ["nope"])
         last = [e for e in session.events if e["type"] == "tool/result"][-1]
-        block = last["data"]["message"]["content"][0]
-        self.assertTrue(block["isError"])
-        self.assertIn("未知工具", block["content"][0]["text"])
+        message = last["data"]["message"]
+        self.assertTrue(message["isError"])
+        self.assertIn("未知工具", message["content"][0]["text"])
 
     def test_multiple_followups_multiple_turns(self):
         session, loop, _ = _make_env()

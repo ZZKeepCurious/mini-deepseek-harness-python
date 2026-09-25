@@ -45,6 +45,7 @@ __all__ = [
     "SURFACE_TYPES_V3",
     "assert_released_v3_artifact",
     "assert_released_v3_header",
+    "assert_released_v3_physical_artifact",
     "restore_released_v3_artifact",
 ]
 
@@ -441,6 +442,11 @@ def _assert_v3_payloads(events: list[dict]) -> None:
 def assert_released_v3_artifact(artifact: dict) -> None:
     """released v3 写出的精确逻辑镜像（target 全量）。"""
     _validate_released_v3_artifact(artifact, "target")
+
+
+def assert_released_v3_physical_artifact(artifact: dict) -> None:
+    """v3 词表中立物理解码校验（不解释事件词表/payload；v3 codec 读向用）。"""
+    _validate_released_v3_artifact(artifact, "physical")
 
 
 def restore_released_v3_artifact(artifact: dict,

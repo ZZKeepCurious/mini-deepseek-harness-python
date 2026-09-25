@@ -11,7 +11,7 @@ from miniharness.core.session import (
     repair_interrupted_turn,
     text_block,
     tool_call_block,
-    tool_result_block,
+    tool_result_message,
     turn_balance,
 )
 from miniharness.llm import AssistantStreamAccumulator, BlockAssembler
@@ -113,18 +113,15 @@ class TestSession(unittest.TestCase):
     def test_derive_tool_result_message(self):
         s = Session("s1")
         s.append("user/message", create_message("user", [text_block("列目录")]), surfaceOp="append")
-        msg = create_message("user", [
-            {"type": "tool-result", "toolCallId": "call_1",
-             "content": [text_block("a.txt")]},
-        ], {"kind": "tool", "callId": "call_1"})
+        msg = tool_result_message("call_1", [text_block("a.txt")])
         s.append("tool/result", {"turn": 1, "step": 1, "message": msg}, surfaceOp="append")
         msgs = derive_messages(s.events)
-        # ToolResultMessage 的 role 是 'user'（上游 llm/src/message.ts）
-        self.assertEqual(msgs[1]["role"], "user")
+        # V4 ToolResultMessage 的 role 是 'tool'，content 平铺（上游 llm/src/message.ts）
+        self.assertEqual(msgs[1]["role"], "tool")
+        self.assertEqual(msgs[1]["toolCallId"], "call_1")
         block = msgs[1]["content"][0]
-        self.assertEqual(block["type"], "tool-result")
-        self.assertEqual(block["toolCallId"], "call_1")
-        self.assertEqual(block["content"][0]["text"], "a.txt")
+        self.assertEqual(block["type"], "text")
+        self.assertEqual(block["text"], "a.txt")
 
     def test_turn_balance_and_repair(self):
         s = Session("s1")
@@ -159,10 +156,10 @@ class TestSession(unittest.TestCase):
         self.assertEqual([c["type"] for c in closers], ["tool/result", "step/end", "turn/end"])
         # 已记录开始 → TOOL_OUTCOME_UNKNOWN
         result = closers[0]
-        self.assertTrue(result["data"]["message"]["content"][0]["isError"])
+        self.assertTrue(result["data"]["message"]["isError"])
         self.assertEqual(result["data"]["error"]["code"], TOOL_OUTCOME_UNKNOWN)
         self.assertEqual(result["data"]["message"]["source"]["callId"], "call_1")
-        self.assertEqual(closers[0]["data"]["message"]["content"][0]["toolCallId"], "call_1")
+        self.assertEqual(closers[0]["data"]["message"]["toolCallId"], "call_1")
         self.assertEqual(closers[-1]["data"]["reason"], {"kind": "interrupted"})
 
     def test_repair_not_started_call(self):
@@ -303,7 +300,7 @@ class TestSurfaceValidation(unittest.TestCase):
         with self.assertRaises(ValueError):
             s.append("tool/result", {
                 "turn": 1, "step": 1,
-                "message": create_message("user", [tool_result_block("c", [text_block("x")])]),
+                "message": tool_result_message("c", [text_block("x")]),
             }, surfaceOp="append", sourceEventSeqs=[])
 
     def test_append_source_event_seqs_must_be_earlier(self):
@@ -311,12 +308,12 @@ class TestSurfaceValidation(unittest.TestCase):
         with self.assertRaises(ValueError):
             s.append("tool/result", {
                 "turn": 1, "step": 1,
-                "message": create_message("user", [tool_result_block("c", [text_block("x")])]),
+                "message": tool_result_message("c", [text_block("x")]),
             }, surfaceOp="append", sourceEventSeqs=[2])  # 当前 seq == 1
 
     def test_valid_append_source_event_seqs_accepted(self):
         s = self._session()
-        msg = create_message("user", [tool_result_block("c", [text_block("x")])])
+        msg = tool_result_message("c", [text_block("x")])
         ev = s.append("tool/result", {"turn": 1, "step": 1, "message": msg},
                       surfaceOp="append", sourceEventSeqs=[0])
         self.assertEqual(ev["sourceEventSeqs"], (0,))
@@ -330,12 +327,12 @@ class TestSurfaceValidation(unittest.TestCase):
         with self.assertRaises(ValueError):
             s.append("tool/result", {
                 "turn": 1, "step": 1,
-                "message": create_message("user", [tool_result_block("c", [text_block("x")])]),
+                "message": tool_result_message("c", [text_block("x")]),
             }, surfaceOp={"op": "replace", "startSeq": 0, "endSeq": 0}, sourceEventSeqs=[0])
 
     def test_tool_result_replace_multi_node_rejected(self):
         s = Session("sv2")
-        msg = create_message("user", [tool_result_block("c1", [text_block("x")])])
+        msg = tool_result_message("c1", [text_block("x")])
         s.append("user/message", create_message("user", [text_block("hi")]), surfaceOp="append")
         s.append("tool/result", {"turn": 1, "step": 1, "message": msg}, surfaceOp="append")
         s.append("assistant/message", {
@@ -345,24 +342,24 @@ class TestSurfaceValidation(unittest.TestCase):
         with self.assertRaises(ValueError):
             s.append("tool/result", {
                 "turn": 1, "step": 1,
-                "message": create_message("user", [tool_result_block("c2", [text_block("y")])]),
+                "message": tool_result_message("c2", [text_block("y")]),
             }, surfaceOp={"op": "replace", "startSeq": 1, "endSeq": 2}, sourceEventSeqs=[1, 2])
 
     def test_tool_result_replace_only_content_change_allowed(self):
         s = Session("sv3")
-        orig = create_message("user", [tool_result_block("c1", [text_block("a.txt")])])
+        orig = tool_result_message("c1", [text_block("a.txt")])
         s.append("user/message", create_message("user", [text_block("hi")]), surfaceOp="append")
         s.append("tool/result", {"turn": 1, "step": 1, "message": orig},
                  surfaceOp="append")
         # 只改 content（复用同一消息 id，其余字段不变）→ 合法
-        revised = create_message("user", [tool_result_block("c1", [text_block("b.txt")])])
+        revised = tool_result_message("c1", [text_block("b.txt")])
         revised["id"] = orig["id"]
         s.append("tool/result", {"turn": 1, "step": 1, "message": revised},
                  surfaceOp={"op": "replace", "startSeq": 1, "endSeq": 1},
                  sourceEventSeqs=[1])
         self.assertEqual(s.replace_generation, 1)
         # 改 toolCallId → 非法
-        tampered = create_message("user", [tool_result_block("c9", [text_block("c.txt")])])
+        tampered = tool_result_message("c9", [text_block("c.txt")])
         tampered["id"] = orig["id"]
         with self.assertRaises(ValueError):
             s.append("tool/result", {"turn": 1, "step": 1, "message": tampered},

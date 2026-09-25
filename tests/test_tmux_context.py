@@ -22,6 +22,18 @@ FIELDS = ["main", "0", "editor", "0", "%1", "1", "1", "layout-abc"]
 LINE = FIELD_SEP.join(FIELDS)
 
 
+class _FakeExecution:
+    def __init__(self, result):
+        self._result = result
+
+    def result(self):
+        result = dict(self._result)
+        for channel in ("stdout", "stderr"):
+            if isinstance(result.get(channel), str):
+                result[channel] = {"text": result[channel], "truncated": False}
+        return result
+
+
 class FakeShell:
     def __init__(self, result=None, error=None):
         self.result = result if result is not None else {"exitCode": 0, "stdout": LINE + "\n",
@@ -31,10 +43,10 @@ class FakeShell:
     def resolve(self, request):
         return dict(request)
 
-    def run(self, spec):
+    def execute(self, spec):
         if self.error is not None:
             raise self.error
-        return self.result
+        return _FakeExecution(self.result)
 
 
 class FakeLogger:
@@ -107,7 +119,7 @@ class TmuxContextCase(unittest.TestCase):
         first = self._pre_step(step=1)
         self.assertEqual(len(first["messages"]), 1)
         message = first["messages"][0]
-        self.assertEqual(message["source"]["plugin"], NAME)
+        self.assertEqual(message["source"]["kind"], NAME)
         self.assertIn("tmux location (turn 1):", message["content"][0]["text"])
         self.assertEqual(self._pre_step(step=2)["messages"], [])
 

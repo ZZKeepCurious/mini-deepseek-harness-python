@@ -1140,20 +1140,18 @@ class AcpServer:
             })
         elif etype == "tool/result":
             data = event["data"]
-            blocks = (data.get("message") or {}).get("content") or []
-            if not blocks:
-                return
-            block = blocks[0]
+            message = data.get("message") or {}
+            blocks = message.get("content") or []
             content = []
-            for inner in block.get("content", []):
+            for inner in blocks:
                 converted = assistant_block_to_acp(self._attachment, inner)
                 if converted is None:
                     continue
                 content.append({"type": "content", "content": converted})
             self._deliver_update(record, {
                 "sessionUpdate": "tool_call_update",
-                "toolCallId": block.get("toolCallId"),
-                "status": "failed" if block.get("isError") else "completed",
+                "toolCallId": message.get("toolCallId"),
+                "status": "failed" if message.get("isError") else "completed",
                 "content": content,
             })
 

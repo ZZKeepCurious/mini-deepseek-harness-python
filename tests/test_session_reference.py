@@ -30,7 +30,7 @@ def surface(session_id, items, cwd=None, version=3, checkpoints=()):
     events = []
     for index, (role, text) in enumerate(items):
         if role == "user":
-            source = {"kind": "plugin", "plugin": "compact"} if index in checkpoints \
+            source = {"kind": "compact-checkpoint"} if index in checkpoints \
                 else {"kind": "user"}
             events.append({"seq": index, "type": "user/message",
                            "data": {"source": source,

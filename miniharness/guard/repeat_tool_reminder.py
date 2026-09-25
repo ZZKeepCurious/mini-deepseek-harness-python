@@ -129,7 +129,7 @@ def _validate_thresholds(values: list[Any]) -> list[int]:
     return sorted(values)
 
 
-_PLUGIN_SOURCE = {"kind": "plugin", "plugin": "repeat-tool-reminder"}
+_PLUGIN_SOURCE = {"kind": "repeat-tool-reminder"}
 
 
 def _reminder_message(tool_name: str, count: int, text: str) -> dict:

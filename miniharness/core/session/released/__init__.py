@@ -35,11 +35,15 @@ from .dispositions import (
     RELEASED_V2_EVENT_TYPES,
     RELEASED_V3_EVENT_DISPOSITIONS,
     RELEASED_V3_EVENT_TYPES,
+    RELEASED_V4_EVENT_DISPOSITIONS,
+    RELEASED_V4_EVENT_TYPES,
 )
 from .codec import (
     RELEASED_V0_CODEC,
     RELEASED_V1_CODEC,
     RELEASED_V2_CODEC,
+    RELEASED_V3_CODEC,
+    RELEASED_V4_CODEC,
     PackedRowError,
     create_released_codec,
     decode_released_header,
@@ -66,11 +70,22 @@ from .validate_v3 import (
     RELEASED_V3_RELATIONSHIP_EXTENSIONS,
     assert_released_v3_artifact,
     assert_released_v3_header,
+    assert_released_v3_physical_artifact,
     restore_released_v3_artifact,
+)
+from .validate_v4 import (
+    RELEASED_V4_RELATIONSHIP_EXTENSIONS,
+    SURFACE_TYPES_V4,
+    assert_released_v4_artifact,
+    assert_released_v4_header,
+    assert_released_v4_physical_artifact,
+    assert_v4_event,
+    restore_released_v4_artifact,
 )
 from .migrate_v0_v1 import V0_TO_V1
 from .migrate_v1_to_v2 import V1_TO_V2
 from .migrate_v2_to_v3 import V2_TO_V3
+from .migrate_v3_to_v4 import V3_TO_V4
 from .catalog import (
     SESSION_FORMAT_CATALOG,
     migrate_released_artifact,
@@ -98,9 +113,13 @@ __all__ = [
     "RELEASED_V2_EVENT_TYPES",
     "RELEASED_V3_EVENT_DISPOSITIONS",
     "RELEASED_V3_EVENT_TYPES",
+    "RELEASED_V4_EVENT_DISPOSITIONS",
+    "RELEASED_V4_EVENT_TYPES",
     "RELEASED_V0_CODEC",
     "RELEASED_V1_CODEC",
     "RELEASED_V2_CODEC",
+    "RELEASED_V3_CODEC",
+    "RELEASED_V4_CODEC",
     "create_released_codec",
     "decode_released_header",
     "assert_released_event_payload",
@@ -120,10 +139,19 @@ __all__ = [
     "RELEASED_V3_RELATIONSHIP_EXTENSIONS",
     "assert_released_v3_artifact",
     "assert_released_v3_header",
+    "assert_released_v3_physical_artifact",
     "restore_released_v3_artifact",
+    "RELEASED_V4_RELATIONSHIP_EXTENSIONS",
+    "SURFACE_TYPES_V4",
+    "assert_released_v4_artifact",
+    "assert_released_v4_header",
+    "assert_released_v4_physical_artifact",
+    "assert_v4_event",
+    "restore_released_v4_artifact",
     "V0_TO_V1",
     "V1_TO_V2",
     "V2_TO_V3",
+    "V3_TO_V4",
     "SESSION_FORMAT_CATALOG",
     "migrate_released_artifact",
     "migrate_released_header",
