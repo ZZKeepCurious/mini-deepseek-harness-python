@@ -67,6 +67,7 @@ LAYER_UNITS = [
     ("terminal", 1),
     ("terminal_bash", 3),
     ("tool_terminal", 3),
+    ("tool_bash", 3),
     ("terminal_controller", 3),
     ("workspace_controller", 3),
     ("workspace_files", 3),
@@ -237,6 +238,16 @@ class ImportDirectionTest(unittest.TestCase):
                     # （confine + 归因），上游 bash-sandbox 同样依赖 dsh-sandbox；
                     # seams 层不得反向 import shell
                     continue
+                if src_unit == "tool_bash" and dst_unit == "shell":
+                    # §5 显式例外（单方向）：tool-bash 是 ctx.shell + ctx.shellEnv 的
+                    # 模型面消费者（上游 tool-bash 依赖 dsh-shell / dsh-shell-env）；
+                    # shell 层不得反向 import tool_bash
+                    continue
+                if src_unit == "cli" and dst_unit == "tool_bash":
+                    # §5 显式例外（单方向）：default_tools 组装真实 bash 工具
+                    # （上游 bundle/base compose tool-bash）；同 cli→shell 先例，
+                    # tool_bash 不得反向 import cli
+                    continue
                 if src_unit == "mcp" and dst_unit == "seams":
                     # §5 显式例外（单方向）：transport 复用 seams/subprocess_env 的
                     # 净身父环境组装 stdio 子进程 env（上游 mcp-client spawn 透传
@@ -369,7 +380,7 @@ TOP_LEVEL_ALL = {
     "SessionPersistence", "SqlitePersistence", "StreamChunk", "TOOL_NOT_STARTED",
     "TOOL_OUTCOME_UNKNOWN", "Tool", "ToolRegistry", "apply_patch", "boot",
     "create_message", "derive_messages", "reasoning_block", "repair_interrupted_turn",
-    "run_headless", "text_block", "tool_call_block", "tool_result_block", "turn_balance",
+    "run_headless", "text_block", "tool_call_block", "tool_result_message", "turn_balance",
 }
 
 

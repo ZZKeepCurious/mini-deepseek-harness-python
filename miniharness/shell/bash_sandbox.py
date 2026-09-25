@@ -2,20 +2,22 @@
 
 把精确的本地 bash argv 经 `ctx.sandbox`（seams/sandbox_local.py）包裹后
 spawn，继承本地进程机制，并报告所选 mode、enforcement 与 denial 事实。
-正面 runner 失败证据意味着命令从未运行：前台调用抛 `SandboxUnavailableError`
-（SANDBOX_UNAVAILABLE）。审批归工具层所有；每次调用携带完整的已决议策略。
+正面 runner 失败证据意味着命令从未运行：前台 `result()` 抛
+`SandboxUnavailableError`（SANDBOX_UNAVAILABLE）；后台句柄把事实挂在
+`execution.sandbox.runnerFailed` 上。审批归工具层所有；每次调用携带完整的
+已决议策略。
 
 三路归因（helpers.py）：runner 启动失败 / denial / 命令自身失败——runner
 失败优先于 denial（诊断里可能含 denial 词汇但命令根本没跑）。
 danger-full-access 直通：不调 confine，结果附 `sandbox: {mode, denied: false}`。
 """
-
 from __future__ import annotations
 
 from ..core.scope import Context
 from ..seams.sandbox_local import LocalSandboxProvider, SandboxUnavailableError
 from .bash_local import LocalBashExecutor
 from .helpers import classify_denial, classify_runner_failure, is_runner_spawn_failure
+from .types import ShellExecution
 
 __all__ = ["SandboxBashExecutor"]
 
@@ -51,35 +53,22 @@ class SandboxBashExecutor(LocalBashExecutor):
             spec["sandboxPolicy"] = self._policy_service.resolve()
         return spec
 
-    def run(self, spec: dict) -> dict:
+    def execute(self, spec: dict) -> ShellExecution:
         spec = self.resolve(spec)
         policy = spec["sandboxPolicy"]
         mode = policy["mode"]
         if mode == "danger-full-access":
-            result = super().run(spec)
-            return {**result, "sandbox": {"mode": mode, "denied": False}}
+            return self._decorate(
+                super().execute(spec),
+                lambda result: {**result, "sandbox": {"mode": mode, "denied": False}})
         confined = self.confine(spec["command"], {**policy, "mode": mode})
-        try:
-            result = self.spawn_argv(spec, confined["argv"])
-        except OSError as error:
-            # 阻止了 spawn 的上游中止仍是取消（上游 signal.throwIfAborted 同位；
-            # mini 前台路径无 AbortSignal 语义，OSError 直接归因）
-            if is_runner_spawn_failure(error, confined["argv"][0], spec.get("workdir") or "."):
-                raise SandboxUnavailableError(mode, str(error)) from error
-            raise
-        runner_failure = classify_runner_failure(
-            result.get("exitCode"), result.get("stderr", ""),
-            confined["runnerFailureRules"])
-        if runner_failure is not None:
-            raise SandboxUnavailableError(mode, runner_failure["detail"])
-        return {
-            **result,
-            "sandbox": {
-                "mode": mode,
-                "denied": classify_denial(result, confined["denialSignatures"]),
-                "enforcement": confined["enforcement"],
-            },
-        }
+        execution = self.execute_argv(
+            spec, confined["argv"],
+            on_settled=lambda e: self._stamp(e, confined, mode, spec["workdir"]))
+        return self._decorate(
+            execution,
+            lambda result: self._sandbox_result(result, confined, mode),
+            lambda error: self._classify_spawn_error(error, confined, mode, spec["workdir"]))
 
     def confine(self, command: str, policy: dict) -> dict:
         """经 ctx.sandbox 包裹一条 shell 命令（内层 `bash -c`）。
@@ -87,3 +76,71 @@ class SandboxBashExecutor(LocalBashExecutor):
         provider 错误原样传播；返回的 argv 直接交给本地执行器的 spawn 路径。
         """
         return self._sandbox.confine(["bash", "-c", command], policy)
+
+    def _sandbox_result(self, result: dict, confined: dict, mode: str) -> dict:
+        """给结算投影盖沙箱事实；runner 失败优先于 denial 并抛基础设施错误。"""
+        stderr_text = result["stderr"]["text"]
+        runner_failure = classify_runner_failure(
+            result.get("exitCode"), stderr_text, confined["runnerFailureRules"])
+        if runner_failure is not None:
+            raise SandboxUnavailableError(mode, runner_failure["detail"])
+        return {
+            **result,
+            "sandbox": {
+                "mode": mode,
+                "denied": classify_denial(
+                    {"exitCode": result.get("exitCode"), "stderr": stderr_text},
+                    confined["denialSignatures"]),
+                "enforcement": confined["enforcement"],
+            },
+        }
+
+    def _stamp(self, execution: ShellExecution, confined: dict, mode: str,
+               workdir: str) -> None:
+        """进程结算即把沙箱事实挂上句柄（后台读路径也看得到 runnerFailed）。"""
+        stderr_text = execution.observed["stderr"].read_from(0)["text"]
+        if execution._spawn_error is not None:
+            runner_failed = is_runner_spawn_failure(
+                execution._spawn_error, confined["argv"][0], workdir)
+        else:
+            runner_failed = classify_runner_failure(
+                execution.exitCode, stderr_text, confined["runnerFailureRules"]) is not None
+        sandbox = {
+            "mode": mode,
+            "denied": (not runner_failed) and classify_denial(
+                {"exitCode": execution.exitCode, "stderr": stderr_text},
+                confined["denialSignatures"]),
+            "enforcement": confined["enforcement"],
+        }
+        if runner_failed:
+            sandbox["runnerFailed"] = True
+        execution.sandbox = sandbox
+
+    @staticmethod
+    def _classify_spawn_error(error: BaseException, confined: dict, mode: str,
+                              workdir: str):
+        """上游中止仍是取消；否则 runner 可执行证据 → SandboxUnavailableError。"""
+        if isinstance(error, OSError) and is_runner_spawn_failure(
+                error, confined["argv"][0], workdir):
+            raise SandboxUnavailableError(mode, str(error)) from error
+        raise error
+
+    @staticmethod
+    def _decorate(execution: ShellExecution, map_result, map_error=None) -> ShellExecution:
+        """就地装饰前台投影（memoized 一次）——句柄身份不变。"""
+        base = execution.result
+        state = {"value": None}
+
+        def result():
+            if state["value"] is None:
+                try:
+                    raw = base()
+                except BaseException as error:  # noqa: BLE001 - 装饰错误映射后重抛
+                    if map_error is not None:
+                        map_error(error)
+                    raise
+                state["value"] = map_result(raw)
+            return state["value"]
+
+        execution.result = result
+        return execution

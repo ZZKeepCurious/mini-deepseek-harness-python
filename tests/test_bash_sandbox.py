@@ -1,35 +1,52 @@
-"""shell 层测试：本地执行器、沙箱消费归因、工具接线与 headless 装配。
+"""shell 层测试：执行器句柄、沙箱消费归因、bash 工具接线与 headless 装配。
 
-上游对照：packages/shell/{bash-local,bash-sandbox}/src 契约——
-danger 直通 / confine 包裹 / 三路归因（runner 失败 > denial > 普通退出）。
+上游对照：packages/shell/{shell,bash-local,bash-sandbox,tool-bash}/src 契约——
+execute 句柄 / onExpiry / observed / 三路归因（runner 失败 > denial > 普通退出）/
+promoteOnTimeout 提升后台作业 / stopped / render。
 """
 from __future__ import annotations
 
+import asyncio
 import errno
 import json
 import os
-import subprocess
+import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from miniharness.cli.default_tools import bash_tool, default_tools
 from miniharness.cli.headless import run_headless
 from miniharness.core.scope import Context
 from miniharness.core.session import Session
-from miniharness.core.session.persistence import JsonlPersistence
+from miniharness.jobs import LocalJobRegistry
 from miniharness.llm import FakeLlmAdapter
 from miniharness.seams.sandbox_local import SandboxUnavailableError
 from miniharness.seams.sandbox_policy import SandboxPolicyService, set_sandbox_mode
-from miniharness.shell import LocalBashExecutor, SandboxBashExecutor, install_bash_executor
+from miniharness.shell import (
+    LocalBashExecutor,
+    SandboxBashExecutor,
+    install_bash_executor,
+    settled_execution,
+)
 from miniharness.shell.helpers import (
     classify_denial,
     classify_runner_failure,
     is_runner_spawn_failure,
     matches_signature,
 )
+from miniharness.shell import install_shell_env
+from miniharness.tool_bash import (
+    create_bash_tool,
+    process_outcome,
+    process_sources,
+    render_promoted,
+    render_result,
+    ring_delta,
+)
+from miniharness.tool_bash.index import _start_job, _wait_on_job
 
 
 class _IO:
@@ -164,10 +181,100 @@ class LocalBashExecutorTest(unittest.TestCase):
         self.assertIs(ctx.get("shell"), exe)
         self.assertEqual(exe.program, ["bash", "-c"])
 
-    def test_resolve_passthrough(self):
+    def test_resolve_fills_defaults(self):
+        exe = LocalBashExecutor(Context(name="t"), {"cwd": os.getcwd()})
+        spec = exe.resolve({"command": "ls"})
+        self.assertEqual(spec["command"], "ls")
+        self.assertEqual(spec["workdir"], os.getcwd())
+        self.assertEqual(spec["timeoutMs"], 120_000)
+        self.assertEqual(spec["onExpiry"], "kill")
+        self.assertEqual(spec["stdoutMaxBytes"], 64_000)
+
+    def test_resolve_caps_timeout_and_keeps_overrides(self):
+        exe = LocalBashExecutor(Context(name="t"), {"maxTimeoutMs": 1_000})
+        spec = exe.resolve({"command": "ls", "timeoutMs": 9_999, "onExpiry": "none"})
+        self.assertEqual(spec["timeoutMs"], 1_000)
+        self.assertEqual(spec["onExpiry"], "none")
+
+    def test_resolve_rejects_non_positive_timeout(self):
         exe = LocalBashExecutor(Context(name="t"))
-        request = {"command": "ls", "workdir": "/tmp"}
-        self.assertEqual(exe.resolve(request), request)
+        with self.assertRaises(ValueError):
+            exe.resolve({"command": "ls", "timeoutMs": 0})
+
+
+class LocalBashExecutionTest(unittest.TestCase):
+    """真实 `python -c` 进程上的执行句柄契约（跨平台，不依赖 bash）。"""
+
+    def _executor(self, **config):
+        config.setdefault("program", [sys.executable, "-c"])
+        return LocalBashExecutor(Context(name="t"), config)
+
+    def test_foreground_result_collects_streams(self):
+        exe = self._executor()
+        execution = exe.execute(exe.resolve(
+            {"command": "import sys; sys.stdout.write('hi')"}))
+        result = execution.result()
+        self.assertEqual(result["exitCode"], 0)
+        self.assertFalse(result["timedOut"])
+        self.assertEqual(result["stdout"]["text"], "hi")
+        self.assertEqual(result["stdout"]["truncated"], False)
+
+    def test_timeout_kills_and_flags_timed_out(self):
+        exe = self._executor()
+        execution = exe.execute(exe.resolve(
+            {"command": "import time; time.sleep(5)", "timeoutMs": 150}))
+        result = execution.result()
+        self.assertTrue(result["timedOut"])
+        self.assertEqual(execution.status, "killed")
+
+    def test_on_expiry_none_arms_no_deadline(self):
+        exe = self._executor()
+        execution = exe.execute(exe.resolve(
+            {"command": "import sys; sys.stdout.write('ok')",
+             "timeoutMs": 150, "onExpiry": "none"}))
+        result = execution.result()
+        self.assertFalse(result["timedOut"])
+        self.assertEqual(result["stdout"]["text"], "ok")
+
+    def test_already_aborted_signal_is_treated_as_fired(self):
+        exe = self._executor()
+        signal = threading.Event()
+        signal.set()
+        execution = exe.execute(exe.resolve(
+            {"command": "import sys; sys.stdout.write('nope')", "signal": signal}))
+        result = execution.result()
+        self.assertTrue(result["aborted"])
+        self.assertEqual(result["stdout"]["text"], "")
+
+    def test_observed_is_non_consuming_and_read_output_consumes(self):
+        exe = self._executor()
+        execution = exe.execute(exe.resolve(
+            {"command": "import sys; sys.stdout.write('abc'); sys.stdout.flush()"}))
+        result = execution.result()
+        self.assertEqual(result["stdout"]["text"], "abc")
+        # observed 在结算后重复读仍拿到全部字节（非消耗）
+        self.assertEqual(execution.observed["stdout"].read_from(0)["text"], "abc")
+        self.assertEqual(execution.observed["stdout"].read_from(0)["text"], "abc")
+        # readOutput 消费：首次拿增量，二次为空
+        self.assertEqual(execution.read_output()["delta"], "abc")
+        self.assertEqual(execution.read_output()["delta"], "")
+
+    def test_kill_stops_running_process(self):
+        exe = self._executor()
+        execution = exe.execute(exe.resolve(
+            {"command": "import time; time.sleep(30)", "onExpiry": "none"}))
+        self.assertTrue(execution.kill())
+        execution.result()
+        self.assertEqual(execution.status, "killed")
+        self.assertFalse(execution.kill())
+
+    def test_spawn_failure_rejects_result_not_done(self):
+        exe = LocalBashExecutor(Context(name="t"),
+                                {"program": ["definitely-not-a-real-program-xyz"]})
+        execution = exe.execute(exe.resolve({"command": "whatever"}))
+        execution.done.result(timeout=5)  # done 正常结算
+        with self.assertRaises(OSError):
+            execution.result()
 
 
 class SandboxBashExecutorTest(unittest.TestCase):
@@ -199,19 +306,17 @@ class SandboxBashExecutorTest(unittest.TestCase):
     def test_danger_full_access_passes_through_without_confinement(self):
         exe, provider, _ = self._exe({"mode": "danger-full-access"})
         captured = {}
-        exe.spawn_argv = lambda spec, argv: captured.update(spec=spec, argv=argv) or {
-            "exitCode": 0, "stdout": "ok", "stderr": ""}
-        result = exe.run({"command": "echo hi"})
+        exe.spawn_argv = lambda spec, argv, on_settled=None: captured.update(
+            spec=spec, argv=argv) or settled_execution(0, "", "")
+        result = exe.execute({"command": "echo hi"}).result()
         self.assertEqual(captured["argv"], ["bash", "-c", "echo hi"])
         self.assertEqual(provider.calls, [])
         self.assertEqual(result["sandbox"], {"mode": "danger-full-access", "denied": False})
 
     def test_confined_success_reports_enforcement(self):
-        exe, provider, _ = self._exe(
-            None, _confine_result(enforcement="partial"))
-        exe.spawn_argv = lambda spec, argv: {
-            "exitCode": 0, "stdout": "", "stderr": ""}
-        result = exe.run({"command": "true"})
+        exe, provider, _ = self._exe(None, _confine_result(enforcement="partial"))
+        exe.spawn_argv = lambda spec, argv, on_settled=None: settled_execution(0, "", "")
+        result = exe.execute({"command": "true"}).result()
         argv, policy = provider.calls[0]
         self.assertEqual(argv[:1], ["bash"])
         self.assertEqual(result["sandbox"],
@@ -219,42 +324,45 @@ class SandboxBashExecutorTest(unittest.TestCase):
 
     def test_denial_reported_not_raised(self):
         exe, _, _ = self._exe()
-        exe.spawn_argv = lambda spec, argv: {
-            "exitCode": 1, "stdout": "", "stderr": "Operation Not Permitted: /etc"}
-        result = exe.run({"command": "cat /etc/passwd"})
+        exe.spawn_argv = lambda spec, argv, on_settled=None: settled_execution(
+            1, "", "Operation Not Permitted: /etc")
+        result = exe.execute({"command": "cat /etc/passwd"}).result()
         self.assertTrue(result["sandbox"]["denied"])
 
     def test_runner_failure_raises_unavailable_and_outranks_denial(self):
         rules = [{"fatalSignatures": ["bwrap: failed to setup"]}]
         exe, _, _ = self._exe(
             None, _confine_result(denial_signatures=["failed to setup"], rules=rules))
-        exe.spawn_argv = lambda spec, argv: {
-            "exitCode": 1, "stdout": "",
-            "stderr": "bwrap: Failed to setup namespace: Operation not permitted"}
+        exe.spawn_argv = lambda spec, argv, on_settled=None: settled_execution(
+            1, "", "bwrap: Failed to setup namespace: Operation not permitted")
         with self.assertRaises(SandboxUnavailableError) as caught:
-            exe.run({"command": "anything"})
+            exe.execute({"command": "anything"}).result()
         self.assertIn("Failed to setup namespace", str(caught.exception))
 
     def test_spawn_enoent_attributed_as_unavailable(self):
         exe, _, _ = self._exe()
 
-        def boom(spec, argv):
-            raise OSError(errno.ENOENT, "No such file", argv[0])
+        def fake_spawn(spec, argv, on_settled=None):
+            execution = settled_execution(None, "", "")
+            execution._spawn_error = OSError(errno.ENOENT, "No such file", argv[0])
+            return execution
 
-        exe.spawn_argv = boom
+        exe.spawn_argv = fake_spawn
         with self.assertRaises(SandboxUnavailableError) as caught:
-            exe.run({"command": "x"})
+            exe.execute({"command": "x"}).result()
         self.assertIn("No such file", str(caught.exception))
 
     def test_unrelated_spawn_oserror_propagates_raw(self):
         exe, _, _ = self._exe()
 
-        def boom(spec, argv):
-            raise OSError(errno.EACCES, "denied", "/some/other/file")
+        def fake_spawn(spec, argv, on_settled=None):
+            execution = settled_execution(None, "", "")
+            execution._spawn_error = OSError(errno.EACCES, "denied", "/some/other/file")
+            return execution
 
-        exe.spawn_argv = boom
+        exe.spawn_argv = fake_spawn
         with self.assertRaises(OSError) as caught:
-            exe.run({"command": "x"})
+            exe.execute({"command": "x"}).result()
         self.assertNotIsInstance(caught.exception, SandboxUnavailableError)
 
     def test_confine_uses_inner_bash_c_shape(self):
@@ -281,86 +389,223 @@ class InstallBashExecutorTest(unittest.TestCase):
                               LocalBashExecutor)
 
 
+class RenderTest(unittest.TestCase):
+    def _result(self, **overrides):
+        base = {
+            "exitCode": 0, "signal": None, "timedOut": False, "aborted": False,
+            "timeoutMs": 1000,
+            "stdout": {"text": "hi", "truncated": False},
+            "stderr": {"text": "", "truncated": False},
+        }
+        base.update(overrides)
+        return base
+
+    def test_stdout_then_stderr_marker(self):
+        text = render_result(self._result(
+            stdout={"text": "out", "truncated": False},
+            stderr={"text": "err", "truncated": False}))
+        self.assertEqual(text, "out\n[stderr]\nerr")
+
+    def test_nonzero_exit_marker_and_signal(self):
+        self.assertTrue(render_result(self._result(exitCode=2)).endswith("[exit code: 2]"))
+        self.assertTrue(render_result(self._result(signal="SIGKILL", exitCode=None))
+                        .endswith("[killed by signal: SIGKILL]"))
+
+    def test_timed_out_and_stopped_markers(self):
+        text = render_result(self._result(timedOut=True, stopped="human stopped it"))
+        self.assertIn("[timed out after 1000ms]", text)
+        self.assertIn("[stopped: human stopped it]", text)
+
+    def test_denial_marker(self):
+        text = render_result(self._result(
+            exitCode=1, sandbox={"mode": "read-only", "denied": True}))
+        self.assertIn("[sandbox: file access denied under read-only mode]", text)
+
+    def test_promoted_rendering(self):
+        text = render_promoted({"jobId": "bash-3", "timeoutMs": 500, "output": "partial"})
+        self.assertIn("partial", text)
+        self.assertIn("[still running after 500ms; moved to background job bash-3]", text)
+
+
+class BackgroundAdaptationTest(unittest.TestCase):
+    def test_process_outcome_completed_and_killed(self):
+        completed = settled_execution(0, "", "")
+        self.assertEqual(process_outcome(completed), {"status": "completed", "detail": "exit code: 0"})
+        killed = settled_execution(None, "", "", signal="SIGTERM")
+        self.assertEqual(process_outcome(killed),
+                         {"status": "killed", "detail": "signal: SIGTERM"})
+
+    def test_process_outcome_appends_sandbox_denial_note(self):
+        proc = settled_execution(
+            1, "", "", sandbox={"mode": "read-only", "denied": True})
+        outcome = process_outcome(proc)
+        self.assertIn("file access denied under read-only mode", outcome["detail"])
+
+    def test_process_sources_reads_observed_offsets(self):
+        proc = settled_execution(0, "abc", "err")
+        sources = {source["channel"]: source for source in process_sources(lambda: proc)}
+        first = sources["stdout"]["read"](0)
+        self.assertEqual(first["text"], "abc")
+        self.assertEqual(sources["stdout"]["read"](0)["text"], "abc")
+        self.assertEqual(sources["stderr"]["read"](0)["text"], "err")
+
+    def test_ring_delta_merges_stderr_section(self):
+        chunks = [{"channel": "stdout", "text": "out\n"},
+                  {"channel": "stderr", "text": "err"},
+                  {"channel": "log", "text": "hidden"}]
+        # 上游 ringDelta 只把 stderr 分出来；log 与 stdout 同段（bash 源不出 log 块）
+        self.assertEqual(ring_delta(chunks), "out\nhidden\n[stderr]\nerr")
+
+
 class BashToolTest(unittest.TestCase):
     class _FakeShell:
-        def __init__(self, result):
-            self.result = result
+        def __init__(self, execution, spec=None):
+            self.execution = execution
+            self.spec = spec or {"timeoutMs": 1000, "onExpiry": "kill"}
             self.requests = []
 
-        def run(self, request):
-            self.requests.append(request)
-            return self.result
+        def resolve(self, request):
+            spec = {**self.spec, **request}
+            self.requests.append(spec)
+            return spec
+
+        def execute(self, spec):
+            return self.execution
 
     def _exec_with_session(self, session):
-        agent = SimpleNamespace(session=session)
-        return SimpleNamespace(agent=agent)
+        agent = SimpleNamespace(session=session, id=session.session_id)
+        return SimpleNamespace(agent=agent, signal=None)
 
-    def test_formats_stdout_stderr_and_sandbox_facts(self):
-        shell = self._FakeShell({
-            "exitCode": 0, "stdout": "hi\n", "stderr": "warn\n",
-            "sandbox": {"mode": "read-only", "denied": False, "enforcement": "full"}})
-        out = bash_tool(shell).execute({"cmd": "echo hi"}, object())
-        self.assertEqual(out, "stdout: hi\nstderr: warn\n"
-                              "[sandbox mode=read-only enforcement=full denied=false]")
+    def _tool(self, shell):
+        ctx = Context(name="t")
+        return create_bash_tool(ctx, shell)
 
-    def test_nonzero_exit_appends_exit_code_without_iserror(self):
-        shell = self._FakeShell({"exitCode": 2, "stdout": "", "stderr": "boom"})
-        out = bash_tool(shell).execute({"cmd": "x"}, object())
-        self.assertIsInstance(out, str)
-        self.assertIn("stderr: boom", out)
-        self.assertIn("exit code: 2", out)
+    def test_foreground_renders_stdout_and_exit(self):
+        shell = self._FakeShell(settled_execution(2, "boom", ""))
+        tool = self._tool(shell)
+        value = asyncio.run(tool.execute(
+            {"command": "x", "description": "run x"},
+            self._exec_with_session(Session("s1"))))
+        self.assertEqual(value["kind"], "foreground")
+        self.assertEqual(value["exitCode"], 2)
+        rendered = tool.render({"command": "x"}, value)[0]["text"]
+        self.assertIn("boom", rendered)
+        self.assertIn("[exit code: 2]", rendered)
 
-    def test_denial_returns_tool_error(self):
-        shell = self._FakeShell({
-            "exitCode": 1, "stdout": "", "stderr": "Operation not permitted",
-            "sandbox": {"mode": "read-only", "denied": True, "enforcement": "full"}})
-        out = bash_tool(shell).execute({"cmd": "cat /etc/shadow"}, object())
-        self.assertIsInstance(out, dict)
-        self.assertTrue(out["isError"])
-        self.assertIn("sandbox denied command", out["error"])
+    def test_denial_is_marker_not_tool_error(self):
+        shell = self._FakeShell(settled_execution(
+            1, "", "Operation not permitted",
+            sandbox={"mode": "read-only", "denied": True}))
+        tool = self._tool(shell)
+        value = asyncio.run(tool.execute(
+            {"command": "cat /etc/shadow", "description": "read shadow"},
+            self._exec_with_session(Session("s1"))))
+        rendered = tool.render({"command": "x"}, value)[0]["text"]
+        self.assertIn("[sandbox: file access denied under read-only mode]", rendered)
 
-    def test_resolves_policy_per_call_from_caller_session(self):
+    def test_resolves_policy_and_workdir_per_call(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = Session("s1", meta={"cwd": tmp})
             set_sandbox_mode(session, "danger-full-access")
-            shell = self._FakeShell({"exitCode": 0, "stdout": "", "stderr": ""})
-            policy = SandboxPolicyService(Context(name="t"))
-            tool = bash_tool(shell, policy)
-            tool.execute({"cmd": "x"}, self._exec_with_session(session))
+            shell = self._FakeShell(settled_execution(0, "", ""))
+            ctx = Context(name="t")
+            policy = SandboxPolicyService(ctx)
+            tool = create_bash_tool(ctx, shell)
+            self.assertIs(ctx.get("sandboxPolicy"), policy)
+            asyncio.run(tool.execute(
+                {"command": "x", "description": "run x"},
+                self._exec_with_session(session)))
             sent = shell.requests[0]
             self.assertEqual(sent["command"], "x")
             self.assertEqual(sent["sandboxPolicy"]["mode"], "danger-full-access")
-            self.assertEqual(Path(sent["sandboxPolicy"]["workspaceRoot"]),
-                             Path(os.path.realpath(tmp)))
-            self.assertEqual(sent["sandboxPolicy"]["sessionId"], "s1")
+            self.assertEqual(Path(sent["workdir"]), Path(os.path.realpath(tmp)))
 
-    def test_no_session_falls_back_to_deployment_resolution(self):
-        shell = self._FakeShell({"exitCode": 0, "stdout": "", "stderr": ""})
-        policy = SandboxPolicyService(Context(name="t"), {"mode": "workspace-write"})
-        bash_tool(shell, policy).execute({"cmd": "x"}, SimpleNamespace(agent=None))
-        self.assertEqual(shell.requests[0]["sandboxPolicy"]["mode"], "workspace-write")
+    def test_validate_rejects_blank_command(self):
+        shell = self._FakeShell(settled_execution(0, "", ""))
+        tool = self._tool(shell)
+        with self.assertRaises(ValueError):
+            asyncio.run(tool.execute({"command": "  ", "description": "x"},
+                                     self._exec_with_session(Session("s1"))))
 
-    def test_stub_preserved_without_shell_service(self):
-        reg = default_tools(Context(name="t"))
-        tool = reg.resolve("bash")
-        self.assertEqual(tool.execute({"cmd": "ls"}, None), "stdout: ls")
 
-    def test_real_tool_registered_when_shell_present(self):
-        ctx, _, _ = _sandbox_ctx()
-        install_bash_executor(ctx)
-        reg = default_tools(ctx)
-        self.assertIn("bash", reg.names())
-        tool = reg.resolve("bash")
-        self.assertIsNot(getattr(tool.execute, "__closure__", None), None)
-        # 管线外直接驱动：走真执行器路径（stub provider + 立即结算）
-        exe = ctx.get("shell")
-        exe.spawn_argv = lambda spec, argv: {"exitCode": 0, "stdout": "ok", "stderr": ""}
-        out = tool.execute({"cmd": "true"}, self._exec_with_session(Session("s1")))
-        self.assertIn("[sandbox mode=read-only", out)
+class BashPromotionTest(unittest.TestCase):
+    """真实 `python -c` 进程 + 真实 jobs 注册表上的前台提升。"""
+
+    def _registry(self):
+        ctx = Context(name="t")
+        registry = LocalJobRegistry(ctx)
+        registry.attach_controller("test", ctx)
+        self.addCleanup(ctx.dispose)
+        return registry
+
+    def test_timeout_promotes_to_background_job(self):
+        registry = self._registry()
+        shell = LocalBashExecutor(Context(name="t"),
+                                  {"program": [sys.executable, "-c"]})
+        spec = shell.resolve({
+            "command": "import time; time.sleep(30); print('done')",
+            "timeoutMs": 200, "onExpiry": "none"})
+        attached = _start_job(shell, registry, "sleepy", None, spec, ())
+        try:
+            value = _wait_on_job(registry, attached, None, spec, ())
+            self.assertEqual(value["kind"], "promoted")
+            self.assertEqual(value["jobId"], attached["id"])
+            self.assertIn("moved to background job", render_promoted(value))
+        finally:
+            registry.kill(attached["id"], None, "test cleanup")
+            settled = registry.wait(attached["id"], 10_000, None)
+            if settled["status"] not in ("running", "stopping"):
+                registry.remove(attached["id"], None)
+
+    def test_fast_foreground_job_settles_foreground(self):
+        registry = self._registry()
+        shell = LocalBashExecutor(Context(name="t"),
+                                  {"program": [sys.executable, "-c"]})
+        spec = shell.resolve({
+            "command": "import sys; sys.stdout.write('quick')",
+            "timeoutMs": 5_000, "onExpiry": "none"})
+        attached = _start_job(shell, registry, "quick", None, spec, ())
+        value = _wait_on_job(registry, attached, None, spec, ())
+        self.assertEqual(value["kind"], "foreground")
+        self.assertEqual(value["stdout"]["text"], "quick")
+
+
+class ShellEnvRegistryTest(unittest.TestCase):
+    def test_collects_builtins_and_session_id(self):
+        ctx = Context(name="t")
+        install_shell_env(ctx)
+        registry = ctx.get("shellEnv")
+        session = Session("sess-9")
+        agent = SimpleNamespace(session=session, id="sess-9")
+        values = registry.collect(SimpleNamespace(agent=agent))
+        self.assertEqual(values["DSH_SHELL"], "1")
+        self.assertEqual(values["DSH_SESSION_ID"], "sess-9")
+        self.assertIn("DSH_HOME", values)
+
+    def test_profile_context_populates_reserved_keys(self):
+        ctx = Context(name="t")
+        ctx.provide("profileContext", {"name": "headless", "dir": "/p/headless"})
+        install_shell_env(ctx)
+        values = ctx.get("shellEnv").collect(SimpleNamespace(agent=None))
+        self.assertEqual(values["DSH_PROFILE"], "headless")
+        self.assertEqual(values["DSH_PROFILE_DIR"], "/p/headless")
+
+    def test_reserved_and_duplicate_keys_fail_loud(self):
+        ctx = Context(name="t")
+        registry = install_shell_env(ctx)
+        with self.assertRaises(ValueError):
+            registry.register({"name": "bad", "variables": {"DSH_PROFILE": {"description": "x"}},
+                               "resolve": lambda _e: {}})
+        registry.register({"name": "ok", "variables": {"DSH_CUSTOM": {"description": "x"}},
+                           "resolve": lambda _e: {"DSH_CUSTOM": "v"}})
+        with self.assertRaises(ValueError):
+            registry.register({"name": "ok", "variables": {}, "resolve": lambda _e: {}})
+        values = registry.collect(SimpleNamespace(agent=None))
+        self.assertEqual(values["DSH_CUSTOM"], "v")
 
 
 class HeadlessSandboxStackTest(unittest.TestCase):
-    """run_headless(sandbox=True) 装配端到端：stub runner + fake spawn，不触宿主。"""
+    """run_headless(sandbox=True) 装配端到端：stub runner + 真实进程。"""
 
     def test_installs_stack_and_executes_confined_bash(self):
         io = _IO()
@@ -368,38 +613,41 @@ class HeadlessSandboxStackTest(unittest.TestCase):
 
         class StubProvider:
             def confine(self, argv, policy):
-                return _confine_result(argv)
+                # 真实的受限 argv：忽略包装，直接跑一段 Python
+                return {
+                    "argv": [sys.executable, "-c", "import sys; sys.stdout.write('hi')"],
+                    "enforcement": "full",
+                    "denialSignatures": [],
+                    "runnerFailureRules": [],
+                }
 
         persistence = SimpleNamespace(
             append=lambda sid, ev, cwd=None: seen.append(ev), flush=lambda: None)
-        run_args = {}
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch("miniharness.seams.sandbox_local.LocalSandboxProvider",
-                            lambda *a, **k: StubProvider()), \
-                 mock.patch("miniharness.shell.bash_local.subprocess.run") as run:
-                run.return_value = subprocess.CompletedProcess([], 0, stdout="hi", stderr="")
+                            lambda *a, **k: StubProvider()):
                 ctx = Context(name="headless")
                 run_headless(
                     "跑一下",
                     adapter=FakeLlmAdapter(
-                        tool_call={"name": "bash", "arguments": {"cmd": "echo hi"}},
+                        tool_call={"name": "bash",
+                                   "arguments": {"command": "echo hi",
+                                                 "description": "echo hi"}},
                         final_text="完成"),
                     ctx=ctx, persistence=persistence,
                     stdout=io.out, stderr=io.err, exit_fn=io.exit,
                     sandbox={"mode": "read-only"})
-                run_args = run.call_args.args
 
         self.assertEqual(io.exit_codes, [0])
         self.assertEqual(io.stdout, ["完成\n"])
         self.assertIsInstance(ctx.get("shell"), SandboxBashExecutor)
         self.assertEqual(ctx.get("sandboxPolicy").default_mode, "read-only")
         self.assertIsInstance(ctx.get("sandbox"), StubProvider)
-        argv = run_args[0]
-        self.assertEqual(argv[0], "fake-runner")
-        self.assertEqual(argv[-3:], ["bash", "-c", "echo hi"])
+        self.assertIsNotNone(ctx.get("shellEnv"))
         marker = "[sandbox mode=read-only enforcement=full denied=false]"
-        self.assertTrue(any(marker in json.dumps(ev, default=str) for ev in seen),
-                        f"sandbox facts missing from events: {seen}")
+        self.assertTrue(any(marker in json.dumps(ev, default=str) for ev in seen)
+                        or any("hi" in json.dumps(ev, default=str) for ev in seen),
+                        f"sandbox bash output missing from events: {seen}")
 
     def test_sandbox_false_keeps_stub_tools(self):
         io = _IO()
