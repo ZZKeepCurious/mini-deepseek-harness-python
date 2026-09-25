@@ -80,14 +80,15 @@
 - 成功分支 `value` 可选（业务无值时整体省略该字段）。
 - 业务方法绝不抛业务错误——一律经 `result.ok` 表达；`details` 恒为对象。
 
-**RpcError 的 `code` 是 24 码命名空间闭集**（统一为 `<namespace>/<name>` 形式，键集与 typert
-`RemoteErrorDetailsMap` 一致：基础设施 `gateway/*` 加各域可扩展注册，见 `web/envelope.py`
-`RPC_ERROR_CODES`；路由层边界校验收 `gateway/input-invalid`，未知端点折算为
-`gateway/invocation-unavailable`）：
+**RpcError 的 `code` 是命名空间闭集**（统一为 `<namespace>/<name>` 形式，键集与 typert
+`RemoteErrorDetailsMap` 一致：基础设施 `gateway/*` 加各域可扩展注册；`web/envelope.py`
+`RPC_ERROR_CODES` 收 47 码，下块列本 web 载体直接签发的 33 个，其余由各自域 handler 签发；
+路由层边界校验收 `gateway/input-invalid`，未知端点折算为 `gateway/invocation-unavailable`）：
 
 ```
 gateway/bad-request       gateway/cancelled         gateway/internal
 gateway/arguments-invalid gateway/input-invalid     gateway/invocation-unavailable
+gateway/protocol          gateway/uplink-overflow
 session/not-found
 session/model-unavailable session/conflict          session/invalid-time-zone
 session/workspace-attach-failed workspace/not-found agent-preset/conflict
@@ -135,19 +136,21 @@ client `connection/src/client/rpc.ts` 按 `/` 切两段）；`web/args.canonical
 > handler docstring 为准，教程见 07 章 §7.5.2；子代理所属会话被访问时统一折
 > `session/agent-busy`（上游 `apiSessionSubagentOwnershipError`）。
 
-## 4. Remote 流（`WS /api/remote.mux`，`web/mux.py` + `web/stream_protocol.py`）
+## 4. Remote 流（`WS /api/remote.mux`，`web/mux.py` + `web/stream_protocol.py` + `web/uplink.py`）
 
 单一路径承载**全部** Remote 流；每条 open 后的 value 序列经 `item` 帧吐出。客户端 `streamId`
 自编号（非空字符串即可）。
 
-**浏览器 → 宿主**（文本帧两型；未知键被 schemastery 投影丢弃，判别字段缺失/类型错才拒）：
+**浏览器 → 宿主**（文本帧四型；每型字段集合精确匹配，多一个键或缺一个键都拒并关 WS 1008）：
 
 ```json
 {"type": "open",   "streamId": "<id>", "endpoint": "<endpoint>", "payload": {...}}
+{"type": "item",   "streamId": "<id>", "value": "<任意值，可省>"}
+{"type": "end",    "streamId": "<id>"}
 {"type": "cancel", "streamId": "<id>"}
 ```
 
-**宿主 → 浏览器**（文本帧三型）：
+**宿主 → 浏览器**（文本帧三型，同样字段集合精确匹配）：
 
 ```json
 {"type": "item",  "streamId": "<id>", "value": "<任意值，可省>"}
@@ -157,6 +160,14 @@ client `connection/src/client/rpc.ts` 按 `/` 切两段）；`web/args.canonical
 
 - 每条 open 立即按 `endpoint` 分发（§4.1/4.2/4.3）；`open` 内抛错 → 该流先发 `error` 帧再 `end`，
   **不关 WS**（单流失败与其它流隔离）；流中途失败同理；`error` 帧本身发送失败 → close 1011。
+- 每条 open 同时建一条**有界上行 inbox**（`web/uplink.py`）：单消费者，缓冲按整帧 UTF-8 字节
+  记账，上限 262144 字节（`create_app(stream_inbox_bytes=...)` 可调，同上游 `streamInboxBytes`）。
+  `end` 是半关（已缓冲的 `item` 仍可读尽）；`end` 之后再收 `item` → 该流以 Remote failure 中止，
+  终态 `error` 帧 code `gateway/protocol`；缓冲超限 → `gateway/uplink-overflow`（消息带
+  `limit` 与 `buffered` 字节数，`details` 带 `{endpoint}`）。两者都只杀本流、不关 WS。
+  紧跟 open 的 `item` 会排在该流 inbox 里等消费者，不因「先建流后派发」而丢。
+  `$events` 由网关自有（不走上行），open 即释放；`session/follow`、`session/control`、
+  `workspaceFiles/changes` 在流结束/取消/断连时释放。
 - 关键 `endpoint`（`GatewayStreams.stream_kinds`）：`$events`、`session/follow`、`session/control`；
    未知 endpoint → `error` 帧 `gateway/internal`。
 - `workspaceFiles/changes`（`{args:{workspaceFileScopeId, path}}`）：先以 `ctx.fs.watch`

@@ -71,6 +71,21 @@ def _as_plain(value: Any) -> Any:
     return thaw(value)
 
 
+def release_uplink(uplink: Any) -> None:
+    """释放一条上行 inbox：无人再读，之后的客户端帧直接丢弃（上游 releaseUplink）。"""
+    if uplink is not None:
+        uplink.release()
+
+
+async def _with_uplink(stream: Any, uplink: Any):
+    """代理一条流，结束时释放它的上行 inbox（上游 `invocation.close()` 的释放点）。"""
+    try:
+        async for value in stream:
+            yield value
+    finally:
+        release_uplink(uplink)
+
+
 class GatewayStreams:
     """WebApi 之上组装好的 Remote 方法面（$events + session/follow/control）。
 
@@ -105,10 +120,14 @@ class GatewayStreams:
             "workspaceFiles/changes": "workspace_changes",
         }
 
-    def open_stream(self, endpoint: str, payload: Any, signal=None):
+    def open_stream(self, endpoint: str, payload: Any, uplink: Any = None, signal=None):
         """按 endpoint 打开一个流：返回 async 生成器（帧 value 序列）。
 
         @param payload - open 帧的 payload（`{args: ...}`，各 endpoint 自校验）。
+        @param uplink - 该逻辑流的有界上行 inbox（`web/uplink.py`）。`$events` 是
+            网关自有流、无人读上行，open 时立即释放（上游 openWireStream）；其余端点
+            的 uplink 活到该流结束（上游 `invocation.close()` 释放），期间客户端
+            item 帧受字节上限约束、违例中止本流。
         @param signal - 可选取消句柄（mux 关闭/客户端 cancel 时终止）。
         @raises EventSourceFailure / RemoteStreamError。
         """
@@ -121,6 +140,8 @@ class GatewayStreams:
                 "gateway/invocation-unavailable",
                 f"typert gateway: {endpoint}: no active Remote method exports this endpoint")
         if kind == "$events":
+            if uplink is not None:
+                release_uplink(uplink)
             return self.events.open(payload, signal=signal)
         if (not isinstance(payload, dict) or set(payload) != {"args"}
                 or not isinstance(payload["args"], dict)):
@@ -133,14 +154,14 @@ class GatewayStreams:
             raise RemoteStreamError(
                 error.code, boundary_error_message(endpoint, error.message)) from error
         if kind == "follow":
-            return self._follow(payload["args"], signal)
+            return _with_uplink(self._follow(payload["args"], signal), uplink)
         if kind == "terminal_follow":
-            return self._terminal_follow(payload["args"], signal)
+            return _with_uplink(self._terminal_follow(payload["args"], signal), uplink)
         if kind == "workspace_follow":
-            return self._workspace_follow(payload["args"], signal)
+            return _with_uplink(self._workspace_follow(payload["args"], signal), uplink)
         if kind == "workspace_changes":
-            return self._workspace_changes(payload["args"], signal)
-        return self._control(signal)
+            return _with_uplink(self._workspace_changes(payload["args"], signal), uplink)
+        return _with_uplink(self._control(signal), uplink)
 
     # ---------- session/follow（历史跟随流） ----------
 

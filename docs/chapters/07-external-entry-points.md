@@ -150,7 +150,7 @@ hooks 的价值在于迁移成本：已经写好 Claude Code 钩子（安全策�
 
 > 对应 dsh 真实源码：`packages/client/connection`（两信封 RPC + HTTP 载体）+ `packages/api/gateway`（`stream-protocol.ts` + `stream-server.ts`：WS `/api/remote.mux` + `$events` 注册表）+ `packages/api/session-controller`（Typert Remote `session/*`）+ `packages/api/remotes`（Remote 事件瀑布 + `$events/result`）+ `packages/host/frontend-static`（SPA 静态载体）。web 面在 alpha.1 重组为「typert 一元 RPC + 单 WebSocket mux」，mini 跟随这一形态。前端（`packages/bundle/web-app` + `packages/client`）mini 以独立 React 工程 `webui/` 承载产品面、vanilla SPA 作教学参照（§7.5.4）。
 >
-> 分层：`web/stream_protocol.py`（§7.5.1）→ `web/api.py`（§7.5.2）→ `web/mux.py` + `web/events.py` + `web/streams.py`（§7.5.3）→ `web/server.py` + `web/downloads.py` + `web/launcher.py`（§7.5.4）→ `web/approvals.py` + `web/frontend.py` + `web/static/`（§7.5.4）。
+> 分层：`web/stream_protocol.py`（§7.5.1）→ `web/api.py`（§7.5.2）→ `web/uplink.py` + `web/mux.py` + `web/events.py` + `web/streams.py`（§7.5.3）→ `web/server.py` + `web/downloads.py` + `web/launcher.py`（§7.5.4）→ `web/approvals.py` + `web/frontend.py` + `web/static/`（§7.5.4）。
 
 ### 7.5.1 信封：两信封 RPC + Remote 流 wire 语法（`web/stream_protocol.py`）
 
@@ -163,11 +163,11 @@ alpha.1 把通信收拢为**单一两信封协议**（同 `packages/client/conne
 
 流式调用不走 SSE 专属宿主流，而是 WebSocket `/api/remote.mux` 上的一套**Remote 流帧协议**（`stream_protocol.py`，同 `stream-protocol.ts`）：
 
-- 客户端 → 服务端：`open`（恰 `{streamId, endpoint, payload}`）、`cancel`（恰 `{streamId}`）。
+- 客户端 → 服务端：`open`（恰 `{streamId, endpoint, payload}`）、`item`（`{type, streamId}` 或加 `value`）、`end`（恰 `{streamId}`）、`cancel`（恰 `{streamId}`）。每型字段集合**精确匹配**（同 `exactKeys`），多一个键即拒并关 WS 1008——不投影丢弃未知键。
 - 服务端 → 客户端：`item`（`{type:'item', streamId, value}`，**value 恒在**——null 是合法 wire 值，`JSON.stringify` 会丢 undefined，故 mini 显式补 null）、`error`（`{type:'error', streamId, error:{code, message, details}}`，**error 帧即终态、不再补 end**）、`end`（`{type:'end', streamId}`，纯终态帧；上游把 `{ok, error?}` 形状收敛为「独立 error 帧 + 纯 end」，失败路径不发 end）。
 - 网关内部端点 `$events`（宿主→客户端事件线）与 `$events/result`（客户端→宿主把事件传回宿主）——`open_stream("$events")` 一旦打开即返回 `ready`，宿主 `api-session/*` 事件线逐帧转发；`$events/result` 是 unary 结算帧（`parse_remote_event_result_payload`），供 waterfall 审批等异步通道回投结果。
 
-信封构造器（`client_request`/`server_response`/`rpc_result_ok/error`/`rpc_error`）同上游 `packages/client/connection`；传输层兜底错误投影 `transport_error` → `{code:'gateway/cancelled'}`（abort 语义）或 `{code:'gateway/internal'}`。互操作锚点：`tests/test_web_stream_protocol.py` 逐项断言 open/cancel/item/error/end 全形与 `$events/result` payload 判定（含**无损 JSON 判定**）。
+信封构造器（`client_request`/`server_response`/`rpc_result_ok/error`/`rpc_error`）同上游 `packages/client/connection`；传输层兜底错误投影 `transport_error` → `{code:'gateway/cancelled'}`（abort 语义）或 `{code:'gateway/internal'}`。互操作锚点：`tests/test_web_stream_protocol.py` 逐项断言 open/cancel/item/error/end 全形、多余键被拒与 `$events/result` payload 判定（含**无损 JSON 判定**）。
 
 ### 7.5.2 会话服务：unary 方法（`web/api.py`）
 
@@ -187,11 +187,12 @@ alpha.1 把通信收拢为**单一两信封协议**（同 `packages/client/conne
 
 `api.dispatch` handlers 收**裸 args**（如 `{cwd:...}`）；`{args:{...}}` 包装与严格校验在 `web/server.py::_unwrap_args` 统一做（见 §7.5.4）。
 
-### 7.5.3 流式：mux 单路径 + `$events` 注册表 + follow/control（`web/mux.py` + `web/events.py` + `web/streams.py`）
+### 7.5.3 流式：mux 单路径 + 有界上行 inbox + `$events` 注册表 + follow/control（`web/mux.py` + `web/uplink.py` + `web/events.py` + `web/streams.py`）
 
 - **`web/mux.py`（`RemoteStreamMuxConnection`）**：单条 `/api/remote.mux` WebSocket 承载**全部** Remote 流。客户端 `open` 帧带 endpoint，`run()` 循环泵帧、`_drive` 逐 open handler 协程、EOF 后发 `end` 结算、`cancel` 中断流。全部 Remote 流收敛到这一条 WS 路径，没有 `/api/events.mux`、`/api/events.host` 这类 SSE 线。
+- **`web/uplink.py`（`UplinkInbox`）**：每条 open 建一条**有界单消费者上行 inbox**（同 `stream-server.ts` UplinkInbox），按整帧 UTF-8 字节记账，上限 262144 字节（`create_app(stream_inbox_bytes=...)` 可调，同 `streamInboxBytes`）。`end` 是半关（缓冲里的 `item` 仍读得尽），`end` 后的 `item` → 该流以 `gateway/protocol` 中止，缓冲超限 → `gateway/uplink-overflow`（`details:{endpoint}`）；违例只杀本流并以终态 `error` 帧落地，socket 不关。`fail` 先到先得（流提前结束遮蔽缓冲），`release` 后一律丢帧。宿主已结束的流 id 收到的 `item`/`end`/`cancel` 直接丢弃（上游 mux `push` 对 closed 流早退），只有重复 `open` 关 socket。
 - **`web/events.py`（`EventStreamRegistry`）**：`$events` 注册表——`ready` 首帧 + `api-session/*` 事件线转发 + `$events/result` 结算对拍。**跨堆线程安全唤醒**：TestClient/uvicorn 把 app 跑在 portal 线程，主线程 `ctx.emit` 广播不能直接调 `asyncio.Event.set()`，`_ClientQueue._wake` 捕获运行 loop 用 `loop.call_soon_threadsafe(waiter)`（含 `loop.is_closed()` 守卫）。
-- **`web/streams.py`（`GatewayStreams`）**：`open_stream` 按 endpoint 分发：
+- **`web/streams.py`（`GatewayStreams`）**：`open_stream(endpoint, payload, uplink=..., signal=...)` 按 endpoint 分发，并**负责释放上行**——`$events` 这类网关自有流 open 即释放（其 `item` 帧被丢弃而不缓冲），其余流在整个流结束（含失败/取消/断连）时释放；当前三个消费 endpoint 的 `In` 皆为 `never`（不读上行），故它们不迭代 inbox，只承担释放责任：
   - `$events`：open 即 `ready`，随后事件帧转发。
   - `session/follow`：首帧 snapshot `{header, cursor, records, hasMore, projections}`，之后逐 event 帧（snapshot 后重投 cursor+1..end，同 `history.ts:92-149`）。lazy async 生成器错误时机——体部 `RemoteStreamError`（session/not-found/gateway/arguments-invalid）在首个 `await gen.__anext__()` 处抛、非调用时，测试须迭代驱动。
   - `session/control`：首帧 baseline `{queues, jobs, projections}`，之后 queue/jobs/projection 替换帧（同 `control.ts:67-124`）。
@@ -216,7 +217,7 @@ alpha.1 把通信收拢为**单一两信封协议**（同 `packages/client/conne
 **产品化前端（`webui/`，仓库顶层独立 React+TS+Vite 工程，推荐）**：会话列表/新建（`session/list`/`session/create`）、Trajectory 折叠（选中会话 `session/follow` 拉 snapshot + 按 seq 去重增量）、审批面板（`$events` waterfall → Allow once / Reject → `$events/result` 结算，outcome∈APPROVAL_OUTCOMES 之外 fail-closed）、队列/作业面板（`session/control` baseline+替换帧）。开发期 Vite dev server 把 `/api` 与 `/api/remote.mux` 代理到本地 Python 后端（`vite.config.ts`）；生产期 `vite build` → `MINIHARNESS_WEBUI_DIST=webui/dist` 让后端静态服务承载。`src/wire/` 是纯 TS 约定客户端（无 UI 依赖，vitest 单测 mock fetch/WS），`src/app/` 是 React 编排，`src/ui/` 是无状态展示组件。
 **教学参照（`web/static/`）**：vanilla SPA（index.html + app.js + style.css，无构建步），消费的是 alpha.1 之前的旧 SSE wire（`events.mux`/`respond`/`host.describe`），对新后端不工作——仅作历史/教学说明，不实跑。
 
-**教学简化（须标注）**：心跳 = transport 级（`ws_ping_interval=2 / ws_ping_timeout=4`，同上游 gateway heartbeat：缺省 2s Ping + 连续 2 周期无 Pong terminate，`web/launcher.py` `uvicorn_options`）；认证门 = 可选 token（配置 `MINIHARNESS_WEB_TOKEN` 后 `/api/*` 全域强制、WS 升级拒绝写 HTTP 401 同上游 `rejectRemoteStreamUpgrade`，监听 `0.0.0.0` 无 token 启动即拒绝；接口约定见 interface-wire §1.1）；`$events`/`follow`/`control` 无 `since` 恢复游标（重连重拉全量）；载荷 schema 校验在 `WebApi` 内做（上游先过 zod）；session 日志事件是 mappingproxy/tuple 冻结形态（`core/session/json.py` `deep_freeze`），序列化前经 `thaw` 还原；前端产品化工程 `webui/` 走新 wire 但不整体移植上游 `packages/client` 40 个 UI 模块——无 slot 组合；Overview 时间线/虚拟化/搜索已按上游概念补入 webui Trajectory（Overview 折叠跳转 + 虚拟化窗口 + 全文搜索），`since` 游标则与后端 wire 一致（上游 alpha.1 无该字段）；`web/static/` vanilla SPA 是旧 wire 教学参照（不实跑）。回归测试：`tests/test_web_{stream_protocol,events,mux,streams,approvals,server,export,frontend,auth}.py`（真实 uvicorn + httpx/websockets）+ `webui/` 的 vitest（wire 层 + trajectory 模型/搜索/组件，`pnpm test` / `pnpm typecheck` / `pnpm build`）。
+**教学简化（须标注）**：心跳 = transport 级（`ws_ping_interval=2 / ws_ping_timeout=4`，同上游 gateway heartbeat：缺省 2s Ping + 连续 2 周期无 Pong terminate，`web/launcher.py` `uvicorn_options`）；认证门 = 可选 token（配置 `MINIHARNESS_WEB_TOKEN` 后 `/api/*` 全域强制、WS 升级拒绝写 HTTP 401 同上游 `rejectRemoteStreamUpgrade`，监听 `0.0.0.0` 无 token 启动即拒绝；接口约定见 interface-wire §1.1）；`$events`/`follow`/`control` 无 `since` 恢复游标（重连重拉全量）；载荷 schema 校验在 `WebApi` 内做（上游先过 zod）；session 日志事件是 mappingproxy/tuple 冻结形态（`core/session/json.py` `deep_freeze`），序列化前经 `thaw` 还原；前端产品化工程 `webui/` 走新 wire 但不整体移植上游 `packages/client` 40 个 UI 模块——无 slot 组合；Overview 时间线/虚拟化/搜索已按上游概念补入 webui Trajectory（Overview 折叠跳转 + 虚拟化窗口 + 全文搜索），`since` 游标则与后端 wire 一致（上游 alpha.1 无该字段）；`web/static/` vanilla SPA 是旧 wire 教学参照（不实跑）。回归测试：`tests/test_web_{stream_protocol,uplink,events,mux,streams,approvals,server,export,frontend,auth}.py`（真实 uvicorn + httpx/websockets）+ `webui/` 的 vitest（wire 层 + trajectory 模型/搜索/组件，`pnpm test` / `pnpm typecheck` / `pnpm build`）。
 
 运行方式：
 

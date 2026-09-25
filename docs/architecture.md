@@ -251,7 +251,8 @@ miniharness/
 ├── web/                   # packages/api/gateway + packages/client/connection + session-controller + remotes + host/frontend-static + host/webserver（mini 子集）
 │   ├── envelope.py        # 两信封 RPC（client-request / server-response，rpc-schema.ts：connection 层错误闭集 + transport_error 折叠）
 │   ├── api.py             # WebApi 会话服务（unary 方法 + 路由表）
-│   ├── stream_protocol.py # Remote 流 wire 语法（open/cancel/item/end/error 帧 + $events/result payload）
+│   ├── stream_protocol.py # Remote 流 wire 语法（open/cancel/item/end/error 帧 exactKeys 闭合 + $events/result payload）
+│   ├── uplink.py          # 单流有界上行 inbox（字节上限 / end 半关 / end 后 item 与超限两违例）
 │   ├── mux.py             # WS /api/remote.mux 单路径承载全部 Remote 流（RemoteStreamMuxConnection）
 │   ├── events.py          # $events 注册表（api-session/* 转发源 + waterfall + $events/result 结算）
 │   ├── streams.py         # GatewayStreams（$events 装配 + session/follow/control 流分发表）
@@ -363,8 +364,9 @@ miniharness/
 | `web/envelope.py` | `packages/client/connection/src/{rpc-schema,rpc}.ts` | 两信封消息联合（client-request / server-response）+ 连接层错误闭集（含 R3 新增 `gateway/input-invalid`）；transport_error 折叠兜底码 ‘internal’ |
 | `web/api.py` | `packages/api/session-controller/src/index.ts`（session 域辅助入口）| WebApi unary 方法（list/search/create/selectModel/modelCatalog/canOpenWorkspacePath/openWorkspacePath/rename/fork/prompt/attachment/updateQueue/cancel/page）+ 路由表；`session/queue` placement 三态经 `session/control` 投影 |
 | `web/args.py` | `packages/api/gateway/src/index.ts`（assertExactArguments:1112 / decode:1140）+ `remote-error-codes.ts` | 路由层 `{args}` 边界校验：每方法字段集合精确匹配（missing/unexpected → `gateway/arguments-invalid`）+ 顶层 JSON 类型（错型 → `gateway/input-invalid`）；`TypertGatewayFaultDetails{endpoint, field?}`；枚举/范围/非空/跨字段语义留 handler（业务码） |
-| `web/stream_protocol.py` | `packages/api/gateway/src/stream-protocol.ts` | Remote 流 wire 语法：`open`/`cancel`/`item`/`end`/`error` 帧、`$events` 打开与 `$events/result` payload 解析、无损 JSON 判定（dict 键须 str、float 有限非 -0） |
-| `web/mux.py` | `packages/api/gateway/src/create-mux-websocket.ts`（RemoteStreamMuxConnection）| 单条 `/api/remote.mux` WebSocket 承载全部 Remote 流；open/cancel/item/end/error 帧往返，二进制 1003/非法 1008 关闭码，隔离单流失败 |
+| `web/stream_protocol.py` | `packages/api/gateway/src/stream-protocol.ts` | Remote 流 wire 语法：`open`/`cancel`/`item`/`end`/`error` 帧（客户端四型与宿主三型都 exactKeys 闭合，多一个键即拒）、`$events` 打开与 `$events/result` payload 解析、无损 JSON 判定（dict 键须 str、float 有限非 -0） |
+| `web/uplink.py` | `packages/api/gateway/src/stream-server.ts`（UplinkInbox）+ `index.ts`（`streamInboxBytes` @default 262144） | 单条逻辑流的有界单消费者上行 inbox：整帧 UTF-8 字节记账、`end` 半关、`end` 后 item → `gateway/protocol`、超限 → `gateway/uplink-overflow`（违例带 `{endpoint}` details 并中止该流）、`fail` 先到先得、释放后丢帧 |
+| `web/mux.py` | `packages/api/gateway/src/create-mux-websocket.ts`（RemoteStreamMuxConnection）+ `stream-server.ts` | 单条 `/api/remote.mux` WebSocket 承载全部 Remote 流；open/cancel/item/end/error 帧往返，二进制 1003/非法 1008/重复 open 1008 关闭码，隔离单流失败；每条 open 先建自己的 inbox（紧跟 open 的 item 排队不丢），`item` 违例以 Remote failure 中止该流并发终态 `error` 帧，`$events` 网关自有流 open 即释放 inbox |
 | `web/events.py` | `packages/api/gateway/src/index.ts`（remote-event）+ `packages/api/session-controller`（api-session/*）+ `packages/api/remotes` | `$events` 注册表：open 首帧 `ready`{clientId, host.home} → 转发 emit/waterfall/cancel；api-session/* 转发源（created/disposed/status/error/activity）；waterfall 经 `$events/result` 结算（result/next/rejected/cancelled），未知 clientId fail-closed |
 | `web/streams.py` | `packages/api/session-controller/src/{index,remote-events}.ts` | GatewayStreams Remote 方法面：session/follow（快照 snapshot{header,cursor,records,hasMore,projections} + 逐条 event）+ session/control（baseline{queues,jobs} + 实时 queue/jobs）+ `$events` 装配；跨堆非阻塞唤醒线程安全。活体 event 载体 = ≤50ms 短轮询批量提取（`_poll_new_events`，`seq >= cursor`，0 基 seq 不吞首帧）；**wire 无 since**（重连=重开全量） |
 | `web/approvals.py` | `packages/interaction/user-approval` + `packages/api/remotes`（last-resort approval 转发）| 审批桥：async `tools/ask` 闸门 → `approval/request` waterfall（`$events`）+ `$events/result` 结算； outcome 映射 result∈APPROVAL_OUTCOMES（否则 unavailable fail-closed）/rejected→unavailable/next→nxt()/cancelled；审计对 approval/asked+decided；接线点在工具闸门（上游在 approval/request，教学简化） |

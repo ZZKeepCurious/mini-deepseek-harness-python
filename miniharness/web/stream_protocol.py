@@ -7,11 +7,11 @@
 已核实的契约（alpha.1，逐条对应上游 stream-protocol.ts + stream-server.ts +
 gateway index.ts）：
   * 单一路径 `/api/remote.mux`（REMOTE_STREAM_MUX_PATH）承载所有 Remote 流。
-  * 浏览器→宿主文本帧四型：`open`（streamId/endpoint/payload —— 判别字段
-    必在，未知键被 schemastery 投影丢弃而非报错）、`cancel`（streamId + 类型）、
-    rc.1 新增 `item`（{streamId, value?}，value 须无损 JSON）与 `end`
-    （上行半关）。streamId/endpoint 非空字符串。二进制消息是协议错误（close 1003）；
-    JSON/形状错误 → close 1008。
+  * 浏览器→宿主文本帧四型：`open`（streamId/endpoint/payload）、`cancel`（streamId）、
+    rc.1 新增 `item`（{streamId} 或 {streamId, value}，value 须无损 JSON）与 `end`
+    （上行半关）。四型都按 exactKeys 闭合校验：多一个键、多一个字段即拒（上游
+    stream-protocol.ts 的 exactKeys，不做未知键投影）。streamId/endpoint 非空字符串。
+    二进制消息是协议错误（close 1003）；JSON/形状错误 → close 1008。
   * 宿主→浏览器帧三型：`item`（streamId + 可选 value）/ `end` / `error`
     （error = {code, message, details}，恒对象）。
   * 事件流端点 `$events`：payload 必须恰为 `{args:{}}`（空 args 对象）；首帧
@@ -143,32 +143,32 @@ def parse_remote_stream_client_message(text: str) -> dict:
     return _parse_message(text, _validate_client)
 
 def _validate_client(value: dict) -> dict:
-    """unknown 键被 schemastery 投影丢弃；判别字段缺失/类型错才拒绝。"""
+    """四型帧都按 exactKeys 闭合校验：多一个键即拒（上游 exactKeys，非投影丢弃）。"""
     kind = value.get("type")
-    if kind == "cancel":
-        if isinstance(value.get("streamId"), str) and value["streamId"]:
-            return {"type": "cancel", "streamId": value["streamId"]}
-        raise StreamProtocolError("api gateway: invalid Remote stream client message")
-    if kind == "end":
-        # 上行半关（rc.1 RemoteStreamClientMessage 新增）：``{type:'end',streamId}``
-        if isinstance(value.get("streamId"), str) and value["streamId"]:
-            return {"type": "end", "streamId": value["streamId"]}
+    if kind in ("cancel", "end"):
+        if _exact_keys(value, ("type", "streamId")) and _valid_id(value["streamId"]):
+            return {"type": kind, "streamId": value["streamId"]}
         raise StreamProtocolError("api gateway: invalid Remote stream client message")
     if kind == "item":
-        # 上行数据帧（rc.1 新增）：``{type:'item',streamId,value?}``，value 须无损 JSON
-        if isinstance(value.get("streamId"), str) and value["streamId"]:
-            projected = {"type": "item", "streamId": value["streamId"]}
-            if "value" in value:
-                if not is_remote_json_value(value["value"]):
-                    raise StreamProtocolError(
-                        "api gateway: invalid Remote stream client message")
-                projected["value"] = value["value"]
-            return projected
+        # 上行数据帧：``{type:'item',streamId}`` 或 ``{type:'item',streamId,value}``，
+        # value 须无损 JSON（上游 exactKeys 二择一 + isRemoteJsonValue）
+        if (_exact_keys(value, ("type", "streamId"))
+                or _exact_keys(value, ("type", "streamId", "value"))):
+            if not _valid_id(value["streamId"]):
+                raise StreamProtocolError(
+                    "api gateway: invalid Remote stream client message")
+            if "value" not in value:
+                return {"type": "item", "streamId": value["streamId"]}
+            if not is_remote_json_value(value["value"]):
+                raise StreamProtocolError(
+                    "api gateway: invalid Remote stream client message")
+            return {"type": "item", "streamId": value["streamId"],
+                    "value": value["value"]}
         raise StreamProtocolError("api gateway: invalid Remote stream client message")
     if kind == "open":
-        if (isinstance(value.get("streamId"), str) and value["streamId"]
-                and isinstance(value.get("endpoint"), str) and value["endpoint"]
-                and "payload" in value):
+        if (_exact_keys(value, ("type", "streamId", "endpoint", "payload"))
+                and _valid_id(value["streamId"])
+                and _valid_id(value["endpoint"])):
             return {"type": "open", "streamId": value["streamId"],
                     "endpoint": value["endpoint"], "payload": value["payload"]}
         raise StreamProtocolError("api gateway: invalid Remote stream client message")
@@ -182,22 +182,24 @@ def parse_remote_stream_server_message(text: str) -> dict:
 def _validate_server(value: dict) -> dict:
     kind = value.get("type")
     if kind == "item":
-        if isinstance(value.get("streamId"), str) and value["streamId"]:
+        if ((_exact_keys(value, ("type", "streamId"))
+                or _exact_keys(value, ("type", "streamId", "value")))
+                and _valid_id(value["streamId"])):
             return value
         raise StreamProtocolError("api gateway: invalid Remote stream server message")
     if kind == "end":
-        if isinstance(value.get("streamId"), str) and value["streamId"]:
+        if _exact_keys(value, ("type", "streamId")) and _valid_id(value["streamId"]):
             return value
         raise StreamProtocolError("api gateway: invalid Remote stream server message")
     if kind == "error":
         error = value.get("error")
-        if (isinstance(value.get("streamId"), str) and value["streamId"]
+        if (_exact_keys(value, ("type", "streamId", "error"))
+                and _valid_id(value["streamId"])
                 and isinstance(error, dict) and not isinstance(error, list)
-                and _subset_keys(error, ("code", "message", "details"))
+                and _exact_keys(error, ("code", "message", "details"))
                 and isinstance(error.get("code"), str)
                 and isinstance(error.get("message"), str)
-                and "details" in error
-                and isinstance(error.get("details"), dict)):
+                and _is_plain_record(error.get("details"))):
             return value
         raise StreamProtocolError("api gateway: invalid Remote stream server message")
     raise StreamProtocolError("api gateway: invalid Remote stream server message")

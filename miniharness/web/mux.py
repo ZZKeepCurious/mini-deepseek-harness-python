@@ -22,10 +22,18 @@
     无 Pong terminate，见 verified-diffs §3.4）。
 
 属性：`RemoteStreamMuxConnection` 持有 active 流的任务集合，dispose 全量取消。
+
+上行（rc.1）：每条 open 先建自己的有界 `UplinkInbox`（`web/uplink.py`），
+`item` 帧按整帧 UTF-8 字节入队、`end` 帧半关；违例（end 后 item → `gateway/protocol`、
+超 `streamInboxBytes` → `gateway/uplink-overflow`）以 Remote failure 中止该流并发终态
+`error` 帧（上游 pump 的 `control` + `remoteErrorOf(reason)` 分支）。inbox 在 open 之前
+建好，客户端紧跟 open 发的 item 等在队列里而不是丢掉（上游 openStream 注释同款）。
+`$events` 是网关自有流、无人读上行，open 时立即释放该 inbox（上游 openWireStream）。
 """
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from typing import Any
 
@@ -34,6 +42,7 @@ from .stream_protocol import (
     StreamProtocolError,
     parse_remote_stream_client_message,
 )
+from .uplink import DEFAULT_STREAM_INBOX_BYTES, UplinkInbox
 
 __all__ = ["RemoteStreamMuxConnection", "REMOTE_STREAM_MUX_PATH"]
 
@@ -47,19 +56,36 @@ def _error_frame(stream_id: str, code: str, message: str,
             "error": {"code": code, "message": message, "details": details or {}}}
 
 
+class _ActiveStream:
+    """一条活跃逻辑流：自己的上行 inbox + 泵任务 + 终止原因。"""
+
+    __slots__ = ("stream_id", "endpoint", "inbox", "task", "failure")
+
+    def __init__(self, stream_id: str, endpoint: str, inbox: UplinkInbox):
+        self.stream_id = stream_id
+        self.endpoint = endpoint
+        self.inbox = inbox
+        self.task: asyncio.Task | None = None
+        self.failure: BaseException | None = None
+
+
 class RemoteStreamMuxConnection:
-    """一条 `/api/remote.mux` 连接的流生命周期（打开/取消/写入）。
+    """一条 `/api/remote.mux` 连接的流生命周期（打开/上行/取消/写入）。
 
     @param gateway - `GatewayStreams`（endpoint 分发 + $events 注册表 + 审批桥）。
     @param ws - 一个鸭子类型 websocket：提供 `receive()`（得到
         {'type':'websocket.receive', text|bytes} 或 {'type':'websocket.disconnect'}）、
         `send_text(str)`。
+    @param stream_inbox_bytes - 单条逻辑流可缓冲的上行帧字节上限
+        （上游 gateway Config `streamInboxBytes`，缺省 262144）。
     """
 
-    def __init__(self, gateway: Any, ws: Any):
+    def __init__(self, gateway: Any, ws: Any,
+                 stream_inbox_bytes: int = DEFAULT_STREAM_INBOX_BYTES):
         self.gateway = gateway
         self.ws = ws
-        self._streams: dict[str, asyncio.Task] = {}
+        self.stream_inbox_bytes = stream_inbox_bytes
+        self._streams: dict[str, _ActiveStream] = {}
         self._closed = False
 
     # ---------- 驱动循环 ----------
@@ -94,13 +120,19 @@ class RemoteStreamMuxConnection:
         except StreamProtocolError:
             await self._close(DROP_CODE)
             return
-        if frame["type"] == "open":
+        kind = frame["type"]
+        if kind == "open":
             await self._open(frame)
-        elif frame["type"] in ("item", "end"):
-            # rc.1 上行帧：mini 的所有 Remote 流端点为单向（server→client），无
-            # uplink 消费者——帧经协议层校验后按「无消费者」丢弃（登记载体差异；
-            # 上游把 uplink 交给流端点，mini 无接收输入的端点）。
-            return
+        elif kind == "item":
+            stream = self._streams.get(frame["streamId"])
+            if stream is not None:
+                violation = stream.inbox.push(frame.get("value"), _frame_bytes(text))
+                if violation is not None:
+                    await self._fail_stream(stream, violation)
+        elif kind == "end":
+            stream = self._streams.get(frame["streamId"])
+            if stream is not None:
+                stream.inbox.end()
         else:
             self._cancel(frame["streamId"])
 
@@ -111,19 +143,28 @@ class RemoteStreamMuxConnection:
         if stream_id in self._streams:
             await self._close(DROP_CODE)
             return
+        endpoint = frame["endpoint"]
+        # inbox 先于端点打开建好：客户端紧跟 open 发的 item 排队等待，不丢。
+        active = _ActiveStream(stream_id, endpoint, self._new_inbox(endpoint))
+        self._streams[stream_id] = active
         try:
-            stream = self.gateway.open_stream(frame["endpoint"], frame["payload"])
+            stream = self.gateway.open_stream(
+                endpoint, frame["payload"], uplink=active.inbox)
         except Exception as error:  # noqa: BLE001 - open 内抛错折 error 帧（流内隔离；
             # 上游 pump catch 只发 error、不补 end——error 即该流的终态帧）
-            await self._send_text(json.dumps(
-                _error_frame(stream_id, _failure_code(error), str(error))))
+            self._streams.pop(stream_id, None)
+            active.inbox.fail(error)
+            await self._send_failure(stream_id, error)
             return
-        loop = asyncio.get_running_loop()
-        task = loop.create_task(self._pump(stream_id, stream))
-        self._streams[stream_id] = task
+        task = asyncio.get_running_loop().create_task(self._pump(active, stream))
+        active.task = task
         task.add_done_callback(lambda _t: self._streams.pop(stream_id, None))
 
-    async def _pump(self, stream_id: str, stream) -> None:
+    def _new_inbox(self, endpoint: str) -> UplinkInbox:
+        return UplinkInbox(self.stream_inbox_bytes, endpoint)
+
+    async def _pump(self, active: _ActiveStream, stream) -> None:
+        stream_id = active.stream_id
         try:
             async for value in stream:
                 # item 帧 value 恒在（上游 `{type,streamId,value}` 构造后由
@@ -135,24 +176,56 @@ class RemoteStreamMuxConnection:
             raise
         except Exception as error:  # noqa: BLE001 - 流中途失败折 error 帧（终态，
             # 不补 end——上游 stream-server.ts pump catch 同款）
-            try:
-                await self._send_text(json.dumps(
-                    _error_frame(stream_id, _failure_code(error), str(error))))
-            except Exception:  # noqa: BLE001 - 错误帧发送失败 → close 1011
-                await self._close(1011)
+            await self._send_failure(stream_id, error)
+        finally:
+            # 下行已定：之后的客户端帧改不了结局，释放上行（上游 pump 的
+            # `inbox.fail(new Error('Remote stream ended'))`）。
+            active.inbox.fail(_stream_ended())
 
     def _cancel(self, stream_id: str) -> None:
-        task = self._streams.pop(stream_id, None)
-        if task is not None:
+        """客户端 `cancel`：取消逻辑流并结束任何挂在 uplink 上的读（不发终态帧）。"""
+        active = self._streams.pop(stream_id, None)
+        if active is None:
+            return
+        active.inbox.fail(_stream_cancelled())
+        if active.task is not None:
+            active.task.cancel()
+
+    async def _fail_stream(self, active: _ActiveStream | None,
+                           error: BaseException) -> None:
+        """上行违例：以该 failure 中止逻辑流并发终态 `error` 帧（上游 pump 的
+        `control.signal.aborted` + `remoteErrorOf(reason)` 分支——违例是失败，
+        普通取消不是，故只有这里发帧）。"""
+        if active is None or active.failure is not None:
+            return
+        active.failure = error
+        active.inbox.fail(error)
+        task = active.task
+        if task is not None and not task.done():
             task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        self._streams.pop(active.stream_id, None)
+        await self._send_failure(active.stream_id, error)
 
     def _close_all(self) -> None:
-        tasks = list(self._streams.values())
+        streams = list(self._streams.values())
         self._streams.clear()
-        for task in tasks:
-            task.cancel()
+        for active in streams:
+            active.inbox.fail(_stream_socket_closed())
+            if active.task is not None:
+                active.task.cancel()
 
     # ---------- 底层写 ----------
+
+    async def _send_failure(self, stream_id: str, error: Any) -> None:
+        """发一条终态 `error` 帧；帧本身写不出去 → close 1011（物理代次失败）。"""
+        try:
+            await self._send_text(json.dumps(_error_frame(
+                stream_id, _failure_code(error), str(error),
+                getattr(error, "details", None))))
+        except Exception:  # noqa: BLE001 - 错误帧发送失败 → close 1011
+            await self._close(1011)
 
     async def _send_text(self, text: str) -> None:
         if self._closed:
@@ -176,6 +249,23 @@ class RemoteStreamMuxConnection:
     def dispose(self) -> None:
         self._closed = True
         self._close_all()
+
+
+def _frame_bytes(text: str) -> int:
+    """一条客户端帧的 UTF-8 字节长（上游 `Buffer.byteLength(text, 'utf8')`）。"""
+    return len(text.encode("utf-8"))
+
+
+def _stream_ended() -> RuntimeError:
+    return RuntimeError("api gateway: Remote stream ended")
+
+
+def _stream_cancelled() -> RuntimeError:
+    return RuntimeError("api gateway: Remote stream cancelled")
+
+
+def _stream_socket_closed() -> RuntimeError:
+    return RuntimeError("api gateway: Remote stream socket closed")
 
 
 def _failure_code(error: Any) -> str:

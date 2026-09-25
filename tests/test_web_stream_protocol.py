@@ -72,14 +72,15 @@ class TestClientMessages(unittest.TestCase):
             with self.assertRaises(StreamProtocolError):
                 parse_remote_stream_client_message(json.dumps(bad))
 
-    def test_extra_keys_dropped_by_projection(self):
-        # schemastery 投影：未知键丢弃而非报错
-        parsed = parse_remote_stream_client_message(json.dumps(
-            {"type": "open", "streamId": "s1", "endpoint": "e", "payload": {},
-             "garbage": 1}))
-        self.assertEqual(parsed,
-                         {"type": "open", "streamId": "s1", "endpoint": "e",
-                          "payload": {}})
+    def test_extra_keys_rejected_by_exact_keys(self):
+        # 上游四型客户端帧都 exactKeys 闭合：多一个键即拒（不做未知键投影）
+        for bad in ({"type": "open", "streamId": "s1", "endpoint": "e",
+                     "payload": {}, "garbage": 1},
+                    {"type": "cancel", "streamId": "s1", "reason": "x"},
+                    {"type": "end", "streamId": "s1", "value": 1},
+                    {"type": "item", "streamId": "s1", "garbage": 1}):
+            with self.assertRaises(StreamProtocolError):
+                parse_remote_stream_client_message(json.dumps(bad))
 
     def test_invalid_shapes_rejected(self):
         for bad in (

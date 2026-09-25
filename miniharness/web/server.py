@@ -48,6 +48,7 @@ from .envelope import (
 )
 from .frontend import DIST_INDEX, DIST_ROOT, serve_static
 from .mux import RemoteStreamMuxConnection
+from .uplink import DEFAULT_STREAM_INBOX_BYTES
 from .stream_protocol import (
     REMOTE_STREAM_MUX_PATH,
     StreamProtocolError,
@@ -94,7 +95,8 @@ def _unwrap_args(payload: Any, method: str) -> Any:
 
 
 def create_app(api: WebApi, gateway: GatewayStreams,
-               token: str | None = None) -> FastAPI:
+               token: str | None = None,
+               stream_inbox_bytes: int = DEFAULT_STREAM_INBOX_BYTES) -> FastAPI:
     """把 WebApi + GatewayStreams 装成 FastAPI 应用（供 launcher/uvicorn 挂载）。
 
     @param api - web 会话服务（unary 域处理）。
@@ -104,6 +106,8 @@ def create_app(api: WebApi, gateway: GatewayStreams,
     session.export）全域强制——对齐上游 `connection.requestRejection` 可插拔
     拒绝面（WS 升级失败 = HTTP 401 响应后断开，`rejectRemoteStreamUpgrade`
     同形；静态 SPA 不设门，浏览器从页面 URL `?token=` 携带）。
+    @param stream_inbox_bytes - 单条逻辑流可缓冲的上行帧字节上限（上游 gateway
+    Config `streamInboxBytes`，缺省 262144；超出即 `gateway/uplink-overflow`）。
     @returns 可挂载的 FastAPI 实例。
     """
     resolved_token = token if token is not None else resolve_web_token()
@@ -191,7 +195,7 @@ def create_app(api: WebApi, gateway: GatewayStreams,
     async def remote_mux(websocket: WebSocket) -> None:
         """`/api/remote.mux` WebSocket：全部 Remote 流的单一路径载体。"""
         await websocket.accept()
-        conn = RemoteStreamMuxConnection(gateway, websocket)
+        conn = RemoteStreamMuxConnection(gateway, websocket, stream_inbox_bytes)
         try:
             await conn.run()
         except WebSocketDisconnect:
