@@ -1,11 +1,14 @@
 """miniharness.jobs — 后台作业家族（对齐 packages/jobs/：seam + jobs-local + tool-jobs）。
 
 契约面（已在 registry.py / tools.py 实现，与上游逐条一致）：
-  * ctx.jobs 服务：start / list / get / read / kill / wait / onJobDone /
-    onJobsChanged / attachController；owned 按会话 id 栅栏、结算 first-wins、
-    teardown cancel force-fail 只改记录、无 `job/*` 会话事件
+  * ctx.jobs 服务：start(JobSpec) / list / get / read / readAt / kill / wait /
+    remove / attachController + events（subscribe）；owner 是 SessionId（经
+    ctx.agents 解析 live Agent），owned 按会话 id 栅栏、结算 first-wins、
+    `settled{cause,awaited}`、teardown cancel force-fail 只改记录
+  * JobSpec.run(JobHandle) 收 append/updateProgress；pull 源（JobOutputSource）
+    由注册表按 cadence 泵入 ring；JobOutcome.result 交出值型结果（无 readOutput）
   * 模型侧三工具 job_output / job_list / job_kill + 完成 notice（busy 注入 /
-    idle 唤醒，maxConsecutiveWakes 封顶）
+    idle 唤醒；maxConsecutiveWakes 缺省无界，设值则封顶）
   * 并发上限 maxConcurrentJobsPerOwner（默认 10，running+stopping 计）
 
 装配约定（镜像 install_compaction）：`apply_retry_planner(ctx)` →

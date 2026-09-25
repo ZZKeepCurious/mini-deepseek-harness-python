@@ -1,25 +1,19 @@
 """模型侧 job_output / job_list / job_kill 三工具 + 完成 notice 投递。
 
-对齐 packages/jobs/tool-jobs/src/index.ts。契约要点：
+对齐 packages/jobs/tool-jobs/src/{index,render}.ts。契约要点：
   * 三工具是 kind 无关的通用作业控制面；共享 PublicJobSnapshot（id/kind/label/
-    status/detail/startedAt/finishedAt），刻意剔除 ownerSession 与内部 reported
-  * job_output 默认非阻塞；wait:true 等至配置上限，超时返回运行态而非 TOOL_TIMEOUT
-  * 完成 notice：unreported 完成经 onJobDone 投递——busy owner 注入 inbox，
-    idle owner 默认 wakeup 开 turn（maxConsecutiveWakes=3 封顶，自激链刹车），
-    quiet 模式一律注入；user 输入消费后恢复预算
-  * producer 提供 outputLimitBytes 时，输出读与 notice 都按完整 UTF-8 结果
-    字节封顶（含 status 元数据），多字节字符不劈裂
-  * canonical value + output.render 分离（execute 返回结构化数据，render 生成
-    模型可见 content blocks）；工具层 finalizeContent 兜底二次截断：
-    job_output/job_kill 结算前按 outputLimitBytes 收口模型可见内容（保状态行，
-    对齐 tool-jobs finalizeTaskContent）。载体差异（登记录入 verified-diffs）：
-    上游经 outputLimits WeakMap（tools/pre-execute prepend 缓存）取上限，mini
-    直接每次现查即上游回退路径 `outputLimits.get(exec) ?? visibleOutputLimit(...)`
-    的等价——无 policy 时行为一致
+    status/detail/startedAt/finishedAt），刻意剔除 owner 与内部游标
+  * job_output 默认非阻塞；wait:true 等至配置上限，超时返回运行态而非 TOOL_TIMEOUT；
+    渲染消费 delta（stdout/无标签 + 一个 [stderr] 段）后附结算 result（若有）
+  * 完成 notice 经 `events.subscribe({owners:'scope'})` 投递：settled 且未
+    awaited/非 teardown/owner 可见时——busy owner 注入 inbox，idle owner 默认
+    wakeup 开 turn；`maxConsecutiveWakes` 缺省不设=无界唤醒，设值则封顶；user 输入
+    被认领后恢复预算；模型自己 job_kill 的结算不再重复告知（killedByModel）
+  * producer 提供 outputLimitBytes 时，输出读与 notice 都按完整 UTF-8 结果字节封顶
+  * canonical value + output.render 分离；finalizeContent 兜底二次截断
 
-载体对齐（R2，2026-09-02）：owner 无钩子近似——jobs 经安装 ctx 订阅
-  agent/inbox/claimed 恢复预算（payload {agent, message, turn}，仅 user 源
-  恢复，对齐 tool-jobs spendWakes.delete），agent/disposed 防 id 键泄漏
+载体对齐：owner 无钩子近似——jobs 经安装 ctx 订阅 agent/inbox/claimed 恢复预算；
+`killedByModel` 以注册表上的私有集合在 notice 监听与 job_kill 工具间共享。
 """
 from __future__ import annotations
 
@@ -29,8 +23,24 @@ from types import MappingProxyType
 from typing import Any, Callable
 
 from ..core.tools import Tool
+from .render import public_job, render_model_delta, status_line
 
-# 共享的公开作业快照 schema（对齐 tool-jobs PUBLIC_TASK_SCHEMA）
+__all__ = [
+    "PUBLIC_TASK_SCHEMA",
+    "fit_completion_notice",
+    "fit_with_suffix",
+    "install_completion_delivery",
+    "job_kill_tool",
+    "job_list_tool",
+    "job_output_tool",
+    "public_job",
+    "register",
+    "resolve_config",
+    "status_line",
+    "validate_job_id",
+]
+
+# 共享的公开作业快照 schema（对齐 tool-jobs PUBLIC_JOB_SCHEMA）
 PUBLIC_TASK_SCHEMA: dict = {
     "type": "object",
     "additionalProperties": False,
@@ -52,11 +62,13 @@ PUBLIC_TASK_SCHEMA: dict = {
 DEFAULT_WAIT_TIMEOUT_MS = 30_000
 DEFAULT_MAX_WAIT_TIMEOUT_MS = 600_000
 DEFAULT_COMPLETION_DELIVERY = "wakeup"
-DEFAULT_MAX_CONSECUTIVE_WAKES = 3
+#: maxConsecutiveWakes 缺省不设（无界唤醒）；仅当显式设值时封顶。
+DEFAULT_MAX_CONSECUTIVE_WAKES = None
 
 
 def resolve_config(config: dict | None) -> dict:
     """解析 tool-jobs 配置（缺省值对齐 Config 表）；越界 fail loud。"""
+    config = config or {}
     cfg = {
         "waitTimeoutMs": config.get("waitTimeoutMs", DEFAULT_WAIT_TIMEOUT_MS),
         "maxWaitTimeoutMs": config.get("maxWaitTimeoutMs", DEFAULT_MAX_WAIT_TIMEOUT_MS),
@@ -65,41 +77,33 @@ def resolve_config(config: dict | None) -> dict:
     }
     if cfg["waitTimeoutMs"] > cfg["maxWaitTimeoutMs"]:
         raise ValueError(
-            f"tool-jobs: waitTimeoutMs ({cfg['waitTimeoutMs']}) exceeds maxWaitTimeoutMs ({cfg['maxWaitTimeoutMs']})"
+            f"tool-jobs: waitTimeoutMs ({cfg['waitTimeoutMs']}) exceeds "
+            f"maxWaitTimeoutMs ({cfg['maxWaitTimeoutMs']})"
         )
     if cfg["completionDelivery"] not in ("quiet", "wakeup"):
         raise ValueError(f"tool-jobs: unknown completionDelivery {cfg['completionDelivery']!r}")
-    if (not isinstance(cfg["maxConsecutiveWakes"], int)
-            or isinstance(cfg["maxConsecutiveWakes"], bool)
-            or cfg["maxConsecutiveWakes"] < 1):
+    budget = cfg["maxConsecutiveWakes"]
+    if budget is not None and (not isinstance(budget, int) or isinstance(budget, bool)
+                               or budget < 1):
         raise ValueError(
-            f"tool-jobs: maxConsecutiveWakes ({cfg['maxConsecutiveWakes']}) must be a whole number of turns"
+            f"tool-jobs: maxConsecutiveWakes ({budget}) must be a whole number of turns"
         )
     return cfg
 
 
-# ---------- 公开快照与状态行 ----------
-
-def public_job(snapshot: dict) -> dict:
-    """去掉 ownerSession / reported 的模型可见投影。"""
-    out: dict = {
-        "id": snapshot["id"],
-        "kind": snapshot["kind"],
-        "label": snapshot["label"],
-        "status": snapshot["status"],
-        "startedAt": snapshot["startedAt"],
-    }
-    if snapshot.get("detail") is not None:
-        out["detail"] = snapshot["detail"]
-    if snapshot.get("finishedAt") is not None:
-        out["finishedAt"] = snapshot["finishedAt"]
-    return out
+def _caller(exec_: Any):
+    """执行上下文 → SessionId（mini 的 Agent.id 即会话 id）。"""
+    agent = getattr(exec_, "agent", None)
+    return getattr(agent, "id", None) if agent is not None else None
 
 
-def status_line(snapshot: dict) -> str:
-    """`[status: <status>]`，带可选 detail。"""
-    detail = snapshot.get("detail")
-    return f"[status: {snapshot['status']}, {detail}]" if detail is not None else f"[status: {snapshot['status']}]"
+def _killed_by_model(jobs: Any) -> set:
+    """模型自请求 kill 的 live 作业集（notice 监听与 job_kill 工具共享）。"""
+    killed = getattr(jobs, "_tool_jobs_killed_by_model", None)
+    if killed is None:
+        killed = set()
+        setattr(jobs, "_tool_jobs_killed_by_model", killed)
+    return killed
 
 
 # ---------- UTF-8 字节封顶（对齐 TextRetainer head/tail + fitWithSuffix） ----------
@@ -150,7 +154,7 @@ def fit_with_suffix(content: str, suffix: str, max_bytes: int | None, omitted: s
     return _fit_tail(content, max_bytes - fixed_bytes) + fixed
 
 
-# ---------- Model-facing final cap (对齐 upstream finalizeTaskContent) ----------
+# ---------- Model-facing final cap (对齐 upstream finalizeContent) ----------
 
 def _raw_single_text(content: Any) -> str | None:
     """规整的单 text 块 → 文本；其余形状 None（对齐 rawSingleText）。"""
@@ -179,19 +183,14 @@ def visible_output_limit(jobs: Any, exec_: Any) -> int | None:
     job_id = args.get("job_id") if isinstance(args, (dict, MappingProxyType)) else None
     if not isinstance(job_id, str) or job_id == "":
         return None
-    for snapshot in jobs.list(getattr(exec_, "agent", None)):
+    for snapshot in jobs.list(_caller(exec_)):
         if snapshot.get("id") == job_id:
             return snapshot.get("outputLimitBytes")
     return None
 
 
 def finalize_job_task_content(jobs: Any) -> Callable[[Any, dict], list | None]:
-    """job_output / job_kill 的 finalizeContent（对齐 tool-jobs finalizeTaskContent）。
-
-    上游在结算时取 `outputLimits.get(exec) ?? visibleOutputLimit(ctx, exec)`；
-    mini 无 WeakMap/pre-execute 捕获，回落为每次现查（等价回退路径），
-    语义与上游默认（无 policy）一致。按调用方 agent 分辨率。
-    """
+    """job_output / job_kill 的 finalizeContent（对齐 tool-jobs finalizeTaskContent）。"""
 
     def _hook(exec_: Any, result: dict) -> list | None:
         max_bytes = visible_output_limit(jobs, exec_)
@@ -208,19 +207,20 @@ def finalize_job_task_content(jobs: Any) -> Callable[[Any, dict], list | None]:
                 suffix = "\n" + status_line(dict(job))
                 if _raw_single_text(result["content"]) == content + suffix:
                     return [{"type": "text",
-                             "text": fit_with_suffix(content, suffix, max_bytes, "\n[output truncated]")}]
+                             "text": fit_with_suffix(content, suffix, max_bytes,
+                                                     "\n[output truncated]")}]
         return _bound_single_text(result["content"], max_bytes)
 
     return _hook
 
 
-def fit_completion_notice(snapshot: dict) -> str:
+def fit_completion_notice(job: dict) -> str:
     """完整 notice；超限时保留稳定 id 前缀与收集指令，先花剩余字节在变化部分。"""
-    prefix = f"background job {snapshot['id']}"
-    detail = f" ({snapshot['kind']}: {snapshot['label']}) finished {status_line(snapshot)}"
+    prefix = f"background job {job['id']}"
+    detail = f" ({job['kind']}: {job['label']}) finished {status_line(public_job(job))}"
     action = "\nDone; job_output."
     complete = f"{prefix}{detail}. Read its output with job_output."
-    max_bytes = snapshot.get("outputLimitBytes")
+    max_bytes = job.get("outputLimitBytes")
     if max_bytes is None or _utf8_len(complete) <= max_bytes:
         return complete
     omitted = "\n[notice truncated]"
@@ -251,24 +251,22 @@ def validate_job_id(value: Any) -> str:
 
 def install_completion_delivery(jobs: Any, config: dict | None = None,
                                 ctx: Any = None) -> None:
-    """注册 onJobDone 监听：unreported 完成投递到精确 owner。
+    """订阅 settled 事件：未 awaited / 非 teardown / 非模型自 kill 的完成投到精确 owner。
 
-    wakeup：idle owner 开 turn（预算 maxConsecutiveWakes，user 输入经
-    agent/inbox/claimed 事件恢复）；busy owner 一律注入（notice 进下一步
-    inbox，同一步合并多个结算）。`ctx` 为注册方上下文（上游 tool-jobs 从
-    自己组合 scope 注册；mini 显式传参）：onJobDone 监听与 claimed/disposed
-    订阅都限该 scope 覆盖的 owner（事件经 ctx.on 以父 scope 收到子循环发送，
-    对齐 tool-jobs ctx.on 订阅语义），缺省=全局层。
+    wakeup：idle owner 开 turn（预算 maxConsecutiveWakes，缺省无界；user 输入经
+    agent/inbox/claimed 事件恢复）；busy owner 一律注入。`ctx` 为注册方上下文
+    （与 registry.events_for 的 scope 一致），缺省=注册表自身 ctx。
     """
     cfg = resolve_config(config)
     delivery = cfg["completionDelivery"]
     wake_budget = cfg["maxConsecutiveWakes"]
+    scope_ctx = ctx if ctx is not None else getattr(jobs, "ctx", None)
+    killed = _killed_by_model(jobs)
     spent_wakes: dict[int, int] = {}
     lock = threading.Lock()
 
     def handle_claimed(payload: dict) -> None:
-        """agent/inbox/claimed：仅 user 源消息恢复预算（对齐 tool-jobs
-        spendWakes.delete(agent) 的 source.kind === 'user' 判定）。"""
+        """agent/inbox/claimed：仅 user 源消息恢复预算。"""
         message = payload.get("message") or {}
         source = message.get("source") if isinstance(message, dict) else None
         if isinstance(source, dict) and source.get("kind") == "user":
@@ -280,25 +278,44 @@ def install_completion_delivery(jobs: Any, config: dict | None = None,
         with lock:
             spent_wakes.pop(id(payload.get("agent")), None)
 
-    def on_done(snapshot: dict, owner: Any) -> None:
-        if snapshot["reported"] or owner is None:
+    def on_event(event: dict) -> None:
+        if event["type"] == "removed":
+            killed.discard(event["job"]["id"])
             return
-        notice = fit_completion_notice(snapshot)
-        with lock:
-            should_wake = (delivery == "wakeup" and getattr(owner, "status", None) == "idle"
-                           and spent_wakes.get(id(owner), 0) < wake_budget)
-            if should_wake:
-                spent_wakes[id(owner)] = spent_wakes.get(id(owner), 0) + 1
+        if event["type"] != "settled":
+            return
+        job = event["job"]
+        delivered = False
+        if job["id"] in killed:
+            killed.discard(job["id"])
+            delivered = True
+        delivered = delivered or event.get("awaited") is True
+        if delivered or event.get("cause") == "teardown" or job.get("owner") is None:
+            return
+        agents = scope_ctx.get("agents") if scope_ctx is not None else None
+        owner = agents.get(job["owner"]) if agents is not None else None
+        if owner is None:
+            return
+        notice = fit_completion_notice(job)
+        should_wake = False
+        if delivery == "wakeup" and getattr(owner, "status", None) == "idle":
+            if wake_budget is None:
+                should_wake = True
+            else:
+                with lock:
+                    spent = spent_wakes.get(id(owner), 0)
+                    if spent < wake_budget:
+                        spent_wakes[id(owner)] = spent + 1
+                        should_wake = True
         if should_wake:
             owner.followup(notice, source="tool-jobs")
         else:
             owner.inject(notice, source="tool-jobs")
 
-    jobs.on_job_done(on_done, ctx)
-    scope = ctx if ctx is not None else getattr(jobs, "ctx", None)
-    if scope is not None:
-        scope.on("agent/inbox/claimed", handle_claimed)
-        scope.on("agent/disposed", handle_disposed)
+    jobs.events_for(scope_ctx).subscribe({"owners": "scope"}, on_event)
+    if scope_ctx is not None:
+        scope_ctx.on("agent/inbox/claimed", handle_claimed)
+        scope_ctx.on("agent/disposed", handle_disposed)
 
 
 # ---------- 三工具 ----------
@@ -306,15 +323,20 @@ def install_completion_delivery(jobs: Any, config: dict | None = None,
 def job_output_tool(jobs, wait_default: int, wait_cap: int) -> Tool:
     async def execute(args: dict, exec_: Any) -> dict:
         task_id = validate_job_id(args.get("job_id"))
-        caller = getattr(exec_, "agent", None)
-        jobs.get(task_id, caller)  # 存在性 + 会话栅栏先验
+        caller = _caller(exec_)
         if args.get("wait") is True:
             timeout = min(args.get("timeout_ms") or wait_default, wait_cap)
             # jobs.wait 是阻塞轮询：to_thread 防止卡住事件循环（abort 信号透传）
             await asyncio.to_thread(jobs.wait, task_id, timeout, caller,
                                     getattr(exec_, "signal", None))
         read = jobs.read(task_id, caller)
-        return {"text": read["text"], "job": public_job(read["snapshot"])}
+        delta = render_model_delta(
+            read["chunks"], read["lossy"],
+            read["job"].get("output", {}).get("spillPaths", []) or [])
+        result = read.get("result")
+        text = delta if result is None else (
+            f"{delta}{'' if not delta or delta.endswith(chr(10)) else chr(10)}{result}")
+        return {"text": text, "job": public_job(read["job"])}
 
     def render(value: dict) -> list[dict]:
         body = value["text"] if value["text"] else "(no new output)"
@@ -365,7 +387,7 @@ def job_output_tool(jobs, wait_default: int, wait_cap: int) -> Tool:
 
 def job_list_tool(jobs) -> Tool:
     async def execute(_args: dict, exec_: Any) -> list[dict]:
-        return [public_job(s) for s in jobs.list(getattr(exec_, "agent", None))]
+        return [public_job(s) for s in jobs.list(_caller(exec_))]
 
     def render(jobs_list: list[dict]) -> list[dict]:
         if not jobs_list:
@@ -388,8 +410,11 @@ def job_list_tool(jobs) -> Tool:
 def job_kill_tool(jobs) -> Tool:
     async def execute(args: dict, exec_: Any) -> dict:
         task_id = validate_job_id(args.get("job_id"))
-        caller = getattr(exec_, "agent", None)
+        caller = _caller(exec_)
         result = jobs.kill(task_id, caller, args.get("reason"))
+        # 模型自己的 kill 即它的交付：结算 notice 只会重复这个工具结果。
+        if result == "requested":
+            _killed_by_model(jobs).add(task_id)
         snapshot = public_job(jobs.get(task_id, caller))
         outcome = "cancellation-requested" if result == "requested" else result
         return {

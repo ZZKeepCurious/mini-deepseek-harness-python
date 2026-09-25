@@ -23,6 +23,7 @@ import time
 import unittest
 
 from miniharness.core.agent_loop.agent import AgentLoop
+from miniharness.core.agents import install_agents
 from miniharness.core.scope import Context
 from miniharness.core.session import Session
 from miniharness.core.session.persistence import JsonlPersistence
@@ -48,6 +49,17 @@ def _parent_loop(session_id="parent", adapter=None):
     loop = AgentLoop(Session(session_id), adapter or FakeLlmAdapter(final_text="父响应"),
                      reg, ctx, system_prompt="你是父代理。")
     return loop, ctx, reg
+
+
+def _activate_parent(ctx, parent):
+    """安装 agents 服务并发布父 loop 为 live 实例。
+
+    新 jobs 契约要求 owned 作业的会话在当前 AgentRegistry 中有 live 实例
+    （resolveOwner，jobs-local index.ts:357-368），旧测试的裸 Agent 载体不再够用。
+    """
+    install_agents(ctx)
+    parent.publish()
+    return parent
 
 
 def _manager(parent, persistence, **kwargs):
@@ -435,6 +447,7 @@ class TestBackgroundDelegation(unittest.TestCase):
 
     def _setup(self, args, config=None):
         parent, ctx, reg = _parent_loop(adapter=_DelegatingParent(args))
+        _activate_parent(ctx, parent)
         install_jobs(ctx)
         mgr = _manager(parent, self.persistence)
         install_subagent_delegation_tool(ctx, reg, mgr, config)
@@ -457,7 +470,7 @@ class TestBackgroundDelegation(unittest.TestCase):
         snap = self._job_snapshots(ctx, parent)[0]
         self.assertEqual(snap["kind"], "subagent")
         self.assertEqual(snap["label"], "研")
-        self.assertEqual(snap["ownerSession"], parent.id)
+        self.assertEqual(snap["owner"], parent.id)
         # 子首回合完成并落盘（worker 先结算子再 settle box）
         events = self.persistence.inspect(cid)["events"]
         self.assertEqual(events[-1]["type"], "turn/end")
@@ -490,6 +503,7 @@ class TestBackgroundDelegation(unittest.TestCase):
 
         parent, ctx, reg = _parent_loop(adapter=_DelegatingParent(
             {"description": "炸", "prompt": "去失败", "run_in_background": True}))
+        _activate_parent(ctx, parent)
         install_jobs(ctx)
         mgr = SubagentContinuationManager(
             parent, self.persistence, adapter_factory=lambda p, m, e=None: BoomChild())
@@ -507,7 +521,7 @@ class TestBackgroundDelegation(unittest.TestCase):
         # 纯函数面（run-settlement 对齐）：completed 携带 output 文本；
         # 无诊断 aborted → killed；有诊断与其余 reason → failed 原始词拼接诊断
         self.assertEqual(delegation_tool._job_outcome("completed", None, "终文本"),
-                         {"status": "completed", "output": "终文本"})
+                         {"status": "completed", "result": "终文本"})
         self.assertEqual(delegation_tool._job_outcome("aborted", None),
                          {"status": "killed"})
         self.assertEqual(delegation_tool._job_outcome("aborted", "unexpected signal"),
@@ -568,6 +582,7 @@ class TestKillCancelsChildJob(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.persistence = JsonlPersistence(self.tmp.name)
         self.parent, self.ctx, self.reg = _parent_loop()
+        _activate_parent(self.ctx, self.parent)
         install_jobs(self.ctx)
         self.child_adapter = _GatedChild()
         self.mgr = SubagentContinuationManager(

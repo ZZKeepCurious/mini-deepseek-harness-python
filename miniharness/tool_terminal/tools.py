@@ -6,9 +6,9 @@
   * terminal_open 走 `terminals.spawn(owner, {type, name?, cwd?}, signal)`
     （缺省 name/cwd 不传递）；terminal_send 后台模式经 `jobs.start` 开
     `kind='pty-send'` 作业（label `<id>: <text|(input)>`，outputLimitBytes=
-    maxResultBytes）；readOutput 钩子消费 operation 增量并渲染
-    `render_send_read`，结算 done 按 cancelRequested 出 completed/killed，
-    失败 settle 为 failed 终态（上游 done.then 双回调的等价）。
+    maxResultBytes）；pull 源消费 operation 增量并渲染 `render_send_read`
+    （上游 background.ts sendSource），结算 done 按 cancelRequested 出
+    completed/killed，失败 settle 为 failed 终态（上游 done.then 双回调等价）。
   * 前台 send 等 operation 结算（同步载体用轮询桥接后端结算线程）后读
     `kind='foreground'` + 结算视图；exec 中止信号经协作取消驱动 operation.
     cancel 并结算后抛 'terminal send aborted'。
@@ -269,24 +269,42 @@ def _present_send_result(_args: dict, result: dict):
     return None if raw is None else {"card": "terminal", "output": raw}
 
 
+def _send_source(state: dict) -> dict:
+    """把 backend 的消费式 send reader 适配为注册表 pull 源（对齐 background.ts:22-31）。
+
+    reader 自身无偏移——每次交出上次以来的增量——故源按已交付字节维持注册表游标
+    的单调。它在 starter 内惰性绑定（注册表先行受理作业），此前的读交付空。
+    """
+    def read(from_byte: int) -> dict:
+        operation = state["operation"]
+        if operation is None:
+            return {"text": "", "nextOffset": from_byte, "lossy": False}
+        text = render_send_read(operation.read_output())
+        return {"text": text, "nextOffset": from_byte + len(text.encode("utf-8")),
+                "lossy": False}
+
+    return {"read": read}
+
+
 def _start_background_send(terminals, jobs, agent, session_id: str, request: dict,
                            max_bytes: int) -> str:
     """开一个 `pty-send` 后台作业并返回 jobId（index.ts:250-276）。
 
-    run() 在 jobs 注册时同步执行：创建 operation、挂 box/取消/增量读三钩子，
-    后台线程把 operation 结算桥接进 JobDoneBox（失败 settle 为 failed 终态）。
+    run(handle) 在 jobs 注册时同步执行：创建 operation、绑定惰性 pull 源与取消
+    钩子，后台线程把 operation 结算桥接进 JobDoneBox（失败 settle 为 failed 终态）。
     """
-    cancel_requested = False
+    state: dict = {"operation": None}
+    cancel_state: dict = {"requested": False}
     lock = threading.Lock()
 
-    def run() -> dict:
+    def run(_job) -> dict:
         operation = terminals.start_send(agent, session_id, request)
+        state["operation"] = operation
         box = JobDoneBox()
 
         def cancel(_reason=None) -> None:
-            nonlocal cancel_requested
             with lock:
-                cancel_requested = True
+                cancel_state["requested"] = True
             operation.cancel()
 
         def produce() -> None:
@@ -296,24 +314,21 @@ def _start_background_send(terminals, jobs, agent, session_id: str, request: dic
                 box.settle({"status": "failed", "detail": str(error)})
                 return
             with lock:
-                killed = cancel_requested
+                killed = cancel_state["requested"]
             box.settle({
                 "status": "killed" if killed else "completed",
                 "detail": send_detail(result),
             })
 
         threading.Thread(target=produce, daemon=True).start()
-        return {
-            "done": box,
-            "cancel": cancel,
-            "read_output": lambda: render_send_read(operation.read_output()),
-        }
+        return {"done": box, "cancel": cancel}
 
     return jobs.start({
         "kind": "pty-send",
         "label": f"{session_id}: {request['text'] or '(input)'}",
-        "owner": agent,
+        "owner": agent.id,
         "outputLimitBytes": max_bytes,
+        "output": [_send_source(state)],
         "run": run,
     })
 
