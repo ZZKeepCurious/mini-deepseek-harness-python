@@ -7,11 +7,11 @@
 !!! warning "早期简化形态"
     本章代码为**教学简化形态**，与当前实现存在以下差异（学习时以当前实现为准，见 00-setup §0.6 简化表）：
 
-    - **JSONL 片段**：实现每文件 header 行 + 事件行，`SESSION_FORMAT_VERSION = 3` 不符即拒读（fail-closed）；torn 尾部的**截断发生在读路径**——`read_prepared` / `_load_checked` 识别 torn 后即调 `_truncate_to` 截断磁盘文件（`core/session/persistence.py:846,874`），随后 `commit_repair` 只**追加** recovered 事件 + closers 并 fsync（`core/session/persistence.py:965`，同上游 commitRepair）。
+    - **JSONL 片段**：实现每文件 header 行 + 事件行，`SESSION_FORMAT_VERSION = 4` 不符即拒读（fail-closed）；torn 尾部的**截断发生在读路径**——`read_prepared` / `_load_checked` 识别 torn 后即调 `_truncate_to` 截断磁盘文件（`core/session/persistence.py:846,874`），随后 `commit_repair` 只**追加** recovered 事件 + closers 并 fsync（`core/session/persistence.py:965`，同上游 commitRepair）。
     - **`repair_and_replay`**：本章为逐条 `append` 重放；实现为 seed 回放——从 `session/end-seed` 标记重放，且修复合成的 closers 经 `commit_repair` 写入磁盘（`core/session/persistence.py`，基类接口 + JSONL 后端实现）。
     - **`turn/end` reason**：本章差异表写 `reason = "interrupted"` 字符串；实现为对象 `{kind:'interrupted'}`（配合 `repair_interrupted_turn` 合成 closers，见第 1 章横幅）。
     - **崩溃演示**：本章 §5.2"kill 进程"实为手动构造未闭合回合来模拟崩溃尾部，非真实 kill（`tests/test_persistence_boot.py` 可复核）。
-    - **简化载体**：配置为 YAML（pyyaml 硬依赖承载）+ `!!js` 仅 `process.env.<NAME>` 子集。JSONL 载体**与上游默认形态一致**：zstd 拼接帧容器 + 一行一事件（V3 事件格式——模型流内嵌 `assistant/message`）+ format.ts 目录布局（`root/--<projectKey(cwd)>--/<encodeSegment(id)>/session.v3.jsonl[.zstd]`——generation 版本化文件名，v0 旧名 `session.jsonl` 保留拒读；编码互斥、遗留布局直接拒绝），见 `zstd_frames.py` 与 `tests/test_persistence_zstd.py`。
+    - **简化载体**：配置为 YAML（pyyaml 硬依赖承载）+ `!!js` 仅 `process.env.<NAME>` 子集。JSONL 载体**与上游默认形态一致**：zstd 拼接帧容器 + 一行一事件（V4 事件格式——模型流内嵌 `assistant/message` + tool 角色平铺结果 + `developer/message`）+ format.ts 目录布局（`root/--<projectKey(cwd)>--/<encodeSegment(id)>/session.v4.jsonl[.zstd]`——generation 版本化文件名，v0 旧名 `session.jsonl` 保留拒读；编码互斥、遗留布局直接拒绝），见 `zstd_frames.py` 与 `tests/test_persistence_zstd.py`。
     - **组合装载（§5.4）**：本章的 `boot()` 为早期静态数组形态（`json.load` + 逐条 `root.plugin()` + `_drain`）；当前实现是 **Loader 活树 + 根 Include 条目**（`miniharness/loader/`：EntryTree + Entry + Group + Loader + Include；`boot()` 经 `mount_root_include` 装载、补丁展开由 `loader.patch.apply_entry_patches` 承担、启动三态审计）。完整语义见第 08 章 §8.3.1 与 `docs/architecture.md` §2 的 `loader/` 行。
 
 ## 5.1 这一章要做什么
@@ -126,10 +126,10 @@ class JsonlPersistence(SessionPersistence):
 
 #### 多代 generation 与相邻迁移（`generation.py` + `released/`，教学代码之外的实现）
 
-实现层的目录布局是**分代**的：每会话目录下是 `session.v3.jsonl[.zstd]`（v2 = 当前代；v0 保留旧名 `session.jsonl`；canonical 名以外的临时/大写/前导零名不是代）。这带来两个读侧做法，都对着上游 `session-persistence-jsonl/src/generation.ts`：
+实现层的目录布局是**分代**的：每会话目录下是 `session.v4.jsonl[.zstd]`（v2 = 当前代；v0 保留旧名 `session.jsonl`；canonical 名以外的临时/大写/前导零名不是代）。这带来两个读侧做法，都对着上游 `session-persistence-jsonl/src/generation.ts`：
 
 1. **选最高代**（`resolveGenerationInDirectory` 语义）：目录里同时存在多代制品时，读侧选数值最高的 canonical 代；发现对立编码的 canonical 名直接拒绝（编码互斥，绝不静默迁移编码）。
-2. **migrate-on-open**（`ensureJsonlGenerationCurrent` 语义）：选中的代 ≠ 当前代时，先解码 → 走**相邻迁移链**（v0→v1→v2→v3，`released/` 包）→ 编码 → 校验 staged → 原子发布后继 `session.v3.jsonl[.zstd]`；**不可变源文件原样保留**（迁移永不改写历史）。三个失败面各自有名有姓：未来版本（`JsonlGenerationNewerVersionError`——"升级 harness"）、格式边拒绝内容（`JsonlGenerationUnsupportedMigrationError`——源制品不动）、目标冲突（`JsonlGenerationTargetConflictError`——当前代文件名已被别的字节占用）。
+2. **migrate-on-open**（`ensureJsonlGenerationCurrent` 语义）：选中的代 ≠ 当前代时，先解码 → 走**相邻迁移链**（v0→v1→v2→v3→v4，`released/` 包）→ 编码 → 校验 staged → 原子发布后继 `session.v4.jsonl[.zstd]`；**不可变源文件原样保留**（迁移永不改写历史）。三个失败面各自有名有姓：未来版本（`JsonlGenerationNewerVersionError`——"升级 harness"）、格式边拒绝内容（`JsonlGenerationUnsupportedMigrationError`——源制品不动）、目标冲突（`JsonlGenerationTargetConflictError`——当前代文件名已被别的字节占用）。
 
 迁移链是**纯函数整件迁移**（上游 `session-format/src/chain.ts`）：逻辑件 `{header, inheritedEventCount, events}` 与物理解码分离，每条边只做 `fromVersion → fromVersion+1`。两条边的语义核心：
 

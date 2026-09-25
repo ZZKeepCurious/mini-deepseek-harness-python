@@ -69,7 +69,7 @@ MiniHarness 的启动行为全部经环境变量驱动，下面是完整清单�
 | `MINIHARNESS_WEBUI_PROXY` | `http://127.0.0.1:8899` | 仅 webui 开发期：Vite dev server 的 `/api` 与 `/api/remote.mux` 代理目标（`webui/vite.config.ts`） |
 | `MINIHARNESS_MAX_STEPS` | `50` | Agent Loop 死循环守卫步数上限（第 4 章） |
 | `DEEPSEEK_API_KEY` | — | 真实 DeepSeek 适配器 / headless 凭据 |
-| `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | 可选，覆盖官方端点（兼容代理） |
+| `DEEPSEEK_BASE_URL` | `https://api.deepseek.com/anthropic` | 可选，覆盖官方 Messages 端点（兼容代理） |
 
 > Windows 控制台（GBK 代码页）查看 `presets` / `sessions` 输出的中文会乱码（数据本身是 UTF-8，未损坏）：设 `PYTHONIOENCODING=utf-8`（如 `set PYTHONIOENCODING=utf-8 && miniharness presets list`）即可正常显示。
 

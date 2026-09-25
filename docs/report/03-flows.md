@@ -141,9 +141,9 @@ flowchart TD
 
 常规做法是"每次变化立刻写库"；dsh 把持久化做成订阅者，异步成批写入。四个要点：
 
-- **扩展口**：`ctx.sessionPersistence` 抽象（locate / create / append / 逻辑 load/inspect / 物理后缀读）。上游当前基线的持久化后端只有 **JSONL**（每会话一个文件，zstd 拼接帧容器一行一事件，generation 版本化文件名 `session.v3.jsonl[.zstd]`）；SQLite 在上游只用于 session-query 检索域（FTS）。
+- **扩展口**：`ctx.sessionPersistence` 抽象（locate / create / append / 逻辑 load/inspect / 物理后缀读）。上游当前基线的持久化后端只有 **JSONL**（每会话一个文件，zstd 拼接帧容器一行一事件，generation 版本化文件名 `session.v4.jsonl[.zstd]`）；SQLite 在上游只用于 session-query 检索域（FTS）。
 - **flush 检查点**：`session/event` 是同步通知，持久化插件先复制事件再异步成批写入；`session/flush` 是等待的并行栅栏，用于认领下一个普通 turn 前的排序与错误观察点。
-- **格式演进：released 版本相邻迁移**：`session-format-catalog` 挂接 v0→v1→v2→v3 迁移链——读路径 `decodeRecoverableArtifact → migrate → encodeCurrent`，把旧 generation 迁移发布为后继 `session.v3.jsonl`（不可变源文件保留）；仅未发布/未知版本双向 fail loud（"升级 harness"）。未知事件类型除非带 `ignorable: true` 标记否则拒绝加载（防止静默丢事件改变后续解读；alpha.2 起支持 `ignorable` 豁免——写方显式标 `ignorable` 的纯信息记录可放行）。
+- **格式演进：released 版本相邻迁移**：`session-format-catalog` 挂接 v0→v1→v2→v3→v4 迁移链——读路径 `decodeRecoverableArtifact → migrate → encodeCurrent`，把旧 generation 迁移发布为后继 `session.v4.jsonl`（不可变源文件保留）；仅未发布/未知版本双向 fail loud（"升级 harness"）。未知事件类型除非带 `ignorable: true` 标记否则拒绝加载（防止静默丢事件改变后续解读；alpha.2 起支持 `ignorable` 豁免——写方显式标 `ignorable` 的纯信息记录可放行）。
 - **崩溃恢复**：关闭孤儿 turn（合成 `interrupted`），只作用于冷会话；活会话 `load` 等待权威内存快照持久化。
 
 <p class="fig-cap">图 13：会话持久化——JSONL 后端、flush 栅栏与崩溃恢复</p>
@@ -174,7 +174,7 @@ flowchart LR
 常规做法是"官方 SDK 直接调用，错误各自处理"；dsh 把模型厂商差异收敛到统一流协议里。四个要点：
 
 - **统一流协议 `StreamChunk`**：`block-start / text-delta / reasoning-delta / tool-call-delta / block-end / usage / finish`。块索引关联交错增量；`block-end` 携带完整块；`usage` 必须在 `finish` 前、之后不再有值。
-- **DeepSeek 官方适配器**（`dsh-llm-deepseek`）：直接 `fetch` + SSE（eventsource-parser）翻译官方 wire 格式。支持 thinking / reasoningEffort / contextWindow / maxTokens 输出上限 / 重试策略（normal|always + 退避）。
+- **DeepSeek 官方适配器**（`dsh-llm-deepseek`）：直接 `fetch` + SSE（eventsource-parser）翻译官方 **Anthropic 兼容 Messages** wire 格式（`messagesApiRoot(base)/messages`；Chat Completions 已上游删除）。支持 thinking / reasoningEffort / contextWindow / maxTokens 输出上限 / 重试策略（normal|always + 退避）。
 - **动态配置**：baseURL、目录、请求默认值经 thunk **每次操作**重读；`ctx.settings` 支持无重启覆盖；`ctx.credentials` 让 API key **每次调用**解析（配置只存 `apiKeyEnv` 引用，绝无明文）。
 - **两种授权错误路径统一为 `LlmFailure`**；上下文溢出统一编码 `CONTEXT_WINDOW_EXCEEDED`；空响应视为可重试错误 `EMPTY_RESPONSE`；每次请求携带 app attribution 头。
 

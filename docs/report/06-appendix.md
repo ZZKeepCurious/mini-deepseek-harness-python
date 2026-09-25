@@ -65,7 +65,7 @@
 
     with DeepSeekHarness(
         provider="deepseek-official",
-        model="deepseek-v4-flash",
+        model="deepseek-flash",
         max_tokens=49_152,
         cwd=str(Path("/absolute/path/to/workspace").resolve()),
         session_root=str(Path("/absolute/path/to/sessions").resolve()),

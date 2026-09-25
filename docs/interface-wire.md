@@ -95,6 +95,9 @@ agent-preset/not-found    agent-preset/invalid      session/agent-busy
 session/attachment-invalid session/queue-item-not-found session/steer-unavailable
 session/title-invalid     session/fork-unavailable  subagent/not-found
 subagent/catalog-diagnostic subagent/unauthorized
+workspace-file/not-found   workspace-file/not-directory workspace-file/not-regular-file
+workspace-file/not-text    workspace-file/outside-workspace workspace-file/too-large
+workspace-file/watch-unsupported
 ```
 
 寄送方签发 `rpcId`（实践中 UUID 即可，递增非零即可）；`transport_error` 把载体层异常折进
@@ -156,6 +159,12 @@ client `connection/src/client/rpc.ts` 按 `/` 切两段）；`web/args.canonical
   **不关 WS**（单流失败与其它流隔离）；流中途失败同理；`error` 帧本身发送失败 → close 1011。
 - 关键 `endpoint`（`GatewayStreams.stream_kinds`）：`$events`、`session/follow`、`session/control`；
    未知 endpoint → `error` 帧 `gateway/internal`。
+- `workspaceFiles/changes`（`{args:{workspaceFileScopeId, path}}`）：先以 `ctx.fs.watch`
+  建立目标监听（目录须在工作区内），成功给 `{kind:'ready'}`，随后命中目标的失效重 stat
+  产出 `{kind:'change', change:{absolutePath, version}}`（目标已删除则 `{absolutePath, absent:true}`）；
+  watch 不可用 → `workspace-file/watch-unsupported`，目录越界 → `workspace-file/outside-workspace`。
+  同 ns 的 unary `readBytes` 取 `options:{range?:{offset,length}, baseFile?}`，服务值为原生字节、
+  wire 层折 base64。
 
 ### 4.1 `session/follow`（历史跟随流）
 
@@ -304,7 +313,7 @@ outcome 归一（`APPROVAL_OUTCOMES = {allowed-once, rejected, cancelled, unavai
 - query：`sessionId`（必须）、`includeDescendants`（`true`/`false`/缺省，其余 400）。
 - 状态码链：200 / 400 / 404（缺根）/ 501（后端不支持）/ 500；响应头
   `Content-Disposition: attachment; filename="dsh-session-<safe>.zip"`。
-- zip 条目序：根制品以**逐字原始文件名**入档（`session.v3.jsonl[.zstd]`，generation 版本化
+- zip 条目序：根制品以**逐字原始文件名**入档（`session.v4.jsonl[.zstd]`，generation 版本化
   文件名，压缩 0/none 时为 `session.jsonl`）→ 后代 `subagents/<safe-id>/<同名制品>`
   （parentSession BFS + seen-set 去重）→ 媒体 `media/<attachmentId>.<ext>`；压缩等级 0-9。
 - 错误正文统一私有外壳（`session log export failed to prepare the stored artifact`），不泄路径细节。

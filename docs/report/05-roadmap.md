@@ -55,9 +55,9 @@
 | turn/step 状态机（agent-loop） | `asyncio.Task` 状态机（idle/running） | turn 打开于认领前；"零 step turn"也须持久化 |
 | 流式 StreamChunk 协议 | dataclass + `AsyncIterator[StreamChunk]` | usage 在 finish 前；tool 参数保持原始 JSON 字符串 |
 | 作用域化注册（per-agent ctx） | 每 agent 一个注册表实例，父子链式查找（继承/遮蔽） | 作用域注册卸载即回滚；restrict 过滤继承工具 |
-| JSONL 持久化 + 崩溃恢复 | **zstd 拼接帧容器** + 一行一事件 + generation 文件名 `session.v3.jsonl[.zstd]`（`compression='none'` 退回明文 `.jsonl`）；启动回放时合成 `interrupted` turn（`commit_repair` 追加 closers），torn 尾部读路径截断；released 旧格式经相邻迁移链（v0→v1→v2→v3）读入 | seq 连续；未知事件类型拒绝加载（fail-closed，`ignorable: true` 豁免放行）；`SESSION_FORMAT_VERSION = 3` 双向拒读 |
+| JSONL 持久化 + 崩溃恢复 | **zstd 拼接帧容器** + 一行一事件 + generation 文件名 `session.v4.jsonl[.zstd]`（`compression='none'` 退回明文 `.jsonl`）；启动回放时合成 `interrupted` turn（`commit_repair` 追加 closers），torn 尾部读路径截断；released 旧格式经相邻迁移链（v0→v1→v2→v3→v4）读入 | seq 连续；未知事件类型拒绝加载（fail-closed，`ignorable: true` 豁免放行）；`SESSION_FORMAT_VERSION = 4` 双向拒读 |
 | 组合层（bundle / patch） | YAML 配置 + 按 id 的整段覆盖 + insert 列表 | 补丁算法单一实现，导出纯函数，禁止复制粘贴 |
-| DeepSeek Files API 执行簇（图像输入请求路由） | `httpx` 异步 + `deepseek_files/` 十二模块 + `ImageRequestTarget`（request-image v6） | 路由目标（token 网格 / 像素预算 + 4096 单边封顶）→ 定价 → file-id 上传/复用（durable `files-v3.json` 索引 + filelock 30s + os.replace 原子发布）→ 含图请求 image-capable 路径：file-id 优先 → base64 回退 → stale-id 有界重试 |
+| DeepSeek Files API 执行簇（图像输入请求路由） | `httpx` 异步 + `deepseek_files/` 十二模块 + `ImageRequestTarget`（request-image v6） | 路由目标（token 网格 / 像素预算 + 4096 单边封顶）→ 定价 → file-id 上传/复用（durable `files-v3.json` 索引 + filelock 30s + os.replace 原子发布）→ 含图请求 image-capable 路径：file-id 优先 → base64 回退 → stale-id 有界重试；wire 为 Anthropic 兼容 Messages（Chat Completions 已上游删除） |
 | 图像卸载 message 投影 | `core/session/projections.py` + `compaction/image_offload.py` | 投影=按事件序折叠覆盖表（fold_projections）；`image/offload` durable 事件记录要卸载的图片 occurrence（严格递增拆分校验 fail-closed）；`offload_oldest_images` + `agent/request-error` 上的 `IMAGE_OFFLOAD_REQUIRED` 修复（不耗重试预算） |
 | 会话格式目录（released 迁移链收口） | `core/session/released/catalog.py` | `read_released_header`（物理头分类 + 旧版相邻头迁移）/ `encode_current_header` / `encode_current_event`；dispositions + `image/offload` |
 | 会话检查点策略（语义持久化屏障） | `seams/session_checkpoint.py` + `SessionStore.checkpoint` | 三屏障（模型请求前 / 顶层工具体前 / 每步边界），经 `agent/checkpoint` / `tools/pre-execute` / `agent/pre-step`；取消折叠为 canonical `ABORTED_BEFORE_DISPATCH`；fail-closed 无参与者抛 `SessionCheckpointError` |
@@ -166,7 +166,7 @@
 
 | 能力 | 一句话功能描述 | 所在 |
 |---|---|---|
-| DeepSeek Files API 执行簇 | 图像输入请求的完整文件管线：路由目标定价 → file-id 上传（单飞共享 + durable 索引 + 配额恢复）→ 双协议传输（Chat Completions / Messages）→ stale-id 恰一次重试 | `llm/deepseek_files/` |
+| DeepSeek Files API 执行簇 | 图像输入请求的完整文件管线：路由目标定价 → file-id 上传（单飞共享 + durable 索引 + 配额恢复）→ Messages `/v1/files` 传输 → stale-id 恰一次重试 | `llm/deepseek_files/` |
 | 图像卸载投影（image/offload） | 上下文压力过大时把最旧输入图片卸载为占位文本的决策 + message 投影，`IMAGE_OFFLOAD_REQUIRED` 恢复不耗重试预算 | `core/session/projections.py` + `compaction/image_offload.py` |
 | 会话检查点策略 | 语义持久化屏障：模型请求前 / 顶层工具体前 / 每步边界各刷一次盘，崩溃后不丢已承诺事实 | `seams/session_checkpoint.py` |
 | 会话格式目录 | released 格式迁移链的读头分类、当前头/事件编码、新事件类型登记（v3 主线） | `core/session/released/catalog.py` |
@@ -199,7 +199,7 @@
 |---|---|
 | `DSH_HOME` / `~/.dsh` | Harness 家目录：`profiles/<name>`、home 级 `cordis.patch.yml`、home 级 `.env`、`profiles/node_modules`（裸插件名解析回退）都在这 |
 | `DEEPSEEK_API_KEY` | 真实 DeepSeek 适配器与 demo 的凭据（也可放 gitignored 的根 `.env`）；无 key 时 e2e 自跳过 |
-| `DEEPSEEK_BASE_URL` | 可选，覆盖官方 API 端点（`https://api.deepseek.com`） |
+| `DEEPSEEK_BASE_URL` | 可选，覆盖官方 Messages API 端点（`https://api.deepseek.com/anthropic`） |
 | `DSH_SESSION_ROOT` | 会话/持久化数据的根目录（Python SDK 与产品 CLI 共用） |
 | `DSH_CORDIS_CONFIG` | Python SDK 注入默认组合配置的方式（指定自定义 cordis.yml 路径） |
 | profile 模板 | `web` 与 `headless` 两个 profile 首次使用自动初始化；其它名字需 `initProfile` 显式创建 |

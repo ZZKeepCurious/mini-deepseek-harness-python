@@ -26,7 +26,7 @@
 </div>
 
 !!! info "版本与格式策略"
-    基线为上游 `dsh-v0.1.5-alpha.1`（developer preview，MIT 协议）。演进策略是"地基优先"：会话格式版本保持 `SESSION_FORMAT_VERSION`，**released 旧版本经相邻迁移链读入**（`session-format-v0-to-v1` / `-v1-to-v2` / `-v2-to-v3` + `session-format-catalog`：读路径 decode→migrate→encodeCurrent，写后继 generation、不动旧代），仅未发布/未知版本双向 fail loud；`session-query` 检索域 SQLite 使用单调 `SCHEMA_VERSION`。
+    基线为上游 `dsh-v0.1.7-rc.1`（developer preview，MIT 协议）。演进策略是"地基优先"：会话格式版本保持 `SESSION_FORMAT_VERSION`，**released 旧版本经相邻迁移链读入**（`session-format-v0-to-v1` / `-v1-to-v2` / `-v2-to-v3` / `-v3-to-v4` + `session-format-catalog`：读路径 decode→migrate→encodeCurrent，写后继 generation、不动旧代），仅未发布/未知版本双向 fail loud；`session-query` 检索域 SQLite 使用单调 `SCHEMA_VERSION`。
 
 ## 2. 分层架构
 

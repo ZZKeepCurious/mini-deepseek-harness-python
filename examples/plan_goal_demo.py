@@ -86,10 +86,10 @@ def _created_goal_ref(session):
         if event["type"] != "tool/result":
             continue
         block = event["data"]["message"]["content"][0]
-        if block.get("type") != "tool-result":
+        if block.get("type") != "text":
             continue
         try:
-            value = json.loads(block["content"][0]["text"])
+            value = json.loads(block["text"])
         except (KeyError, TypeError, ValueError):
             continue
         if isinstance(value, dict) and isinstance(value.get("goal"), dict) \

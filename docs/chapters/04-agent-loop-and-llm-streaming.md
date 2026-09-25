@@ -8,7 +8,7 @@
     本章代码为**教学简化形态**，与当前实现存在以下差异（学习时以当前实现为准，见 00-setup §0.6 简化表）：
 
     - **`FakeLlmAdapter` finish reason**：本章为字符串（`"stop"` / `"tool-calls"`）；实现为对象 `{"kind": "stop"}` / `{"kind": "tool-calls"}`（`llm/fake.py:58,70`）。
-    - **`DeepSeekAdapter` SSE**：实现要求字面 `[DONE]` 必须出现（EOF 未到 `[DONE]` 抛 `STREAM_CLOSED`）、畸形 SSE 载荷抛 `MALFORMED_RESPONSE`、HTTP 错误映射完整（401/403→AUTH、quota 措辞→QUOTA、429→RATE_LIMIT、400 上下文→CONTEXT_WINDOW_EXCEEDED 否则 INVALID_REQUEST、≥500→SERVER、其余 `HTTP_<status>`）、`usage` 归一为 `TokenUsage`（`llm/deepseek.py`，见 `llm/protocol.py` 的 `StreamChunk` 判别字段 `type`）。本章的 `AUTH_ERROR`/`REQUEST_ERROR` 二元映射已过时。
+    - **`DeepSeekAdapter` SSE**：实现走 **Anthropic 兼容 Messages** 协议（上游 `llm-deepseek` 已删除 Chat Completions），以 `message_stop` 为完成点（EOF 未到 `message_stop` 抛 `STREAM_CLOSED`）、畸形 SSE 载荷抛 `MALFORMED_RESPONSE`、带内 `error` 事件即 provider 失败、HTTP 错误映射完整（401/403→AUTH、quota 措辞→QUOTA、429→RATE_LIMIT、400 上下文→CONTEXT_WINDOW_EXCEEDED 否则 INVALID_REQUEST、≥500→SERVER、其余 `HTTP_<status>`）、`usage` 按 Anthropic 拼写归一为 `TokenUsage`（wire/翻译在 `llm/deepseek_messages.py`，适配器 `llm/deepseek.py`；见 `llm/protocol.py` 的 `StreamChunk` 判别字段 `type`）。本章的 `AUTH_ERROR`/`REQUEST_ERROR` 二元映射已过时、`[DONE]`/`choices[].delta` 形态亦已过时。
     - **空响应**：实现已产出 `EMPTY_RESPONSE` 错误且默认可重试（`llm/retry_policy.py` 白名单），§4.4 教学正文与 §4.8/§4.9 现已一致。
     - **loop 片段**：本章 `loop.py` 的 `_append` 方法、字符串 reason、扁平 `assistant/message` 形态均已过时；实现是 ContentBlock 消息对象 + 显式编号 + `request/header` 事件 + 模型流压缩内嵌 `assistant/message`（失败 attempt 落 `assistant/attempt`）（`core/agent_loop/agent.py`）。
     - **重试接线**：真实调用入口必须挂载 `apply_retry_planner`（`llm/retry.py:298`），否则 `agent/request-error` 瀑布不生效（本章 §4.6 真实 API 示例为教学简化、未挂载；真实装配必须先挂）。
@@ -170,7 +170,7 @@ class DeepSeekAdapter(LlmAdapter):
 
     def __init__(self, api_key=None, base_url=None, model="deepseek-chat"):
         self._key = api_key if api_key is not None else os.environ.get("DEEPSEEK_API_KEY", "")
-        self._base = (base_url or os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")).rstrip("/")
+        self._base = (base_url or os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/anthropic")).rstrip("/")
         self._model = model
 
     async def stream(self, messages, tools, signal=None):
@@ -178,13 +178,12 @@ class DeepSeekAdapter(LlmAdapter):
         signal.aborted 置位 → _aiter_raced 在下次取块前抛 StreamAborted，
         退出 async-with 即关闭连接（真取消，无遗留线程）。"""
         abort_event = getattr(signal, "event", None) if signal is not None else None
-        body = {"model": self._model, "messages": serialize_messages(messages), "stream": True}
+        body = {"model": self._model, "messages": serialize_messages(messages),
+                "max_tokens": 256000, "stream": True}
         if tools:
             body["tools"] = [
-                {"type": "function", "function": {
-                    "name": t["name"], "description": t.get("description", ""),
-                    "parameters": t.get("parameters", {}),
-                }} for t in tools
+                {"name": t["name"], "description": t.get("description", ""),
+                 "input_schema": t.get("parameters", {})} for t in tools
             ]
         async with httpx.AsyncClient(timeout=httpx.Timeout(
                 self.CONNECT_TIMEOUT_S, read=self.READ_TIMEOUT_S)) as client:
