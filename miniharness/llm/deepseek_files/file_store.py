@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass
 
 from ..protocol import INVALID_REQUEST, INVALID_RESPONSE, StreamAborted, LlmFailure
+from ..deepseek_messages import messages_api_root
 from .file_id import DeepSeekFileId
 from .files_api import DeepSeekFilesClient, is_files_quota_error
 from .upload_index import (
@@ -55,7 +56,8 @@ class DeepSeekFileConnection:
 
     baseURL: str
     apiKey: str
-    protocol: str
+    #: 使用 DSH 账户头（x-dsh-auth-token）；普通 API key 为 False。
+    accountCredential: bool = False
 
 
 @dataclass(frozen=True)
@@ -67,9 +69,8 @@ class DeepSeekFileReference:
 
 
 def _file_scope(connection: DeepSeekFileConnection):
-    root = connection.baseURL.rstrip("/")
-    base = f"{root}/v1" if connection.protocol == "messages" else root
-    return deep_seek_file_scope(base, connection.apiKey)
+    # Files 资源的父 URL 标识上传命名空间（上游 fileScope → messagesApiRoot）。
+    return deep_seek_file_scope(messages_api_root(connection.baseURL), connection.apiKey)
 
 
 def _extension(media_type: str) -> str:
@@ -108,7 +109,7 @@ class DeepSeekFileStore:
     def _client(self, connection: DeepSeekFileConnection) -> DeepSeekFilesClient:
         return DeepSeekFilesClient(
             baseURL=connection.baseURL, apiKey=connection.apiKey,
-            protocol=connection.protocol, transport=self._transport)
+            accountCredential=connection.accountCredential, transport=self._transport)
 
     async def ensure_uploaded(self, version, connection: DeepSeekFileConnection,
                               policy: DeepSeekFilePolicy, signal=None) -> DeepSeekFileReference:
@@ -230,19 +231,15 @@ class DeepSeekFileStore:
         client = self._client(connection)
         after: DeepSeekFileId | None = None
         owned: list[tuple[DeepSeekFileId, int]] = []
-        while connection.protocol == "messages" or len(owned) < count:
-            page = await client.list(after=after, limit=1_000, order="asc", signal=signal)
+        while True:
+            page = await client.list(after=after, limit=1_000, signal=signal)
             for file in page.data:
                 if not file.filename.startswith(_OWNED_FILE_PREFIX):
                     continue
                 owned.append((file.id, file.createdAt))
-                if connection.protocol == "chat-completions" and len(owned) == count:
-                    break
-            if connection.protocol == "messages":
-                # Messages offers no ascending-order query; retain the oldest
-                # candidates across every page.
-                owned.sort(key=lambda entry: entry[1])
-                owned = owned[:count]
+            # Messages 无升序查询；跨页保留最旧候选。
+            owned.sort(key=lambda entry: entry[1])
+            owned = owned[:count]
             if not page.hasMore or page.lastId is None or page.lastId == after:
                 break
             after = page.lastId

@@ -43,21 +43,40 @@ class _FilesServer:
 
     def handler(self, request):
         self.calls.append((request.method, request.url.path))
-        if request.method == "POST" and request.url.path == "/files":
+        if request.method == "POST" and request.url.path == "/anthropic/v1/files":
             if self.fail:
                 return httpx.Response(500, json={"error": {"message": "boom"}})
             self.uploaded = _multipart_file_bytes(request)
             return httpx.Response(200, json={
-                "id": "file-1", "object": "file", "bytes": len(self.uploaded),
-                "created_at": 1000, "filename": "n", "purpose": "user_data",
-                "expires_at": 4600})
-        if request.method == "GET" and request.url.path == "/files":
+                "id": "file-1", "type": "file", "mime_type": "image/png",
+                "size_bytes": len(self.uploaded), "created_at": "1970-01-01T00:16:40Z",
+                "filename": "n"})
+        if request.method == "GET" and request.url.path == "/anthropic/v1/files":
             return httpx.Response(200, json={
-                "object": "list", "data": [], "has_more": False,
-                "first_id": None, "last_id": None})
+                "data": [], "has_more": False, "first_id": None, "last_id": None})
         if request.method == "DELETE":
-            return httpx.Response(200, json={"id": "file-1", "object": "file", "deleted": True})
+            return httpx.Response(200, json={"id": "file-1", "type": "file_deleted"})
         return httpx.Response(404, json={"error": {"message": "not found"}})
+
+
+def _anthropic_sse(text="ok"):
+    lines = (
+        ['event: message_start',
+         'data: ' + json.dumps({'type': 'message_start', 'message': {}}), '',
+         'event: content_block_start',
+         'data: ' + json.dumps({'type': 'content_block_start', 'index': 0,
+                                'content_block': {'type': 'text', 'text': ''}}), '',
+         'event: content_block_delta',
+         'data: ' + json.dumps({'type': 'content_block_delta', 'index': 0,
+                                'delta': {'type': 'text_delta', 'text': text}}), '',
+         'event: content_block_stop',
+         'data: ' + json.dumps({'type': 'content_block_stop', 'index': 0}), '',
+         'event: message_delta',
+         'data: ' + json.dumps({'type': 'message_delta',
+                                'delta': {'stop_reason': 'end_turn'}}), '',
+         'event: message_stop',
+         'data: ' + json.dumps({'type': 'message_stop'}), ''])
+    return ('\n'.join(lines) + '\n\n').encode()
 
 
 class _ChatServer:
@@ -67,7 +86,7 @@ class _ChatServer:
     def handler(self, request):
         self.bodies.append(json.loads(request.content))
         return httpx.Response(200, headers={"content-type": "text/event-stream"},
-                              content=b'data: {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
+                              content=_anthropic_sse())
 
 
 def _adapter(store, files, chat, model="deepseek-flash"):
@@ -106,12 +125,9 @@ class DeepSeekAdapterImagesTest(unittest.TestCase):
                                                   self.image_block]}])
         self.assertEqual([c["type"] for c in chunks if c["type"] == "finish"], ["finish"])
         body = chat.bodies[0]
-        part_types = [part["type"] for part in
-                      body["messages"][0]["content"] if isinstance(part, dict)]
-        self.assertIn("file", part_types)
-        file_part = next(p for p in body["messages"][0]["content"]
-                         if isinstance(p, dict) and p["type"] == "file")
-        self.assertEqual(file_part["file_id"], "file-1")
+        image_part = next(p for p in body["messages"][0]["content"]
+                          if isinstance(p, dict) and p["type"] == "image")
+        self.assertEqual(image_part["source"], {"type": "file", "file_id": "file-1"})
         # 上传字节是请求版本（可能被重新编码），摘要只断言非空
         self.assertTrue(len(files.uploaded) > 0)
 
@@ -121,8 +137,10 @@ class DeepSeekAdapterImagesTest(unittest.TestCase):
         adapter = _adapter(self.store, files, chat)
         self._run(adapter, [{"role": "user", "content": [self.image_block]}])
         body = chat.bodies[0]
-        parts = [p for p in body["messages"][0]["content"] if isinstance(p, dict)]
-        self.assertTrue(any(p["type"] == "image_url" for p in parts))
+        image_part = next(p for p in body["messages"][0]["content"]
+                          if isinstance(p, dict) and p["type"] == "image")
+        self.assertEqual(image_part["source"]["type"], "base64")
+        self.assertEqual(image_part["source"]["media_type"], "image/png")
 
     def test_text_unsupported_model_rejects_images(self):
         files = _FilesServer()

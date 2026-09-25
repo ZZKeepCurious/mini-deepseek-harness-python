@@ -9,7 +9,13 @@ serialize_messages_with_images 序列化，并通过 IMAGE_OFFLOAD_REQUIRED 机�
 import asyncio
 import unittest
 
-from miniharness.core.session import file_block, text_block, tool_result_block
+from miniharness.core.session import file_block, text_block
+
+
+def tool_message(call_id, blocks):
+    """V4 tool/result 消息：role 'tool' 平铺 content + 顶层 toolCallId/source。"""
+    return {"id": f"tm-{call_id}", "role": "tool", "toolCallId": call_id,
+            "content": list(blocks), "source": {"kind": "tool", "callId": call_id}}
 from miniharness.llm import (
     IMAGE_OFFLOAD_REQUIRED,
     LlmFailure,
@@ -42,13 +48,11 @@ class FileHandleTextTest(unittest.TestCase):
 
 
 class ContentHasFileTest(unittest.TestCase):
-    def test_recursive_tool_result(self):
+    def test_flat_tool_message_content(self):
         self.assertFalse(content_has_file([text_block("t")]))
         self.assertTrue(content_has_file([file_block(REF)]))
-        nested = [tool_result_block("c1", [file_block(REF)])]
-        self.assertTrue(content_has_file(nested))
-        deep = [tool_result_block("c1", [tool_result_block("c2", [file_block(REF)])])]
-        self.assertTrue(content_has_file(deep))
+        flat = tool_message("c1", [file_block(REF)])["content"]
+        self.assertTrue(content_has_file(flat))
 
 
 class ProjectFilesToTextTest(unittest.TestCase):
@@ -65,18 +69,15 @@ class ProjectFilesToTextTest(unittest.TestCase):
         self.assertEqual(out[0]["content"][1]["type"], "text")
         self.assertIn('File "report.pdf"', out[0]["content"][1]["text"])
 
-    def test_nested_tool_result_replaced(self):
-        messages = [{"id": "m", "role": "user", "content": [
-            tool_result_block("c1", [file_block(REF), text_block("rest")])], "source": {}}]
+    def test_flat_tool_message_replaced(self):
+        messages = [tool_message("c1", [file_block(REF), text_block("rest")])]
         out = project_files_to_text(messages, lambda ref: None)
-        result = out[0]["content"][0]
-        self.assertEqual(result["type"], "tool-result")
-        self.assertEqual(result["content"][0]["type"], "text")
-        self.assertIn("cannot access a readable path", result["content"][0]["text"])
-        self.assertEqual(result["content"][1]["text"], "rest")
+        self.assertEqual(out[0]["content"][0]["type"], "text")
+        self.assertIn("cannot access a readable path", out[0]["content"][0]["text"])
+        self.assertEqual(out[0]["content"][1]["text"], "rest")
         # 无 file 的兄弟消息浅拷贝保形
-        self.assertEqual(out[0]["id"], "m")
-        self.assertEqual(out[0]["role"], "user")
+        self.assertEqual(out[0]["id"], "tm-c1")
+        self.assertEqual(out[0]["role"], "tool")
 
     def test_replace_preserves_order_and_non_file_blocks(self):
         blocks = [text_block("a"), {"type": "reasoning", "text": "r"},
@@ -94,9 +95,8 @@ class SerializeFileBlockDefenseTest(unittest.TestCase):
             serialize_messages(messages)
         self.assertEqual(cm.exception.code, UNSUPPORTED_CONTENT)
 
-    def test_serialize_rejects_nested_file_block(self):
-        messages = [{"id": "m", "role": "user", "content": [
-            tool_result_block("c1", [file_block(REF)])], "source": {}}]
+    def test_serialize_rejects_flat_tool_file_block(self):
+        messages = [tool_message("c1", [file_block(REF)])]
         with self.assertRaises(LlmFailure):
             serialize_messages(messages)
 
@@ -105,7 +105,8 @@ class SerializeFileBlockDefenseTest(unittest.TestCase):
             text_block("see"), file_block(REF)], "source": {}}]
         wire = serialize_messages(project_files_to_text(messages, lambda ref: None))
         self.assertEqual(wire[0]["role"], "user")
-        self.assertIn('File "report.pdf"', wire[0]["content"])
+        text = "".join(block["text"] for block in wire[0]["content"])
+        self.assertIn('File "report.pdf"', text)
 
 
 if __name__ == "__main__":
@@ -126,8 +127,8 @@ class ContentHasImageTest(unittest.TestCase):
         self.assertTrue(content_has_image([IMAGE_BLOCK]))
         self.assertFalse(content_has_image([text_block("hi")]))
 
-    def test_nested_tool_result(self):
-        self.assertTrue(content_has_image([tool_result_block("c1", [IMAGE_BLOCK])]))
+    def test_flat_tool_message(self):
+        self.assertTrue(content_has_image(tool_message("c1", [IMAGE_BLOCK])["content"]))
 
     def test_offloaded_image(self):
         self.assertTrue(content_has_image([OFFLOADED_IMAGE_BLOCK]))
@@ -218,7 +219,7 @@ class SerializeMessagesWithImagesTest(unittest.TestCase):
         images = {"representation": {"kind": "base64"}, "requestImages": {}, "maxRequestImageBytes": 1000000}
         result = self._run(messages, images)
         self.assertEqual(result[0]["role"], "user")
-        self.assertEqual(result[0]["content"], "hi")
+        self.assertEqual(result[0]["content"], [{"type": "text", "text": "hi"}])
 
     def test_offload_needed_raises(self):
         from miniharness.llm import IMAGE_OFFLOAD_REQUIRED
@@ -258,22 +259,20 @@ class NormalizedAccessTextTest(unittest.TestCase):
 
 
 class ReplaceOffloadedWithToolResultTest(unittest.TestCase):
-    def test_nested_tool_result_offloaded(self):
+    def test_flat_tool_content_offloaded(self):
         from miniharness.llm.content import _replace_offloaded_images
-        block = {"type": "tool-result", "content": [OFFLOADED_IMAGE_BLOCK]}
-        out = _replace_offloaded_images([block], lambda ref: "[removed]")
+        out = _replace_offloaded_images([OFFLOADED_IMAGE_BLOCK], lambda ref: "[removed]")
         self.assertEqual(len(out), 1)
-        self.assertEqual(out[0]["type"], "tool-result")
-        self.assertEqual(out[0]["content"][0]["text"], "[removed]")
+        self.assertEqual(out[0]["type"], "text")
+        self.assertEqual(out[0]["text"], "[removed]")
 
 
 class ReplaceImagesForTextModelNestedTest(unittest.TestCase):
-    def test_nested_tool_result(self):
+    def test_flat_tool_content(self):
         from miniharness.llm.content import _replace_images_for_text_model
-        block = {"type": "tool-result", "content": [IMAGE_BLOCK]}
-        out = _replace_images_for_text_model([block])
-        self.assertEqual(out[0]["content"][0]["type"], "text")
-        self.assertIn("image omitted", out[0]["content"][0]["text"])
+        out = _replace_images_for_text_model([IMAGE_BLOCK])
+        self.assertEqual(out[0]["type"], "text")
+        self.assertIn("image omitted", out[0]["text"])
 
 
 class RequiredImageOffloadBase64Test(unittest.TestCase):

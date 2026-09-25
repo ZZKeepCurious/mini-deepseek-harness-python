@@ -1,9 +1,9 @@
 """请求侧 image/file 块投影（上游 packages/llm/llm/src/content.ts）。
 
 file 是第六类 ContentBlock（alpha.1）：durable verbatim 引用经 attachment 服务
-存储；**任何 provider 都不原生接收 file 块**——请求组装无条件把 file（含嵌套
-tool-result 内的）投影为确定性 handle 文本（fileHandleText），模型按需用文件
-工具读取该路径。
+存储；**任何 provider 都不原生接收 file 块**——请求组装无条件把 file 投影为
+确定性 handle 文本（fileHandleText），模型按需用文件工具读取该路径。V4 起
+tool/result 消息平铺 content，内容块不再嵌套（tool-result 包裹块废止）。
 
 image 的处理分两条路径：
   * text-only 模型：把历史 image 块确定性投影为占位文本（textOnlyImageText）
@@ -74,21 +74,13 @@ def base64_length(bytes_count: int) -> int:
 # ---------- contentHasImage / contentHasFile ----------
 
 def content_has_image(content: list) -> bool:
-    """内容块是否含 image 块（含嵌套 tool-result 递归，上游 contentHasImage）。"""
-    return any(
-        block.get("type") == "image"
-        or (block.get("type") == "tool-result" and content_has_image(block.get("content") or []))
-        for block in content or []
-    )
+    """内容块是否含 image 块（V4 平铺内容，无嵌套，上游 contentHasImage）。"""
+    return any(block.get("type") == "image" for block in content or [])
 
 
 def content_has_file(content: list) -> bool:
-    """内容块是否含 file 块（含嵌套 tool-result 递归，上游 contentHasFile）。"""
-    return any(
-        block.get("type") == "file"
-        or (block.get("type") == "tool-result" and content_has_file(block.get("content") or []))
-        for block in content or []
-    )
+    """内容块是否含 file 块（V4 平铺内容，无嵌套，上游 contentHasFile）。"""
+    return any(block.get("type") == "file" for block in content or [])
 
 
 # ---------- image text 生成函数 ----------
@@ -174,7 +166,7 @@ def _replace_offloaded_images(
     blocks: list,
     placeholder,
 ) -> list:
-    """Replace every offloaded occurrence, including nested tool results, with placeholder text."""
+    """Replace every offloaded occurrence with placeholder text."""
     next_blocks = None
     for index, block in enumerate(blocks or []):
         if block.get("type") == "image" and block.get("offloaded") is True:
@@ -182,15 +174,6 @@ def _replace_offloaded_images(
                 next_blocks = list(blocks[:index])
             next_blocks.append({"type": "text", "text": placeholder(block.get("attachment") or {})})
             continue
-        if block.get("type") == "tool-result":
-            content = _replace_offloaded_images(block.get("content") or [], placeholder)
-            if content is not (block.get("content") or []):
-                if next_blocks is None:
-                    next_blocks = list(blocks[:index])
-                replaced = dict(block)
-                replaced["content"] = content
-                next_blocks.append(replaced)
-                continue
         if next_blocks is not None:
             next_blocks.append(block)
     if next_blocks is not None:
@@ -224,7 +207,7 @@ def project_offloaded_images(
 
 
 def _replace_images_for_text_model(blocks: list) -> list:
-    """Replace every image occurrence, including nested tool results, for a text-only model."""
+    """Replace every image occurrence for a text-only model."""
     next_blocks = None
     for index, block in enumerate(blocks or []):
         if block.get("type") == "image":
@@ -232,15 +215,6 @@ def _replace_images_for_text_model(blocks: list) -> list:
                 next_blocks = list(blocks[:index])
             next_blocks.append({"type": "text", "text": text_only_image_text(block.get("attachment") or {})})
             continue
-        if block.get("type") == "tool-result":
-            content = _replace_images_for_text_model(block.get("content") or [])
-            if content is not (block.get("content") or []):
-                if next_blocks is None:
-                    next_blocks = list(blocks[:index])
-                replaced = dict(block)
-                replaced["content"] = content
-                next_blocks.append(replaced)
-                continue
         if next_blocks is not None:
             next_blocks.append(block)
     if next_blocks is not None:
@@ -270,7 +244,7 @@ def project_images_for_text_model(messages: list) -> list:
 
 
 def _replace_files_with_handles(blocks: list, resolve_path) -> list:
-    """Replace every file occurrence, including nested tool results, with handle text."""
+    """Replace every file occurrence with handle text."""
     next_blocks = None
     for index, block in enumerate(blocks or []):
         if block.get("type") == "file":
@@ -278,15 +252,6 @@ def _replace_files_with_handles(blocks: list, resolve_path) -> list:
                 next_blocks = list(blocks[:index])
             next_blocks.append({"type": "text", "text": file_handle_text(block.get("attachment") or {}, resolve_path(block.get("attachment") or {}))})
             continue
-        if block.get("type") == "tool-result":
-            content = _replace_files_with_handles(block.get("content") or [], resolve_path)
-            if content is not (block.get("content") or []):
-                if next_blocks is None:
-                    next_blocks = list(blocks[:index])
-                replaced = dict(block)
-                replaced["content"] = content
-                next_blocks.append(replaced)
-                continue
         if next_blocks is not None:
             next_blocks.append(block)
     return next_blocks if next_blocks is not None else list(blocks or [])
@@ -375,9 +340,7 @@ def required_image_offload(
 
 
 def visit_image_blocks(content: list, visit) -> None:
-    """Visit every image occurrence of typed content in message order, including nested tool-result content."""
+    """Visit every image occurrence of typed content in message order."""
     for block in content or []:
         if block.get("type") == "image":
             visit(block)
-        elif block.get("type") == "tool-result":
-            visit_image_blocks(block.get("content") or [], visit)

@@ -64,8 +64,7 @@ def _block(ref, offloaded=False):
 
 def _connection(models=()):
     return DeepSeekConnectionOptions(
-        protocol="chat-completions", baseURL="https://api.deepseek.com",
-        models=tuple(models))
+        baseURL="https://api.deepseek.com", models=tuple(models))
 
 
 VISION_MODEL = DeepSeekCatalogModel(id="vision", inputModalities=("text", "image"))
@@ -222,11 +221,11 @@ class _FilesServer:
         self.pages = None
 
     def handler(self, request: httpx.Request) -> httpx.Response:
+        """Messages Files API 夹具（客户端根为 messagesApiRoot(baseURL) → /v1/files）。"""
         path = request.url.path
-        if path.startswith("/v1"):
-            # Messages 协议共享同一夹具：/v1/files 等价于 /files。
-            return self._messages_handler(request)
-        if request.method == "POST" and path == "/files":
+        if not path.startswith("/v1/files"):
+            return httpx.Response(404, json={"error": {"message": "not found"}})
+        if request.method == "POST":
             if self.fail_upload_status is not None:
                 return httpx.Response(self.fail_upload_status, json={
                     "error": {"message": self.fail_detail or "failed",
@@ -238,43 +237,13 @@ class _FilesServer:
             data = _multipart_file_bytes(request)
             self.upload_count += 1
             file_id = f"file-{self.upload_count}"
-            self.files[file_id] = {
-                "bytes": len(data), "created": 1000, "expires": 1000 + 3600,
-                "filename": "dsh-owned",
-            }
-            return httpx.Response(200, json={
-                "id": file_id, "object": "file", "bytes": len(data),
-                "created_at": 1000, "filename": "dsh-owned", "purpose": "user_data",
-                "expires_at": 1000 + 3600})
-        if request.method == "GET" and path == "/files":
-            data = [{
-                "id": file_id, "object": "file", "bytes": meta["bytes"],
-                "created_at": meta["created"], "filename": meta["filename"],
-                "purpose": "user_data", "expires_at": meta["expires"],
-            } for file_id, meta in self.files.items()]
-            return httpx.Response(200, json={
-                "object": "list", "data": data, "first_id": None,
-                "last_id": None, "has_more": False})
-        if request.method == "DELETE" and path.startswith("/files/"):
-            file_id = path.rsplit("/", 1)[1]
-            self.files.pop(file_id, None)
-            self.deleted.append(file_id)
-            return httpx.Response(200, json={"id": file_id, "object": "file", "deleted": True})
-        return httpx.Response(404, json={"error": {"message": "not found"}})
-
-    def _messages_handler(self, request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        if request.method == "POST":
-            data = _multipart_file_bytes(request)
-            self.upload_count += 1
-            file_id = f"file-{self.upload_count}"
             self.files[file_id] = {"bytes": len(data), "created": 1000,
                                    "expires": 1000 + 3600, "filename": "dsh-owned"}
             return httpx.Response(200, json={
                 "id": file_id, "type": "file", "mime_type": "image/png",
                 "size_bytes": len(data), "created_at": "1970-01-01T00:16:40Z",
                 "filename": "dsh-owned"})
-        if request.method == "GET":
+        if request.method == "GET" and path == "/v1/files":
             data = [{
                 "id": file_id, "type": "file", "mime_type": "image/png",
                 "size_bytes": meta["bytes"],
@@ -282,6 +251,15 @@ class _FilesServer:
             } for file_id, meta in self.files.items()]
             return httpx.Response(200, json={"data": data, "has_more": False,
                                              "first_id": None, "last_id": None})
+        if request.method == "GET":
+            file_id = path.rsplit("/", 1)[1]
+            meta = self.files.get(file_id)
+            if meta is None:
+                return httpx.Response(404, json={"error": {"message": "not found"}})
+            return httpx.Response(200, json={
+                "id": file_id, "type": "file", "mime_type": "image/png",
+                "size_bytes": meta["bytes"], "created_at": "1970-01-01T00:16:40Z",
+                "filename": meta["filename"]})
         file_id = path.rsplit("/", 1)[1]
         self.files.pop(file_id, None)
         self.deleted.append(file_id)
@@ -353,11 +331,16 @@ class UploadIndexTest(unittest.TestCase):
 
 
 class FilesClientTest(unittest.TestCase):
+    """Messages Files API：/v1/files 路径、x-api-key 头、ISO 时间、after_id 游标。"""
+
+    def _client(self, handler):
+        return DeepSeekFilesClient(
+            baseURL="https://api.deepseek.com", apiKey="sk-test",
+            transport=httpx.MockTransport(handler))
+
     def test_upload_list_delete_roundtrip(self):
         server = _FilesServer()
-        client = DeepSeekFilesClient(
-            baseURL="https://api.deepseek.com", apiKey="sk-test",
-            protocol="chat-completions", transport=httpx.MockTransport(server.handler))
+        client = self._client(server.handler)
 
         async def run():
             uploaded = await client.upload(
@@ -376,9 +359,7 @@ class FilesClientTest(unittest.TestCase):
         server = _FilesServer()
         server.fail_upload_status = 429
         server.fail_detail = "storage quota exceeded"
-        client = DeepSeekFilesClient(
-            baseURL="https://api.deepseek.com", apiKey="sk-test",
-            protocol="chat-completions", transport=httpx.MockTransport(server.handler))
+        client = self._client(server.handler)
 
         async def run():
             with self.assertRaises(DeepSeekFilesError) as cm:
@@ -388,15 +369,6 @@ class FilesClientTest(unittest.TestCase):
             self.assertTrue(is_files_quota_error(cm.exception))
 
         asyncio.run(run())
-
-
-class FilesClientMessagesTest(unittest.TestCase):
-    """Messages 协议分支：/v1/files 路径、x-api-key 头、ISO 时间、分页游标。"""
-
-    def _client(self, handler):
-        return DeepSeekFilesClient(
-            baseURL="https://api.deepseek.com", apiKey="sk-test",
-            protocol="messages", transport=httpx.MockTransport(handler))
 
     def test_upload_uses_v1_path_and_derives_expiry(self):
         captured = {}
@@ -451,17 +423,6 @@ class FilesClientMessagesTest(unittest.TestCase):
             asyncio.run(client.list())
         self.assertEqual(cm.exception.code, "INVALID_RESPONSE")
 
-    def test_chat_list_requires_object_tag(self):
-        def handler(request):
-            return httpx.Response(200, json={"data": [], "has_more": True})
-
-        client = DeepSeekFilesClient(
-            baseURL="https://api.deepseek.com", apiKey="sk-test",
-            protocol="chat-completions", transport=httpx.MockTransport(handler))
-        with self.assertRaises(LlmFailure) as cm:
-            asyncio.run(client.list())
-        self.assertEqual(cm.exception.code, "INVALID_RESPONSE")
-
 
 class FileStoreMessagesScopeTest(unittest.TestCase):
     def test_messages_scope_uses_v1_namespace(self):
@@ -471,8 +432,7 @@ class FileStoreMessagesScopeTest(unittest.TestCase):
             store = DeepSeekFileStore(
                 index=DeepSeekUploadIndex(os.path.join(tmp, "files-v3.json")),
                 now=lambda: 1_000_000, transport=httpx.MockTransport(server.handler))
-            connection = DeepSeekFileConnection(
-                "https://api.deepseek.com", "sk-test", "messages")
+            connection = DeepSeekFileConnection("https://api.deepseek.com", "sk-test")
             policy = DeepSeekFilePolicy(3600, 0, 10)
             result = asyncio.run(store.ensure_uploaded(_version(), connection, policy))
             self.assertEqual(
@@ -491,8 +451,7 @@ class FileStoreMessagesScopeTest(unittest.TestCase):
             store = DeepSeekFileStore(
                 index=DeepSeekUploadIndex(os.path.join(tmp, "files-v3.json")),
                 now=lambda: 1_000_000, transport=httpx.MockTransport(server.handler))
-            connection = DeepSeekFileConnection(
-                "https://api.deepseek.com", "sk-test", "chat-completions")
+            connection = DeepSeekFileConnection("https://api.deepseek.com", "sk-test")
             total = asyncio.run(store.release_all(connection))
             self.assertEqual(total, 1)
             self.assertEqual(server.files, {})
@@ -510,8 +469,7 @@ class FileStoreTest(unittest.TestCase):
         self.store = DeepSeekFileStore(index=self.index, now=lambda: 1_000_000,
                                        transport=self.transport)
         self.connection = DeepSeekFileConnection(
-            baseURL="https://api.deepseek.com", apiKey="sk-test",
-            protocol="chat-completions")
+            baseURL="https://api.deepseek.com", apiKey="sk-test")
         self.policy = DeepSeekFilePolicy(
             expiresAfterSeconds=3600, refreshMarginSeconds=0, quotaCleanupBatch=10)
         self.version = _version()
@@ -609,8 +567,7 @@ class RequestFilesTest(unittest.TestCase):
                 index=DeepSeekUploadIndex(os.path.join(tmp, "files-v3.json")),
                 now=lambda: 1_000_000,
                 transport=httpx.MockTransport(server.handler))
-            connection = DeepSeekFileConnection(
-                "https://api.deepseek.com", "sk", "chat-completions")
+            connection = DeepSeekFileConnection("https://api.deepseek.com", "sk")
             request_files = RequestFiles(
                 store, connection, DeepSeekFilePolicy(3600, 0, 10),
                 1000, None, lambda: None)
@@ -644,7 +601,7 @@ class ModelInfoTest(unittest.TestCase):
 
     def test_thinking_disabled_off_only(self):
         conn = DeepSeekConnectionOptions(
-            protocol="chat-completions", baseURL="x",
+            baseURL="x",
             defaults=RequestDefaults(thinking="disabled"),
             models=(VISION_MODEL,))
         info = model_info(conn, "p", "vision")

@@ -9,7 +9,7 @@ from .types import DeepSeekCatalogModel
 
 __all__ = ["DEFAULT_MODELS"]
 
-#: 建议性官方模型条目；部署可替换整个目录。
+#: 建议性官方模型条目；部署可替换整个目录（上游 models.ts）。
 DEFAULT_MODELS = (
     DeepSeekCatalogModel(
         id="deepseek-flash",
@@ -19,21 +19,9 @@ DEFAULT_MODELS = (
         systemPromptUpdate="in-history",
     ),
     DeepSeekCatalogModel(
-        id="deepseek-v4-flash",
-        name="DeepSeek-V4-Flash",
-        description="Fast, efficient, and economical; suited to focused, routine, or parallel tasks.",
-        contextWindow=DEFAULT_CONTEXT_WINDOW,
-    ),
-    DeepSeekCatalogModel(
         id="deepseek-v4-pro",
         name="DeepSeek-V4-Pro",
         description="Stronger agentic coding, knowledge, and difficult reasoning; suited to complex or quality-critical tasks at higher cost.",
         contextWindow=DEFAULT_CONTEXT_WINDOW,
-    ),
-    DeepSeekCatalogModel(
-        id="deepseek-v4-flash-vision-exp",
-        name="DeepSeek-V4-Flash-Vision-Exp",
-        contextWindow=DEFAULT_CONTEXT_WINDOW,
-        inputModalities=("text", "image"),
     ),
 )

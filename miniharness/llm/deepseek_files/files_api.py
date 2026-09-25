@@ -1,6 +1,12 @@
-"""DeepSeek Files API 传输（Chat Completions 与 Messages 端点）。
+"""DeepSeek Files API 传输（Messages 协议端点）。
 
 对应 dsh 真实源码：packages/llm/llm-deepseek/src/common/files-api.ts。
+
+上游 llm-deepseek 自 dsh-v0.1.7-rc.1 起只保留 Anthropic 兼容 Messages；Files
+资源挂在 ``messagesApiRoot(baseURL)`` 下（``/v1/files``），头为 ``x-api-key`` +
+``anthropic-version: 2023-06-01`` + ``anthropic-beta: files-api-2025-04-14``，
+列表游标为 ``after_id``（无升序查询），时间戳为 ISO 字符串，删除回执
+``type == "file_deleted"``。
 
 载体差异：上游以 Web `fetch`/`FormData`/`Blob` 实现；mini 用 httpx（异步）。
 `redirect: 'error'` 语义以 httpx 缺省不跟随重定向承载——凭据不会离开配置源。
@@ -13,6 +19,7 @@ from typing import Any
 
 import httpx
 
+from ..deepseek_messages import MESSAGES_FILES_BETA, messages_api_root
 from ..protocol import (
     AUTH,
     FILES_API,
@@ -42,8 +49,6 @@ __all__ = [
     "provider_error_detail",
 ]
 
-#: Messages 文件操作与 file-referenced 图片请求所需的显式 opt-in。
-MESSAGES_FILES_BETA = "files-api-2025-04-14"
 #: provider 支持的最小文件寿命。
 MIN_FILE_EXPIRY_SECONDS = 3_600
 #: provider 支持的最大文件寿命。
@@ -78,7 +83,7 @@ def is_files_quota_error(error: object) -> bool:
 
 
 class DeepSeekFileObject:
-    """从任一 DeepSeek Files 协议归一化出的已校验文件元数据。"""
+    """从 Messages Files 协议归一化出的已校验文件元数据。"""
 
     id: DeepSeekFileId
     bytes: int
@@ -126,7 +131,7 @@ def _is_safe_int(value: Any) -> bool:
 
 
 def parse_file_object(value: Any, operation: str) -> DeepSeekFileObject:
-    """严格归一化 Chat Completions 文件对象（上游 parseFileObject）。"""
+    """严格归一化已解码的 Messages 文件对象（上游 parseFileObject）。"""
     if not isinstance(value, dict):
         raise _invalid_response(operation)
     wire_id = value.get("id")
@@ -151,7 +156,7 @@ def parse_file_object(value: Any, operation: str) -> DeepSeekFileObject:
 
 
 def parse_messages_file(value: Any, operation: str) -> DeepSeekFileObject:
-    """归一化 Messages wire 对象，不把省略的过期时间解释为永久（上游 parseMessagesFile）。"""
+    """归一化 Messages wire 对象，不把省略的过期时间解释为永久（上游 parseFileObject）。"""
     if not isinstance(value, dict):
         raise _invalid_response(operation)
     created_at_raw = value.get("created_at")
@@ -197,23 +202,20 @@ def provider_error_detail(value: Any) -> dict:
 class DeepSeekFilesClient:
     """直接 Files 客户端，保留配置的 URL 根并拒绝重定向以免凭据离开源。"""
 
-    def __init__(self, *, baseURL: str, apiKey: str, protocol: str,
+    def __init__(self, *, baseURL: str, apiKey: str, accountCredential: bool = False,
                  transport: httpx.AsyncBaseTransport | None = None) -> None:
-        self.baseURL = baseURL.rstrip("/")
+        self.baseURL = messages_api_root(baseURL)
         self.apiKey = apiKey
-        self.protocol = protocol
+        self.accountCredential = accountCredential
         self._transport = transport
-        self.path = "/v1/files" if protocol == "messages" else "/files"
 
     def _parse_file(self, value: Any, operation: str) -> DeepSeekFileObject:
-        return (parse_messages_file(value, operation)
-                if self.protocol == "messages" else parse_file_object(value, operation))
+        return parse_messages_file(value, operation)
 
     def _headers(self) -> dict:
-        if self.protocol == "messages":
-            return {"x-api-key": self.apiKey, "anthropic-version": "2023-06-01",
-                    "anthropic-beta": MESSAGES_FILES_BETA}
-        return {"authorization": f"Bearer {self.apiKey}"}
+        return {(("x-dsh-auth-token" if self.accountCredential else "x-api-key")): self.apiKey,
+                "anthropic-version": "2023-06-01",
+                "anthropic-beta": MESSAGES_FILES_BETA}
 
     async def _request(self, method: str, path: str,
                        *, data=None, params=None, files=None, signal=None) -> httpx.Response:
@@ -247,7 +249,10 @@ class DeepSeekFilesClient:
 
     async def upload(self, *, data: bytes, mediaType: str, filename: str,
                      expiresAfterSeconds: int, signal=None) -> DeepSeekFileObject:
-        """上传一张图片并带显式寿命（上游 upload）。"""
+        """上传一张图片并带显式寿命（上游 upload）。
+
+        Messages 不上报过期时间；deadline 取上传创建时间加请求寿命。
+        """
         if len(data) > MAX_FILE_UPLOAD_BYTES:
             raise LlmFailure(INVALID_REQUEST, "DeepSeek Files API upload exceeds 128 MiB.")
         if (not isinstance(expiresAfterSeconds, int) or isinstance(expiresAfterSeconds, bool)
@@ -260,69 +265,53 @@ class DeepSeekFilesClient:
             "expires_after[anchor]": "created_at",
             "expires_after[seconds]": str(expiresAfterSeconds),
         }
-        if self.protocol == "chat-completions":
-            form["purpose"] = "user_data"
         response = await self._request(
-            "POST", self.path, data=form,
+            "POST", "/files", data=form,
             files={"file": (filename, data, mediaType)}, signal=signal)
         file = self._parse_file(response.json(), "upload")
-        if self.protocol == "messages":
-            return DeepSeekFileObject(file.id, file.bytes, file.createdAt, file.filename,
-                                      expiresAt=file.createdAt + expiresAfterSeconds)
-        if file.expiresAt is None:
-            raise _invalid_response("upload")
-        return file
+        return DeepSeekFileObject(file.id, file.bytes, file.createdAt, file.filename,
+                                  expiresAt=file.createdAt + expiresAfterSeconds)
 
-    async def list(self, *, after: DeepSeekFileId | None = None, limit: int | None = None,
-                   order: str | None = None, signal=None) -> DeepSeekFilePage:
-        """列出一页文件；排序仅适用于 Chat Completions（上游 list）。"""
-        query: dict = {} if self.protocol == "messages" else {"purpose": "user_data"}
+    async def list(self, *, after: DeepSeekFileId | None = None,
+                   limit: int | None = None, signal=None) -> DeepSeekFilePage:
+        """列出一页文件（Messages 无升序查询，游标为 after_id）。"""
+        query: dict = {}
         if after is not None:
-            query["after_id" if self.protocol == "messages" else "after"] = str(after)
+            query["after_id"] = str(after)
         if limit is not None:
             query["limit"] = str(limit)
-        if order is not None and self.protocol == "chat-completions":
-            query["order"] = order
-        response = await self._request("GET", self.path, params=query, signal=signal)
+        response = await self._request("GET", "/files", params=query, signal=signal)
         value = response.json()
         if not isinstance(value, dict):
             raise _invalid_response("list")
         first_raw = value.get("first_id")
         last_raw = value.get("last_id")
-        first_id = first_raw if self.protocol == "messages" else first_raw
-        last_id = last_raw if self.protocol == "messages" else last_raw
-        if ((self.protocol == "chat-completions" and value.get("object") != "list")
-                or not isinstance(value.get("data"), list)
+        if (not isinstance(value.get("data"), list)
                 or not isinstance(value.get("has_more"), bool)
-                or (first_id is not None and not isinstance(first_id, str))
-                or (last_id is not None and not isinstance(last_id, str))):
+                or (first_raw is not None and not isinstance(first_raw, str))
+                or (last_raw is not None and not isinstance(last_raw, str))):
             raise _invalid_response("list")
         return DeepSeekFilePage(
             data=[self._parse_file(item, "list") for item in value["data"]],
-            firstId=DeepSeekFileId(first_id) if isinstance(first_id, str) else None,
-            lastId=DeepSeekFileId(last_id) if isinstance(last_id, str) else None,
+            firstId=DeepSeekFileId(first_raw) if isinstance(first_raw, str) else None,
+            lastId=DeepSeekFileId(last_raw) if isinstance(last_raw, str) else None,
             hasMore=value["has_more"],
         )
 
     async def retrieve(self, file_id: DeepSeekFileId, signal=None) -> DeepSeekFileObject:
         """取回一个文件对象（上游 retrieve）。"""
         response = await self._request(
-            "GET", f"{self.path}/{_encode(file_id)}", signal=signal)
+            "GET", f"/files/{_encode(file_id)}", signal=signal)
         return self._parse_file(response.json(), "retrieve")
 
     async def delete(self, file_id: DeepSeekFileId, signal=None) -> None:
         """删除一个 provider 文件（上游 delete）。"""
         response = await self._request(
-            "DELETE", f"{self.path}/{_encode(file_id)}", signal=signal)
+            "DELETE", f"/files/{_encode(file_id)}", signal=signal)
         value = response.json()
         if not isinstance(value, dict):
             raise _invalid_response("delete")
-        if self.protocol == "messages":
-            valid = value.get("id") == file_id and value.get("type") == "file_deleted"
-        else:
-            valid = (value.get("id") == file_id and value.get("object") == "file"
-                     and value.get("deleted") is True)
-        if not valid:
+        if value.get("id") != file_id or value.get("type") != "file_deleted":
             raise _invalid_response("delete")
 
 

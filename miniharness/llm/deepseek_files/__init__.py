@@ -5,7 +5,7 @@
   * file_id —— Files API 标识与命名空间品牌类型；
   * defaults / models / types / model_info —— provider 限额、缺省目录与能力解析；
   * image_tokens / request_pricing —— provider vision-token 与请求图定价；
-  * files_api —— Files API 传输（Chat Completions / Messages）；
+  * files_api —— Files API 传输（Messages 协议 /v1/files）；
   * upload_index —— durable attachment→file-id 索引（filelock + 原子写）；
   * file_store —— 上传复用、失效与配额恢复；
   * request_files —— 请求级解析、stale-id 恢复与规范化图片诊断。
@@ -63,7 +63,6 @@ __all__ = [
     "DeepSeekFileStore",
     "DeepSeekFilesClient",
     "DeepSeekFilesError",
-    "DeepSeekProtocol",
     "DeepSeekUploadIndex",
     "DeepSeekUploadRecord",
     "FileResolutionFailure",

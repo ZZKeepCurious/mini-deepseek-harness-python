@@ -13,12 +13,8 @@ __all__ = [
     "DeepSeekConnectionOptions",
     "DeepSeekFileConnection",
     "DeepSeekFilePolicy",
-    "DeepSeekProtocol",
     "RequestDefaults",
 ]
-
-#: 支持的 wire 实现；Responses 尚未实现。
-DeepSeekProtocol = str
 
 
 @dataclass(frozen=True)
@@ -52,7 +48,6 @@ class DeepSeekConnectionOptions:
     适配器信任它并逐操作重读，使配置变化无需重注册即可到达下一次请求。
     """
 
-    protocol: DeepSeekProtocol
     baseURL: str
     defaults: RequestDefaults = field(default_factory=RequestDefaults)
     maxTokens: int = 0

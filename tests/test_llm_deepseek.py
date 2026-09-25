@@ -1,7 +1,9 @@
-"""DeepSeek SSE 解析契约（spec-strict，上游 sse.ts:7-9）+ httpx 传输契约。
+# -*- coding: utf-8 -*-
+"""DeepSeek Messages（Anthropic 兼容）SSE 解析契约 + httpx 传输契约。
 
-解析：事件只在空行终结时派发、EOF 未终止尾部 = 截断（STREAM_CLOSED）、
-multi-data join、畸形载荷 MALFORMED_RESPONSE、abort 覆盖截断判定。
+解析：事件只在空行终结时派发、EOF 未到 message_stop = 截断（STREAM_CLOSED）、
+multi-data join、畸形载荷 MALFORMED_RESPONSE、带内 error 即 provider 失败、
+abort 覆盖截断判定。翻译：text/thinking/tool_use 块与 stop_reason/usage 映射。
 传输：经 httpx.MockTransport 注入，覆盖 HTTP 错误映射 / facts / 超时。
 """
 import asyncio
@@ -11,9 +13,51 @@ import unittest
 import httpx
 
 from miniharness.llm import DeepSeekAdapter, LlmFailure
+from miniharness.llm.deepseek_files import DEFAULT_MODELS
+from miniharness.llm.deepseek_messages import messages_api_root
 from miniharness.llm.protocol import StreamAborted
 
-BODY = {'model': 'deepseek-chat', 'messages': [{'role': 'user', 'content': 'hi'}]}
+
+def _frame(event_type, payload):
+    return ['event: ' + event_type, 'data: ' + json.dumps(payload), '']
+
+
+def _message_start(usage=None):
+    message = {}
+    if usage is not None:
+        message['usage'] = usage
+    return _frame('message_start', {'type': 'message_start', 'message': message})
+
+
+def _start(index, content_block, type_='content_block_start'):
+    return _frame(type_, {'type': type_, 'index': index, 'content_block': content_block})
+
+
+def _delta(index, delta):
+    return _frame('content_block_delta',
+                  {'type': 'content_block_delta', 'index': index, 'delta': delta})
+
+
+def _stop(index):
+    return _frame('content_block_stop', {'type': 'content_block_stop', 'index': index})
+
+
+def _settle(stop_reason, usage=None):
+    payload = {'type': 'message_delta', 'delta': {'stop_reason': stop_reason}}
+    if usage is not None:
+        payload['usage'] = usage
+    return _frame('message_delta', payload)
+
+
+def _message_stop():
+    return _frame('message_stop', {'type': 'message_stop'})
+
+
+def _text_stream(text='ok', stop_reason='end_turn'):
+    return (_message_start()
+            + _start(0, {'type': 'text', 'text': ''})
+            + _delta(0, {'type': 'text_delta', 'text': text})
+            + _stop(0) + _settle(stop_reason) + _message_stop())
 
 
 async def _alines(lines):
@@ -31,71 +75,71 @@ def _run(lines):
     return asyncio.run(_parse(lines))
 
 
-def _chunk(text='ok', finish=None):
-    return 'data: ' + json.dumps(
-        {'choices': [{'index': 0, 'delta': {'content': text}, 'finish_reason': finish}]}) + '\n'
-
-
-DONE = 'data: [DONE]\n'
-
-
-def _tool_chunk(index=0, call_id=None, name=None, arguments=None, finish=None):
-    fn: dict = {}
-    if name is not None:
-        fn['name'] = name
-    if arguments is not None:
-        fn['arguments'] = arguments
-    delta: dict = {'tool_calls': [{'index': index, **({'id': call_id} if call_id is not None else {}),
-                                  **({'function': fn} if fn else {})}]}
-    return 'data: ' + json.dumps({'choices': [{'index': 0, 'delta': delta, 'finish_reason': finish}]}) + '\n'
-
-
 def _tool_block(out):
     return [c for c in out if c['type'] == 'block-end'][0]['block']
 
 
 class SseParsingTest(unittest.TestCase):
     def test_terminated_events_dispatch(self):
-        out = _run([_chunk(), '', DONE, ''])
+        out = _run(_text_stream())
         self.assertEqual([c['type'] for c in out],
-                         ['block-start', 'text-delta', 'block-end', 'finish'])
+                         ['block-start', 'text-delta', 'block-end', 'usage', 'finish'])
+        self.assertEqual(out[1]['text'], 'ok')
+        self.assertEqual(out[4]['reason'], {'kind': 'stop'})
 
     def test_unterminated_tail_is_truncation(self):
-        # spec-strict（上游 sse.ts:7-9）：事件只在空行终结时派发，
-        # EOF 处的未终止尾部是截断 → 缺 [DONE] → STREAM_CLOSED
+        # spec-strict：事件只在空行终结时派发，EOF 处的未终止尾部是截断 →
+        # 缺 message_stop → STREAM_CLOSED
+        lines = _message_start() + _settle('end_turn')
+        lines = lines + ['data: ' + json.dumps({'type': 'message_stop'})]
         with self.assertRaises(LlmFailure) as cm:
-            _run([_chunk(), '', _chunk().rstrip('\n')])
+            _run(lines)
         self.assertEqual(cm.exception.code, 'STREAM_CLOSED')
 
-    def test_unterminated_done_is_truncation(self):
-        # 未终止的 [DONE] 同样不派发 → STREAM_CLOSED
+    def test_stream_without_message_stop_is_truncation(self):
+        lines = (_message_start() + _start(0, {'type': 'text', 'text': ''})
+                 + _delta(0, {'type': 'text_delta', 'text': 'partial'}) + _stop(0))
         with self.assertRaises(LlmFailure) as cm:
-            _run([_chunk(), '', 'data: [DONE]'])
+            _run(lines)
         self.assertEqual(cm.exception.code, 'STREAM_CLOSED')
 
     def test_multi_data_join(self):
         # 同一事件的多个 data: 行以 \n 连接（eventsource-parser multi-data join）
-        out = _run(['data: {"choices":[{"index":0,\n',
-                    'data: "delta":{"content":"split"}}]}\n',
-                    '\n', DONE, ''])
-        self.assertEqual([c['type'] for c in out],
-                         ['block-start', 'text-delta', 'block-end', 'finish'])
+        lines = (_message_start()
+                 + _start(0, {'type': 'text', 'text': ''})
+                 + ['data: {"type":"content_block_delta","index":0,',
+                    'data: "delta":{"type":"text_delta","text":"split"}}', '']
+                 + _stop(0) + _settle('end_turn') + _message_stop())
+        out = _run(lines)
         self.assertEqual(out[1]['text'], 'split')
 
     def test_malformed_payload_fails_loud(self):
         with self.assertRaises(LlmFailure) as cm:
-            _run(['data: {not json\n', '\n', DONE, ''])
+            _run(['data: {not json', ''])
         self.assertEqual(cm.exception.code, 'MALFORMED_RESPONSE')
+
+    def test_event_name_mismatch_fails_loud(self):
+        lines = _frame('message_start', {'type': 'content_block_delta', 'index': 0,
+                                          'delta': {'type': 'text_delta', 'text': 'x'}})
+        with self.assertRaises(LlmFailure) as cm:
+            _run(lines)
+        self.assertEqual(cm.exception.code, 'MALFORMED_RESPONSE')
+
+    def test_in_band_error_event_is_provider_failure(self):
+        lines = _frame('error', {'type': 'error',
+                                 'error': {'type': 'overloaded_error', 'message': 'busy'}})
+        with self.assertRaises(LlmFailure) as cm:
+            _run(lines)
+        self.assertEqual(cm.exception.code, 'SERVER')
 
     def test_abort_overrides_truncation(self):
         # 取消路径不落 STREAM_CLOSED：解析器阻塞等待时外部置位 → StreamAborted
-        # （而非 EOF 截断判定；_aiter_raced 竞速在下一次取块判负即抛）
         adapter = DeepSeekAdapter(api_key='sk-test')
         abort = asyncio.Event()
 
         async def source():
-            yield _chunk().rstrip('\n')
-            yield ''
+            for line in _message_start():
+                yield line
             # 流在此截断且不再推进：若无 abort，将判 STREAM_CLOSED
             await asyncio.Event().wait()
 
@@ -114,89 +158,189 @@ class SseParsingTest(unittest.TestCase):
             asyncio.run(scenario())
 
 
-class ToolCallIdentityTest(unittest.TestCase):
-    """tool-call delta identity 健壮化（translate.ts:74-87 acceptIdentity，alpha.1）。
+class TranslateTest(unittest.TestCase):
+    def test_duplicate_message_start_rejected(self):
+        with self.assertRaises(LlmFailure) as cm:
+            _run(_message_start() + _message_start())
+        self.assertEqual(cm.exception.code, 'MALFORMED_RESPONSE')
 
-    id/name 是 identity 而非累加：continuation 重发 ''/null 表示「无更新」；
-    arguments 片段遇 null 按 ''（translate.ts:186 ?? ''）。
-    """
+    def test_event_before_message_start_rejected(self):
+        with self.assertRaises(LlmFailure) as cm:
+            _run(_start(0, {'type': 'text', 'text': ''}))
+        self.assertEqual(cm.exception.code, 'MALFORMED_RESPONSE')
 
-    def test_name_resent_on_continuation_keeps_established(self):
-        # continuation delta 重发 name（某些网关会整段重发）不得拼接成 'get_weatherget_weather'
-        out = _run([_tool_chunk(name='get_weather', arguments='{"ci'),
-                    '',
-                    _tool_chunk(name='get_weather', arguments='ty":"SF"}'),
-                    '', DONE, ''])
-        block = _tool_block(out)
-        self.assertEqual(block['name'], 'get_weather')
-        self.assertEqual(block['arguments'], '{"city":"SF"}')
+    def test_thinking_maps_to_reasoning(self):
+        lines = (_message_start()
+                 + _start(0, {'type': 'thinking', 'thinking': ''})
+                 + _delta(0, {'type': 'thinking_delta', 'thinking': 'why'})
+                 + _delta(0, {'type': 'signature_delta', 'signature': 'sig'})
+                 + _stop(0) + _settle('end_turn') + _message_stop())
+        out = _run(lines)
+        self.assertEqual([c['type'] for c in out],
+                         ['block-start', 'reasoning-delta', 'block-end', 'usage', 'finish'])
+        self.assertEqual(out[2]['block'], {'type': 'reasoning', 'text': 'why'})
 
-    def test_identity_empty_or_null_keeps_established(self):
-        # '' / null 均为「无更新」：不清空、不覆盖
-        out = _run([_tool_chunk(call_id='call_1', name='get_weather', arguments='{}'),
-                    '',
-                    _tool_chunk(call_id='', name=None),
-                    '', DONE, ''])
-        block = _tool_block(out)
-        self.assertEqual(block['id'], 'call_1')
-        self.assertEqual(block['name'], 'get_weather')
+    def test_tool_use_streams_arguments(self):
+        lines = (_message_start()
+                 + _start(0, {'type': 'tool_use', 'id': 'call_1', 'name': 'get_weather',
+                              'input': {}})
+                 + _delta(0, {'type': 'input_json_delta', 'partial_json': '{"ci'})
+                 + _delta(0, {'type': 'input_json_delta', 'partial_json': 'ty":"SF"}'})
+                 + _stop(0) + _settle('tool_use') + _message_stop())
+        out = _run(lines)
+        self.assertEqual(out[1]['type'], 'tool-call-delta')
+        self.assertEqual(out[1]['id'], 'call_1')
+        self.assertEqual(out[1]['name'], 'get_weather')
+        self.assertEqual(_tool_block(out),
+                         {'type': 'tool-call', 'id': 'call_1', 'name': 'get_weather',
+                          'arguments': '{"city":"SF"}'})
+        self.assertEqual(out[-1]['reason'], {'kind': 'tool-calls'})
 
-    def test_arguments_explicit_null_does_not_crash(self):
-        # arguments 显式 null（wire 放宽 string|null）：不得 TypeError，按 '' 贡献
-        out = _run([_tool_chunk(call_id='call_1', name='ping', arguments=None),
-                    '',
-                    _tool_chunk(arguments='{}'),
-                    '', DONE, ''])
-        block = _tool_block(out)
-        self.assertEqual(block['arguments'], '{}')
+    def test_empty_tool_identity_rejected(self):
+        lines = _start(0, {'type': 'tool_use', 'id': '', 'name': 'x', 'input': {}})
+        with self.assertRaises(LlmFailure) as cm:
+            _run(_message_start() + lines)
+        self.assertEqual(cm.exception.code, 'MALFORMED_RESPONSE')
 
-    def test_missing_name_falls_back_empty(self):
-        # 从未建立 name → closeBlock 缺省 ''（translate.ts:97 block.name ?? ''）
-        out = _run([_tool_chunk(call_id='call_1', arguments='{}'), '', DONE, ''])
-        self.assertEqual(_tool_block(out)['name'], '')
+    def test_unsupported_response_block_rejected(self):
+        with self.assertRaises(LlmFailure) as cm:
+            _run(_message_start() + _start(0, {'type': 'image'}))
+        self.assertEqual(cm.exception.code, 'UNSUPPORTED_CONTENT')
 
-    def test_missing_id_close_falls_back_empty_string(self):
-        # 全程无 id → closeBlock 空串 stand-in（translate.ts:90 `callId ?? ''`；
-        # mini 旧版合成 call_{idx} 占位，随 §2.22 F5 对齐移除）
-        out = _run([_tool_chunk(name='ping', arguments='{}'), '', DONE, ''])
-        block = _tool_block(out)
-        self.assertEqual(block['id'], '')
-        self.assertEqual(block['name'], 'ping')
+    def test_unknown_stop_reason_rejected(self):
+        with self.assertRaises(LlmFailure) as cm:
+            _run(_text_stream(stop_reason='pause_turn'))
+        self.assertEqual(cm.exception.code, 'MALFORMED_RESPONSE')
 
-    def test_usage_maps_total_tokens_and_cache(self):
-        # 上游 mapUsage（translate.ts）：totalTokens = prompt+completion（权威
-        # 聚合），cacheRead 取 prompt_tokens_details.cached_tokens，reasoning 取
-        # completion_tokens_details.reasoning_tokens。
-        usage = {
-            'prompt_tokens': 100, 'completion_tokens': 50, 'total_tokens': 150,
-            'prompt_cache_hit_tokens': 30,
-            'prompt_tokens_details': {'cached_tokens': 30},
-            'completion_tokens_details': {'reasoning_tokens': 20},
-        }
-        line = 'data: ' + json.dumps({'usage': usage}) + '\n'
-        out = _run([_chunk(), '\n', line, '\n', DONE, ''])
-        usage_chunk = next(c for c in out if c['type'] == 'usage')
-        self.assertEqual(usage_chunk['usage'], {
-            'inputTokens': 70, 'outputTokens': 50, 'cacheReadTokens': 30,
-            'reasoningTokens': 20, 'totalTokens': 150,
-        })
+    def test_delta_without_open_block_rejected(self):
+        with self.assertRaises(LlmFailure) as cm:
+            _run(_message_start() + _delta(0, {'type': 'text_delta', 'text': 'x'}))
+        self.assertEqual(cm.exception.code, 'MALFORMED_RESPONSE')
 
-    def test_usage_total_tokens_omitted_when_inconsistent(self):
-        # total_tokens 与 prompt+completion 不一致 → totalTokens 省略（可缺省）。
-        usage = {
-            'prompt_tokens': 100, 'completion_tokens': 50, 'total_tokens': 999,
-        }
-        line = 'data: ' + json.dumps({'usage': usage}) + '\n'
-        out = _run([_chunk(), '\n', line, '\n', DONE, ''])
-        usage_chunk = next(c for c in out if c['type'] == 'usage')
-        self.assertNotIn('totalTokens', usage_chunk['usage'])
-        self.assertEqual(usage_chunk['usage']['inputTokens'], 100)
-        self.assertEqual(usage_chunk['usage']['outputTokens'], 50)
+    def test_invalid_tool_json_at_message_stop_rejected(self):
+        lines = (_message_start()
+                 + _start(0, {'type': 'tool_use', 'id': 'c', 'name': 't', 'input': {}})
+                 + _delta(0, {'type': 'input_json_delta', 'partial_json': '{"a":'})
+                 + _stop(0) + _settle('tool_use') + _message_stop())
+        with self.assertRaises(LlmFailure) as cm:
+            _run(lines)
+        self.assertEqual(cm.exception.code, 'MALFORMED_RESPONSE')
+
+    def test_max_tokens_retains_truncated_tool_json(self):
+        lines = (_message_start()
+                 + _start(0, {'type': 'tool_use', 'id': 'c', 'name': 't', 'input': {}})
+                 + _delta(0, {'type': 'input_json_delta', 'partial_json': '{"a":'})
+                 + _stop(0) + _settle('max_tokens') + _message_stop())
+        out = _run(lines)
+        self.assertEqual(_tool_block(out)['arguments'], '{"a":')
+        self.assertEqual(out[-1]['reason'], {'kind': 'max-tokens'})
+
+    def test_empty_response_rejected(self):
+        lines = _message_start() + _settle('end_turn') + _message_stop()
+        with self.assertRaises(LlmFailure) as cm:
+            _run(lines)
+        self.assertEqual(cm.exception.code, 'EMPTY_RESPONSE')
+
+    def test_usage_maps_anthropic_fields_and_total(self):
+        lines = (_message_start({'input_tokens': 100, 'cache_read_input_tokens': 30,
+                                 'cache_creation_input_tokens': 5})
+                 + _start(0, {'type': 'text', 'text': ''})
+                 + _delta(0, {'type': 'text_delta', 'text': 'ok'})
+                 + _stop(0) + _settle('end_turn', {'output_tokens': 50})
+                 + _message_stop())
+        out = _run(lines)
+        usage = next(c for c in out if c['type'] == 'usage')['usage']
+        self.assertEqual(usage, {'inputTokens': 100, 'outputTokens': 50,
+                                 'cacheReadTokens': 30, 'cacheWriteTokens': 5,
+                                 'totalTokens': 185})
+
+    def test_invalid_usage_rejected(self):
+        with self.assertRaises(LlmFailure) as cm:
+            _run(_message_start({'input_tokens': -1})
+                 + _settle('end_turn') + _message_stop())
+        self.assertEqual(cm.exception.code, 'MALFORMED_RESPONSE')
+
+
+class MessagesApiRootTest(unittest.TestCase):
+    def test_appends_v1_once(self):
+        self.assertEqual(messages_api_root('https://api.deepseek.com/anthropic'),
+                         'https://api.deepseek.com/anthropic/v1')
+        self.assertEqual(messages_api_root('https://api.deepseek.com/anthropic/v1'),
+                         'https://api.deepseek.com/anthropic/v1')
+        self.assertEqual(messages_api_root('https://api.deepseek.com/anthropic/v1/'),
+                         'https://api.deepseek.com/anthropic/v1')
+
+
+class SerializeMessagesTest(unittest.TestCase):
+    def test_text_tool_result_roundtrip(self):
+        from miniharness.llm import serialize_messages
+        wire = serialize_messages([
+            {'role': 'system', 'content': [{'type': 'text', 'text': 'sys'}]},
+            {'role': 'user', 'content': [{'type': 'text', 'text': 'hi'}]},
+            {'role': 'assistant', 'content': [
+                {'type': 'text', 'text': 'calling'},
+                {'type': 'reasoning', 'text': 'because'},
+                {'type': 'tool-call', 'id': 'c1', 'name': 't', 'arguments': '{"a":1}'}]},
+            {'role': 'tool', 'toolCallId': 'c1', 'isError': True,
+             'content': [{'type': 'text', 'text': 'out'}]},
+        ])
+        self.assertEqual(wire[0], {'role': 'user', 'content': [{'type': 'text', 'text': 'hi'}]})
+        self.assertEqual(wire[1]['content'], [
+            {'type': 'text', 'text': 'calling'},
+            {'type': 'thinking', 'thinking': 'because'},
+            {'type': 'tool_use', 'id': 'c1', 'name': 't', 'input': {'a': 1}},
+        ])
+        self.assertEqual(wire[2]['role'], 'user')
+        self.assertEqual(wire[2]['content'], [
+            {'type': 'tool_result', 'tool_use_id': 'c1',
+             'content': [{'type': 'text', 'text': 'out'}], 'is_error': True}])
+
+    def test_in_history_system_update_stays(self):
+        from miniharness.llm import serialize_messages
+        wire = serialize_messages([
+            {'role': 'user', 'content': [{'type': 'text', 'text': 'hi'}]},
+            {'role': 'system', 'content': [{'type': 'text', 'text': 'update'}]},
+            {'role': 'assistant', 'content': [{'type': 'text', 'text': 'ok'}]},
+        ], model='deepseek-flash', models=DEFAULT_MODELS)
+        self.assertEqual(wire[1], {'role': 'system',
+                                   'content': [{'type': 'text', 'text': 'update'}]})
+
+    def test_non_in_history_system_update_folds_to_history_system(self):
+        from miniharness.llm import serialize
+        body = serialize([
+            {'role': 'user', 'content': [{'type': 'text', 'text': 'hi'}]},
+            {'role': 'system', 'content': [{'type': 'text', 'text': 'update'}]},
+        ], model='deepseek-v4-pro', models=DEFAULT_MODELS)
+        self.assertEqual(body['system'], 'update')
+        self.assertEqual([m['role'] for m in body['messages']], ['user'])
+
+    def test_developer_message_rejected(self):
+        from miniharness.llm import serialize_messages
+        message = {'role': 'developer', 'content': [{'type': 'tool-addition', 'toolName': 'x'}]}
+        with self.assertRaises(LlmFailure) as cm:
+            serialize_messages([message])
+        self.assertEqual(cm.exception.code, 'UNSUPPORTED_CONTENT')
+
+    def test_tool_result_without_call_rejected(self):
+        from miniharness.llm import serialize_messages
+        message = {'role': 'tool', 'toolCallId': 'nope',
+                   'content': [{'type': 'text', 'text': 'out'}]}
+        with self.assertRaises(LlmFailure) as cm:
+            serialize_messages([message])
+        self.assertEqual(cm.exception.code, 'INVALID_REQUEST')
+
+    def test_duplicate_tool_call_id_rejected(self):
+        from miniharness.llm import serialize_messages
+        message = {'role': 'assistant', 'content': [
+            {'type': 'tool-call', 'id': 'c', 'name': 'a', 'arguments': '{}'},
+            {'type': 'tool-call', 'id': 'c', 'name': 'b', 'arguments': '{}'}]}
+        with self.assertRaises(LlmFailure) as cm:
+            serialize_messages([message])
+        self.assertEqual(cm.exception.code, 'INVALID_REQUEST')
 
 
 def _stream(handler):
-    adapter = DeepSeekAdapter(api_key='sk-test', transport=httpx.MockTransport(handler))
-    return adapter
+    return DeepSeekAdapter(api_key='sk-test', transport=httpx.MockTransport(handler))
 
 
 MESSAGES = [{'role': 'user', 'content': [{'type': 'text', 'text': 'hi'}]}]
@@ -211,28 +355,38 @@ def _collect(adapter, messages=MESSAGES):
     return asyncio.run(scenario())
 
 
-def _sse_response(text='hi', finish='stop', headers=None):
-    piece = json.dumps({'choices': [{'index': 0, 'delta': {'content': text},
-                                     'finish_reason': finish}]})
-    return httpx.Response(
-        200, content=f'data: {piece}\n\ndata: [DONE]\n\n'.encode(),
-        headers=headers or {'content-type': 'text/event-stream'})
+def _sse_response(text='hi', stop_reason='end_turn', headers=None):
+    body = '\n'.join(_text_stream(text, stop_reason)) + '\n\n'
+    return httpx.Response(200, content=body.encode(),
+                          headers=headers or {'content-type': 'text/event-stream'})
 
 
 class TransportTest(unittest.TestCase):
     def test_happy_path_full_stream(self):
         def handler(request):
-            self.assertEqual(request.headers['authorization'], 'Bearer sk-test')
-            self.assertEqual(request.url.path, '/chat/completions')
+            self.assertEqual(request.headers['x-api-key'], 'sk-test')
+            self.assertEqual(request.headers['anthropic-version'], '2023-06-01')
+            self.assertEqual(request.url.path, '/anthropic/v1/messages')
             return _sse_response()
 
         out = _collect(_stream(handler))
         self.assertEqual([c['type'] for c in out],
-                         ['block-start', 'text-delta', 'block-end', 'finish'])
+                         ['block-start', 'text-delta', 'block-end', 'usage', 'finish'])
+
+    def test_account_token_uses_auth_token_header(self):
+        def handler(request):
+            self.assertNotIn('x-api-key', request.headers)
+            self.assertEqual(request.headers['x-dsh-auth-token'], 'acct-1')
+            return _sse_response()
+
+        adapter = DeepSeekAdapter(api_key='sk-test', account_token='acct-1',
+                                  transport=httpx.MockTransport(handler))
+        _collect(adapter)
 
     def test_http_401_maps_to_auth_with_facts(self):
         def handler(request):
-            return httpx.Response(401, text='{"error":"unauthorized"}',
+            return httpx.Response(401, json={'error': {'type': 'authentication_error',
+                                                       'message': 'unauthorized'}},
                                   headers={'x-request-id': 'rid-1'})
 
         with self.assertRaises(LlmFailure) as cm:
@@ -252,7 +406,6 @@ class TransportTest(unittest.TestCase):
         self.assertEqual(cm.exception.provider_retry_after_ms, 5000)
 
     def test_quota_wording_wins_over_status(self):
-        # quota 措辞（任意状态，先于 429）→ QUOTA
         def handler(request):
             return httpx.Response(429, text='insufficient_quota')
 
@@ -270,7 +423,8 @@ class TransportTest(unittest.TestCase):
 
     def test_400_other_maps_invalid_request(self):
         def handler(request):
-            return httpx.Response(400, text='bad param')
+            return httpx.Response(400, json={'error': {'type': 'invalid_request_error',
+                                                       'message': 'bad param'}})
 
         with self.assertRaises(LlmFailure) as cm:
             _collect(_stream(handler))
@@ -311,20 +465,29 @@ class TransportTest(unittest.TestCase):
 
 class ReasoningEffortTest(unittest.TestCase):
     def test_valid_tiers_sent_on_wire(self):
-        for tier in ("low", "high", "max"):
+        for tier in ('low', 'high', 'max'):
             adapter = DeepSeekAdapter(api_key='sk-test', reasoning_effort=tier)
             body = adapter._build_body([], [])
-            self.assertEqual(body.get("reasoning_effort"), tier)
+            self.assertEqual(body['output_config']['effort'], tier)
+            self.assertEqual(body['thinking'], {'type': 'enabled'})
 
-    def test_off_and_unset_omitted_on_wire(self):
-        off = DeepSeekAdapter(api_key='sk-test', reasoning_effort='off')
-        self.assertNotIn("reasoning_effort", off._build_body([], []))
-        unset = DeepSeekAdapter(api_key='sk-test')
-        self.assertNotIn("reasoning_effort", unset._build_body([], []))
+    def test_off_disables_thinking_without_output_config(self):
+        adapter = DeepSeekAdapter(api_key='sk-test', reasoning_effort='off')
+        body = adapter._build_body([], [])
+        self.assertEqual(body['thinking'], {'type': 'disabled'})
+        self.assertNotIn('output_config', body)
+
+    def test_unset_defaults_to_high(self):
+        body = DeepSeekAdapter(api_key='sk-test')._build_body([], [])
+        self.assertEqual(body['output_config']['effort'], 'high')
 
     def test_invalid_tier_rejected(self):
         with self.assertRaises(ValueError):
             DeepSeekAdapter(api_key='sk-test', reasoning_effort='medium')
+
+    def test_thinking_disabled_rejects_non_off_effort(self):
+        with self.assertRaises(ValueError):
+            DeepSeekAdapter(api_key='sk-test', thinking='disabled', reasoning_effort='high')
 
     def test_property_exposes_tier(self):
         adapter = DeepSeekAdapter(api_key='sk-test', reasoning_effort='high')
