@@ -7,9 +7,10 @@
 已核实的契约（alpha.1，逐条对应上游 stream-protocol.ts + stream-server.ts +
 gateway index.ts）：
   * 单一路径 `/api/remote.mux`（REMOTE_STREAM_MUX_PATH）承载所有 Remote 流。
-  * 浏览器→宿主文本帧两型：`open`（streamId/endpoint/payload —— 判别字段
-    必在，未知键被 schemastery 投影丢弃而非报错）、`cancel`（streamId + 类型）。
-    streamId/endpoint 非空字符串。二进制消息是协议错误（close 1003）；
+  * 浏览器→宿主文本帧四型：`open`（streamId/endpoint/payload —— 判别字段
+    必在，未知键被 schemastery 投影丢弃而非报错）、`cancel`（streamId + 类型）、
+    rc.1 新增 `item`（{streamId, value?}，value 须无损 JSON）与 `end`
+    （上行半关）。streamId/endpoint 非空字符串。二进制消息是协议错误（close 1003）；
     JSON/形状错误 → close 1008。
   * 宿主→浏览器帧三型：`item`（streamId + 可选 value）/ `end` / `error`
     （error = {code, message, details}，恒对象）。
@@ -147,6 +148,22 @@ def _validate_client(value: dict) -> dict:
     if kind == "cancel":
         if isinstance(value.get("streamId"), str) and value["streamId"]:
             return {"type": "cancel", "streamId": value["streamId"]}
+        raise StreamProtocolError("api gateway: invalid Remote stream client message")
+    if kind == "end":
+        # 上行半关（rc.1 RemoteStreamClientMessage 新增）：``{type:'end',streamId}``
+        if isinstance(value.get("streamId"), str) and value["streamId"]:
+            return {"type": "end", "streamId": value["streamId"]}
+        raise StreamProtocolError("api gateway: invalid Remote stream client message")
+    if kind == "item":
+        # 上行数据帧（rc.1 新增）：``{type:'item',streamId,value?}``，value 须无损 JSON
+        if isinstance(value.get("streamId"), str) and value["streamId"]:
+            projected = {"type": "item", "streamId": value["streamId"]}
+            if "value" in value:
+                if not is_remote_json_value(value["value"]):
+                    raise StreamProtocolError(
+                        "api gateway: invalid Remote stream client message")
+                projected["value"] = value["value"]
+            return projected
         raise StreamProtocolError("api gateway: invalid Remote stream client message")
     if kind == "open":
         if (isinstance(value.get("streamId"), str) and value["streamId"]

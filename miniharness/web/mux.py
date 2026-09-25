@@ -3,10 +3,12 @@
 载体契约（逐条对应上游 stream-server.ts / index.ts）：
   * 单一路径 `/api/remote.mux`（REMOTE_STREAM_MUX_PATH）承载所有 Remote 流，
     对应 `create_mux_websocket` 的 Gateway `RemoteStreamMuxConnection`。
-  * 客户端文本帧两型（`parse_remote_stream_client_message`）：
+  * 客户端文本帧四型（`parse_remote_stream_client_message`）：
 
       {type:'open', streamId, endpoint, payload}   —— 打开一个新的下游流
       {type:'cancel', streamId}                    —— 取消一条已打开流
+      {type:'item', streamId, value?}              —— rc.1 上行数据帧（无消费者则丢弃）
+      {type:'end', streamId}                       —— rc.1 上行半关（无消费者则丢弃）
 
     binary 消息（非文本帧）→ close 1003（协议错）；JSON/形状非法 → close 1008。
     重复 open（同 streamId 已活跃）→ close 1008（非法 open）。
@@ -94,6 +96,11 @@ class RemoteStreamMuxConnection:
             return
         if frame["type"] == "open":
             await self._open(frame)
+        elif frame["type"] in ("item", "end"):
+            # rc.1 上行帧：mini 的所有 Remote 流端点为单向（server→client），无
+            # uplink 消费者——帧经协议层校验后按「无消费者」丢弃（登记载体差异；
+            # 上游把 uplink 交给流端点，mini 无接收输入的端点）。
+            return
         else:
             self._cancel(frame["streamId"])
 

@@ -49,6 +49,29 @@ class TestClientMessages(unittest.TestCase):
             json.dumps({"type": "cancel", "streamId": "s1"})),
             {"type": "cancel", "streamId": "s1"})
 
+    def test_uplink_item_roundtrip(self):
+        # rc.1 新增上行数据帧：{type:'item',streamId,value?}
+        for frame in ({"type": "item", "streamId": "s1"},
+                      {"type": "item", "streamId": "s1", "value": {"ok": True}},
+                      {"type": "item", "streamId": "s1", "value": [1, 2, 3]},
+                      {"type": "item", "streamId": "s1", "value": None}):
+            self.assertEqual(
+                parse_remote_stream_client_message(json.dumps(frame)), frame)
+
+    def test_uplink_end_roundtrip(self):
+        # rc.1 新增上行半关：{type:'end',streamId}
+        self.assertEqual(parse_remote_stream_client_message(
+            json.dumps({"type": "end", "streamId": "s1"})),
+            {"type": "end", "streamId": "s1"})
+
+    def test_uplink_item_rejects_bad_id_and_value(self):
+        for bad in ({"type": "item", "streamId": ""},
+                    {"type": "item", "streamId": "s1", "value": float("inf")},
+                    {"type": "end", "streamId": ""},
+                    {"type": "end", "streamId": 0}):
+            with self.assertRaises(StreamProtocolError):
+                parse_remote_stream_client_message(json.dumps(bad))
+
     def test_extra_keys_dropped_by_projection(self):
         # schemastery 投影：未知键丢弃而非报错
         parsed = parse_remote_stream_client_message(json.dumps(

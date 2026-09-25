@@ -31,13 +31,16 @@ class TestRpcId(unittest.TestCase):
 
 class TestErrorCodeSet(unittest.TestCase):
     def test_closed_set_matches_session_error_details_map(self):
-        # RemoteErrorDetailsMap 键集（alpha.2 命名空间码，typert-protocol/types.ts + 各域注册）40 码
+        # RemoteErrorDetailsMap 键集（alpha.2 命名空间码，typert-protocol/types.ts + 各域注册）45 码
         # （R3 闭合：路由层边界校验新增 gateway/input-invalid；复核批：mux 未知
         # endpoint 对齐上游 gateway/index.ts:660 → gateway/invocation-unavailable；
         # P4：terminal-controller 新增 terminal/control-unavailable + terminal/limit-reached；
         # 残余 api 控制器：workspace / workspace-file / settings / credential /
-        # agent-preset/read-only / gateway/lookup-not-found）
-        self.assertEqual(len(RPC_ERROR_CODES), 40)
+        # agent-preset/read-only / gateway/lookup-not-found；
+        # rc.1：session-controller 新增 session/projections-unavailable、session/writer-held；
+        # terminal-controller 新增 terminal/unavailable；workspace-files 新增
+        # workspace-file/watch-unsupported；workspace-controller 新增 workspace/session-active）
+        self.assertEqual(len(RPC_ERROR_CODES), 47)
 
     def test_known_codes_present(self):
         for code in ("gateway/bad-request", "session/not-found", "session/model-unavailable",
@@ -45,13 +48,16 @@ class TestErrorCodeSet(unittest.TestCase):
                      "agent-preset/conflict", "session/agent-busy",
                      "session/attachment-invalid", "session/queue-item-not-found",
                      "session/steer-unavailable", "session/title-invalid",
-                     "session/fork-unavailable", "subagent/not-found",
+                     "session/fork-unavailable", "session/projections-unavailable",
+                     "session/writer-held", "subagent/not-found",
                      "subagent/unauthorized", "gateway/internal", "gateway/cancelled",
                      "gateway/arguments-invalid", "gateway/input-invalid",
                      "gateway/invocation-unavailable", "gateway/lookup-not-found",
                      "terminal/control-unavailable", "terminal/limit-reached",
+                     "terminal/unavailable",
                      "workspace/invalid-path", "workspace/name-conflict",
-                     "workspace/move-invalid", "workspace-file/not-found",
+                     "workspace/move-invalid", "workspace/session-active",
+                     "workspace-file/not-found", "workspace-file/watch-unsupported",
                      "workspace-file/too-large", "workspace-file/not-text",
                      "settings/rejected", "settings/conflict", "credential/rejected",
                      "agent-preset/read-only"):
