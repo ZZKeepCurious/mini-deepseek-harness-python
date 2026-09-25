@@ -370,6 +370,14 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
     def _route(self):
         self.close_connection = True
+        # 排空请求体：带未读入站数据关闭连接在 Windows 上会触发 RST，
+        # 使客户端在读取响应途中偶发 ReadError（本地测试服务器竞态）。
+        length = self.headers.get("Content-Length")
+        if length is not None:
+            try:
+                self.rfile.read(int(length))
+            except (ValueError, OSError):
+                pass
         behavior = self.server.behaviors.get(self.path, (404, {}, b"not found"))
         if isinstance(behavior, tuple):
             status, headers, body = behavior

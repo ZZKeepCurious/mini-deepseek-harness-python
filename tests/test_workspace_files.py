@@ -3,7 +3,6 @@
 对齐 packages/api/workspace-files（index.ts / changes.ts 的确定性面）。
 """
 
-import base64
 import os
 import tempfile
 import unittest
@@ -58,25 +57,30 @@ class WorkspaceFilesCase(unittest.TestCase):
 
     def test_byte_windows_and_complete_reads(self):
         path = self._write("a.bin", b"0123456789")
-        window = self.controller.read_bytes(self.scope, path, {"offset": 2, "length": 3})
-        self.assertEqual(base64.b64decode(window["data"]), b"234")
+        window = self.controller.read_bytes(
+            self.scope, path, {"range": {"offset": 2, "length": 3}})
+        self.assertEqual(window["data"], b"234")
         self.assertFalse(window["eof"])
-        end = self.controller.read_bytes(self.scope, path, {"offset": 8, "length": 5})
-        self.assertEqual(base64.b64decode(end["data"]), b"89")
+        end = self.controller.read_bytes(
+            self.scope, path, {"range": {"offset": 8, "length": 5}})
+        self.assertEqual(end["data"], b"89")
         self.assertTrue(end["eof"])
-        whole = self.controller.read_all(self.scope, path)
-        self.assertEqual(base64.b64decode(whole["data"]), b"0123456789")
+        whole = self.controller.read_bytes(self.scope, path, {})
+        self.assertEqual(whole["data"], b"0123456789")
         self.assertTrue(whole["eof"])
 
-    def test_read_related_resolves_from_base_directory(self):
+    def test_read_bytes_resolves_relative_to_base_file(self):
         base = self._write("dir/a.txt", b"a")
         self._write("dir/b.txt", b"related")
-        result = self.controller.read_related(self.scope, base, "b.txt")
-        self.assertEqual(base64.b64decode(result["data"]), b"related")
-        self.assertEqual(self._code(lambda: self.controller.read_related(
-            self.scope, base, "../escape")), "workspace-file/not-found")
-        self.assertEqual(self._code(lambda: self.controller.read_related(
-            self.scope, base, "/abs")), "gateway/bad-request")
+        result = self.controller.read_bytes(self.scope, "b.txt", {"baseFile": base})
+        self.assertEqual(result["data"], b"related")
+        windowed = self.controller.read_bytes(
+            self.scope, "b.txt", {"baseFile": base, "range": {"offset": 0, "length": 3}})
+        self.assertEqual(windowed["data"], b"rel")
+        self.assertEqual(self._code(lambda: self.controller.read_bytes(
+            self.scope, "../escape", {"baseFile": base})), "workspace-file/not-found")
+        self.assertEqual(self._code(lambda: self.controller.read_bytes(
+            self.scope, "/abs", {"baseFile": base})), "gateway/bad-request")
 
     def test_text_refusals(self):
         binary = self._write("bin.dat", b"ab\x00cd")
@@ -88,10 +92,10 @@ class WorkspaceFilesCase(unittest.TestCase):
         self.assertEqual(self._code(lambda: self.controller.read(
             self.scope, self.root, {})), "workspace-file/not-regular-file")
 
-    def test_read_all_refuses_above_the_complete_file_cap(self):
+    def test_complete_read_refuses_above_the_complete_file_cap(self):
         path = self._write("big.txt", b"0123456789")
         controller = self._fresh(maxFileBytes=4)
-        self.assertEqual(self._code(lambda: controller.read_all(self.scope, path)),
+        self.assertEqual(self._code(lambda: controller.read_bytes(self.scope, path, {})),
                          "workspace-file/too-large")
 
     def test_list_directory_bounds_and_confinement(self):
@@ -110,23 +114,45 @@ class WorkspaceFilesCase(unittest.TestCase):
             self.scope, os.path.join(self.root, "dir", "one.txt"))),
             "workspace-file/not-directory")
 
-    def test_changes_streams_ready_then_contained_observations(self):
+    def test_changes_streams_ready_then_target_observations(self):
         path = self._write("watched.txt", b"x")
         target = run_on_resident(self.fs.resolve(path))
         info = run_on_resident(self.fs.stat(target))
-        changes = self.controller.changes(self.scope)
+        changes = self.controller.changes(self.scope, path)
         self.assertEqual(changes.ready, {"kind": "ready"})
         self.ctx.emit("fs/observed", (target, FsObservation("present", info.version), None))
         frame = changes.pop()
         self.assertEqual(frame["kind"], "change")
         self.assertEqual(frame["change"]["absolutePath"], os.path.realpath(path))
         self.assertEqual(frame["change"]["version"], info.version)
-        outside = run_on_resident(self.fs.resolve(os.path.dirname(self.root)))
-        self.ctx.emit("fs/observed", (outside, FsObservation("absent"), None))
+        # 另一目标的观察被目标级过滤掉
+        sibling = run_on_resident(self.fs.resolve(self._write("other.txt", b"y")))
+        self.ctx.emit("fs/observed", (sibling, FsObservation("present", info.version), None))
         self.assertIsNone(changes.pop())
         changes.close()
         self.ctx.emit("fs/observed", (target, FsObservation("absent"), None))
         self.assertIsNone(changes.pop())
+
+    def test_changes_reports_absent_target(self):
+        path = os.path.join(self.root, "gone.txt")
+        target = run_on_resident(self.fs.resolve(path))
+        changes = self.controller.changes(self.scope, path)
+        self.ctx.emit("fs/observed", (target, FsObservation("absent"), None))
+        frame = changes.pop()
+        self.assertEqual(frame["change"],
+                         {"absolutePath": os.path.realpath(path), "absent": True})
+        changes.close()
+
+    def test_changes_rejects_directory_outside_workspace(self):
+        outside = os.path.dirname(self.root)
+        self.assertEqual(self._code(lambda: self.controller.changes(self.scope, outside)),
+                         "workspace-file/outside-workspace")
+
+    def test_changes_refuses_a_backend_that_cannot_watch(self):
+        missing_parent = os.path.join(self.root, "nope", "file.txt")
+        self.assertEqual(
+            self._code(lambda: self.controller.changes(self.scope, missing_parent)),
+            "workspace-file/watch-unsupported")
 
 
 if __name__ == "__main__":

@@ -35,6 +35,20 @@ def _fake(model: str = "fake-model") -> FakeLlmAdapter:
     return adapter
 
 
+def _zero_projection() -> dict:
+    """空/零统计投影的期望视图（projection_values 对无贡献事件会话的产出）。"""
+    return {
+        "sessionStats": {
+            "turns": 0, "steps": 0, "llmMs": 0, "toolMs": 0,
+            "ttftMs": 0, "ttftSteps": 0, "decodeMs": 0, "decodeTokens": 0,
+        },
+        "tokenUsage": {
+            "uncachedInputTokens": 0, "outputTokens": 0,
+            "cacheReadTokens": 0, "cacheWriteTokens": 0,
+        },
+    }
+
+
 class WebApiTest(unittest.TestCase):
     """基类：无 attachment 服务的瘦 api（ATTACHMENT_UNAVAILABLE 路径）。"""
 
@@ -263,6 +277,12 @@ class TestSessionList(WebApiTest):
         self.assertEqual(item["sessionId"], "session-blank")
         self.assertIs(item["blank"], True)
         self.assertIs(item["running"], False)
+        # 上游 SessionSummary.agentAvailable：create 已挂 live Agent → True
+        self.assertIs(item["agentAvailable"], True)
+        # SessionProjectionHints.kind：live 注册表直读 → 'sequenced'
+        self.assertEqual(item["projections"]["kind"], "sequenced")
+        self.assertEqual(item["projections"]["asOfSeq"], -1)
+        self.assertEqual(item["projections"]["values"], _zero_projection())
         self.assertEqual(item["updatedAt"], self.api.store.get("session-blank").created_at)
 
     def test_list_after_turn(self):
@@ -271,6 +291,9 @@ class TestSessionList(WebApiTest):
         item = self._value(self.api.dispatch("session.list", "rid", {}))["items"][0]
         self.assertIs(item["blank"], False)
         self.assertIs(item["running"], False)
+        self.assertIs(item["agentAvailable"], True)
+        self.assertEqual(item["projections"]["kind"], "sequenced")
+        self.assertGreaterEqual(item["projections"]["asOfSeq"], 0)
         user = next(ev for ev in self.api.store.get(session_id).events
                     if ev["type"] == "user/message")
         self.assertEqual(item["updatedAt"], user["time"])
@@ -291,6 +314,14 @@ class TestSessionList(WebApiTest):
         item = next(i for i in items if i["sessionId"] == "session-child")
         self.assertEqual(item["parentSessionId"], "session-par")
         self.assertEqual(item["origin"], "subagent")
+
+    def test_list_cold_session_agent_unavailable_and_cached_hints(self):
+        # 在店但未挂 Agent 的冷会话：agentAvailable False、投影 hints 降级 'cached'
+        self.api.store.create("session-cold", {"meta": {"cwd": CWD}})
+        item = self._value(self.api.dispatch("session.list", "rid", {}))["items"][0]
+        self.assertEqual(item["sessionId"], "session-cold")
+        self.assertIs(item["agentAvailable"], False)
+        self.assertEqual(item["projections"]["kind"], "cached")
 
     def test_list_sorted_desc(self):
         self._create(session_id="session-a")
@@ -425,19 +456,16 @@ class TestSessionFork(WebApiTest):
         self.assertEqual(error["code"], "session/fork-unavailable")
         self.assertIn("no completed turn", error["message"])
 
-    def test_fork_at_seq_beyond_log(self):
+    def test_fork_at_seq_beyond_log_is_rejected(self):
         session_id = self._value(self._create())["sessionId"]
         self._prompt_and_settle(session_id, "first")
-        # atSeq 越界 → 锚定最后一个已完成 turn（上游 commands.ts fork 的
-        # boundary ?? (atSeq > lastSeq ? findLast(turn/end)) 分支）
-        value = self._value(self.api.dispatch("session.fork", "rid", {
+        # rc.1 commands.ts:245-254：显式 atSeq 是精确切点，缺失该 seq 即拒
+        # （省略 atSeq 才回落 latestCompletedPrefixBoundary）
+        error = self._error(self.api.dispatch("session.fork", "rid", {
             "sessionId": session_id, "atSeq": 999}))
-        child = self.api.store.get(value["sessionId"])
-        self.assertIsNotNone(child)
-        self.assertEqual(child.meta["parentSession"], session_id)
-        self.assertIs(child.is_seeded, True)
-        self.assertGreaterEqual(child.inherited_event_count,
-                                len(self.api.store.get(session_id).events))
+        self.assertEqual(error["code"], "session/fork-unavailable")
+        self.assertIn("event 999 does not exist", error["message"])
+        self.assertEqual(error["details"], {"sessionId": session_id})
 
     def test_fork_unknown_session(self):
         error = self._error(self.api.dispatch("session.fork", "rid",
@@ -747,8 +775,9 @@ class TestSessionControl(WebApiTest):
         sub = self.api.control()
         baseline = sub.pull()
         self.assertEqual(baseline["type"], "baseline")
-        self.assertEqual(baseline["value"]["queues"], {session_id: []})
-        self.assertEqual(baseline["value"]["jobs"], {session_id: []})
+        # rc.1 control baseline 去 queues/jobs，仅 projections
+        self.assertNotIn("queues", baseline["value"])
+        self.assertNotIn("jobs", baseline["value"])
         self.assertEqual(baseline["value"]["projections"][session_id]["asOfSeq"], -1)
         self.assertEqual(baseline["value"]["projections"][session_id]["values"],
                          {"sessionStats": {
@@ -761,36 +790,20 @@ class TestSessionControl(WebApiTest):
         self.assertEqual(self._drain(sub), [])
         sub.close()
 
-    def test_queue_frame_on_prompt(self):
-        session_id = self._value(self._create())["sessionId"]
-        sub = self.api.control()
-        baseline = sub.pull()
-        self.assertEqual(baseline["value"]["queues"][session_id], [])
-        self.api.dispatch("session.prompt", "rp1", {
-            "sessionId": session_id, "mode": "queue", "requestId": "req-q",
-            "content": [{"type": "text", "text": "first"}]})
-        frames = self._drain(sub)
-        queue = next(f for f in frames if f["type"] == "queue")
-        self.assertEqual(queue["sessionId"], session_id)
-        self.assertEqual(len(queue["items"]), 1)
-        self.assertEqual(queue["items"][0]["placement"], "queued")
-        self.assertEqual(queue["items"][0]["rpcId"], "req-q")
-        self.assertEqual(queue["items"][0]["message"]["content"],
-                         [{"type": "text", "text": "first"}])
-        sub.close()
-
-    def test_steered_item_placement(self):
+    def test_prompt_emits_no_queue_frames(self):
+        # rc.1 control wire 移除 queues/jobs 帧：prompt/steer 不再经 control 推送 queue 帧
         session_id = self._value(self._create())["sessionId"]
         sub = self.api.control()
         sub.pull()
         self.api.dispatch("session.prompt", "rp1", {
+            "sessionId": session_id, "mode": "queue", "requestId": "req-q",
+            "content": [{"type": "text", "text": "first"}]})
+        self.api.dispatch("session.prompt", "rp2", {
             "sessionId": session_id, "mode": "steer", "requestId": "req-s",
             "content": [{"type": "text", "text": "go now"}]})
         frames = self._drain(sub)
-        queue = next(f for f in frames if f["type"] == "queue")
-        # steer 源是 user（带 rpcId），落 next-step → placement 'steering'
-        self.assertEqual(queue["items"][0]["placement"], "steering")
-        self.assertEqual(queue["items"][0]["rpcId"], "req-s")
+        self.assertFalse(any(f["type"] == "queue" for f in frames), frames)
+        self.assertFalse(any(f["type"] == "jobs" for f in frames), frames)
         sub.close()
 
 
@@ -870,18 +883,19 @@ class TestDispatch(WebApiTest):
             "session/modelCatalog", "session/canOpenWorkspacePath",
             "session/openWorkspacePath", "session/rename", "session/fork",
             "session/prompt", "session/attachment", "session/updateQueue",
-            "session/cancel", "session/page", "pluginInventory/list",
+            "session/cancel", "session/page", "session/projections",
+            "session/workspacePathApplications", "pluginInventory/list",
             "terminal/environment", "terminal/shells", "terminal/list",
             "terminal/create", "terminal/write", "terminal/resize",
             "terminal/rename", "terminal/close",
-            "workspace/create", "workspace/rename", "workspace/delete",
-            "workspace/insertBefore", "workspace/insertSessionBefore",
+            "workspace/create", "workspace/initializeDefault", "workspace/rename",
+            "workspace/delete", "workspace/insertBefore", "workspace/insertSessionBefore",
             "workspace/archiveSession", "workspace/unarchiveSession",
-            "workspaceFiles/read", "workspaceFiles/readBytes", "workspaceFiles/readAll",
-            "workspaceFiles/readRelated", "workspaceFiles/stat", "workspaceFiles/list",
-            "settings/describe", "settings/canOpenAgentPresetDirectory", "settings/update",
+            "workspace/pinSession", "workspace/unpinSession",
+            "workspaceFiles/read", "workspaceFiles/readBytes",
+            "workspaceFiles/stat", "workspaceFiles/list",
+            "settings/describe", "settings/update",
             "settings/replace", "settings/mutate", "settings/openSettingsDocument",
-            "settings/openAgentPresetDirectory",
             "credentials/describe", "credentials/set", "credentials/unset",
             "sessionReferenceResolver/candidates"}))
 

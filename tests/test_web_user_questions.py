@@ -83,8 +83,8 @@ class QuestionBridgeTest(unittest.TestCase):
         raise AssertionError("no tool/result")
 
     def _tool_result_is_error(self, sid):
-        block = self._tool_result_event(sid)["data"]["message"]["content"][0]
-        return bool(block.get("isError"))
+        # V4：role 'tool' 平铺 content + 顶层 isError
+        return bool(self._tool_result_event(sid)["data"]["message"].get("isError"))
 
     def test_ask_flow_answered(self):
         async def go():
@@ -104,10 +104,10 @@ class QuestionBridgeTest(unittest.TestCase):
             await prompt
             await gen.aclose()
             event = self._tool_result_event(sid)
-            block = event["data"]["message"]["content"][0]
+            content = event["data"]["message"]["content"]
             self.assertFalse(self._tool_result_is_error(sid))
             # canonical 紧凑 JSON 文本（content 载体为 str，模型可见纯 JSON）
-            text = block["content"][0]["text"]
+            text = content[0]["text"]
             self.assertEqual(
                 text,
                 '{"answers":[{"id":"continue","selected":["ok"]}]}')
@@ -132,7 +132,7 @@ class QuestionBridgeTest(unittest.TestCase):
             # 结构化错误 {name, code} 落 tool/result.error；文本带原消息
             self.assertEqual(event["data"]["error"],
                              {"name": "UserQuestionError", "code": "ASK_CANCELLED"})
-            text = event["data"]["message"]["content"][0]["content"][0]["text"]
+            text = event["data"]["message"]["content"][0]["text"]
             self.assertTrue(text.startswith("Error: the user cancelled ask_user_question"))
 
         _run(go())

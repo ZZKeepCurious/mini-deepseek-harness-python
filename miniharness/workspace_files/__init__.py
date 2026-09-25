@@ -1,30 +1,37 @@
 """Workspace 文件 Remote 服务（对齐 packages/api/workspace-files）。
 
-承载 `ctx.workspaceFiles`：只读文件预览（`read` / `readBytes` / `readAll` /
-`readRelated` / `stat`）、工作区内的目录列举（`list`）与经 `fs/observed` 的观察
-变更流（`changes`）。文件读取遵循组合文件系统的读权限（可读工作区外路径）；
-目录列举与变更观察限定在会话工作区根内。本服务**不含任何变更操作**。
+承载 `ctx.workspaceFiles`：只读文件预览（`read` / `readBytes` / `stat`）、工作区内的
+目录列举（`list`）与目标级观察变更流（`changes`）。文件读取遵循组合文件系统的读权限
+（可读工作区外路径）；目录列举与目录观察限定在会话工作区根内。本服务**不含任何变更操作**。
+
+`readBytes` 是唯一字节读入口（上游 rc.1 把 `readAll`/`readRelated` 折入）：
+`options.range` 给 Byte 窗口，省略则读整文件并在超 `maxFileBytes` 时
+`workspace-file/too-large`；`options.baseFile` 提供相对目标时的基文件目录。服务值
+`WorkspaceFileBytes.data` 是原生 `bytes`，base64 只在 web wire 层做。
+
+`changes(scope, path)` 是目标级的：经 `ctx.fs.watch` 建立 OS 监听，成功后才给 `ready`，
+此后命中目标的失效重 stat 产出当前元数据；目录目标须在工作区内；后端不能 watch 时折
+`workspace-file/watch-unsupported`。
 
 载体差异（登记）：
   * 上游 `ctx.fs` 的方法为 Promise；mini 的 fs seam 本体为 async（多数同步体），
     本控制器经常驻事件循环（`run_on_resident`）同步驱动，对 WebApi 同步派发面等价。
   * 上游 lookup `workspaceFileScope` 可回退持久化 `stat` 解析冷会话 header；mini
     无会话持久化 stat 面，scope 由 web 层从 `ctx.sessions` 或 sandboxPolicy 回退根派生。
-  * `changes` 只转发 `fs/observed`（受插桩操作）；OS 不监听（上游同款限制）。
+  * `changes` 的 OS 监听经 watchdog（`fs.watch`）；watch 回调在 emitter 线程，观察队列
+    只做入队，重 stat 在 pop 时同步驱动（上游在事件循环内 await stat）。
 """
 from __future__ import annotations
 
-import base64
 import os
 import posixpath
 import ntpath
 import threading
-from collections import deque
 from typing import Any
 
 from ..core.agent_loop.resident_loop import run_on_resident
 from ..core.scope import Context, Service
-from ..fs import FsError, is_path_under
+from ..fs import FsError
 
 __all__ = [
     "WORKSPACE_FILE_CONFIG_DEFAULTS",
@@ -69,45 +76,126 @@ def resolve_config(config: dict | None = None) -> dict:
 
 
 class WorkspaceChanges:
-    """一条 `changes` 代次：ready + 工作区内观察（线程安全非阻塞 pop）。"""
+    """一条 `changes` 代次：目标级 OS watch + `fs/observed`（非阻塞 pop）。
 
-    def __init__(self, controller: "WorkspaceFiles", workspace_root: str):
-        self.ready = {"kind": "ready"}
-        self._root_key = os.path.realpath(workspace_root)
+    对齐 changes.ts WorkspaceChangeFeed.follow：先解析目标（目录须在工作区内），
+    经 `ctx.fs.watch` 建立 OS 监听，成功后才对外给 `ready`；此后每条命中目标的
+    失效（watch 回调或受插桩 `fs/observed`）在 pop 时重 stat 目标，产出当前元数据
+    （`version` 或 `absent`）。watch 初始化失败折 `workspace-file/watch-unsupported`。
+    """
+
+    def __init__(self, controller: "WorkspaceFiles", workspace_root: str, path: str):
         self._fs = controller._fs()
-        self._queue: deque[dict] = deque()
+        self._ctx = controller.ctx
+        self._workspace_root = workspace_root
+        self._path = path
+        self._root = None
+        self._target = None
+        self._watch_close = None
+        self._dispose = None
+        self._failure: WorkspaceFileFault | None = None
         self._lock = threading.Lock()
+        self._pending = 0
         self._closed = False
-        self._dispose = controller.ctx.on("fs/observed", self._on_observed)
+        self.ready: dict | None = None
+        self._setup()
+
+    def _setup(self) -> None:
+        try:
+            run_on_resident(self._setup_async())
+        except WorkspaceFileFault as error:
+            self._failure = error
+            raise
+        except FsError as error:
+            fault = _map_fs_error(error, self._path)
+            self._failure = fault
+            raise fault from error
+
+    async def _setup_async(self) -> None:
+        fs = self._fs
+        self._root = await fs.resolve(self._workspace_root)
+        self._target = await fs.resolve(self._path, {"cwd": self._workspace_root})
+        # 目录目标须在工作区内（目录观察仍是工作区限定的）。
+        await self._stat_target_async()
+        try:
+            self._watch_close = await fs.watch(self._target, self._on_watch, None)
+        except FsError as error:
+            raise WorkspaceFileFault(
+                "workspace-file/watch-unsupported", str(error),
+                {"path": self._path}) from error
+        except Exception as error:  # noqa: BLE001 - 任何 watch 装配失败折稳定码
+            raise WorkspaceFileFault(
+                "workspace-file/watch-unsupported", str(error),
+                {"path": self._path}) from error
+        self._dispose = self._ctx.on("fs/observed", self._on_observed)
+        self.ready = {"kind": "ready"}
+
+    async def _stat_target_async(self):
+        info = await self._fs.stat(self._target)
+        if (info is not None and info.type == "directory"
+                and not self._fs.contains(self._root, self._target)):
+            raise WorkspaceFileFault(
+                "workspace-file/outside-workspace",
+                "Directory is outside the workspace", {"path": self._path})
+        return info
 
     def _on_observed(self, payload: Any) -> None:
         try:
-            target, observation, _actor = payload
-        except (TypeError, ValueError):
+            target = payload[0]
+        except (TypeError, IndexError):
             return
-        key = self._fs.process_path(target)
-        if not is_path_under(key, self._root_key):
+        if self._target is None:
             return
-        if getattr(observation, "kind", None) == "present":
-            change = {"absolutePath": key, "version": observation.version}
-        else:
-            change = {"absolutePath": key, "absent": True}
+        if self._fs.process_path(target) != self._fs.process_path(self._target):
+            return
+        self._enqueue()
+
+    def _on_watch(self, error: Any = None) -> None:
+        if error is not None:
+            self._failure = WorkspaceFileFault(
+                "workspace-file/watch-unsupported", str(error), {"path": self._path})
+            return
+        self._enqueue()
+
+    def _enqueue(self) -> None:
         with self._lock:
             if self._closed:
                 return
-            self._queue.append({"kind": "change", "change": change})
+            self._pending += 1
 
     def pop(self) -> dict | None:
+        if self._failure is not None:
+            raise self._failure
         with self._lock:
-            return self._queue.popleft() if self._queue else None
+            if self._closed or self._pending == 0:
+                return None
+            self._pending -= 1
+        try:
+            info = run_on_resident(self._stat_target_async())
+        except WorkspaceFileFault:
+            raise
+        except FsError as error:
+            raise _map_fs_error(error, self._path) from error
+        absolute = self._fs.process_path(self._target)
+        if info is not None:
+            change = {"absolutePath": absolute, "version": info.version}
+        else:
+            change = {"absolutePath": absolute, "absent": True}
+        return {"kind": "change", "change": change}
 
     def close(self) -> None:
         with self._lock:
+            if self._closed:
+                return
             self._closed = True
-            self._queue.clear()
+            self._pending = 0
         if self._dispose is not None:
             self._dispose()
             self._dispose = None
+        watch_close = self._watch_close
+        self._watch_close = None
+        if watch_close is not None:
+            run_on_resident(watch_close())
 
 
 class WorkspaceFiles(Service):
@@ -125,25 +213,23 @@ class WorkspaceFiles(Service):
         offset, limit = self._resolve_page(range_ or {})
         return self._drive(self._read_async(scope, path, offset, limit), path)
 
-    def read_bytes(self, scope: dict, path: str, range_: dict | None = None) -> dict:
-        offset, length = self._resolve_window(range_ or {}, path)
-        return self._drive(self._read_bytes_async(scope, path, offset, length), path)
+    def read_bytes(self, scope: dict, path: str, options: dict | None = None) -> dict:
+        """`readBytes`：`options.range` 定点窗口；省略则整文件（`maxFileBytes` cap）。
 
-    def read_all(self, scope: dict, path: str) -> dict:
-        return self._drive(self._read_all_async(scope, path), path)
-
-    def read_related(self, scope: dict, path: str, relative_path: str) -> dict:
-        relative = (relative_path or "").replace("\\", "/")
-        if (relative == "" or relative.startswith("/")
-                or _looks_like_url(relative) or _NUL in relative):
-            raise WorkspaceFileFault("gateway/bad-request",
-                                     "relativePath must be a relative filesystem path", {})
-        target = self._drive(self._locate_file_async(scope, path), path)[0]
-        absolute = self._fs().process_path(target)
-        joined = (posixpath.join(posixpath.dirname(absolute), relative)
-                  if absolute.startswith("/")
-                  else ntpath.join(ntpath.dirname(absolute), relative))
-        return self.read_all(scope, joined)
+        `options.baseFile` 提供基文件，`path` 相对其目录解析（上游 index.ts:257-280）。
+        """
+        options = options or {}
+        range_ = options.get("range")
+        window = None if range_ is None else self._resolve_window(dict(range_), path)
+        resolved = path
+        if options.get("baseFile") is not None:
+            resolved = self._drive(
+                self._relative_path_async(scope, options["baseFile"], path), path)
+        if window is None:
+            return self._drive(self._read_all_bytes_async(scope, resolved), resolved)
+        offset, length = window
+        return self._drive(
+            self._read_bytes_async(scope, resolved, offset, length), resolved)
 
     def stat(self, scope: dict, path: str) -> dict:
         target, info = self._drive(self._locate_file_async(scope, path), path)
@@ -152,11 +238,13 @@ class WorkspaceFiles(Service):
     def list(self, scope: dict, path: str) -> dict:
         return self._drive(self._list_async(scope, path), path)
 
-    def changes(self, scope: dict) -> WorkspaceChanges:
+    def changes(self, scope: dict, path: str) -> WorkspaceChanges:
         root = (scope or {}).get("workspaceRoot")
         if not isinstance(root, str) or not root:
             raise WorkspaceFileFault("gateway/bad-request", "workspace root is required", {})
-        return WorkspaceChanges(self, root)
+        if not isinstance(path, str) or path == "":
+            raise WorkspaceFileFault("gateway/bad-request", "path is required", {})
+        return WorkspaceChanges(self, root, path)
 
     # ---------- fs 异步面（在常驻循环上执行） ----------
 
@@ -213,28 +301,38 @@ class WorkspaceFiles(Service):
             raise _map_fs_error(error, path) from error
         eof = (len(data) < length if info.size is None
                else offset + len(data) >= info.size)
-        return {**self._stat_of(target, info), "offset": offset,
-                "data": base64.b64encode(data).decode("ascii"), "eof": eof}
+        return {**self._stat_of(target, info), "offset": offset, "data": data, "eof": eof}
 
-    async def _read_all_async(self, scope: dict, path: str) -> dict:
+    async def _read_all_bytes_async(self, scope: dict, path: str) -> dict:
         target, info = await self._locate_file_async(scope, path)
         limit = self.config["maxFileBytes"]
-        if info.size is not None and info.size > limit:
-            raise WorkspaceFileFault(
-                "workspace-file/too-large",
-                f'"{path}" exceeds the {limit} byte full-file cap',
-                {"path": path, "limit": limit})
         try:
-            data = await self._fs().read_byte_range(target, 0, limit + 1)
+            data = await self._fs().read_bytes(target, None, limit)
         except FsError as error:
+            if error.code == "FS_TOO_LARGE":
+                raise WorkspaceFileFault(
+                    "workspace-file/too-large",
+                    f'"{path}" exceeds the {limit} byte full-file cap',
+                    {"path": path, "limit": limit}) from error
             raise _map_fs_error(error, path) from error
-        if len(data) > limit:
+        return {**self._stat_of(target, info), "offset": 0, "data": data, "eof": True}
+
+    async def _relative_path_async(self, scope: dict, base_file: str, path: str) -> str:
+        """`path` 相对 `base_file` 目录解析（上游 index.ts relativePath）。
+
+        `path` 必须是相对路径（非空、不以 `/` 起、非 URL、无 NUL），否则
+        `gateway/bad-request`；基文件本身按常规文件定位。
+        """
+        relative = (path or "").replace("\\", "/")
+        if (relative == "" or relative.startswith("/")
+                or _looks_like_url(relative) or _NUL in relative):
             raise WorkspaceFileFault(
-                "workspace-file/too-large",
-                f'"{path}" exceeds the {limit} byte full-file cap',
-                {"path": path, "limit": limit})
-        return {**self._stat_of(target, info), "offset": 0,
-                "data": base64.b64encode(data).decode("ascii"), "eof": True}
+                "gateway/bad-request", "path must be relative when baseFile is provided", {})
+        target, _info = await self._locate_file_async(scope, base_file)
+        absolute = self._fs().process_path(target)
+        return (posixpath.join(posixpath.dirname(absolute), relative)
+                if absolute.startswith("/")
+                else ntpath.join(ntpath.dirname(absolute), relative))
 
     async def _list_async(self, scope: dict, path: str) -> dict:
         fs, root, workspace_root, entry = await self._inspect_async(scope, path)

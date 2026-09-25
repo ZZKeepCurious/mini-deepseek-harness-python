@@ -73,7 +73,7 @@ class TestFollow(GatewayStreamsTest):
             self.assertEqual(snap["type"], "snapshot")
             # snapshot.header = 平铺 SessionWireHeader（上游 history.ts wireHeader）
             self.assertEqual(snap["header"]["id"], sid)
-            self.assertEqual(snap["header"]["version"], 3)
+            self.assertEqual(snap["header"]["version"], 4)
             self.assertIs(snap["header"]["isSeeded"], False)
             self.assertIn("createdAt", snap["header"])
             self.assertIn("cursor", snap)
@@ -198,24 +198,20 @@ class TestFollow(GatewayStreamsTest):
 
 
 class TestControl(GatewayStreamsTest):
-    def test_baseline_then_live_queue(self):
+    def test_baseline_then_live_projection(self):
         async def go():
             sid = self._create(session_id="session-c")
             loop = self.api._agents[sid]
-            message = create_message("user", [text_block("hi")], {"kind": "user"})
-            loop.inbox.append("next-turn", message)
             gen = self.gateway.open_stream("session.control", {"args": {}})
             baseline = await gen.__anext__()
             self.assertEqual(baseline["type"], "baseline")
             value = baseline["value"]
-            self.assertIn("queues", value)
-            self.assertIn("jobs", value)
+            # rc.1 control wire 去 queues/jobs，只剩 projections 块
+            self.assertEqual(set(value), {"projections"})
+            self.assertNotIn("queues", value)
+            self.assertNotIn("jobs", value)
             # baseline 对齐上游 control.ts：全部 live 会话每会话一条（空也放）
-            # + 每会话 projections 空基线块 {asOfSeq, values}
-            self.assertIn(sid, value["queues"])
-            self.assertIn(sid, value["jobs"])
             self.assertIn(sid, value["projections"])
-            self.assertEqual(value["queues"][sid][0]["placement"], "queued")
             # projections 真实视图：sessionStats/tokenUsage 均为 8/4 键闭形状
             pvalues = value["projections"][sid]["values"]
             self.assertEqual(set(pvalues), {"sessionStats", "tokenUsage"})
@@ -227,17 +223,17 @@ class TestControl(GatewayStreamsTest):
                 set(pvalues["tokenUsage"]),
                 {"uncachedInputTokens", "outputTokens",
                  "cacheReadTokens", "cacheWriteTokens"})
-            # 触发一次 inbox splice → 实时 queue 帧（gen 已 running 消费队列）
-            loop.inbox.append("next-turn",
-                              create_message("user", [text_block("again")], {"kind": "user"}))
+            # 追加 step/end → sessionStats 变更 → 实时 projection 替换帧
             frame_task = asyncio.create_task(gen.__anext__())
             await asyncio.sleep(0)
+            loop.session.append("step/end", {"turn": 1})
             frame = await asyncio.wait_for(frame_task, 5)
             return frame, sid
 
         frame, sid = _run(go())
-        self.assertEqual(frame["type"], "queue")
+        self.assertEqual(frame["type"], "projection")
         self.assertEqual(frame["sessionId"], sid)
+        self.assertEqual(frame["key"], "sessionStats")
 
 
 class TestDispatchErrorHandling(GatewayStreamsTest):
@@ -324,7 +320,7 @@ class TestReconnectResilience(GatewayStreamsTest):
         b1, b2, sid = _run(go())
         for baseline in (b1, b2):
             self.assertEqual(baseline["type"], "baseline")
-            self.assertIn(sid, baseline["value"]["queues"])
+            self.assertIn(sid, baseline["value"]["projections"])
 
     def test_events_reconnect_no_emit_replay(self):
         async def go():

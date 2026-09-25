@@ -25,6 +25,7 @@ from .shells import discover_shells, resolve_shell
 from .terminal import BrowserTerminal
 from .types import (
     TerminalLimitReached,
+    TerminalUnavailable,
     is_identity,
     resolve_config,
 )
@@ -95,11 +96,16 @@ class TerminalController(Service):
     # ---------- 远程方法 ----------
 
     def environment(self, agent: Any, signal=None) -> dict:
-        """读会话工作目录与终端限额（不解析 shell）。"""
+        """读会话工作目录与终端限额（不解析 shell）。
+
+        上游 index.ts:121：cwd = `session.header.cwd ?? sandboxPolicy.workspaceRoot`
+        （会话头部 cwd 优先，缺失回退策略工作区根）。
+        """
         self._throw_if_aborted(signal)
         policy = self._policy()
         resolved = policy.resolve({"session": agent.session})
-        return {"cwd": resolved["workspaceRoot"],
+        cwd = (getattr(agent.session, "meta", {}) or {}).get("cwd") or resolved["workspaceRoot"]
+        return {"cwd": cwd,
                 "maxInputBytes": self.config["maxInputBytes"],
                 "maxCols": self.config["maxCols"],
                 "maxRows": self.config["maxRows"],
@@ -118,6 +124,19 @@ class TerminalController(Service):
             return []
         return ([t.info for t in owner.terminals.values()]
                 + [a["info"] for a in owner.allocations.values()])
+
+    def retain(self, session_id: str, id: str) -> Any:
+        """为一次物理 Remote 流持有终端，不激活 Agent、不取输入控制（index.ts:198）。
+
+        返回已保留的终端；身份缺失/已关闭/正在清理 → terminal/unavailable。
+        载体简化（登记）：mini 无「无人值守空闲回收」调度器，持有本身不影响清理，
+        本方法只闭合 wire 契约（`{type:'retained'}` 后保持到取消）。
+        """
+        owner = self._owners.get(session_id)
+        terminal = owner.terminals.get(id) if owner is not None else None
+        if terminal is None or id in owner.closed_ids or owner.cleaned:
+            raise TerminalUnavailable()
+        return terminal
 
     def create(self, agent: Any, request: dict, signal=None) -> dict:
         """为调用方生成的身份分配一个交互式 shell（开身份幂等）。"""
@@ -245,14 +264,9 @@ class TerminalController(Service):
                           if candidate["path"] == shell_path), None)
         if shell is None:
             raise RuntimeError("Selected shell is not available in this execution environment")
-        policy = self._policy().resolve({"session": agent.session})
+        # 上游 rc.1：用户终端以执行环境的系统用户权限运行，不再受 Agent 沙箱围栏
+        # （index.ts:151「without Agent sandbox or approval restrictions」）。
         argv = [shell["path"], *shell["args"]]
-        if policy["mode"] != "danger-full-access":
-            sandbox = self._sandbox(agent)
-            if sandbox is None:
-                raise RuntimeError(
-                    "The Session sandbox mode requires an execution sandbox provider")
-            argv = sandbox.confine(argv, {**policy, "mode": policy["mode"]}, signal)["argv"]
         handle = self._spawn_terminal({
             "argv": argv, "cwd": environment["cwd"], "cols": request["cols"],
             "rows": request["rows"], "terminalType": TERMINAL_TYPE,
@@ -281,12 +295,13 @@ class TerminalController(Service):
         owner = self._owners.get(agent.id)
         terminal = owner.terminals.get(id) if owner is not None else None
         if terminal is None:
-            raise RuntimeError("Terminal no longer exists in this Session")
+            raise TerminalUnavailable("Terminal no longer exists in this Session")
+        self._require_open(owner, id)
         return terminal
 
     def _require_open(self, owner: _OwnedSession, id: str) -> None:
         if id in owner.closed_ids:
-            raise RuntimeError("Terminal was closed in this Session")
+            raise TerminalUnavailable("Terminal was closed in this Session")
 
     def _dimensions(self, cols: Any, rows: Any) -> None:
         if (not _is_safe_int(cols) or cols < 2 or cols > self.config["maxCols"]
@@ -299,12 +314,6 @@ class TerminalController(Service):
             raise RuntimeError(
                 "The Session execution environment requires subprocess and sandbox policy providers")
         return policy
-
-    def _sandbox(self, agent: Any):
-        agent_ctx = getattr(agent, "ctx", None)
-        if agent_ctx is None:
-            return None
-        return agent_ctx.get("sandbox")
 
     @staticmethod
     def _throw_if_aborted(signal) -> None:

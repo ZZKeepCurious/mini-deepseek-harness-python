@@ -68,6 +68,28 @@ class WebResidualTest(unittest.TestCase):
             "workspace/delete", "w4", {"workspaceId": workspace_id}))
         self.assertEqual(missing["code"], "workspace/not-found")
 
+    def test_workspace_pin_and_archive_routes(self):
+        self._value(self.api.dispatch("workspace/create", "w1", {"path": self.work}))
+        pinned = self._value(self.api.dispatch(
+            "workspace/pinSession", "w2", {"sessionId": self.session_id}))
+        self.assertEqual(pinned["pinnedSessionIds"], [self.session_id])
+        unpinned = self._value(self.api.dispatch(
+            "workspace/unpinSession", "w3", {"sessionId": self.session_id}))
+        self.assertEqual(unpinned["pinnedSessionIds"], [])
+        # stopActivity 是可选布尔字段，须通过路由层边界校验
+        archived = self._value(self.api.dispatch(
+            "workspace/archiveSession", "w4",
+            {"sessionId": self.session_id, "stopActivity": True}))
+        self.assertEqual(archived["archivedSessionIds"], [self.session_id])
+        # 注册表已非空 → 不触发默认创建，value 为 None
+        self.assertIsNone(self._value(self.api.dispatch(
+            "workspace/initializeDefault", "w5",
+            {"directoryName": "proj", "title": "Proj"})))
+        boundary = self._error(self.api.dispatch(
+            "workspace/archiveSession", "w6",
+            {"sessionId": self.session_id, "stopActivity": "yes"}))
+        self.assertEqual(boundary["code"], "gateway/input-invalid")
+
     def test_workspace_files_routes_read_and_stat(self):
         stat = self._value(self.api.dispatch(
             "workspaceFiles/stat", "f1",
@@ -80,8 +102,12 @@ class WebResidualTest(unittest.TestCase):
         window = self._value(self.api.dispatch(
             "workspaceFiles/readBytes", "f3",
             {"workspaceFileScopeId": self.session_id, "path": self.file,
-             "offset": 0, "length": 5}))
+             "options": {"range": {"offset": 0, "length": 5}}}))
         self.assertEqual(base64.b64decode(window["data"]), b"hello")
+        whole = self._value(self.api.dispatch(
+            "workspaceFiles/readBytes", "f3b",
+            {"workspaceFileScopeId": self.session_id, "path": self.file}))
+        self.assertEqual(base64.b64decode(whole["data"]), b"hello\nworld\n")
         listing = self._value(self.api.dispatch(
             "workspaceFiles/list", "f4",
             {"workspaceFileScopeId": self.session_id, "path": self.work}))
@@ -104,8 +130,8 @@ class WebResidualTest(unittest.TestCase):
     def test_settings_and_credentials_routes(self):
         described = self._value(self.api.dispatch("settings/describe", "s1", {}))
         self.assertIn("writable", described)
-        self.assertFalse(self._value(self.api.dispatch(
-            "settings/canOpenAgentPresetDirectory", "s2", {})))
+        # rc.1 删 `settings/canOpenAgentPresetDirectory` 路由（无处理器 → dispatch 返回 None）
+        self.assertIsNone(self.api.dispatch("settings/canOpenAgentPresetDirectory", "s2", {}))
         self.assertEqual(self._error(self.api.dispatch(
             "settings/openSettingsDocument", "s3", {}))["code"], "gateway/internal")
         self.assertEqual(self._error(self.api.dispatch(
@@ -137,7 +163,8 @@ class WebResidualTest(unittest.TestCase):
 
         async def changes_stream():
             stream = self.api.gateway.open_stream(
-                "workspaceFiles/changes", {"args": {"workspaceFileScopeId": self.session_id}})
+                "workspaceFiles/changes",
+                {"args": {"workspaceFileScopeId": self.session_id, "path": self.file}})
             ready = await stream.__anext__()
             await stream.aclose()
             return ready

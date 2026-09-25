@@ -47,11 +47,12 @@ from ..core.scope import Context
 from ..core.session import SESSION_FORMAT_VERSION, Session, thaw
 from ..core.session.message import create_message, image_block, text_block
 from ..core.session.surface import derive_event_message
-from ..core.session_store import SessionStore
+from ..core.session_store import SessionForkError, SessionStore
 from ..core.agents import install_agents
 from ..core.tools import ToolRegistry
 from ..llm import LlmAdapter
-from ..telemetry import projection_values
+from ..session_projection import install_session_projections
+from ..telemetry import install_usage_stats, projection_values
 from .args import (
     BoundaryReject,
     boundary_error_message,
@@ -103,6 +104,12 @@ def canonical_client_time_zone(value: str) -> str | None:
 def _utf16_len(value: str) -> int:
     """JS String.prototype.length 等价：按 UTF-16 码元计数。"""
     return len(value.encode("utf-16-le")) // 2
+
+
+def _is_safe_int(value: Any) -> bool:
+    """JS Number.isSafeInteger 等价：int（非 bool）且 |v| <= 2**53-1。"""
+    return (isinstance(value, int) and not isinstance(value, bool)
+            and -9007199254740991 <= value <= 9007199254740991)
 
 
 def _truncate_code_points(value: str, maximum: int) -> str:
@@ -197,14 +204,13 @@ class _FollowSubscription(_Subscription):
     def _start(self, request: dict) -> None:
         api = self.api
         max_messages = request.get("maxMessages")
-        if max_messages is not None and (not isinstance(max_messages, int)
-                                         or isinstance(max_messages, bool) or max_messages <= 0):
-            raise _Reject("gateway/bad-request", "maxMessages must be a positive safe integer", {})
+        turn_window = request.get("turnWindow")
+        api._validate_history_window(max_messages, turn_window)
         session_id = api._address_target(request)
         session = self._session_or_reject(session_id)
         cursor = session.seq - 1
         page, has_more = api._paginate(list(session.events), None,
-                                       max_messages or DEFAULT_MAX_MESSAGES)
+                                       max_messages or DEFAULT_MAX_MESSAGES, cursor, turn_window)
         self._push({"type": "snapshot", "header": api._wire_header(session),
                     "cursor": cursor, "records": api._page_records(page),
                     "hasMore": has_more,
@@ -254,10 +260,12 @@ class _FollowSubscription(_Subscription):
 
 
 class _ControlSubscription(_Subscription):
-    """session.control 流订阅（control.ts 同款）：队列/作业/投影基线 + 增量。
+    """session.control 流订阅（control.ts 同款）：投影基线 + projection 替换帧。
 
-    mini 无 ctx.jobs 服务 → jobs 恒空（如实）；无投影注册表 → values 恒 {}
-    （“deployment without the registry” 语义）。基线队列只列挂接 agent 的会话。
+    基线只含 `projections`（上游 SessionControlBaseline）；`queues`/`jobs` 已从
+    control wire 移除（其投影归 SessionQueuedItem/SessionJob，从 wire 删除）。
+    无投影注册表 → 只放基线（`{asOfSeq, values}` 仍由现场折叠给出真实视图），
+    无 live 替换帧（upstream control 的 `onChanged` 依赖注册表在场）。
     """
 
     def __init__(self, api: "WebApi"):
@@ -268,12 +276,8 @@ class _ControlSubscription(_Subscription):
 
     def _start(self) -> None:
         api = self.api
-        baseline: dict[str, Any] = {"queues": {}, "jobs": {}, "projections": {}}
+        baseline: dict[str, Any] = {"projections": {}}
         for session in api.store.list():
-            agent = api._agents.get(session.session_id)
-            items = api._queue_items(agent) if agent is not None and agent.session is session else []
-            baseline["queues"][session.session_id] = items
-            baseline["jobs"][session.session_id] = []
             baseline["projections"][session.session_id] = {
                 "asOfSeq": session.seq - 1,
                 "values": projection_values(
@@ -281,23 +285,17 @@ class _ControlSubscription(_Subscription):
                     api.ctx.get("sessionProjections"))}
         self._push({"type": "baseline", "value": baseline})
 
-        def on_event(payload: dict) -> None:
+        registry = api.ctx.get("sessionProjections")
+        if registry is None:
+            return
+
+        def on_changed(session, key, value, seq) -> None:
             if self.done:
                 return
-            current = payload.get("session")
-            event = payload.get("event")
-            if not isinstance(event, Mapping) or event.get("type") != "agent/inbox/spliced":
-                return
-            session_id = getattr(current, "session_id", None)
-            if session_id is None:
-                return
-            agent = api._agents.get(session_id)
-            if agent is None or agent.session is not current:
-                return
-            self._push({"type": "queue", "sessionId": session_id,
-                        "items": api._queue_items(agent, event.get("data") or {})})
+            self._push({"type": "projection", "sessionId": session.session_id,
+                        "key": key, "value": value, "seq": seq})
 
-        self._dispose = api.ctx.on("session/event", on_event, global_=True)
+        self._dispose = registry.on_changed(on_changed)
 
     def close(self) -> None:
         if self._dispose is not None:
@@ -327,6 +325,11 @@ class WebApi:
         if self.store is None:
             self.store = SessionStore(ctx)
         install_agents(ctx)
+        # sessionProjections 注册表 + telemetry 投影单元：session/projections 读面与
+        # session/control 的 projection 帧都要求注册表在场（对齐上游 control.ts
+        # 构造注入 `ctx.sessionProjections`）。已装则幂等复用。
+        install_session_projections(ctx)
+        install_usage_stats(ctx)
         self.attachments = ctx.get("attachments")
         self._agents: dict[str, AgentLoop] = {}
         # selectModel 记录（advisory：单适配器部署回落恒单模型，不驱动路由）
@@ -355,6 +358,8 @@ class WebApi:
         "session/updateQueue": "update_queue",
         "session/cancel": "cancel",
         "session/page": "page",
+        "session/projections": "projections",
+        "session/workspacePathApplications": "workspace_path_applications",
         "pluginInventory/list": "plugin_inventory",
         "terminal/environment": "terminal_environment",
         "terminal/shells": "terminal_shells",
@@ -365,25 +370,24 @@ class WebApi:
         "terminal/rename": "terminal_rename",
         "terminal/close": "terminal_close",
         "workspace/create": "workspace_create",
+        "workspace/initializeDefault": "workspace_initialize_default",
         "workspace/rename": "workspace_rename",
         "workspace/delete": "workspace_delete",
         "workspace/insertBefore": "workspace_insert_before",
         "workspace/insertSessionBefore": "workspace_insert_session_before",
         "workspace/archiveSession": "workspace_archive_session",
         "workspace/unarchiveSession": "workspace_unarchive_session",
+        "workspace/pinSession": "workspace_pin_session",
+        "workspace/unpinSession": "workspace_unpin_session",
         "workspaceFiles/read": "workspace_files_read",
         "workspaceFiles/readBytes": "workspace_files_read_bytes",
-        "workspaceFiles/readAll": "workspace_files_read_all",
-        "workspaceFiles/readRelated": "workspace_files_read_related",
         "workspaceFiles/stat": "workspace_files_stat",
         "workspaceFiles/list": "workspace_files_list",
         "settings/describe": "settings_describe",
-        "settings/canOpenAgentPresetDirectory": "settings_can_open_agent_preset_directory",
         "settings/update": "settings_update",
         "settings/replace": "settings_replace",
         "settings/mutate": "settings_mutate",
         "settings/openSettingsDocument": "settings_open_document",
-        "settings/openAgentPresetDirectory": "settings_open_agent_preset_directory",
         "credentials/describe": "credentials_describe",
         "credentials/set": "credentials_set",
         "credentials/unset": "credentials_unset",
@@ -445,7 +449,13 @@ class WebApi:
                           {"reason": "use subagent delivery for this child session"})
         loop = self._agents.get(session_id)
         if loop is None:
-            loop = self._attach(session)
+            try:
+                loop = self._attach(session)
+            except Exception as error:  # noqa: BLE001 - 独占 writer 冲突折稳定码
+                if error.__class__.__name__ == "SessionAlreadyOwnedError":
+                    raise _Reject("session/writer-held", str(error),
+                                  {"sessionId": session_id}) from error
+                raise
         return session, loop
 
     @staticmethod
@@ -607,6 +617,10 @@ class WebApi:
         return self._remote_call(
             lambda: self._workspace_controller().create({"path": payload.get("path")}))
 
+    def workspace_initialize_default(self, payload: dict) -> dict | None:
+        return self._remote_call(lambda: self._workspace_controller().initialize_default(
+            {"directoryName": payload.get("directoryName"), "title": payload.get("title")}))
+
     def workspace_rename(self, payload: dict) -> dict:
         return self._remote_call(lambda: self._workspace_controller().rename(
             {"workspaceId": payload.get("workspaceId"), "title": payload.get("title")}))
@@ -626,11 +640,22 @@ class WebApi:
              "beforeSessionId": payload.get("beforeSessionId")}))
 
     def workspace_archive_session(self, payload: dict) -> dict:
-        return self._remote_call(lambda: self._workspace_controller().archive_session(
-            {"sessionId": payload.get("sessionId")}))
+        request: dict[str, Any] = {"sessionId": payload.get("sessionId")}
+        if payload.get("stopActivity") is not None:
+            request["stopActivity"] = payload["stopActivity"]
+        return self._remote_call(
+            lambda: self._workspace_controller().archive_session(request))
 
     def workspace_unarchive_session(self, payload: dict) -> dict:
         return self._remote_call(lambda: self._workspace_controller().unarchive_session(
+            {"sessionId": payload.get("sessionId")}))
+
+    def workspace_pin_session(self, payload: dict) -> dict:
+        return self._remote_call(lambda: self._workspace_controller().pin_session(
+            {"sessionId": payload.get("sessionId")}))
+
+    def workspace_unpin_session(self, payload: dict) -> dict:
+        return self._remote_call(lambda: self._workspace_controller().unpin_session(
             {"sessionId": payload.get("sessionId")}))
 
     # ---------- workspace-files 域（workspace-files 的 Remote 方法面） ----------
@@ -667,24 +692,20 @@ class WebApi:
             lambda: self._workspace_files().read(scope, payload.get("path"), range_))
 
     def workspace_files_read_bytes(self, payload: dict) -> dict:
-        scope = self.workspace_file_scope(payload)
-        range_ = {}
-        if payload.get("offset") is not None:
-            range_["offset"] = payload["offset"]
-        if payload.get("length") is not None:
-            range_["length"] = payload["length"]
-        return self._remote_call(
-            lambda: self._workspace_files().read_bytes(scope, payload.get("path"), range_))
+        """`workspaceFiles/readBytes`：原生字节 `options = {range?, baseFile?}`。
 
-    def workspace_files_read_all(self, payload: dict) -> dict:
+        上游 rc.1（index.ts:257-280）把原 `readAll`/`readRelated` 折进本方法：
+        `options.baseFile` 提供相对目标基目录，省略 range 时读整文件并在超
+        `maxFileBytes` 时 `workspace-file/too-large`。服务值 `data` 是原生 `bytes`，
+        此处按 wire 折 base64（JSON 无法承载 bytes）。
+        """
         scope = self.workspace_file_scope(payload)
-        return self._remote_call(
-            lambda: self._workspace_files().read_all(scope, payload.get("path")))
-
-    def workspace_files_read_related(self, payload: dict) -> dict:
-        scope = self.workspace_file_scope(payload)
-        return self._remote_call(lambda: self._workspace_files().read_related(
-            scope, payload.get("path"), payload.get("relativePath")))
+        options = payload.get("options") or {}
+        result = self._remote_call(lambda: self._workspace_files().read_bytes(
+            scope, payload.get("path"), dict(options)))
+        if isinstance(result.get("data"), (bytes, bytearray)):
+            result = {**result, "data": base64.b64encode(result["data"]).decode("ascii")}
+        return result
 
     def workspace_files_stat(self, payload: dict) -> dict:
         scope = self.workspace_file_scope(payload)
@@ -715,10 +736,6 @@ class WebApi:
     def settings_describe(self, payload: dict) -> dict:
         return self._remote_call(lambda: self._settings_controller().describe())
 
-    def settings_can_open_agent_preset_directory(self, payload: dict) -> bool:
-        return self._remote_call(
-            lambda: self._settings_controller().can_open_agent_preset_directory())
-
     def settings_update(self, payload: dict) -> dict:
         return self._remote_call(lambda: self._settings_controller().update(
             payload.get("ns"), payload.get("patch"), payload.get("expectedRevision")))
@@ -733,10 +750,6 @@ class WebApi:
 
     def settings_open_document(self, payload: dict) -> dict:
         return self._remote_call(lambda: self._settings_controller().open_settings_document())
-
-    def settings_open_agent_preset_directory(self, payload: dict) -> dict:
-        return self._remote_call(lambda: self._settings_controller().open_agent_preset_directory(
-            payload.get("agentPreset")))
 
     def credentials_describe(self, payload: dict) -> dict:
         return self._remote_call(
@@ -783,9 +796,13 @@ class WebApi:
     def _summary(self, session: Session, running: bool) -> dict:
         metadata = self._list_metadata(session)
         meta = session.meta
+        loop = self._agents.get(session.session_id)
+        attached = loop is not None and loop.session is session
         summary: dict[str, Any] = {
             "sessionId": session.session_id,
             "updatedAt": max(session.created_at, metadata["lastPromptAt"] or 0),
+            # 上游 SessionSummary.agentAvailable：该会话当前是否持有 live Agent。
+            "agentAvailable": attached,
             "running": running,
             "blank": metadata["blank"],
         }
@@ -795,7 +812,23 @@ class WebApi:
             summary["origin"] = meta["origin"]
         if meta.get("cwd") is not None:
             summary["cwd"] = meta["cwd"]
+        hints = self._projection_hints(session, attached)
+        if hints is not None:
+            summary["projections"] = hints
         return summary
+
+    def _projection_hints(self, session: Session, attached: bool) -> dict | None:
+        """SessionProjectionHints（上游 list.ts hintsOf）。
+
+        mini 无持久投影缓存 → 恒按 live 注册表快照直读：挂接 Agent 的会话
+        `kind:'sequenced'`，其余 `kind:'cached'`（同进程内存会话一律可折）。
+        """
+        values = projection_values(session, self.ctx.get("usageStats"),
+                                   self.ctx.get("sessionProjections"))
+        if not values:
+            return None
+        return {"kind": "sequenced" if attached else "cached",
+                "asOfSeq": session.seq - 1, "values": values}
 
     def list_sessions(self, payload: dict) -> dict:
         items = []
@@ -945,12 +978,33 @@ class WebApi:
         return False
 
     def open_workspace_path(self, payload: dict) -> None:
+        # 载体简化（登记 verified-diffs）：mini 无原生桌面打开器（native-command
+        # 无对应物）→ 校验通过后仍 gateway/internal。路径校验按上游 verifyDesktopPath
+        # 的可验证面折叠：非空 + 真实存在的 Host 路径（无 fs processPath 映射层）。
         path = payload.get("path")
-        if not path:
-            raise _Reject("gateway/bad-request", "session.openWorkspacePath requires a non-empty path", {})
+        if not isinstance(path, str) or path == "":
+            raise _Reject("gateway/bad-request", "A non-empty file path is required", {})
+        self._verify_desktop_path(path)
         raise _Reject("gateway/internal",
                       "path open failed: no native desktop opener is available in this deployment",
-                      {"path": path})
+                      {})
+
+    def workspace_path_applications(self, payload: dict) -> list:
+        # 无原生桌面打开器 → canOpenPath 恒 False（上游 workspacePathApplications
+        # 在 `!canOpenPath()` 时直接返回空发现面，不校验路径）。
+        return []
+
+    @staticmethod
+    def _verify_desktop_path(path: str) -> str:
+        """上游 verifyDesktopPath 的 mini 折叠：非空 + 存在的绝对 Host 路径。
+
+        `resolve(path)` 后要求路径可由 Host 文件系统验证（mini 无
+        `fs.processPathFromHostPath` 映射层，以 realpath 存在性作等价准入）。
+        """
+        host_path = os.path.realpath(os.path.abspath(path))
+        if not os.path.exists(host_path):
+            raise _Reject("gateway/bad-request", "Path has no verified Host path", {})
+        return host_path
 
     # ---------- session.rename ----------
 
@@ -1081,10 +1135,13 @@ class WebApi:
                 raise _Reject("gateway/bad-request",
                               "queue edit content must include non-whitespace text", {})
 
-        agent = self._agents.get(session_id)
-        if agent is None or self._subagent_owned(agent.session):
+        # 上游 updateQueue：冷会话先 resolveAgent（resume 后才可变更 pending 队列）；
+        # 仅 session/not-found 折 queue-item-not-found，其余稳定错误原样抛出。
+        found = self._agent_for(session_id)
+        if found is None:
             raise _Reject("session/queue-item-not-found", "queued item is no longer pending",
                           {"itemId": item_id})
+        _session, agent = found
 
         target = self._queue_target(agent, item_id)
         if target is None:
@@ -1194,8 +1251,6 @@ class WebApi:
             if isinstance(attachment, Mapping) and str(attachment.get("attachmentId")) == attachment_id:
                 return self._ref_from_dict(attachment)
             return None
-        if block.get("type") == "tool-result":
-            return self._image_in_blocks(block.get("content"), attachment_id)
         return None
 
     @staticmethod
@@ -1213,52 +1268,92 @@ class WebApi:
             originalDimensions=original,
         )
 
+    # ---------- session.projections ----------
+
+    def projections(self, payload: dict) -> dict | None:
+        """一次非激活的会话投影读（上游 index.ts projections）。
+
+        @returns `SessionProjectionBaseline`（`{asOfSeq, values}`），会话不存在
+        时返回 None；部署未挂投影注册表 → `session/projections-unavailable`。
+        """
+        session_id = payload.get("sessionId")
+        if not isinstance(session_id, str) or session_id == "":
+            raise _Reject("gateway/bad-request", "sessionId must not be empty", {})
+        session = self.store.get(session_id)
+        if session is None:
+            return None
+        registry = self.ctx.get("sessionProjections")
+        if registry is None:
+            raise _Reject("session/projections-unavailable",
+                          "Session projections are unavailable", {})
+        registry.snapshot(session)
+        return {"asOfSeq": session.seq - 1,
+                "values": projection_values(session, self.ctx.get("usageStats"), registry)}
+
     # ---------- session.fork ----------
 
     def fork(self, payload: dict) -> dict:
+        """从源会话的精确事件前缀创建子会话（上游 commands.ts fork）。
+
+        `atSeq` 是含端点的精确源事件 seq；省略时取「最近完成 turn 前缀」
+        （最后一个 turn/end + 其后的独立事件，直到下一 turn/start、append
+        user/message 或 agent/inbox/spliced）。开放切点由 store.fork 的
+        build_fork_seed 以 `forked` cause 合成闭包平衡。
+        """
         session_id = _require_id(payload, "sessionId")
         at_seq = payload.get("atSeq")
-        if at_seq is not None and at_seq < 0:
-            raise _Reject("gateway/bad-request", "atSeq must be a non-negative integer", {})
+        if at_seq is not None and (not isinstance(at_seq, int)
+                                   or isinstance(at_seq, bool) or at_seq < 0):
+            raise _Reject("gateway/bad-request", "atSeq must be a non-negative safe integer", {})
         source = self.store.get(session_id)
         if source is None:
             raise _Reject("session/not-found", f'session "{session_id}" not found',
                           {"sessionId": session_id})
-        events = source.events
-        last_seq = events[-1]["seq"] if events else -1
-        boundary = self._fork_boundary(events, at_seq)
-        if boundary is None:
-            if at_seq is not None and at_seq <= last_seq:
+        events = list(source.events)
+        if at_seq is None:
+            boundary = self._latest_completed_prefix_boundary(events)
+            if boundary is None:
                 raise _Reject("session/fork-unavailable",
-                              f'session "{session_id}" has not completed the turn '
-                              f'containing event {at_seq}',
+                              f'session "{session_id}" has no completed turn to fork from',
                               {"sessionId": session_id})
-            raise _Reject("session/fork-unavailable",
-                          f'session "{session_id}" has no completed turn to fork from',
-                          {"sessionId": session_id})
-        cut = boundary["seq"] + 1
-        while cut < len(events) and events[cut].get("type") != "turn/start":
-            cut += 1
-        child_id = f"session-{uuid.uuid4()}"
-        meta: dict[str, Any] = {"parentSession": source.session_id, "isSeeded": True}
-        if source.meta.get("cwd") is not None:
-            meta["cwd"] = source.meta["cwd"]
-        if source.meta.get("agentPreset") is not None:
-            meta["agentPreset"] = source.meta["agentPreset"]
-        self.store.create(child_id, {"seed": list(events[:cut]), "meta": meta})
-        return {"sessionId": child_id}
+        else:
+            boundary = at_seq
+            if boundary >= len(events) or events[boundary].get("seq") != boundary:
+                last_seq = events[-1]["seq"] if events else "none"
+                raise _Reject(
+                    "session/fork-unavailable",
+                    f'event {at_seq} does not exist in session "{session_id}" '
+                    f"(last seq: {last_seq})",
+                    {"sessionId": session_id})
+        try:
+            child = self.store.fork(source, boundary)
+        except SessionForkError as error:
+            raise _Reject("session/fork-unavailable", str(error),
+                          {"sessionId": session_id}) from error
+        return {"sessionId": child.session_id}
 
     @staticmethod
-    def _fork_boundary(events, at_seq: int | None) -> dict | None:
-        """最近完成的 turn（turn/end），atSeq 给定则要求锚定 seq >= atSeq 且 turn 已闭合。"""
-        if at_seq is not None:
-            anchored = next((e for e in events
-                             if e.get("type") == "turn/end" and e["seq"] >= at_seq), None)
-            if anchored is not None:
-                return anchored
-            if events and at_seq <= events[-1]["seq"]:
-                return None
-        return next((e for e in reversed(events) if e.get("type") == "turn/end"), None)
+    def _latest_completed_prefix_boundary(events) -> int | None:
+        """省略 atSeq 的缺省切点：最近完成 turn 前缀（上游 commands.ts）。
+
+        从最后一个 turn/end 起，向后吸收独立事件（step/end、tool/* 等），
+        遇到下一 turn/start、append user/message 或 agent/inbox/spliced 停止。
+        """
+        last_end = None
+        for event in events:
+            if event.get("type") == "turn/end":
+                last_end = event
+        if last_end is None:
+            return None
+        boundary = last_end["seq"]
+        for event in events[boundary + 1:]:
+            etype = event.get("type")
+            if (etype == "turn/start"
+                    or (etype == "user/message" and event.get("surfaceOp") == "append")
+                    or etype == "agent/inbox/spliced"):
+                break
+            boundary = event["seq"]
+        return boundary
 
     # ---------- session.page ----------
 
@@ -1269,8 +1364,9 @@ class WebApi:
         source_cursor = source[-1]["seq"] if source else -1
 
         through_seq = payload.get("throughSeq")
-        if through_seq < -1:
-            raise _Reject("gateway/bad-request", "throughSeq must be an integer greater than or equal to -1",
+        if not _is_safe_int(through_seq) or through_seq < -1:
+            raise _Reject("gateway/bad-request",
+                          "throughSeq must be an integer greater than or equal to -1",
                           {})
         if through_seq > source_cursor:
             raise _Reject("gateway/bad-request",
@@ -1281,27 +1377,58 @@ class WebApi:
                           {"sessionId": session_id})
 
         before_seq = payload.get("beforeSeq")
-        if before_seq is not None and before_seq < 0:
+        if before_seq is not None and (not _is_safe_int(before_seq) or before_seq < 0):
             raise _Reject("gateway/bad-request", "beforeSeq must be a non-negative safe integer", {})
         max_messages = payload.get("maxMessages")
-        if max_messages is not None and max_messages <= 0:
-            raise _Reject("gateway/bad-request", "maxMessages must be a positive safe integer", {})
+        turn_window = payload.get("turnWindow")
+        self._validate_history_window(max_messages, turn_window)
 
-        page_events, has_more = self._paginate(source, before_seq, max_messages or DEFAULT_MAX_MESSAGES,
-                                               through_seq)
+        page_events, has_more = self._paginate(
+            source, before_seq, max_messages or DEFAULT_MAX_MESSAGES, through_seq, turn_window)
         return {"records": self._page_records(page_events), "hasMore": has_more}
 
     @staticmethod
+    def _validate_history_window(max_messages: Any, turn_window: Any) -> None:
+        """maxMessages + turnWindow 窗口校验（上游 history.ts validateHistoryWindow）。"""
+        if max_messages is not None and (not _is_safe_int(max_messages) or max_messages <= 0):
+            raise _Reject("gateway/bad-request", "maxMessages must be a positive safe integer", {})
+        if turn_window is None:
+            return
+        if not isinstance(turn_window, dict):
+            raise _Reject("gateway/bad-request", "turnWindow must be an object", {})
+        min_messages = turn_window.get("minMessages")
+        min_turns = turn_window.get("minTurns")
+        if (not _is_safe_int(min_messages) or min_messages <= 0
+                or min_messages > (max_messages or DEFAULT_MAX_MESSAGES)):
+            raise _Reject(
+                "gateway/bad-request",
+                "turnWindow.minMessages must be a positive safe integer no greater than maxMessages",
+                {})
+        if not _is_safe_int(min_turns) or min_turns <= 0:
+            raise _Reject("gateway/bad-request",
+                          "turnWindow.minTurns must be a positive safe integer", {})
+
+    @staticmethod
     def _paginate(events, before_seq: int | None, max_messages: int,
-                  through_seq: int | None = None) -> tuple[list[dict], bool]:
-        """消息边界分页（history.ts paginate 同款）。"""
+                  through_seq: int | None = None,
+                  turn_window: dict | None = None) -> tuple[list[dict], bool]:
+        """消息边界分页（history.ts paginate 同款）。
+
+        turnWindow 给定且先满足 minMessages + minTurns 时，在 turn/start 处切段。
+        """
         if through_seq is None:
             through_seq = events[-1]["seq"] if events else -1
         end = min(through_seq + 1, before_seq) if before_seq is not None else through_seq + 1
         count = 0
+        turns = 0
         cut = 0
         for index in range(end - 1, -1, -1):
             event = events[index]
+            if turn_window is not None and event.get("type") == "turn/start":
+                turns += 1
+                if count >= turn_window["minMessages"] and turns >= turn_window["minTurns"]:
+                    cut = index
+                    break
             if event.get("type") not in MESSAGE_TYPES or event.get("surfaceOp") != "append":
                 continue
             count += 1
@@ -1328,48 +1455,8 @@ class WebApi:
         return _FollowSubscription(self, request)
 
     def control(self) -> _ControlSubscription:
-        """session.control：队列/作业/投影基线 + 增量。"""
+        """session.control：投影基线 + projection 替换帧。"""
         return _ControlSubscription(self)
-
-    # ---------- 队列投影（control.ts queueItems 同款） ----------
-
-    def _queue_items(self, agent: AgentLoop, splice: Mapping | None = None) -> list[dict]:
-        """队列投影（control.ts queueItems 同款）。
-
-        广播点在内存 mutation 之前，splice 事件携带的是 pre-splice 状态；
-        重投影 splice 到 inbox 当前列表上得到 post-splice 快照（与既有
-        web/streams.py _queue_snapshot 同模式）。
-        """
-
-        def project(target: str) -> list[dict]:
-            messages = agent.inbox.next_turn if target == "next-turn" \
-                else agent.inbox.next_step
-            if splice is not None and splice.get("target") == target:
-                start = splice.get("start", 0)
-                removed = splice.get("removedCount", 0)
-                before = messages[:start]
-                after = messages[start + removed:]
-                return before + list(splice.get("inserted", [])) + after
-            return messages
-
-        items = []
-        for message in project("next-turn"):
-            items.append(self._queued_item(message, "queued"))
-        for message in project("next-step"):
-            placement = "steering" if (message.get("source") or {}).get("kind") == "user" \
-                else "context"
-            items.append(self._queued_item(message, placement))
-        return items
-
-    @staticmethod
-    def _queued_item(message: dict, placement: str) -> dict:
-        item: dict[str, Any] = {"id": message["id"], "placement": placement,
-                                "message": {"id": message["id"],
-                                            "content": thaw(message.get("content") or [])}}
-        source = message.get("source")
-        if isinstance(source, Mapping) and source.get("kind") == "user" and source.get("rpcId"):
-            item["rpcId"] = source["rpcId"]
-        return item
 
     # ---------- wire 辅助 ----------
 

@@ -85,8 +85,8 @@ class ApprovalBridgeTest(unittest.TestCase):
     def _tool_result_is_error(self, sid):
         for event in self.api.store.get(sid).events:
             if event["type"] == "tool/result":
-                block = event["data"]["message"]["content"][0]
-                return bool(block.get("isError"))
+                # V4：role 'tool' 平铺 content + 顶层 isError
+                return bool(event["data"]["message"].get("isError"))
         return None
 
     def _tool_result_present(self, sid):

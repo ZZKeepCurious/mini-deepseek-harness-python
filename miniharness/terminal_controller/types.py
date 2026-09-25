@@ -25,8 +25,10 @@ __all__ = [
     "TERMINAL_CONFIG_DEFAULTS",
     "ERROR_CONTROL_UNAVAILABLE",
     "ERROR_LIMIT_REACHED",
+    "ERROR_UNAVAILABLE",
     "TerminalControlUnavailable",
     "TerminalLimitReached",
+    "TerminalUnavailable",
     "resolve_config",
     "is_identity",
     "frame_bytes",
@@ -49,9 +51,10 @@ TERMINAL_CONFIG_DEFAULTS: dict[str, Any] = {
     "disposeGraceMs": 1000,
 }
 
-#: Remote 错误码（types.ts:8,10）。
+#: Remote 错误码（types.ts:8,10,12）。
 ERROR_CONTROL_UNAVAILABLE = "terminal/control-unavailable"
 ERROR_LIMIT_REACHED = "terminal/limit-reached"
+ERROR_UNAVAILABLE = "terminal/unavailable"
 
 #: 数值字段的上界要求（字段 → 最小合法值；None 表示仅要求非负整数）。
 _NUMERIC_MINIMUMS = {
@@ -89,6 +92,16 @@ class TerminalLimitReached(Exception):
     def __init__(self, limit: int):
         super().__init__("Session terminal limit reached")
         self.details = {"limit": limit}
+
+
+class TerminalUnavailable(Exception):
+    """终端身份缺失或已进入进程清理（types.ts:8，details 恒空）。"""
+
+    code = ERROR_UNAVAILABLE
+
+    def __init__(self, message: str = "Terminal is closing or unavailable"):
+        super().__init__(message)
+        self.details = {}
 
 
 def is_identity(value: Any) -> bool:

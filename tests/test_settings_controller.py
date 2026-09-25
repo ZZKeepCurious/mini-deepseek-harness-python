@@ -91,28 +91,12 @@ class SettingsControllerCase(unittest.TestCase):
         self.assertEqual(self._code(lambda: controller.describe()), "gateway/internal")
 
     def test_native_document_open_is_unavailable(self):
-        self.assertFalse(self.controller.can_open_agent_preset_directory())
+        # rc.1 删 `canOpenAgentPresetDirectory`/`openAgentPresetDirectory`（及 `nativeOpen`）；
+        # 文档打开仍有 provider 缺席折 gateway/internal 的语义。
+        self.assertFalse(hasattr(self.controller, "can_open_agent_preset_directory"))
+        self.assertFalse(hasattr(self.controller, "open_agent_preset_directory"))
         self.assertEqual(self._code(lambda: self.controller.open_settings_document()),
                          "gateway/internal")
-
-    def test_open_agent_preset_directory_resolves_trust(self):
-        self.assertEqual(self.controller.open_agent_preset_directory("mine"),
-                         {"opened": False, "path": os.path.join(self._tmp.name, "user")})
-        self.assertEqual(self._code(
-            lambda: self.controller.open_agent_preset_directory("standard")),
-            "agent-preset/read-only")
-        self.assertEqual(self._code(
-            lambda: self.controller.open_agent_preset_directory("missing")),
-            "agent-preset/not-found")
-        self.assertEqual(self._code(lambda: self.controller.open_agent_preset_directory("")),
-                         "gateway/bad-request")
-        no_roster = Context(name="no-roster")
-        self.addCleanup(no_roster.dispose)
-        install_settings(no_roster, path=os.path.join(self._tmp.name, "s2.json"))
-        controller = install_settings_controller(no_roster, roster=None)
-        self.assertEqual(self._code(
-            lambda: controller.open_agent_preset_directory("standard")),
-            "agent-preset/not-found")
 
     def test_credentials_describe_set_unset(self):
         described = self.credentials.describe(["MY_KEY"])

@@ -10,16 +10,15 @@
 设置读使用 `redact_secrets`，secret 字段不随响应出行。
 
 载体差异（登记）：
-  * minh 无原生桌面打开器（`native-command` 无对应物）——`canOpenAgentPresetDirectory`
-    恒 False、`openSettingsDocument`/预设目录打开返回 gateway/internal 或
-    `{opened:false, path}`（如实标注部署能力，不臆造 opener）。
+  * mini 无原生桌面打开器（`native-command` 无对应物）——`openSettingsDocument`
+    返回 gateway/internal（如实标注部署能力，不臆造 opener）。上游 rc.1 已移除
+    `canOpenAgentPresetDirectory`/`openAgentPresetDirectory`（原生预设目录打开）。
   * 上游 schema 由 schemastery 序列化进入 namespace 视图；mini 无 schema 面，
     `schema` 以 `{}` 占位（表单渲染载体差异）。
   * 上游写路径为 Promise；mini settings 服务 async（同步体），经常驻循环驱动。
 """
 from __future__ import annotations
 
-import os
 import re
 from typing import Any
 
@@ -53,6 +52,7 @@ def _namespace_view(entry: dict) -> dict:
     """把一个脱敏描述符投影为其 wire 视图（逐字段，index.ts namespaceView）。"""
     view: dict[str, Any] = {
         "ns": entry["ns"],
+        "autoGenerate": entry.get("autoGenerate", False),
         "schema": entry.get("schema", {}),
         "value": entry.get("value"),
         "applies": entry.get("applies"),
@@ -72,9 +72,7 @@ class SettingsController(Service):
 
     provide = "settingsController"
 
-    def __init__(self, ctx: Context, roster: Any = None, native_open: bool = False):
-        self.roster = roster
-        self.native_open = bool(native_open)
+    def __init__(self, ctx: Context, roster: Any = None):
         super().__init__(ctx, "settingsController")
 
     # ---------- 读面 ----------
@@ -84,12 +82,10 @@ class SettingsController(Service):
         described = settings.describe(redact_secrets=True)
         return {
             "writable": described["writable"],
-            "hasDocument": described["hasDocument"],
+            # 上游 index.ts:102：描述面恒报 hasDocument true（provider 的存在即启用文档）。
+            "hasDocument": True,
             "namespaces": [_namespace_view(entry) for entry in described["namespaces"]],
         }
-
-    def can_open_agent_preset_directory(self) -> bool:
-        return self.native_open
 
     # ---------- 写面 ----------
 
@@ -144,33 +140,6 @@ class SettingsController(Service):
             "gateway/internal",
             "path open failed: no native desktop opener is available in this deployment",
             {})
-
-    def open_agent_preset_directory(self, agent_preset: Any) -> dict:
-        if not isinstance(agent_preset, str) or agent_preset == "":
-            raise SettingsFault("gateway/bad-request",
-                                "agent preset id must not be empty", {})
-        if self.roster is None:
-            raise SettingsFault("agent-preset/not-found",
-                                "this deployment composes no agent presets",
-                                {"agentPreset": agent_preset, "available": []})
-        from ..preset.presets import UnknownPresetError
-        try:
-            preset = self.roster.resolve(agent_preset)
-        except UnknownPresetError as error:
-            raise SettingsFault("agent-preset/not-found", str(error),
-                                {"agentPreset": agent_preset,
-                                 "available": list(self.roster.ids())}) from error
-        if preset.trust != "user":
-            raise SettingsFault(
-                "agent-preset/read-only",
-                f'agent-presets: preset "{preset.id}" cannot be written: it ships with the deployment',
-                {"agentPreset": preset.id, "reason": "it ships with the deployment"})
-        directory = os.path.dirname(str(preset.path))
-        if not self.native_open:
-            return {"opened": False, "path": directory}
-        raise SettingsFault(
-            "gateway/internal",
-            "path open failed: no native desktop opener is available in this deployment", {})
 
     # ---------- 内部 ----------
 
@@ -244,13 +213,12 @@ class CredentialsController(Service):
         return credentials
 
 
-def install_settings_controller(ctx: Context, roster: Any = None,
-                                native_open: bool = False) -> SettingsController:
+def install_settings_controller(ctx: Context, roster: Any = None) -> SettingsController:
     """幂等装配 `ctx.settingsController` + `ctx.credentialsController`。"""
     existing = ctx.get("settingsController")
     if existing is not None:
         return existing
-    controller = SettingsController(ctx, roster=roster, native_open=native_open)
+    controller = SettingsController(ctx, roster=roster)
     if ctx.get("credentialsController") is None:
         CredentialsController(ctx)
     return controller

@@ -6,8 +6,8 @@
 
   * `session/follow`  —— 单个会话跟随流（history.follow）：开流即一个 `snapshot`
     帧（header/cursor/records/hasMore/projections）后逐条 `event` 帧。
-  * `session/control` —— 宿主级 live control：首个 `baseline` 帧（queues/jobs/
-    projections）后按变更给 `queue` / `jobs` / `projection` 帧。
+  * `session/control` —— 宿主级 live control：首个 `baseline` 帧（projections）
+    后按变更给 `projection` 替换帧。
   * `$events`         —— 远程事件流（`web/events.py` RemoteEventRegistry），承载
     api-session/* 转发源 + 审批瀑布 + 用户提问瀑布（`web/approvals.py` /
     `web/questions.py` bridge）。
@@ -19,15 +19,16 @@
 mini 简化 / 已核对（须同步 verified-diffs §3.4)：follow 的 records 用会话日志
 事件流 `Session.events` 投影（wire 形状对齐上游 `{type:'event', event}` 包装、
 cursor = 最后已提交 seq；projections values 由 `telemetry/projection_values` 产出
-真实 `sessionStats` + `tokenUsage` 视图，未建投影注册表——固定单位现场折叠等价，
-见 verified-diffs §2.30），无 message 对齐游标；`_attach` 冷会话自动 resume 后取
-日志尾部快照，再以 `_poll_new_events`（短轮询 + 空闲 sleep，一次捞出全部新事件，
-seq 严格递增）实时补 event 帧。**已核实：alpha.1 wire 无 since 字段**（客户端连回 =
+真实 `sessionStats` + `tokenUsage` 视图，未建持久投影缓存——固定单位现场折叠等价，
+见 verified-diffs §2.30），快照走 `WebApi._paginate`（消息对齐 + maxMessages/
+turnWindow 截断，对齐 history.follow）；`_attach` 冷会话自动 resume 后取日志尾部
+快照，再以 `_poll_new_events`（短轮询 + 空闲 sleep，一次捞出全部新事件，seq 严格
+递增）实时补 event 帧。**已核实：alpha.1 wire 无 since 字段**（客户端连回 =
 重开流重新投递完整 snapshot/baseline，README 明言单向通知重连不重放）——mini
 同款，重连健壮性由「重开全量 + 客户端按 seq 去重」（webui TrajectoryBuffer）
 保证，无游标也无需再造。control baseline 对齐上游 control.ts（全部 live 会话
-每会话一条，空也放；projections 每会话真实视图块）。jobs 来自 ctx 的
-on_jobs_changed 回调，owner 恒为 AgentLoop；心跳 Ping 由 launcher 的 transport
+每会话一条 projections 块，空也放；替换帧只来自 `sessionProjections.onChanged`，
+queues/jobs 已从 rc.1 control wire 移除）。心跳 Ping 由 launcher 的 transport
 级 ping 闭合（`web/launcher.py` uvicorn_options，不在此层）。
 """
 from __future__ import annotations
@@ -35,6 +36,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from .api import DEFAULT_MAX_MESSAGES, _Reject
 from .args import (
     BoundaryReject,
     boundary_error_message,
@@ -47,7 +49,6 @@ from ..telemetry import projection_values
 
 __all__ = ["GatewayStreams", "RemoteStreamError"]
 
-QUEUE_CAPACITY = 1024
 FOLLOW_POLL_INTERVAL = 0.05
 #: terminal/follow 帧轮询间隔（秒）：同步 follower 非阻塞 pop 的桥接粒度。
 TERMINAL_FOLLOW_POLL = 0.01
@@ -150,6 +151,14 @@ class GatewayStreams:
                 or not address["sessionId"]):
             raise RemoteStreamError("gateway/arguments-invalid",
                                     "session/follow requires a session address")
+        max_messages = args.get("maxMessages")
+        turn_window = args.get("turnWindow")
+        # 上游 history.follow 先 validateHistoryWindow（maxMessages/turnWindow 语义门）
+        # 再取源；业务码在此折成流 error（同 `_FollowSubscription`）。
+        try:
+            self.api._validate_history_window(max_messages, turn_window)
+        except _Reject as error:
+            raise RemoteStreamError(error.code, error.message) from error
         session_id = address["sessionId"]
         session = self.api.store.get(session_id)
         if session is None:
@@ -161,12 +170,11 @@ class GatewayStreams:
         # cursor = 最后一条已提交事件 seq（上游 0 基 seq 的 inclusive cursor，
         # history.ts `sourceLog.at(-1)?.seq ?? -1`；空日志 -1）
         cursor = events[-1]["seq"] if events else -1
-        records = [self._record(e) for e in events]
-        has_more = False
-        max_messages = args.get("maxMessages")
-        if isinstance(max_messages, int) and max_messages > 0 and len(records) > max_messages:
-            records = records[-max_messages:]
-            has_more = True
+        # 上游 follow 快照 paginate(events, undefined, maxMessages ?? DEFAULT, cursor,
+        # turnWindow)：消息对齐 + turnWindow 截断（history.ts follow）。
+        page, has_more = self.api._paginate(
+            events, None, max_messages or DEFAULT_MAX_MESSAGES, cursor, turn_window)
+        records = [self._record(e) for e in page]
         yield {"type": "snapshot", "header": self.api._wire_header(session),
                "cursor": cursor, "records": records, "hasMore": has_more,
                "projections": {"asOfSeq": cursor,
@@ -252,7 +260,8 @@ class GatewayStreams:
     # ---------- workspaceFiles/changes（文件观察流） ----------
 
     async def _workspace_changes(self, args: dict, signal=None):
-        """`workspaceFiles/changes`：`{kind:'ready'}` 后跟工作区内 `fs/observed` 观察。"""
+        """`workspaceFiles/changes`：目标级 OS watch 就绪后 `{kind:'ready'}`，
+        随后命中目标的失效重 stat 产出 `change` 帧（`path` 必填）。"""
         controller = self.api.ctx.get("workspaceFiles")
         if controller is None:
             raise RemoteStreamError(
@@ -260,7 +269,7 @@ class GatewayStreams:
                 "typert gateway: workspaceFiles/changes: workspaceFiles namespace is not mounted")
         try:
             scope = self.api.workspace_file_scope(args)
-            changes = controller.changes(scope)
+            changes = controller.changes(scope, args.get("path"))
         except Exception as error:  # noqa: BLE001 - 折流 error 帧（不关 WS）
             raise RemoteStreamError(getattr(error, "code", None) or "gateway/internal",
                                     str(error)) from error
@@ -281,20 +290,19 @@ class GatewayStreams:
         if self._attached:
             return
         self._attached = True
-        self._disposers = [
-            self.ctx.on("session/event", self._on_session_event),
-            self.ctx.on("session/created", self._on_session_created),
-            self.ctx.on("session/disposed", self._on_session_disposed),
-            self.ctx.on("agent/status", self._on_agent_status),
-            self.ctx.on("agent/error", self._on_agent_error),
-        ]
-        jobs = self.ctx.get("jobs")
-        if jobs is not None and hasattr(jobs, "on_jobs_changed"):
-            self._disposers.append(jobs.on_jobs_changed(self._on_jobs_changed))
+        # 上游 control.ts 构造期订阅 `sessionProjections.onChanged`，只广播
+        # projection 替换帧；queues/jobs 及其投影类型（SessionQueuedItem /
+        # SessionJob）已从 rc.1 control wire 移除。
+        registry = self.ctx.get("sessionProjections")
+        if registry is None:
+            self._disposers = []
+            return
+        self._disposers = [registry.on_changed(self._on_projection_changed)]
 
     async def _control(self, signal=None):
         self._attach_control()
-        queue: asyncio.Queue = asyncio.Queue(maxsize=QUEUE_CAPACITY)
+        # 上游 ControlQueue 无界（Deque）；projection 帧不经丢帧窗口。
+        queue: asyncio.Queue = asyncio.Queue()
         self._control_queues[queue] = None
         try:
             yield {"type": "baseline", "value": self._control_baseline()}
@@ -307,99 +315,24 @@ class GatewayStreams:
             self._control_queues.pop(queue, None)
 
     def _control_baseline(self) -> dict:
-        """control baseline（上游 control.ts:67-81）：全部 live 会话每会话一条
-        （无 agent 挂接的会话空数组也放）+ 每会话 projections 空基线块。"""
-        queues: dict[str, list] = {}
-        jobs: dict[str, list] = {}
+        """control baseline（上游 control.ts projectionBaseline）：全部 live 会话
+        每会话一条 projections 块（空也放）；queues/jobs 已从 control wire 移除。"""
         projections: dict[str, dict] = {}
         stats = self.ctx.get("usageStats")
         registry = self.ctx.get("sessionProjections")
         for session in self.api.store.list():
-            session_id = session.session_id
-            queues[session_id] = self._queue_view(session_id)
-            jobs[session_id] = self._jobs_view(session_id)
-            projections[session_id] = {
+            projections[session.session_id] = {
                 "asOfSeq": session.seq - 1,
                 "values": projection_values(session, stats, registry),
             }
-        return {"queues": queues, "jobs": jobs, "projections": projections}
+        return {"projections": projections}
 
-    def _on_session_event(self, payload: dict) -> None:
-        session = payload["session"]
-        if session.session_id not in self.api._agents:
-            return
-        event = payload["event"]
-        if event.get("type") == "agent/inbox/spliced":
-            frame = {"type": "queue", "sessionId": session.session_id,
-                     "items": self._queue_view(session.session_id, event["data"])}
-            for queue in list(self._control_queues):
-                queue.put_nowait(frame)
-
-    def _on_jobs_changed(self, owner: Any) -> None:
-        session_id = getattr(owner, "id", None)
-        if not session_id or session_id not in self.api._agents:
-            return
-        frame = {"type": "jobs", "sessionId": session_id,
-                 "jobs": self._jobs_view(session_id)}
+    def _on_projection_changed(self, session, key, value, seq) -> None:
+        """投影单元视图变更 → 一条 `projection` 替换帧（control.ts:22-30）。"""
+        frame = {"type": "projection", "sessionId": session.session_id,
+                 "key": key, "value": value, "seq": seq}
         for queue in list(self._control_queues):
             queue.put_nowait(frame)
-
-    def _on_session_created(self, payload: dict) -> None:
-        pass  # control baseline 覆盖已挂会话；新会话经 list/baseline 收敛
-
-    def _on_session_disposed(self, payload: dict) -> None:
-        session_id = payload["session"].session_id
-        for queue in list(self._control_queues):
-            queue.put_nowait({"type": "queue", "sessionId": session_id, "items": []})
-
-    def _on_agent_status(self, payload: dict) -> None:
-        pass  # running 位由 api-session/status 承担（$events），control 不发重复
-
-    def _on_agent_error(self, payload: dict) -> None:
-        pass
-
-    def _queue_view(self, session_id: str, splice: dict | None = None) -> list[dict]:
-        loop = self.api._agents.get(session_id)
-        if loop is None:
-            return []
-        items = []
-        for message in loop.inbox.next_turn:
-            items.append({"id": message["id"], "placement": "queued",
-                          **self._prompt_rpc_id(message),
-                          "message": {"id": message["id"],
-                                      "content": message.get("content", [])}})
-        for message in loop.inbox.next_step:
-            placement = ("steering" if message.get("source", {}).get("kind") == "user"
-                         else "context")
-            items.append({"id": message["id"], "placement": placement,
-                          **self._prompt_rpc_id(message),
-                          "message": {"id": message["id"],
-                                      "content": message.get("content", [])}})
-        return items
-
-    @staticmethod
-    def _prompt_rpc_id(message: dict) -> dict:
-        """Prompt-RPC 身份（上游 promptRpcId：browser 提交消息的 user source 携带）。"""
-        source = message.get("source") or {}
-        if source.get("kind") == "user" and "rpcId" in source:
-            return {"rpcId": source["rpcId"]}
-        return {}
-
-    def _jobs_registry(self):
-        return self.ctx.get("jobs")
-
-    def _jobs_view(self, session_id: str) -> list[dict]:
-        loop = self.api._agents.get(session_id)
-        jobs = self._jobs_registry()
-        if loop is None or jobs is None:
-            return []
-        return [self._job_row(job) for job in jobs.list(loop)]
-
-    @staticmethod
-    def _job_row(snapshot: dict) -> dict:
-        return {key: snapshot[key] for key in ("id", "kind", "label", "status",
-                                               "startedAt", "detail", "finishedAt")
-                if key in snapshot}
 
     # ---------- 生命周期 ----------
 

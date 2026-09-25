@@ -16,7 +16,7 @@ from miniharness.terminal_controller.shells import (
     resolve_executable,
     resolve_shell,
 )
-from miniharness.terminal_controller.types import TerminalLimitReached
+from miniharness.terminal_controller.types import TerminalLimitReached, TerminalUnavailable
 
 from tests.test_terminal_controller_terminal import FakeBrowserHandle
 
@@ -81,13 +81,17 @@ class TestTerminalController(unittest.TestCase):
     def agent(self, session_id="session-a", cwd="/workspace"):
         return FakeAgent(self.ctx, session_id, cwd)
 
-    def test_environment_reads_workspace_and_limits_without_resolving_a_shell(self):
+    def test_environment_prefers_the_session_cwd_and_keeps_the_limits(self):
         controller = self.controller()
         agent = self.agent()
-        expected_cwd = self.policy.resolve({"session": agent.session})["workspaceRoot"]
-        environment = controller.environment(agent)
-        self.assertEqual(environment, {"cwd": expected_cwd, "maxInputBytes": 1000,
-                                       "maxCols": 200, "maxRows": 100, "scrollback": 100})
+        # index.ts:121 `session.header.cwd ?? sandboxPolicy.workspaceRoot`
+        self.assertEqual(controller.environment(agent), {"cwd": "/workspace",
+                                                         "maxInputBytes": 1000,
+                                                         "maxCols": 200, "maxRows": 100,
+                                                         "scrollback": 100})
+        headless = self.agent(cwd=None)
+        self.assertEqual(controller.environment(headless)["cwd"],
+                         self.policy.resolve({"session": headless.session})["workspaceRoot"])
 
     def test_creates_the_shell_and_keeps_an_existing_identity(self):
         controller = self.controller()
@@ -107,7 +111,7 @@ class TestTerminalController(unittest.TestCase):
         agent = self.agent()
         controller.create(agent, {"id": "terminal-1", "cols": 80, "rows": 24})
         self.assertEqual(controller.list("other"), [])
-        with self.assertRaisesRegex(RuntimeError, "no longer exists"):
+        with self.assertRaisesRegex(TerminalUnavailable, "no longer exists"):
             controller.follow(self.agent("other"), "terminal-1", "writer")
         follow = controller.follow(agent, "terminal-1", "writer")
         self.assertEqual(follow.baseline["type"], "snapshot")
@@ -121,7 +125,7 @@ class TestTerminalController(unittest.TestCase):
         controller.create(agent, {"id": "terminal-1", "cols": 80, "rows": 24})
         controller.close(agent, "terminal-1")
         self.assertEqual(self.handle.terminate_calls, 1)
-        with self.assertRaisesRegex(RuntimeError, "closed in this Session"):
+        with self.assertRaisesRegex(TerminalUnavailable, "closed in this Session"):
             controller.create(agent, {"id": "terminal-1", "cols": 80, "rows": 24})
         controller.close(agent, "terminal-1")  # 重复关闭成功
         controller.create(agent, {"id": "terminal-2", "cols": 80, "rows": 24})
@@ -174,18 +178,27 @@ class TestTerminalController(unittest.TestCase):
         self.assertEqual(controller.list("session-a")[0]["title"], "server logs")
         follow.detach()
 
-    def test_confines_the_selected_shell_with_the_session_policy(self):
+    def test_does_not_confine_the_shell_with_the_session_policy(self):
+        # rc.1 index.ts:151：用户终端以执行环境的系统用户权限运行，不套 Agent
+        # 沙箱围栏（围栏由 sandboxPolicy 的 mode fence 只挡模式变更）。
         sandbox = FakeSandbox()
         self.ctx.provide("sandbox", sandbox)
         controller = self.controller(policy_mode="workspace-write")
         agent = self.agent()
         controller.create(agent, {"id": "terminal-1", "cols": 80, "rows": 24})
-        self.assertEqual(self.spawn_specs[0]["argv"], ["sandbox-runner", "/bin/bash", "-i"])
-        self.assertEqual(sandbox.calls[0][1]["mode"], "workspace-write")
+        self.assertEqual(self.spawn_specs[0]["argv"], ["/bin/bash", "-i"])
+        self.assertEqual(self.spawn_specs[0]["cwd"], "/workspace")
+        self.assertEqual(sandbox.calls, [])
 
-    def test_rejects_a_confined_session_without_a_sandbox_provider(self):
-        controller = self.controller(policy_mode="read-only")
-        with self.assertRaisesRegex(RuntimeError, "requires an execution sandbox provider"):
+    def test_reports_a_missing_execution_provider(self):
+        bare = Context(name="no-execution-provider")
+        self.addCleanup(bare.dispose)
+        controller = install_terminal_controller(
+            bare, {"maxCols": 200, "maxRows": 100, "maxInputBytes": 1000,
+                   "scrollback": 100, "disposeGraceMs": 100},
+            spawn_terminal=self._spawn,
+            resolve_shell_fn=lambda configured, signal=None: self.shell)
+        with self.assertRaisesRegex(RuntimeError, "requires subprocess and sandbox policy"):
             controller.create(self.agent(), {"id": "terminal-1", "cols": 80, "rows": 24})
         self.assertEqual(self.spawn_specs, [])
 

@@ -38,6 +38,7 @@ __all__ = [
 
 STR = "str"
 INT = "int"
+BOOL = "bool"
 OBJ = "object"
 ARR = "array"
 
@@ -79,6 +80,11 @@ _SPECS: dict[str, dict[str, tuple[str, bool]]] = {
     "session/modelCatalog": {},
     "session/canOpenWorkspacePath": {},
     "session/openWorkspacePath": {
+        "action": (STR, False),
+        "application": (STR, False),
+        "path": (STR, True),
+    },
+    "session/workspacePathApplications": {
         "path": (STR, True),
     },
     "session/rename": {
@@ -108,15 +114,20 @@ _SPECS: dict[str, dict[str, tuple[str, bool]]] = {
     "session/cancel": {
         "sessionId": (STR, True),
     },
+    "session/projections": {
+        "sessionId": (STR, True),
+    },
     "session/page": {
         "address": (OBJ, True),
         "throughSeq": (INT, True),
         "beforeSeq": (INT, False),
         "maxMessages": (INT, False),
+        "turnWindow": (OBJ, False),
     },
     "session/follow": {
         "address": (OBJ, True),
         "maxMessages": (INT, False),
+        "turnWindow": (OBJ, False),
     },
     "session/control": {},
     "pluginInventory/list": {},
@@ -166,9 +177,18 @@ _SPECS: dict[str, dict[str, tuple[str, bool]]] = {
         "agentId": (STR, True),
         "id": (STR, True),
     },
+    # retain 取 sessionId（index.ts:198），不激活 Agent。
+    "terminal/retain": {
+        "sessionId": (STR, True),
+        "id": (STR, True),
+    },
     # workspace-controller（packages/api/workspace-controller）：请求对象字段扁平化。
     "workspace/create": {
         "path": (STR, True),
+    },
+    "workspace/initializeDefault": {
+        "directoryName": (STR, True),
+        "title": (STR, True),
     },
     "workspace/rename": {
         "workspaceId": (STR, True),
@@ -188,8 +208,15 @@ _SPECS: dict[str, dict[str, tuple[str, bool]]] = {
     },
     "workspace/archiveSession": {
         "sessionId": (STR, True),
+        "stopActivity": (BOOL, False),
     },
     "workspace/unarchiveSession": {
+        "sessionId": (STR, True),
+    },
+    "workspace/pinSession": {
+        "sessionId": (STR, True),
+    },
+    "workspace/unpinSession": {
         "sessionId": (STR, True),
     },
     "workspace/follow": {},
@@ -203,17 +230,7 @@ _SPECS: dict[str, dict[str, tuple[str, bool]]] = {
     "workspaceFiles/readBytes": {
         "workspaceFileScopeId": (STR, True),
         "path": (STR, True),
-        "offset": (INT, False),
-        "length": (INT, False),
-    },
-    "workspaceFiles/readAll": {
-        "workspaceFileScopeId": (STR, True),
-        "path": (STR, True),
-    },
-    "workspaceFiles/readRelated": {
-        "workspaceFileScopeId": (STR, True),
-        "path": (STR, True),
-        "relativePath": (STR, True),
+        "options": (OBJ, False),
     },
     "workspaceFiles/stat": {
         "workspaceFileScopeId": (STR, True),
@@ -225,10 +242,10 @@ _SPECS: dict[str, dict[str, tuple[str, bool]]] = {
     },
     "workspaceFiles/changes": {
         "workspaceFileScopeId": (STR, True),
+        "path": (STR, True),
     },
     # settings-controller（packages/api/settings-controller）。
     "settings/describe": {},
-    "settings/canOpenAgentPresetDirectory": {},
     "settings/update": {
         "ns": (STR, True),
         "patch": (OBJ, True),
@@ -245,9 +262,6 @@ _SPECS: dict[str, dict[str, tuple[str, bool]]] = {
         "expectedRevision": (INT, False),
     },
     "settings/openSettingsDocument": {},
-    "settings/openAgentPresetDirectory": {
-        "agentPreset": (STR, True),
-    },
     "credentials/describe": {
         "refs": (ARR, True),
     },
@@ -271,6 +285,8 @@ def _check(kind: str, value: Any) -> bool:
         return isinstance(value, str)
     if kind == INT:
         return isinstance(value, int) and not isinstance(value, bool)
+    if kind == BOOL:
+        return isinstance(value, bool)
     if kind == OBJ:
         return isinstance(value, dict)
     if kind == ARR:
