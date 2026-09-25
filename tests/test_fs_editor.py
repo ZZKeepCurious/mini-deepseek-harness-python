@@ -1,4 +1,4 @@
-"""str_replace_editor 与 present 工具验收。"""
+"""str_replace_editor 工具验收。"""
 import pathlib
 import tempfile
 import unittest
@@ -9,7 +9,6 @@ from miniharness.core.tools import ToolExec, ToolRegistry
 from miniharness.fs import (
     FsError,
     install_local_fs,
-    install_present_tool,
     install_str_replace_editor,
 )
 
@@ -19,7 +18,7 @@ class _Agent:
         self.session = session
 
 
-class EditorPresentTestCase(unittest.IsolatedAsyncioTestCase):
+class EditorTestCase(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.dir = pathlib.Path(self._tmp.name)
@@ -27,7 +26,6 @@ class EditorPresentTestCase(unittest.IsolatedAsyncioTestCase):
         ToolRegistry(self.ctx)
         install_local_fs(self.ctx, {"cwd": str(self.dir)})
         self.editor = install_str_replace_editor(self.ctx)
-        self.present = install_present_tool(self.ctx)
 
     def tearDown(self):
         self.ctx.dispose()
@@ -97,21 +95,6 @@ class EditorPresentTestCase(unittest.IsolatedAsyncioTestCase):
             {"command": "insert", "path": str(path), "insert_line": 1, "new_str": "b"},
             self._exec())
         self.assertEqual(path.read_text(encoding="utf-8"), "a\nb\nc\n")
-
-    async def test_present_existing_files_and_missing(self):
-        a = self.dir / "a.txt"
-        a.write_text("x", encoding="utf-8")
-        b = self.dir / "b.txt"
-        b.write_text("y", encoding="utf-8")
-        value = await self.present.execute(
-            {"files": [{"path": str(a), "description": "out"},
-                       {"path": str(a)}, {"path": str(b)}]}, self._exec())
-        self.assertEqual([f["path"] for f in value["files"]], [str(a), str(b)])
-        text = self.present.render({}, value)[0]["text"]
-        self.assertIn(str(a), text)
-        with self.assertRaises(FsError):
-            await self.present.execute(
-                {"files": [{"path": str(self.dir / "missing.txt")}]}, self._exec())
 
 
 if __name__ == "__main__":

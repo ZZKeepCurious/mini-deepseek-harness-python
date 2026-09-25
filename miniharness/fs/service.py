@@ -9,13 +9,14 @@
 """
 from __future__ import annotations
 
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 from ..core.scope import Context, Service
 from .types import (
     FsDirEntry,
     FsEditOutcome,
     FsEditRequest,
+    FsError,
     FsInfo,
     FsPathInfo,
     FsTarget,
@@ -33,6 +34,19 @@ class FileSystem(Service):
 
     def __init__(self, ctx: Context):
         super().__init__(ctx, "fs")
+
+    async def watch(self, target: FsTarget, changed: Callable[..., None],
+                    signal: Any = None) -> Callable[[], Awaitable[None]]:
+        """观察一个文件或目录的直接子项变化（对齐上游 `FileSystem.watch`）。
+
+        `changed` 是失效回调：正常变更 `changed()`，watcher 错误 `changed(error)`；
+        `signal` 只取消 watcher 初始化（已初始化的 watcher 由调用方经返回的 close
+        关闭）。返回观测生效后可用、异步的 close。基类不支持观察 → `FS_IO_ERROR`。
+        """
+        if signal is not None and getattr(signal, "is_set", lambda: False)():
+            raise FsError("watch aborted", "FS_ABORTED")
+        raise FsError("Filesystem watching is not supported by this provider.",
+                      "FS_IO_ERROR")
 
     @property
     def sandbox_mode(self) -> str | None:

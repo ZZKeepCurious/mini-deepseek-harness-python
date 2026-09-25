@@ -1,14 +1,18 @@
 """write/edit 的结果态上下文 diff（对齐 tool-fs/src/diff.ts）。
 
 存储返回 before/after 文本；本模块用 stdlib difflib 生成每个 hunk 的三行上下文卡片。
+write 的落盘 meta 即 `FsDiffMeta`：`diffs` 恒在，`operation?: 'create' | 'update'`
+区分「create 的空 hunk 列表」与「内容未变的不变覆盖」。
 """
 from __future__ import annotations
 
 import difflib
 
-__all__ = ["DIFF_CONTEXT", "compute_hunk_diffs", "diffs_from_meta"]
+__all__ = ["DIFF_CONTEXT", "FS_DIFF_OPERATIONS", "compute_hunk_diffs",
+           "diffs_from_meta", "fs_diff_meta"]
 
 DIFF_CONTEXT = 3
+FS_DIFF_OPERATIONS = ("create", "update")
 
 
 def compute_hunk_diffs(path: str, before: str, after: str) -> list[dict]:
@@ -40,6 +44,21 @@ def compute_hunk_diffs(path: str, before: str, after: str) -> list[dict]:
             "newText": "\n".join(new_lines),
         })
     return diffs
+
+
+def fs_diff_meta(path: str, before: str | None, after: str,
+                 operation: str) -> dict:
+    """构建 write 工具的落盘 meta（对齐 `FsDiffMeta` / `output.presentationMeta`）。
+
+    `before is None`（create）→ 空 hunk 列表，与内容未变的不变覆盖同为 `diffs: []`，
+    由 `operation` 区分；其余经 {@link compute_hunk_diffs} 生成应用 hunk。
+    """
+    if operation not in FS_DIFF_OPERATIONS:
+        raise ValueError(f"unknown fs diff operation: {operation!r}")
+    return {
+        "operation": operation,
+        "diffs": [] if before is None else compute_hunk_diffs(path, before, after),
+    }
 
 
 def _is_file_diff(value: object) -> bool:

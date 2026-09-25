@@ -14,6 +14,7 @@ from typing import Any, AsyncIterator, Iterable
 
 from ..core.scope import Context
 from ..core.tools import Tool
+from .diff import fs_diff_meta
 from .types import FsEditRequest, FsError, FsObservation
 
 __all__ = [
@@ -35,6 +36,7 @@ __all__ = [
     "parse_write_args",
     "remediate_fs_error",
     "session_cwd",
+    "write_presentation_meta",
 ]
 
 READ_LIMIT = 2000
@@ -340,6 +342,16 @@ def format_write_output(display_path: str, operation: str) -> str:
     return (f"<path>{display_path}</path>\n<type>file</type>\n<content>\n{verb} file\n</content>")
 
 
+def write_presentation_meta(args: dict, value: dict) -> dict:
+    """write 落盘 meta（对齐 write.ts output.presentationMeta）：operation + diffs。
+
+    diff 路径用模型给出的原始 `file_path`（同上游 `args.file_path`）；create 的
+    空 hunk 列表与不变覆盖由 `operation` 区分。
+    """
+    return fs_diff_meta(args["file_path"], value.get("before"),
+                        value.get("after"), value["operation"])
+
+
 def parse_edit_args(args: dict) -> dict:
     if not isinstance(args.get("file_path"), str) or args["file_path"].strip() == "":
         raise ValueError("file_path must be a non-empty string")
@@ -421,6 +433,7 @@ def apply_write_tool(ctx: Context, gate: FsSandboxGate) -> Tool:
         execute=lambda args, exec: _write_execute(ctx, gate, args, exec),
         render=lambda args, value: [{"type": "text", "text": format_write_output(
             value["path"], value["operation"])}],
+        presentation_meta=write_presentation_meta,
     )
     ctx.get("tools").register(tool)
     return tool

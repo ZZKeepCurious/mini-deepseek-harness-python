@@ -7,12 +7,16 @@
 """
 from __future__ import annotations
 
+import asyncio
 import codecs
 import os
 import stat as stat_mod
 import threading
 import uuid
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Awaitable, Callable
+
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
 
 from ..core.scope import Context
 from .service import FileSystem
@@ -161,6 +165,43 @@ def _probe(absolute_path: str, follow: bool = True) -> dict | None:
     }
 
 
+class _WatchHandler(FileSystemEventHandler):
+    """watchdog 事件 → 目标/直接子项过滤 → changed（对齐 fs-local chokidar 过滤）。
+
+    文件目标只转发命中该目标路径的事件；目录目标转发其直接子项的任意事件。
+    载体差异：changed 由 watchdog 的 emitter 线程调用（上游在事件循环回调）。
+    """
+
+    def __init__(self, changed: Callable[..., None], target_path: str,
+                 directory: bool) -> None:
+        super().__init__()
+        self._changed = changed
+        self._target = os.path.normcase(os.path.abspath(target_path))
+        self._directory = directory
+
+    def _maybe(self, event: Any) -> None:
+        if self._directory:
+            self._changed()
+            return
+        for raw in (getattr(event, "dest_path", "") or "",
+                    getattr(event, "src_path", "") or ""):
+            if raw and os.path.normcase(os.path.abspath(raw)) == self._target:
+                self._changed()
+                return
+
+    def on_created(self, event: Any) -> None:
+        self._maybe(event)
+
+    def on_modified(self, event: Any) -> None:
+        self._maybe(event)
+
+    def on_deleted(self, event: Any) -> None:
+        self._maybe(event)
+
+    def on_moved(self, event: Any) -> None:
+        self._maybe(event)
+
+
 class LocalFileSystem(FileSystem):
     """宿主文件系统后端（对齐上游 LocalFileSystem）。"""
 
@@ -185,6 +226,44 @@ class LocalFileSystem(FileSystem):
                 lock = threading.Lock()
                 self._locks[target_key] = lock
             return lock
+
+    # ---------- 观察 ----------
+
+    async def watch(self, target: FsTarget, changed: Callable[..., None],
+                    signal: Any = None) -> Callable[[], Awaitable[None]]:
+        """watchdog 实现（对齐上游 fs-local chokidar 适配）。
+
+        文件/缺失目标 watch 其父目录（depth 0）并只转发命中目标路径的事件；
+        目录目标 watch 目录本身、转发其直接子项事件。watchdog 无 `ready` 事件，
+        本方法在 observer 线程启动后即返回；`signal` 只在 stat 前后检查，不在
+        等待期观察（载体差异，见 verified-diffs §3.41）。
+        """
+        _throw_if_aborted(signal, "watch")
+        path = os.path.abspath(self.process_path(target))
+        info = await self.stat(target, signal)
+        _throw_if_aborted(signal, "watch")
+        directory = info is not None and info.type == "directory"
+        root = path if directory else os.path.dirname(path)
+        if not os.path.isdir(root):
+            error = FsError(
+                f'cannot watch "{target.display_path}": parent directory does not exist',
+                "FS_IO_ERROR")
+            changed(error)
+            raise error
+        observer = Observer()
+        observer.schedule(_WatchHandler(changed, path, directory), root, recursive=False)
+
+        async def close() -> None:
+            observer.stop()
+            await asyncio.to_thread(observer.join, 5.0)
+
+        try:
+            observer.start()
+        except BaseException as error:
+            await close()
+            changed(error)
+            raise
+        return close
 
     # ---------- 身份 / 路径 ----------
 

@@ -1,17 +1,34 @@
-"""fs-local 后端验收（对齐 packages/fs/fs-local：身份/读取/原子写/字面编辑）。"""
+﻿"""fs-local 后端验收（对齐 packages/fs/fs-local：身份/读取/原子写/字面编辑/观察）。"""
+import asyncio
 import os
 import pathlib
 import tempfile
+import threading
+import time
 import unittest
 
 from miniharness.core.scope import Context
 from miniharness.fs import (
+    FileSystem,
     FsEditRequest,
     FsError,
+    FsTarget,
     FsWriteIntent,
     LocalFileSystem,
     install_local_fs,
 )
+
+WAIT = 5.0
+POLL = 0.02
+
+
+async def _await_until(pred, timeout=WAIT):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        await asyncio.sleep(POLL)
+    return False
 
 
 class FsLocalTestCase(unittest.IsolatedAsyncioTestCase):
@@ -171,6 +188,96 @@ class FsLocalTestCase(unittest.IsolatedAsyncioTestCase):
             self.assertIs(install_local_fs(ctx), first)
         finally:
             ctx.dispose()
+
+    # ---------- watch ----------
+
+    async def test_base_watch_rejects_fs_io_error_and_abort(self):
+        ctx = Context(name="base-watch")
+        try:
+            base = FileSystem(ctx)
+            target = FsTarget(target_key="x", display_path="x")
+            with self.assertRaises(FsError) as unsupported:
+                await base.watch(target, lambda *_: None, None)
+            self.assertEqual(unsupported.exception.code, "FS_IO_ERROR")
+            aborted = threading.Event()
+            aborted.set()
+            with self.assertRaises(FsError) as signal_aborted:
+                await base.watch(target, lambda *_: None, aborted)
+            self.assertEqual(signal_aborted.exception.code, "FS_ABORTED")
+        finally:
+            ctx.dispose()
+
+    async def test_watch_rejects_aborted_signal(self):
+        target = await self.fs.resolve("w.txt")
+        aborted = threading.Event()
+        aborted.set()
+        with self.assertRaises(FsError) as error:
+            await self.fs.watch(target, lambda *_: None, aborted)
+        self.assertEqual(error.exception.code, "FS_ABORTED")
+
+    async def test_watch_missing_parent_rejects_fs_io_error(self):
+        target = await self.fs.resolve("nope/deep/w.txt")
+        errors = []
+        with self.assertRaises(FsError) as error:
+            await self.fs.watch(target, lambda err=None: errors.append(err), None)
+        self.assertEqual(error.exception.code, "FS_IO_ERROR")
+        self.assertEqual(len(errors), 1)
+
+    async def test_watch_file_reports_target_change_only(self):
+        path = self.dir / "watched.txt"
+        path.write_text("one", encoding="utf-8")
+        target = await self.fs.resolve("watched.txt")
+        events = []
+        close = await self.fs.watch(target, lambda error=None: events.append(error), None)
+        try:
+            path.write_text("two", encoding="utf-8")
+            self.assertTrue(await _await_until(lambda: events), "watcher never reported the target")
+            await asyncio.sleep(0.3)
+            events.clear()
+            (self.dir / "other.txt").write_text("x", encoding="utf-8")
+            await asyncio.sleep(0.4)
+            self.assertEqual(events, [])
+            path.write_text("three", encoding="utf-8")
+            self.assertTrue(await _await_until(lambda: events), "target change not reported")
+            self.assertTrue(all(error is None for error in events))
+        finally:
+            await close()
+
+    async def test_watch_missing_target_reports_creation(self):
+        target = await self.fs.resolve("created.txt")
+        events = []
+        close = await self.fs.watch(target, lambda error=None: events.append(error), None)
+        try:
+            (self.dir / "created.txt").write_text("hi", encoding="utf-8")
+            self.assertTrue(await _await_until(lambda: events), "creation not reported")
+        finally:
+            await close()
+
+    async def test_watch_directory_reports_direct_child_change(self):
+        target = await self.fs.resolve(".")
+        events = []
+        close = await self.fs.watch(target, lambda error=None: events.append(error), None)
+        try:
+            (self.dir / "child.txt").write_text("x", encoding="utf-8")
+            self.assertTrue(await _await_until(lambda: events), "direct child change not reported")
+            self.assertTrue(all(error is None for error in events))
+        finally:
+            await close()
+
+    async def test_watch_close_stops_events(self):
+        path = self.dir / "w.txt"
+        path.write_text("a", encoding="utf-8")
+        target = await self.fs.resolve("w.txt")
+        events = []
+        close = await self.fs.watch(target, lambda error=None: events.append(error), None)
+        path.write_text("b", encoding="utf-8")
+        self.assertTrue(await _await_until(lambda: events), "watcher never reported the target")
+        await asyncio.sleep(0.3)
+        await close()
+        events.clear()
+        path.write_text("c", encoding="utf-8")
+        await asyncio.sleep(0.4)
+        self.assertEqual(events, [])
 
 
 if __name__ == "__main__":

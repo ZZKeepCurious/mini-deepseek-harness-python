@@ -6,7 +6,6 @@
 """
 from .local import LocalFileSystem, install_local_fs
 from .observation_policy import ObservedStateGate, install_fs_observation_policy
-from .present import apply_present_tool, install_present_tool
 from .sandbox import SandboxedFileSystem, install_sandboxed_fs, is_path_under, writable_roots
 from .search import apply_glob_tool, apply_grep_tool, install_fs_search_tools
 from .service import FileSystem
@@ -50,12 +49,10 @@ __all__ = [
     "SandboxedFileSystem",
     "apply_glob_tool",
     "apply_grep_tool",
-    "apply_present_tool",
     "install_fs_observation_policy",
     "install_fs_search_tools",
     "install_fs_tools",
     "install_local_fs",
-    "install_present_tool",
     "install_sandboxed_fs",
     "install_str_replace_editor",
     "is_path_under",

@@ -3,9 +3,10 @@ import pathlib
 import tempfile
 import unittest
 
+from miniharness.core.agent_loop.tool_calls import append_tool_call, emit_tool_result
 from miniharness.core.session.session import Session
 from miniharness.core.scope import Context
-from miniharness.core.tools import ToolExec, ToolRegistry
+from miniharness.core.tools import ToolExec, ToolRegistry, ToolResult, run_pipeline_async
 from miniharness.fs import FsError, install_local_fs, install_fs_observation_policy
 from miniharness.fs.tools import install_fs_tools
 
@@ -109,6 +110,47 @@ class FsToolsTestCase(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "old_string must be a non-empty"):
             await self.tools["edit"].execute(
                 {"file_path": "x", "old_string": "", "new_string": "b"}, self._exec())
+
+    async def test_write_presentation_meta_operation_and_diffs(self):
+        tool = self.registry.resolve("write")
+        created = await tool.execute(
+            {"file_path": "m.txt", "content": "one\ntwo\n"}, self._exec())
+        meta = tool.presentation_meta({"file_path": "m.txt"}, created)
+        self.assertEqual(meta["operation"], "create")
+        self.assertEqual(meta["diffs"], [])
+        updated = await tool.execute(
+            {"file_path": "m.txt", "content": "one\nTWO\n"}, self._exec())
+        meta = tool.presentation_meta({"file_path": "m.txt"}, updated)
+        self.assertEqual(meta["operation"], "update")
+        self.assertTrue(meta["diffs"])
+        self.assertEqual(meta["diffs"][0]["path"], "m.txt")
+
+    async def test_pipeline_populates_write_meta(self):
+        tool = self.registry.resolve("write")
+        result = await run_pipeline_async(
+            self.ctx, tool, {"file_path": "p.txt", "content": "hi\n"}, self._exec())
+        self.assertTrue(result.ok)
+        self.assertEqual(result.meta["operation"], "create")
+        self.assertEqual(result.meta["diffs"], [])
+        nested_exec = self._exec()
+        nested_exec.parent = object()
+        nested = await run_pipeline_async(
+            self.ctx, tool, {"file_path": "q.txt", "content": "x"}, nested_exec)
+        self.assertEqual(nested.meta, {})
+
+    async def test_tool_result_event_carries_presentation_meta(self):
+        session = Session("s-meta")
+        call_seq = append_tool_call(session, 1, 1, "c1", "write", "{}")
+        emit_tool_result(
+            session, 1, 1, "c1",
+            ToolResult(ok=True, content="ok", value={},
+                       meta={"operation": "create", "diffs": []}),
+            call_seq)
+        event = session.events[-1]
+        self.assertEqual(event["type"], "tool/result")
+        meta = event["data"]["meta"]
+        self.assertEqual(meta["operation"], "create")
+        self.assertEqual(list(meta["diffs"]), [])
 
 
 if __name__ == "__main__":
