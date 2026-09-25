@@ -10,7 +10,11 @@ import unittest
 from miniharness.core.agent_loop.resident_loop import run_on_resident
 from miniharness.core.scope import Context
 from miniharness.core.session_store import SessionStore
-from miniharness.workspace import install_workspaces
+from miniharness.workspace import (
+    SessionActivity,
+    SessionActivityItem,
+    install_workspaces,
+)
 from miniharness.workspace_controller import WorkspaceFault, install_workspace_controller
 
 
@@ -25,7 +29,8 @@ class WorkspaceControllerCase(unittest.TestCase):
         self.addCleanup(self.ctx.dispose)
         self.store = SessionStore(self.ctx)
         install_workspaces(self.ctx, root=self._home.name)
-        self.controller = install_workspace_controller(self.ctx)
+        self.controller = install_workspace_controller(
+            self.ctx, {"documentsDirectory": self.root})
 
     def _dir(self, name):
         path = os.path.join(self.root, name)
@@ -107,6 +112,71 @@ class WorkspaceControllerCase(unittest.TestCase):
             "session/not-found")
         self.assertEqual(self.controller.unarchive_session({"sessionId": "s1"}),
                          {"archivedSessionIds": []})
+
+    def test_initialize_default_creates_and_validates(self):
+        created = self.controller.initialize_default(
+            {"directoryName": "proj", "title": "My Project"})
+        expected = os.path.realpath(
+            os.path.join(self.root, "deepseek-harness", "proj"))
+        self.assertEqual(created["workspace"]["title"], "My Project")
+        self.assertEqual(created["workspace"]["path"], expected)
+        self.assertTrue(os.path.isdir(expected))
+        # 重复请求复用持久身份
+        again = self.controller.initialize_default(
+            {"directoryName": "other", "title": "Other"})
+        self.assertEqual(again["workspace"]["workspaceId"],
+                         created["workspace"]["workspaceId"])
+        self.assertEqual(self._code(lambda: self.controller.initialize_default(
+            {"directoryName": "a/b", "title": "X"})), "gateway/bad-request")
+        self.assertEqual(self._code(lambda: self.controller.initialize_default(
+            {"directoryName": "proj2", "title": "   "})), "gateway/bad-request")
+
+    def test_archive_session_reports_activity_and_stop(self):
+        path = self._dir("proj")
+        self.controller.create({"path": path})
+        self._session("s1", path)
+
+        async def activity(payload, nxt):
+            return [SessionActivity("schedule", [SessionActivityItem("sched-1")]),
+                    *await nxt(payload)]
+
+        self.ctx.on("workspace/session-activity", activity)
+        with self.assertRaises(WorkspaceFault) as caught:
+            self.controller.archive_session({"sessionId": "s1"})
+        self.assertEqual(caught.exception.code, "workspace/session-active")
+        self.assertEqual(caught.exception.details["sessionId"], "s1")
+        self.assertEqual(caught.exception.details["activity"],
+                         [{"kind": "schedule", "items": [{"id": "sched-1"}]}])
+        self.assertEqual(self.ctx.get("workspaces").archivedSessionIds, [])
+
+        stopped = []
+        self.ctx.on("workspace/session-stop",
+                    lambda payload: stopped.append(payload["sessionId"]))
+        archived = self.controller.archive_session(
+            {"sessionId": "s1", "stopActivity": True})
+        self.assertEqual(archived["archivedSessionIds"], ["s1"])
+        self.assertEqual(stopped, ["s1"])
+
+    def test_pin_and_unpin_sessions(self):
+        path = self._dir("proj")
+        self.controller.create({"path": path})
+        self._session("s1", path)
+        self._session("s2", path)
+        self.assertEqual(self.controller.pin_session({"sessionId": "s1"}),
+                         {"pinnedSessionIds": ["s1"]})
+        self.assertEqual(self.controller.pin_session({"sessionId": "s2"}),
+                         {"pinnedSessionIds": ["s2", "s1"]})
+        self.assertEqual(self.controller.unpin_session({"sessionId": "s1"}),
+                         {"pinnedSessionIds": ["s2"]})
+        self.assertEqual(self._code(
+            lambda: self.controller.pin_session({"sessionId": "ghost"})),
+            "session/not-found")
+        # 归档会丢弃 pin，且归档后不可置顶
+        self.controller.archive_session({"sessionId": "s2"})
+        self.assertEqual(self.controller.baseline()["pinnedSessionIds"], [])
+        self.assertEqual(self._code(
+            lambda: self.controller.pin_session({"sessionId": "s2"})),
+            "gateway/bad-request")
 
     def test_follow_starts_with_baseline_then_ordered_increments(self):
         follow = self.controller.follow()

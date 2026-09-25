@@ -7,7 +7,12 @@ from miniharness.core.scope import Context
 from miniharness.core.session_store import SessionStore
 from miniharness.core.tools import ToolRegistry
 from miniharness.workspace import (
+    SessionActivity,
+    SessionActivityItem,
+    WorkspaceActiveSessionError,
+    WorkspaceArchivedSessionPinError,
     WorkspaceService,
+    WorkspaceUnknownSessionError,
     default_workspace_title,
     fully_qualified_workspace_path,
     install_workspaces,
@@ -108,6 +113,122 @@ class WorkspaceCase(unittest.IsolatedAsyncioTestCase):
             self.assertIs(install_workspaces(ctx), first)
         finally:
             ctx.dispose()
+
+    async def test_initialize_default_only_when_empty(self):
+        target = os.path.join(self.root, "default-proj")
+
+        async def resolve():
+            return {"path": target, "title": "Default"}
+
+        ws = await self.service.initialize_default(resolve)
+        self.assertIsNotNone(ws)
+        self.assertEqual(ws.title, "Default")
+        self.assertTrue(os.path.isdir(target))
+        # 重复请求复用持久身份，且不再调用 resolve_directory
+        async def other():
+            return {"path": os.path.join(self.root, "other"), "title": "Other"}
+
+        again = await self.service.initialize_default(other)
+        self.assertEqual(again.id, ws.id)
+        # 删除默认登记后永久禁用自动创建
+        self.service.delete(ws.id)
+        self.assertIsNone(await self.service.initialize_default(other))
+
+    async def test_initialize_default_skips_when_registry_or_sessions_present(self):
+        async def resolve():
+            return {"path": os.path.join(self.root, "new"), "title": "New"}
+
+        await self.service.create(self.ws_dir)
+        self.assertIsNone(await self.service.initialize_default(resolve))
+        self.service.delete(self.service.ids()[0])
+        self._session("s1", self.ws_dir)
+        self.assertIsNone(await self.service.initialize_default(resolve))
+
+    async def test_default_workspace_id_persisted(self):
+        target = os.path.join(self.root, "default-proj")
+
+        async def resolve():
+            return {"path": target, "title": "Default"}
+
+        ws = await self.service.initialize_default(resolve)
+        ctx2 = Context(name="reload-default")
+        try:
+            ToolRegistry(ctx2)
+            SessionStore(ctx2)
+            reloaded = WorkspaceService(ctx2, root=self.home.name)
+            self.assertEqual(reloaded._default_workspace_id, ws.id)
+            self.assertEqual(reloaded.get(ws.id).title, "Default")
+        finally:
+            ctx2.dispose()
+
+    async def test_archive_admission_reports_activity_and_stop(self):
+        await self.service.create(self.ws_dir)
+        self._session("s1", self.ws_dir)
+        stopped = []
+
+        async def activity(payload, nxt):
+            return [SessionActivity("turn"),
+                    SessionActivity("job", [SessionActivityItem("j1", "Build")]),
+                    *await nxt(payload)]
+
+        self.ctx.on("workspace/session-activity", activity)
+        with self.assertRaises(WorkspaceActiveSessionError) as caught:
+            await self.service.archive_session("s1")
+        self.assertEqual(caught.exception.session_id, "s1")
+        self.assertEqual([entry.kind for entry in caught.exception.activity], ["turn", "job"])
+        self.assertEqual(self.service.archivedSessionIds, [])
+
+        self.ctx.on("workspace/session-stop",
+                    lambda payload: stopped.append(payload["sessionId"]))
+        # 带 stopActivity：跳过活动检查、写入后派发停止
+        await self.service.archive_session("s1", {"stopActivity": True})
+        self.assertEqual(self.service.archivedSessionIds, ["s1"])
+        self.assertEqual(stopped, ["s1"])
+
+    async def test_archive_without_providers_archives_freely(self):
+        await self.service.create(self.ws_dir)
+        self._session("s1", self.ws_dir)
+        await self.service.archive_session("s1")
+        self.assertEqual(self.service.archivedSessionIds, ["s1"])
+
+    async def test_pin_order_idempotence_and_unknown(self):
+        await self.service.create(self.ws_dir)
+        self._session("s1", self.ws_dir)
+        self._session("s2", self.ws_dir)
+        await self.service.pin_session("s1")
+        await self.service.pin_session("s2")
+        self.assertEqual(self.service.pinnedSessionIds, ["s2", "s1"])
+        await self.service.pin_session("s2")  # 已置顶不重排
+        self.assertEqual(self.service.pinnedSessionIds, ["s2", "s1"])
+        with self.assertRaises(WorkspaceUnknownSessionError):
+            await self.service.pin_session("ghost")
+        await self.service.unpin_session("s1")
+        self.assertEqual(self.service.pinnedSessionIds, ["s2"])
+        await self.service.unpin_session("s1")  # 幂等
+        self.assertEqual(self.service.pinnedSessionIds, ["s2"])
+
+    async def test_archive_drops_pin_and_archived_cannot_pin(self):
+        await self.service.create(self.ws_dir)
+        self._session("s1", self.ws_dir)
+        await self.service.pin_session("s1")
+        self.assertEqual(self.service.pinnedSessionIds, ["s1"])
+        await self.service.archive_session("s1")
+        self.assertEqual(self.service.pinnedSessionIds, [])
+        self.assertEqual(self.service.archivedSessionIds, ["s1"])
+        with self.assertRaises(WorkspaceArchivedSessionPinError):
+            await self.service.pin_session("s1")
+
+    async def test_pin_persisted_across_reload(self):
+        await self.service.create(self.ws_dir)
+        self._session("s1", self.ws_dir)
+        await self.service.pin_session("s1")
+        ctx2 = Context(name="reload-pin")
+        try:
+            ToolRegistry(ctx2)
+            reloaded = WorkspaceService(ctx2, root=self.home.name)
+            self.assertEqual(reloaded.pinnedSessionIds, ["s1"])
+        finally:
+            ctx2.dispose()
 
 
 if __name__ == "__main__":
