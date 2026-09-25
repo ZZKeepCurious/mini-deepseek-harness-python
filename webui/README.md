@@ -1,7 +1,8 @@
 # webui — MiniHarness 产品化浏览器前端
 
 > 仓库顶层独立 React + TypeScript + Vite 工程（独立于 Python 内核）。
-> **只依赖后端发布的 wire 约定**：两信封 RPC（`/api/<endpoint>`）+ `/api/remote.mux`
+> **只依赖后端发布的 wire 约定**：两信封 RPC（`/api/<endpoint>`，含 `multipart/form-data`
+> 的二进制结果附件）+ `/api/remote.mux`
 > WebSocket 承载 Remote 流 + `$events`/`$events/result` + `session.follow`/`session.control`。
 > 禁止 import / hack Python 内部。约定权威参考：`../docs/interface-wire.md`。
 
@@ -68,7 +69,7 @@ webui/
 ├── src/wire/      # 约定客户端层（纯 TS，可单测）：rpc / mux / follow / control / events / auth
 ├── src/app/       # React 编排 hooks（useBackend）
 ├── src/ui/        # 无状态展示组件（SessionList / Trajectory / ApprovalPanel / ControlPanel）
-├── tests/         # vitest 单测（jsdom，mock fetch/WS）
+├── tests/         # vitest 单测（jsdom，mock fetch/WS；wire-binary.test.ts 走 node 环境解析 multipart）
 ├── vite.config.ts # dev 代理 + 构建 + vitest 配置
 └── index.html     # Vite 入口
 ```

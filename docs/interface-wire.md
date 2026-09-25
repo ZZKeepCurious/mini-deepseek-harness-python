@@ -48,6 +48,8 @@
 - `400`：body 非 JSON（含空体）；`GET/HEAD /api/session.export` 参数缺失/非法同样归 400 文本。
 - `500`：信封合法但实现崩溃（纯文本 `handler failure: <error>`）。
 - `200`：**一切业务结果**——业务错误恒 200 + `server-response` 且 `result.ok=false`，不借 HTTP 状态码表达业务错误。
+- 200 的响应体有两种 `content-type`：`application/json`（默认）与 `multipart/form-data`
+  （结果含二进制，见 §3.1）。
 
 路径约束：endpoint 段匹配 `[A-Za-z0-9_$.-]+`（`$` 是真实约定：`$events`、`$events/result` 为网关
 内端点）；body `client-request` 的 `payload` 必须**恰**为 `{args:{...}}` 单字段 plain object
@@ -136,6 +138,22 @@ client `connection/src/client/rpc.ts` 按 `/` 切两段）；`web/args.canonical
 > handler docstring 为准，教程见 07 章 §7.5.2；子代理所属会话被访问时统一折
 > `session/agent-busy`（上游 `apiSessionSubagentOwnershipError`）。
 
+### 3.1 结果里的二进制附件（`web/attachments.py`）
+
+结果值里的 `bytes` 叶子无法进 JSON，按上游 gateway `encodeRpcResult`（投影）+ Connection
+`fullResponse`（分帧）拆成**二进制附件**：该字节在 JSON 里写成 `null` 占位，附件在顶层
+`attachments` 描述，载体改用 `multipart/form-data`。
+
+- 触发面：结果含 `bytes`/`bytearray`/`memoryview` 的 unary 端点（`workspaceFiles/readBytes`
+  的 `data`）。失败分支与纯 JSON 结果仍是 `200` + `application/json`。
+- 分帧：`metadata` 文本 part 装 `{type, rpcId, result:{ok:true, value}, attachments}`，
+  第 `i` 个二进制 part 名 `bytes-<i>`、`Content-Type: application/octet-stream`，出体流式。
+- 附件描述符 `{"path": ["data"], "codec": "bytes", "part": "bytes-0"}`；`path` 段为对象键
+  字符串或数组下标整数，按发现顺序编号。
+- 客户端（`webui/src/wire/rpc.ts`）按 `path` 把 part 写回 `Uint8Array`：part 名重复、
+  非 `bytes` codec、路径走不通、占位不是 `null`、有 part 未被声明都拒（`TypeError`）。
+- 结果值有循环引用 → 200 + `gateway/internal`（`gateway: circular RPC result`）。
+
 ## 4. Remote 流（`WS /api/remote.mux`，`web/mux.py` + `web/stream_protocol.py` + `web/uplink.py`）
 
 单一路径承载**全部** Remote 流；每条 open 后的 value 序列经 `item` 帧吐出。客户端 `streamId`
@@ -175,7 +193,7 @@ client `connection/src/client/rpc.ts` 按 `/` 切两段）；`web/args.canonical
   产出 `{kind:'change', change:{absolutePath, version}}`（目标已删除则 `{absolutePath, absent:true}`）；
   watch 不可用 → `workspace-file/watch-unsupported`，目录越界 → `workspace-file/outside-workspace`。
   同 ns 的 unary `readBytes` 取 `options:{range?:{offset,length}, baseFile?}`，服务值为原生字节、
-  wire 层折 base64。
+  wire 层走 §3.1 的二进制附件。
 
 ### 4.1 `session/follow`（历史跟随流）
 
@@ -343,12 +361,13 @@ outcome 归一（`APPROVAL_OUTCOMES = {allowed-once, rejected, cancelled, unavai
 
 | 文件 | 对应 |
 |---|---|
-| `rpc.ts` | §1 unary 载体 + §2 信封 + §5 `$events/result`（`RpcFailure` 折叠 transport_error） |
+| `rpc.ts` | §1 unary 载体 + §2 信封 + §3.1 multipart 重组（`parseBinaryResponse`）+ §5 `$events/result`（`RpcFailure` 折叠 transport_error） |
 | `mux.ts` | §4 客户端 open/cancel 帧 + item/end/error 消费（流队列 + waiter） |
 | `events.ts` | §4.3 `$events` ready/emit/waterfall/cancel + §5 结算（settled 集合 fail-closed） |
 | `follow.ts` | §4.1 snapshot/event 帧 + seq 去重（`TrajectoryBuffer`） |
 | `control.ts` | §4.2 baseline/queue/jobs 替换帧（`applyControlFrame`） |
-| `types.ts` | §2 信封 + 事件/消息/会话类型（镜像 core 模型） |
+| `types.ts` | §2 信封 + §3.1 附件描述符 + 事件/消息/会话类型（镜像 core 模型） |
 
-测试：`webui/tests/wire.test.ts`（vitest，mock fetch/WS）+ `tests/test_web_*.py`（后端约定全组）；
+测试：`webui/tests/wire.test.ts` + `webui/tests/wire-binary.test.ts`（vitest，mock fetch/WS；
+后者走 node 环境解析 multipart）+ `tests/test_web_*.py`（后端约定全组）；
 后端静态承载新增 `tests/test_web_frontend.py` `test_webui_dist_build`（Vite 形态 dist）。

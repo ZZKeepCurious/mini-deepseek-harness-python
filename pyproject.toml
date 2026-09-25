@@ -28,7 +28,7 @@ classifiers = [
 miniharness = "miniharness.cli:main"
 
 [project.optional-dependencies]
-web = ["fastapi>=0.110", "uvicorn>=0.29", "websockets>=12"]
+web = ["fastapi>=0.110", "uvicorn>=0.29", "websockets>=12", "requests-toolbelt>=1.0"]
 
 [tool.setuptools.packages.find]
 include = ["miniharness*"]

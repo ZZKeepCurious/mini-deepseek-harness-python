@@ -8,7 +8,9 @@
     404（非 POST / 不在 /api/ 下 / 方法不在路由表）/ 415（content-type 非
     application/json，跨站写围栏）/ 400（body 非 JSON）；业务错误恒 200 +
     result.ok=false。信封不合法 → 200 bad-request；path 与 message.method 不一致
-    → 200 bad-request（details.issues=[]）。
+    → 200 bad-request（details.issues=[]）。结果含二进制（如
+    `workspaceFiles/readBytes` 的 data）→ 200 `multipart/form-data`
+    （`metadata` + `bytes-<i>` part，见 `web/attachments.py`）。
   * **`$events/result` unary**：endpoint 特判；payload 恰
     `{args:{clientId,eventId,outcome}}`，词法经 `parse_remote_event_result_payload`
     校验后交 `gateway.receive_result` 结算（对齐 gateway dispatchRpc 的
@@ -23,21 +25,21 @@
   * 非 `/api/` 的 GET/HEAD → 静态服务（SPA，`web/frontend.py`），其余方法 405。
 
 教学简化（须在 AGENTS.md 标注）：session 日志事件是 mappingproxy/tuple 冻结形态
-（core/session/json.py deep_freeze），序列化前经 thaw 还原；`$events` 为单帧
-载体（无 mux `since` 恢复游标，见 verified-diffs §3.4）；心跳 = launcher
-transport 级 uvicorn 选项（2s Ping + 4s 判死，见 mux docstring）。
+（core/session/json.py deep_freeze），序列化前经 thaw 还原（`web/attachments.py`
+的 dumps）；`$events` 为单帧载体（无 mux `since` 恢复游标，见 verified-diffs
+§3.4）；心跳 = launcher transport 级 uvicorn 选项（2s Ping + 4s 判死，见 mux
+docstring）。
 """
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 
-from ..core.session.json import thaw
 from .api import WebApi
 from .args import canonical_endpoint
+from .attachments import dumps, result_response
 from .auth import TokenGateMiddleware, resolve_web_token
 from .downloads import build_session_export, parse_export_query
 from .envelope import (
@@ -62,11 +64,6 @@ __all__ = ["create_app"]
 INVALID_REQUEST_RPC_ID_VALUE = "invalid-request"
 
 
-def _dumps(value: Any) -> str:
-    """解冻（session 日志事件是 mappingproxy/tuple 冻结形态）后序列化。"""
-    return json.dumps(thaw(value), ensure_ascii=False)
-
-
 def _error_response(rpc_id_: str, code: str, message: str, details: dict) -> Response:
     """200 载体 + 业务错误 server-response（gateway errorResponse 同款）。"""
     body = {
@@ -75,7 +72,7 @@ def _error_response(rpc_id_: str, code: str, message: str, details: dict) -> Res
         "result": {"ok": False, "error": {"code": code, "message": message,
                                           "details": details}},
     }
-    return Response(_dumps(body), status_code=200, media_type="application/json")
+    return Response(dumps(body), status_code=200, media_type="application/json")
 
 
 def _unwrap_args(payload: Any, method: str) -> Any:
@@ -189,7 +186,10 @@ def create_app(api: WebApi, gateway: GatewayStreams,
             return Response(f"handler failure: {error}", status_code=500)
         if response is None:
             return Response("not found", status_code=404)
-        return Response(_dumps(response), status_code=200, media_type="application/json")
+        try:
+            return result_response(response)
+        except TypeError as error:
+            return _error_response(message["rpcId"], "gateway/internal", str(error), {})
 
     @app.websocket(REMOTE_STREAM_MUX_PATH)
     async def remote_mux(websocket: WebSocket) -> None:
@@ -225,9 +225,8 @@ def _events_result_response(gateway: GatewayStreams, body: Any) -> Response:
     def envelope(result: dict) -> Response:
         rpc_id = body.get("rpcId") if isinstance(body, dict) and isinstance(
             body.get("rpcId"), str) else INVALID_REQUEST_RPC_ID_VALUE
-        return Response(_dumps({"type": "server-response", "rpcId": rpc_id,
-                                "result": result}), status_code=200,
-                        media_type="application/json")
+        return result_response({"type": "server-response", "rpcId": rpc_id,
+                                "result": result})
 
     try:
         payload = body if isinstance(body, dict) and "args" in body else None

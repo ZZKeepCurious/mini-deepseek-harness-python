@@ -1,7 +1,6 @@
 """web 残余 api 控制器：workspace / workspaceFiles / settings / credentials 路由与流。"""
 
 import asyncio
-import base64
 import os
 import tempfile
 import unittest
@@ -103,11 +102,11 @@ class WebResidualTest(unittest.TestCase):
             "workspaceFiles/readBytes", "f3",
             {"workspaceFileScopeId": self.session_id, "path": self.file,
              "options": {"range": {"offset": 0, "length": 5}}}))
-        self.assertEqual(base64.b64decode(window["data"]), b"hello")
+        self.assertEqual(window["data"], b"hello")
         whole = self._value(self.api.dispatch(
             "workspaceFiles/readBytes", "f3b",
             {"workspaceFileScopeId": self.session_id, "path": self.file}))
-        self.assertEqual(base64.b64decode(whole["data"]), b"hello\nworld\n")
+        self.assertEqual(whole["data"], b"hello\nworld\n")
         listing = self._value(self.api.dispatch(
             "workspaceFiles/list", "f4",
             {"workspaceFileScopeId": self.session_id, "path": self.work}))

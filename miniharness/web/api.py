@@ -696,16 +696,14 @@ class WebApi:
 
         上游 rc.1（index.ts:257-280）把原 `readAll`/`readRelated` 折进本方法：
         `options.baseFile` 提供相对目标基目录，省略 range 时读整文件并在超
-        `maxFileBytes` 时 `workspace-file/too-large`。服务值 `data` 是原生 `bytes`，
-        此处按 wire 折 base64（JSON 无法承载 bytes）。
+        `maxFileBytes` 时 `workspace-file/too-large`。服务值 `data` 是原生 `bytes`
+        （上游 `WorkspaceFileBytes.data`），wire 上由 `web/attachments.py` 拆成
+        二进制附件，不在这里折 base64。
         """
         scope = self.workspace_file_scope(payload)
         options = payload.get("options") or {}
-        result = self._remote_call(lambda: self._workspace_files().read_bytes(
+        return self._remote_call(lambda: self._workspace_files().read_bytes(
             scope, payload.get("path"), dict(options)))
-        if isinstance(result.get("data"), (bytes, bytearray)):
-            result = {**result, "data": base64.b64encode(result["data"]).decode("ascii")}
-        return result
 
     def workspace_files_stat(self, payload: dict) -> dict:
         scope = self.workspace_file_scope(payload)

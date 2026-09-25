@@ -57,6 +57,22 @@ export interface ServerResponse<T = unknown> {
   result: RpcResult<T>;
 }
 
+// ---------- Binary result attachments (multipart/form-data) ----------
+// A result carrying bytes answers with `multipart/form-data`: a `metadata` text
+// part holds the envelope with `null` at every byte position, and each descriptor
+// names the part holding it. Source: miniharness/web/attachments.py
+// (upstream packages/client/connection/src/rpc-host.ts fullResponse).
+
+export interface RpcAttachmentDescriptor {
+  path: (string | number)[];
+  codec: "bytes";
+  part: string;
+}
+
+export interface BinaryServerResponse<T = unknown> extends ServerResponse<T> {
+  attachments: RpcAttachmentDescriptor[];
+}
+
 // ---------- Session list / create ----------
 
 export interface SessionSummary {
