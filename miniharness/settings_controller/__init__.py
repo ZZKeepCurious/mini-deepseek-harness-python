@@ -52,7 +52,10 @@ def _namespace_view(entry: dict) -> dict:
     """把一个脱敏描述符投影为其 wire 视图（逐字段，index.ts namespaceView）。"""
     view: dict[str, Any] = {
         "ns": entry["ns"],
-        "autoGenerate": entry.get("autoGenerate", False),
+        # 对齐上游 settings/index.ts:312 `autoGenerate = presentations.get(
+        # fiber)?.auto ?? true`：页面策略缺省即自动生成（mini 无 configure 面，
+        # 恒缺省 true；注册者显式 false 才关）。
+        "autoGenerate": entry.get("autoGenerate", True),
         "schema": entry.get("schema", {}),
         "value": entry.get("value"),
         "applies": entry.get("applies"),

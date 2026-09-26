@@ -187,6 +187,15 @@ class RemoteEventRegistry:
                 return
             self.broadcast("api-session/activity", session.session_id, event.get("time"))
 
+        def on_settings_document_updated(payload: dict) -> None:
+            # 对齐上游 remote-events.ts:40 `settings/document-updated`（mode emit）：
+            # 转发 {ns, revision}。payload 由 settings 服务保证无损 JSON。
+            ns = payload.get("ns")
+            revision = payload.get("revision")
+            if ns is None or revision is None:
+                return
+            self.broadcast("settings/document-updated", ns, revision)
+
         ctx = api.ctx
         self._disposers = [
             ctx.on("session/created", on_created, global_=True),
@@ -194,6 +203,7 @@ class RemoteEventRegistry:
             ctx.on("agent/status", on_status, global_=True),
             ctx.on("agent/error", on_error, global_=True),
             ctx.on("session/event", on_session_event, global_=True),
+            ctx.on("settings/document-updated", on_settings_document_updated, global_=True),
         ]
 
     # ---------- 流侧：$events open + $events/result ----------

@@ -194,5 +194,50 @@ class RemoteEventRegistryTest(unittest.TestCase):
         self.assertEqual(cancel["eventId"], frame["eventId"])
 
 
+class SettingsDocumentUpdatedForwardingTest(unittest.TestCase):
+    """`settings/document-updated` 经 `$events` 转发（上游 remote-events.ts:40）。"""
+
+    def setUp(self):
+        import tempfile
+        from miniharness.core.scope import Context
+        from miniharness.llm.fake import FakeLlmAdapter
+        from miniharness.settings import install_settings
+        from miniharness.web.api import WebApi
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.ctx = Context(name="settings-events")
+        self.addCleanup(self.ctx.dispose)
+        install_settings(self.ctx, path=__import__("os").path.join(
+            self._tmp.name, "settings.json"))
+        self.api = WebApi(self.ctx, FakeLlmAdapter())
+
+    def _settings(self):
+        from miniharness.core.agent_loop.resident_loop import run_on_resident
+        provider = self.ctx.get("settings")
+        ns = provider.register("demo", defaults={"a": 1})
+        return provider, ns, run_on_resident
+
+    def test_document_updated_forwarded_to_events_clients(self):
+        import asyncio
+        provider, ns, run_on_resident = self._settings()
+
+        async def go():
+            client = self.api.gateway.events.open({"args": {}}).__aiter__()
+            await client.__anext__()  # ready
+            run_on_resident(provider.update(ns._ns, {"a": 2}))
+            frame = await client.__anext__()
+            return frame
+
+        frame = asyncio.run(go())
+        self.assertEqual(frame["type"], "emit")
+        self.assertEqual(frame["event"], "settings/document-updated")
+        self.assertEqual(frame["args"], [ns._ns, 1])
+
+    def test_document_updated_not_forwarded_without_ns(self):
+        # payload 缺 ns/revision 时不转发（守卫）
+        frames = _consume(self.api.gateway.events.open({"args": {}}), 1)
+        self.assertEqual(frames[0]["type"], "ready")
+
+
 if __name__ == "__main__":
     unittest.main()
