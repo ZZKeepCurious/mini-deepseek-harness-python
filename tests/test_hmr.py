@@ -351,5 +351,107 @@ class TestWatchUserPatches(unittest.TestCase):
         self.assertIsNone(disposer())
 
 
+class TestHmrRunExclusive(unittest.TestCase):
+    """`Hmr.run_exclusive` 串行事务队列（对齐 packages/boot/hmr runExclusive）。"""
+
+    def setUp(self):
+        self.ctx = Context(name="hmr-exclusive")
+        self.addCleanup(self.ctx.dispose)
+        self.hmr = Hmr(self.ctx, base_dir=".")
+
+    def test_runs_operation_and_returns_value(self):
+        self.assertEqual(self.hmr.run_exclusive(lambda: 42), 42)
+
+    def test_serializes_concurrent_operations(self):
+        order: list[str] = []
+        gate = threading.Event()
+
+        def first():
+            order.append("first")
+            gate.wait(timeout=5.0)
+            order.append("first-done")
+
+        def second():
+            order.append("second")
+
+        t = threading.Thread(target=lambda: self.hmr.run_exclusive(first))
+        t.start()
+        time.sleep(0.05)
+        self.hmr.run_exclusive(second)
+        self.assertEqual(order, ["first", "first-done", "second"])
+        gate.set()
+        t.join(timeout=5.0)
+
+    def test_nested_transaction_rejected(self):
+        with self.assertRaisesRegex(RuntimeError, "cannot be nested"):
+            self.hmr.run_exclusive(
+                lambda: self.hmr.run_exclusive(lambda: None))
+
+    def test_disposed_rejects(self):
+        self.ctx.dispose()
+        with self.assertRaisesRegex(RuntimeError, "HMR is disposed"):
+            self.hmr.run_exclusive(lambda: None)
+
+
+class TestReconcileProfilePatches(unittest.TestCase):
+    """`reconcile_profile_patches` 对账（对齐 app-boot reconcileProfilePatches）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = os.path.abspath(self._tmp.name)
+        self.config_file = os.path.join(self.dir, "cordis.yml")
+        with open(self.config_file, "w", encoding="utf-8") as h:
+            h.write(
+                "plugins:\n"
+                "  - id: greeter\n"
+                "    module: miniharness.example_plugins\n"
+                "    config:\n"
+                "      greeting: hi\n")
+        self.ctx, _ = boot(self.config_file)
+
+    def tearDown(self):
+        self.ctx.dispose()
+        self._tmp.cleanup()
+
+    def _reload(self, patches, required_ids=None):
+        from miniharness.boot.boot import reconcile_profile_patches
+        return reconcile_profile_patches(self.ctx, patches, bin_name="miniharness",
+                                         required_ids=required_ids)
+
+    def test_valid_patch_reconciles_and_emits_config_reload(self):
+        reloaded = []
+        self.ctx.on("app-boot/config-reload", lambda *args: reloaded.append(True))
+        result = self._reload([
+            {"replace": {"id": "greeter", "config": {"greeting": "yo"}}}])
+        self.assertEqual(result, [])
+        self.assertTrue(reloaded)
+        self.assertEqual(self.ctx.get("greeter")("x"), "yo, x!")
+
+    def test_unchanged_failure_returns_diagnostic_not_throw(self):
+        # 先引入一个缺失模块条目（首次即 failure），重载时 unchanged
+        # （same entry/fiber/options/diagnostic）不抛、返回诊断列表。
+        with self.assertRaisesRegex(RuntimeError, "did not activate"):
+            self._reload([
+                {"insert": [{"id": "broken",
+                             "module": "miniharness.does_not_exist"}]}])
+        # 已存在的 broken 条目对账：unchanged → 返回诊断而非抛
+        result = self._reload([
+            {"insert": [{"id": "broken",
+                         "module": "miniharness.does_not_exist"}]}])
+        self.assertTrue(any("broken" in diagnostic for diagnostic in result))
+
+    def test_unchanged_failure_with_required_id_rejects(self):
+        with self.assertRaisesRegex(RuntimeError, "did not activate"):
+            self._reload([
+                {"insert": [{"id": "broken",
+                             "module": "miniharness.does_not_exist"}]}])
+        # requiredIds 点名该 broken 条目 → 既有失败也拒绝对账
+        with self.assertRaisesRegex(RuntimeError, "did not activate"):
+            self._reload(
+                [{"insert": [{"id": "broken",
+                              "module": "miniharness.does_not_exist"}]}],
+                required_ids=["broken"])
+
+
 if __name__ == "__main__":
     unittest.main()

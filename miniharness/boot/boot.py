@@ -268,6 +268,100 @@ def load_optional_patches(patch_path: str, bin_name: str = "miniharness") -> lis
     return load_patch_list(patch_path, bin_name)
 
 
+def reconcile_profile_patches(
+    ctx: Context,
+    patches: list[dict],
+    *,
+    bin_name: str = "miniharness",
+    required_ids: list[str] | None = None,
+) -> list[str]:
+    """对账式应用补丁世代（对齐 app-boot reconcileProfilePatches，index.ts:271-300）。
+
+    语义：快照当前未激活条目（entry/fiber/options/diagnostic 四元）与全部旧
+    fiber 的前状态 → 根 Include `entry.update` 应用新补丁 → 等旧 fiber 结算 +
+    loader.await → 收集新未激活条目 → introduced 判定（requiredIds 点名的 /
+    与 previous 逐项不一致的新失败）→ 有 introduced 即抛；旧 fiber 中被拒但
+    原先未失败的按原样重抛 → 通过则 emit `app-boot/config-reload`，返回
+    unchanged 的未激活诊断列表。
+
+    @param ctx 已 boot 的根上下文（须含 loader + 根 Include entry）。
+    @param patches 完整有序补丁列表。
+    @param bin_name 诊断前缀。
+    @param required_ids 显式点名的启用目标（其既有失败也拒绝对账）。
+    @returns unchanged 的 pre-existing 未激活条目诊断（供调用方展示）。
+    """
+    entry = _BOOTSTRAP_INCLUDES.get(ctx)
+    if entry is None:
+        raise RuntimeError(f"{bin_name}: profile reload requires the root Include entry")
+    loader = ctx.get("loader")
+    if loader is None:
+        raise RuntimeError(f"{bin_name}: profile reload requires the Loader service")
+    required = set(required_ids or [])
+    previous_failures = [
+        {"entry": f_entry, "diagnostic": diagnostic,
+         "fiber": f_entry.fiber, "options": _json_dumps(f_entry.options)}
+        for f_entry, diagnostic in inactive_entries(loader)
+    ]
+    previous_fibers = [
+        {"fiber": row.fiber,
+         "failed": row.fiber.state in (FiberState.FAILED, FiberState.DISPOSED)}
+        for row in loader.entries() if row.fiber is not None
+    ]
+    include_config = dict(entry.options.get("config") or {})
+    include_config.pop("patches", None)
+    include_config["patches"] = _overlay_to_entry_patches(patches)
+    entry.update({"config": include_config})
+    _settle_fibers([row["fiber"] for row in previous_fibers])
+    loader.await_all()
+    failures = inactive_entries(loader)
+    failure_by_entry = {
+        id(f_entry): (f_entry, diagnostic) for f_entry, diagnostic in failures}
+    previous_keys = {
+        id(prev["entry"]): prev for prev in previous_failures}
+    introduced = []
+    for f_entry, diagnostic in failures:
+        if f_entry.options.get("id") in required:
+            introduced.append((f_entry, diagnostic))
+            continue
+        prev = previous_keys.get(id(f_entry))
+        if prev is None or prev["fiber"] is not f_entry.fiber \
+                or prev["options"] != _json_dumps(f_entry.options) \
+                or prev["diagnostic"] != diagnostic:
+            introduced.append((f_entry, diagnostic))
+    if introduced:
+        raise RuntimeError(
+            _activation_diagnostic(bin_name, "warning", introduced).rstrip("\n"))
+    for row in previous_fibers:
+        if row["failed"]:
+            continue
+        fiber = row["fiber"]
+        f_entry = getattr(fiber, "entry", None)
+        if f_entry is None:
+            continue
+        candidate = failure_by_entry.get(id(f_entry))
+        # 旧 fiber 中被拒但原先未失败的条目 → 原样重抛（上游 results 拒绝分支）。
+        if candidate is not None and candidate[0].fiber is fiber:
+            raise RuntimeError(candidate[1])
+    ctx.emit("app-boot/config-reload")
+    return [diagnostic for _f_entry, diagnostic in failures]
+
+
+def _json_dumps(value: Any) -> str:
+    import json
+    return json.dumps(value, sort_keys=True, default=str)
+
+
+def _settle_fibers(fibers: list) -> None:
+    """确认旧 fiber 已离开活跃态（上游 Promise.allSettled(fiber.await) 的同步等价）。
+
+    mini 同步 loader 的 internal/update waterfall 在 update 内完成旧 fiber
+    卸载/重装；此处仅触碰引用（防止 GC 在 diff 前回收），状态收敛由审计断言
+    承载，运行中异常由内部观察者（_contain_update）记录。
+    """
+    for fiber in fibers:
+        _ = fiber.state  # noqa: B018 - 触碰状态（同步模型无 await 语义）
+
+
 def watch_user_patches(
     ctx: Context,
     filename: str,
@@ -281,8 +375,9 @@ def watch_user_patches(
     每次刷新：重读 include 的非补丁 config → 重读补丁文件（缺失=空层）→
     `compose`（缺省恒等，允许把用户层插入完整补丁序列中间）→ 根 Include
     `entry.update({config: {...includeConfig, patches}})` 走 internal/update
-    waterfall 完成卸载/重装 → `loader.await_all()` 结算 → `inactive_entries`
-    审计（有未激活即抛诊断，由 HMR 单飞循环折算 `hmr/config-update-failed`）。
+    waterfall 完成卸载/重装 → `loader.await_all()` 结算 → 经
+    `reconcile_profile_patches` 对账（前后 diff 判定 introduced，emit
+    `app-boot/config-reload`）。
     HMR 缺席或根 Include 缺席 fail loud；注册期 INACTIVE_EFFECT 表示应用正在
     退出，返回 no-op disposer（上游同款豁免）。
     """
@@ -294,19 +389,9 @@ def watch_user_patches(
         raise RuntimeError(f"{bin_name}: user patch-layer watching requires the root Include entry")
 
     def refresh() -> None:
-        include_config = dict(entry.options.get("config") or {})
-        include_config.pop("patches", None)
         user_patches = load_optional_patches(filename, bin_name)
         composed = compose(user_patches) if compose is not None else user_patches
-        include_config["patches"] = _overlay_to_entry_patches(composed)
-        entry.update({"config": include_config})
-        loader = ctx.get("loader")
-        if loader is not None:
-            loader.await_all()
-            failures = inactive_entries(loader)
-            if failures:
-                raise RuntimeError(
-                    _activation_diagnostic(bin_name, "warning", failures).rstrip("\n"))
+        reconcile_profile_patches(ctx, composed, bin_name=bin_name)
 
     try:
         return hmr.register_config(filename, refresh)

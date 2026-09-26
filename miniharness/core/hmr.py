@@ -43,6 +43,9 @@ __all__ = ["Hmr", "find_watch_root", "CONFIG_UPDATE_FAILED"]
 #: 刷新失败外泄事件名（上游 'hmr/config-update-failed'，index.ts:29）
 CONFIG_UPDATE_FAILED = "hmr/config-update-failed"
 
+#: run_exclusive 嵌套判定的线程局部标记（同步载体：同一线程内递归即嵌套）。
+_thread_local = threading.local()
+
 
 def _event_key(path: str) -> str:
     """事件路径与登记键的统一规范化：realpath 消解符号链接/短路径 + 大小写
@@ -150,6 +153,9 @@ class Hmr(Service):
         # registration key(规范化路径) → (handle, refresh, state, filename)
         self._configs: dict[str, tuple] = {}
         self._lock = threading.Lock()
+        # run_exclusive 串行事务锁 + 关闭标记（上游 runExclusive 的事务队列）。
+        self._exclusive_lock = threading.Lock()
+        self._closing = False
         # 同上：execute 立即执行，返回 _teardown_all 方法本身作为销毁期回调
         ctx.effect(lambda: self._teardown_all, "hmr")
 
@@ -196,6 +202,28 @@ class Hmr(Service):
             if key in (_event_key(registered), _event_key(filename)):
                 self.refresh_config(registered)
                 return
+
+    # ---------- 事务串行（上游 packages/boot/hmr runExclusive） ----------
+
+    def run_exclusive(self, operation: Callable[[], Any]) -> Any:
+        """把一次调用方拥有的变更与全部自动重载路径串行化。
+
+        对齐上游 hmr/src/index.ts:139-147 `runExclusive`：串行事务队列
+        （config-editor/plugin-manager 等宿主写路径与自动重载共用同一锚）；
+        嵌套拒绝（'HMR transactions cannot be nested'）；服务已关闭拒绝
+        （'HMR is disposed'）。mini 同步模型用非重入锁承载（线程载体），
+        拒绝嵌套经线程局部标记判定（同一线程内递归即嵌套）。
+        """
+        if getattr(_thread_local, "in_hmr_transaction", False):
+            raise RuntimeError("HMR transactions cannot be nested")
+        with self._exclusive_lock:
+            if self._closing:
+                raise RuntimeError("HMR is disposed")
+            _thread_local.in_hmr_transaction = True
+            try:
+                return operation()
+            finally:
+                _thread_local.in_hmr_transaction = False
 
     # ---------- 单飞 + dirty 合并（上游 refreshConfig，index.ts:297-324） ----------
 
@@ -256,6 +284,7 @@ class Hmr(Service):
         with self._lock:
             entries = list(self._configs.values())
             self._configs.clear()
+        self._closing = True
         for handle, _refresh, state, _filename in entries:
             handle.close()
         for _handle, _refresh, state, _filename in entries:
