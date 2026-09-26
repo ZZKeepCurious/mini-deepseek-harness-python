@@ -104,6 +104,10 @@ KNOWN_TYPES = frozenset({
     # V4 起为已知事件类型）：log-only 非 surface；mini 无工作区文件观察面，
     # 仅为读侧词汇一致性登记。
     "workspace/changes",
+    # 会话组合选择（上游 agent-preset-registry/src/session.ts SessionEventMap：
+    # {agentPreset}，log-only 非 surface，整值替换最后一条胜出——投影单元
+    # agentPreset 的 fold 输入；init = header.agentPreset ?? null）
+    "agent-preset/selected",
 })
 
 # message-投影事件类型（上游 known-event-types.ts MESSAGE_PROJECTION_EVENT_TYPES）：

@@ -43,6 +43,7 @@ __all__ = [
 RPC_ERROR_CODES = frozenset({
     "agent-preset/conflict",
     "agent-preset/invalid",
+    "agent-preset/locked",
     "agent-preset/not-found",
     "agent-preset/read-only",
     "credential/rejected",

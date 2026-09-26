@@ -78,8 +78,10 @@ __all__ = [
     "default_roster",
     "delete_preset",
     "load_preset",
+    "make_agent_preset_projection",
     "project_preset",
     "project_session_agent_preset",
+    "register_agent_preset_projection",
     "select_preset",
     "session_has_started",
     "translate_cordis_composition",
@@ -514,6 +516,48 @@ def project_session_agent_preset(events: list[dict], header: str | None = None) 
             data = ev.get("data") or {}
             current = data.get("agentPreset")
     return current
+
+
+def make_agent_preset_projection():
+    """`agentPreset` 会话投影单元（对齐上游 agent-preset-registry/src/session.ts）。
+
+    stateVersion 1；init = header.agentPreset ?? null（mini 的 header 是
+    `session.meta`）；apply 消费 `agent-preset/selected` 事件整值替换；有 wire
+    （wire 值即 fold 状态本身），故 `session/projections` 与 control 投影帧会
+    暴露该单元。消费面：agentPresets.select 的 turnBoundary 锁前的组合决议。
+    """
+    from ..session_projection import ProjectionDefinition
+
+    def init(header, inherited_event_count):
+        if isinstance(header, dict):
+            return header.get("agentPreset")
+        return None
+
+    def apply(state, event):
+        if event.get("type") != _SELECTED_EVENT:
+            return state
+        data = event.get("data") or {}
+        return data.get("agentPreset")
+
+    return ProjectionDefinition(
+        "agentPreset", init=init, apply=apply, state_version=1,
+        view=lambda state: state,
+    )
+
+
+def register_agent_preset_projection(registry) -> object:
+    """把 `agentPreset` 投影单元注册进 sessionProjections（M7）注册表。
+
+    返回注销 disposer；注册表未提供 `agentPreset` 单元时幂等（重复注册同
+    stateVersion 会 refcount++，故先查既有）。
+    """
+    try:
+        return registry.register(make_agent_preset_projection())
+    except ValueError as error:
+        # 已注册（同 stateVersion refcount++）或冲突——幂等装配吞同版本重复。
+        if "already registered" in str(error) and "stateVersion 1" in str(error):
+            return None
+        raise
 
 
 def assert_preset_selectable(events: list[dict], session_id: str, preset_id: str) -> None:

@@ -94,13 +94,16 @@ gateway/protocol          gateway/uplink-overflow
 session/not-found
 session/model-unavailable session/conflict          session/invalid-time-zone
 session/workspace-attach-failed workspace/not-found agent-preset/conflict
-agent-preset/not-found    agent-preset/invalid      session/agent-busy
+agent-preset/not-found    agent-preset/invalid      agent-preset/locked
+session/agent-busy
 session/attachment-invalid session/queue-item-not-found session/steer-unavailable
 session/title-invalid     session/fork-unavailable  subagent/not-found
 subagent/catalog-diagnostic subagent/unauthorized
 workspace-file/not-found   workspace-file/not-directory workspace-file/not-regular-file
 workspace-file/not-text    workspace-file/outside-workspace workspace-file/too-large
 workspace-file/watch-unsupported
+workspace/session-active
+job/not-found
 ```
 
 寄送方签发 `rpcId`（实践中 UUID 即可，递增非零即可）；`transport_error` 把载体层异常折进
@@ -407,6 +410,30 @@ by deltas」。
   返回 `{"outcome": "requested" | "already-finished"}`；未知/外会话作业 →
   `job/not-found`（details `{sessionId, jobId}`）。
 - `job` namespace 未挂载（`ctx` 无 `jobs`）→ `gateway/invocation-unavailable`。
+
+### 4.8 `agentPresets`（声明式组合 roster 的 Remote 面）
+
+`agentPresets` namespace（上游 `packages/preset/agent-preset-registry`，web-app 默认挂载）。
+三个 unary `POST /api/<endpoint>`：
+
+- `agentPresets.list`（`{args:{}}`）→ `AgentPresetRoster`：
+  `{presets: [{id, isDefault, name?, description?, broken?}], modeSelectionEnabled}`；
+  `modeSelectionEnabled` mini 恒 `true`（无 settings 配置面）。未知端点集合不固定——roster
+  是当前部署的声明列表。
+- `agentPresets.read`（`{args:{agentPreset}}`）→ `AgentPresetDocument`：
+  `{agentPreset, content, name?, description?}`；`content` 是声明行/组合的 entry-list YAML
+  （mini JSON 载体 → `rows: []`）。未知 id → `agent-preset/not-found`（details
+  `{agentPreset, available}`）。
+- `agentPresets.select`（`{args:{sessionId, agentPreset}}`）→ 提交的 preset id（字符串）。
+  **首回合前锁**：`turnBoundary` 投影判定 `openTurnStartSeq !== null || lastTurn > 0` →
+  `agent-preset/locked`（details `{sessionId, agentPreset}`，消息 "This session has already
+  started"）；合法则解析（未知 → `agent-preset/not-found`）并 append durable
+  `agent-preset/selected {agentPreset}` 落盘后返回 id。
+- 错误码闭集新增 `agent-preset/locked`（`agent-preset/not-found`/`agent-preset/invalid` 既有）；
+  未挂载 roster → `gateway/invocation-unavailable`。
+- 会话投影：`agentPreset` 单元（stateVersion 1，init = `session.meta.agentPreset ?? null`，
+  fold `agent-preset/selected` 整值替换，有 wire）——`session/projections` 与 control
+  projection 帧暴露该单元。
 
 ## 5. `$events/result`（HTTP unary 特判端点，`web/server.py` + `web/events.py`）
 `POST /api/$events/result`，body 为 `client-request` 全形，`payload` 恰：

@@ -290,6 +290,16 @@ _SPECS: dict[str, dict[str, tuple[str, bool]]] = {
         "sessionId": (STR, True),
         "jobId": (STR, True),
     },
+    # agent-preset-registry（packages/preset/agent-preset-registry）：
+    # list 无入参；read 取 agentPreset；select 取 agentPreset + sessionId。
+    "agentPresets/list": {},
+    "agentPresets/read": {
+        "agentPreset": (STR, True),
+    },
+    "agentPresets/select": {
+        "sessionId": (STR, True),
+        "agentPreset": (STR, True),
+    },
 }
 
 

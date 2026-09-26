@@ -393,6 +393,9 @@ class WebApi:
         "credentials/unset": "credentials_unset",
         "sessionReferenceResolver/candidates": "session_reference_candidates",
         "job/kill": "job_kill",
+        "agentPresets/list": "agent_presets_list",
+        "agentPresets/read": "agent_presets_read",
+        "agentPresets/select": "agent_presets_select",
     }
 
     def methods(self) -> frozenset[str]:
@@ -813,6 +816,99 @@ class WebApi:
         # job 已存在才走到这里：job 对象未用，但保留了栅栏语义（上游 get 预检）。
         _ = job
         return {"outcome": outcome}
+
+    # ---------- agentPresets 域（agent-preset-registry 的 Remote 方法面） ----------
+
+    def _agent_preset_roster(self):
+        roster = self.roster
+        if roster is None:
+            raise _Reject("gateway/invocation-unavailable",
+                          "agentPresets namespace is not mounted in this deployment", {})
+        return roster
+
+    def agent_presets_list(self, payload: dict) -> dict:
+        """`agentPresets.list`：当前部署的 preset 选择列表（AgentPresetRoster）。
+
+        对齐上游 agent-preset-registry remoteExportList：`{presets: rows.map(
+        ...isDefault), modeSelectionEnabled}`。roster.rows() 已产 AgentPresetRow
+        形态（{id, isDefault, name?, description?, broken?}）。modeSelectionEnabled
+        缺省 true（mini 部署无 settings 配置面，见载体差异登记）。
+        """
+        roster = self._agent_preset_roster()
+        return {"presets": roster.rows(),
+                "modeSelectionEnabled": True}
+
+    def agent_presets_read(self, payload: dict) -> dict:
+        """`agentPresets.read`：一条声明行的可读文档（AgentPresetDocument）。
+
+        对齐上游 readDocument：未知 id → `agent-preset/not-found`（带 available）。
+        mini 的组合载体为 preset.json/agent.cordis.yml；content 渲染为组合的
+        entry-list YAML（有声明行则原样，JSON 载体给 `rows: []`——同
+        file_composition 的既有投影语义）。
+        """
+        roster = self._agent_preset_roster()
+        preset_id = payload.get("agentPreset")
+        try:
+            _, preset = roster.locate(preset_id)
+        except Exception as error:
+            raise _Reject("agent-preset/not-found", str(error),
+                          {"agentPreset": preset_id, "available": roster.ids()}) from error
+        document: dict[str, Any] = {"agentPreset": preset.id,
+                                    "content": self._preset_document_content(preset)}
+        if preset.name:
+            document["name"] = preset.name
+        if preset.description:
+            document["description"] = preset.description
+        return document
+
+    @staticmethod
+    def _preset_document_content(preset) -> str:
+        """一条 preset 的可读组合内容（AgentPresetDocument.content）。
+
+        mini 载体：preset.json 无插件行 → `rows: []`（同 file_composition 的
+        JSON 载体投影）；组合形态文件读 entry-list YAML 原样。
+        """
+        from ..loader.include import load_entry_list_yaml
+        from ..web.inventory import _COMPOSITION_FILES
+        path = getattr(preset, "path", None)
+        if path is not None and path.name in _COMPOSITION_FILES:
+            try:
+                rows = load_entry_list_yaml(path.read_text(encoding="utf-8"))
+                import yaml
+                return yaml.safe_dump(rows, sort_keys=False, allow_unicode=True)
+            except Exception:  # noqa: BLE001 - 渲染尽力而为，组合损坏给空文档
+                return "rows: []\n"
+        return "rows: []\n"
+
+    def agent_presets_select(self, payload: dict) -> dict:
+        """`agentPresets.select`：会话首回合前选定组合；已开始 → locked。
+
+        对齐上游 select（index.ts:325-341）：turnBoundary 投影检查
+        `openTurnStartSeq !== null || lastTurn > 0` → `agent-preset/locked`；
+        合法则 resolve（未知 → `agent-preset/not-found`）→ append
+        `agent-preset/selected` 落盘 → 返回提交的 preset id。
+        """
+        session_id = _require_id(payload, "sessionId")
+        preset_id = payload.get("agentPreset")
+        found = self._agent_for(session_id)
+        if found is None:
+            raise _Reject("session/not-found", f'session "{session_id}" not found',
+                          {"sessionId": session_id})
+        session, _loop = found
+        registry = self.ctx.get("sessionProjections")
+        boundary = registry.state_of(session, "turnBoundary") if registry is not None else None
+        if boundary is not None and (
+                boundary.get("openTurnStartSeq") is not None or boundary.get("lastTurn", 0) > 0):
+            raise _Reject("agent-preset/locked", "This session has already started",
+                          {"sessionId": session_id, "agentPreset": preset_id})
+        roster = self._agent_preset_roster()
+        try:
+            _, preset = roster.locate(preset_id)
+        except Exception as error:
+            raise _Reject("agent-preset/not-found", str(error),
+                          {"agentPreset": preset_id, "available": roster.ids()}) from error
+        session.append("agent-preset/selected", {"agentPreset": preset.id})
+        return preset.id
 
     # ---------- session.list ----------
     @staticmethod
