@@ -39,8 +39,9 @@ class TestErrorCodeSet(unittest.TestCase):
         # agent-preset/read-only / gateway/lookup-not-found；
         # rc.1：session-controller 新增 session/projections-unavailable、session/writer-held；
         # terminal-controller 新增 terminal/unavailable；workspace-files 新增
-        # workspace-file/watch-unsupported；workspace-controller 新增 workspace/session-active）
-        self.assertEqual(len(RPC_ERROR_CODES), 47)
+        # workspace-file/watch-unsupported；workspace-controller 新增 workspace/session-active；
+        # job-controller 新增 job/not-found）
+        self.assertEqual(len(RPC_ERROR_CODES), 48)
 
     def test_known_codes_present(self):
         for code in ("gateway/bad-request", "session/not-found", "session/model-unavailable",
@@ -60,7 +61,7 @@ class TestErrorCodeSet(unittest.TestCase):
                      "workspace-file/not-found", "workspace-file/watch-unsupported",
                      "workspace-file/too-large", "workspace-file/not-text",
                      "settings/rejected", "settings/conflict", "credential/rejected",
-                     "agent-preset/read-only"):
+                     "agent-preset/read-only", "job/not-found"):
             self.assertIn(code, RPC_ERROR_CODES)
 
     def test_apiproxy_only_codes_retired(self):

@@ -173,6 +173,8 @@ class GatewayStreams:
             "terminal/follow": "terminal_follow",
             "workspace/follow": "workspace_follow",
             "workspaceFiles/changes": "workspace_changes",
+            "job/list": "job_list",
+            "job/follow": "job_follow",
         }
 
     def uplink_codecs(self) -> dict[str, Any]:
@@ -233,6 +235,11 @@ class GatewayStreams:
         if kind == "workspace_changes":
             return _with_uplink(
                 self._workspace_changes(payload["args"], invocation), invocation)
+        if kind == "job_list":
+            return _with_uplink(self._job_list(payload["args"], invocation), invocation)
+        if kind == "job_follow":
+            return _with_uplink(
+                self._job_follow(payload["args"], invocation), invocation)
         return _with_uplink(self._control(invocation), invocation)
 
     # ---------- session/follow（历史跟随流） ----------
@@ -405,6 +412,169 @@ class GatewayStreams:
                 await asyncio.sleep(TERMINAL_FOLLOW_POLL)
         finally:
             changes.close()
+
+    # ---------- job 域（job-controller 的流方法面） ----------
+
+    #: job 流帧合并窗口（上游 job-controller observeFlushMs 默认 100ms）。
+    JOB_FLUSH_MS = 0.1
+    #: job output 帧软字节预算（上游 observeMaxFrameBytes 默认 64 KiB）。
+    JOB_MAX_FRAME_BYTES = 64 * 1024
+    #: job 流轮询间隔（秒）：同步事件总线 + abort 信号的桥接粒度。
+    JOB_POLL = 0.02
+
+    def _jobs_registry(self):
+        registry = self.api.ctx.get("jobs")
+        if registry is None:
+            raise RemoteStreamError(
+                "gateway/invocation-unavailable",
+                "typert gateway: job namespace is not mounted in this deployment")
+        return registry
+
+    @staticmethod
+    def _utf8_bytes(text: str) -> int:
+        return len(text.encode("utf-8"))
+
+    @staticmethod
+    def _is_aborted(signal) -> bool:
+        if signal is None:
+            return False
+        return bool(getattr(signal, "cancelled", lambda: False)()
+                    or getattr(signal, "aborted", False))
+
+    async def _wait_or_poll(self, waiter: asyncio.Event, signal) -> None:
+        """等待事件置位或取消；返回后由调用方复核真实条件。"""
+        while not waiter.is_set():
+            if self._is_aborted(signal):
+                return
+            await asyncio.sleep(self.JOB_POLL)
+
+    async def _job_list(self, args: dict, invocation: StreamInvocation):
+        """`job/list`：一次会话可见作业集的整集替换帧流（对齐 rows.ts）。
+
+        首帧即刻（`{type:'rows', jobs:[...]}`），此后每次触及可见作业的
+        lifecycle 提交（registered/progress/stopping/settled/removed）合并
+        flushMs 后发整集替换；纯 output 追加不刷新 roster。
+        """
+        registry = self._jobs_registry()
+        session_id = args.get("sessionId")
+        waiter: asyncio.Event = asyncio.Event()
+        changed = {"owner": session_id, "output": False}
+
+        def on_event(event: dict) -> None:
+            if event.get("type") == "output":
+                return
+            owner = (event.get("job") or {}).get("owner")
+            if owner is None or owner == session_id:
+                waiter.set()
+
+        unsubscribe = registry.events_for(self.ctx).subscribe(
+            {"owners": "all"}, on_event)
+        signal = invocation.signal
+        try:
+            yield {"type": "rows", "jobs": registry.list(session_id)}
+            while True:
+                await self._wait_or_poll(waiter, signal)
+                if self._is_aborted(signal):
+                    return
+                waiter.clear()
+                # 让突发提交合成一帧（上游 sleep(flushMs, signal)）。
+                await asyncio.sleep(self.JOB_FLUSH_MS)
+                if self._is_aborted(signal):
+                    return
+                yield {"type": "rows", "jobs": registry.list(session_id)}
+        finally:
+            unsubscribe()
+
+    async def _job_follow(self, args: dict, invocation: StreamInvocation):
+        """`job/follow`：锚帧 opened → 合并 output → 终态 status（对齐 observe.ts）。
+
+        from 缺省 = 最老保留字节；removed 中途宣布 → 以移除投影发终态 status 并关流。
+        """
+        registry = self._jobs_registry()
+        job_id = args.get("jobId")
+        session_id = args.get("sessionId")
+        requested_from = args.get("from")
+        if requested_from is not None and (
+                isinstance(requested_from, bool) or not isinstance(requested_from, int)
+                or requested_from < 0):
+            raise RemoteStreamError(
+                "gateway/arguments-invalid",
+                f"invalid observe offset: expected a non-negative safe integer, "
+                f"got {requested_from!r}")
+        try:
+            job = registry.get(job_id, session_id)
+        except Exception as error:  # noqa: BLE001 - 未知/外会话折 not-found
+            raise RemoteStreamError(
+                "job/not-found", str(error)) from error
+        waiter: asyncio.Event = asyncio.Event()
+        removed: list[dict] = []
+
+        def on_event(event: dict) -> None:
+            changed_id = event.get("id") if event.get("type") == "output" \
+                else (event.get("job") or {}).get("id")
+            if changed_id != job_id:
+                return
+            if event.get("type") == "removed":
+                removed.append(event.get("job"))
+            waiter.set()
+
+        unsubscribe = registry.events_for(self.ctx).subscribe(
+            {"owners": "all"}, on_event)
+        signal = invocation.signal
+        try:
+            cursor = job["output"]["earliest"] if requested_from is None else requested_from
+            yield {"type": "opened", "job": job, "from": cursor}
+            while not self._is_aborted(signal):
+                if removed:
+                    yield {"type": "status", "job": removed[0]}
+                    return
+                read = registry.read_at(job_id, cursor, session_id)
+                if read.get("chunks") or read.get("lossy"):
+                    async for frame in self._job_output_frames(
+                            read.get("chunks") or [], read.get("next", cursor),
+                            read.get("lossy", False)):
+                        yield frame
+                cursor = read.get("next", cursor)
+                job = registry.get(job_id, session_id)
+                if job.get("status") not in ("running", "stopping") \
+                        and cursor >= (job.get("output") or {}).get("total", 0):
+                    yield {"type": "status", "job": job}
+                    return
+                await self._wait_or_poll(waiter, signal)
+                if not waiter.is_set():
+                    continue
+                waiter.clear()
+                await asyncio.sleep(self.JOB_FLUSH_MS)
+        finally:
+            unsubscribe()
+
+    async def _job_output_frames(self, chunks: list, next_offset: int,
+                                 lossy: bool):
+        """把一次 read 按软字节预算切 output 帧（对齐 observe.ts outputFrames）。
+
+        超预算的单块整块带走；lossy 只随首帧标志。
+        """
+        batch: list = []
+        batch_bytes = 0
+        flagged_lossy = lossy
+        for chunk in chunks:
+            batch.append(chunk)
+            batch_bytes += self._utf8_bytes(chunk.get("text", ""))
+            if batch_bytes >= self.JOB_MAX_FRAME_BYTES:
+                last = batch[-1]
+                end = last.get("at", 0) + self._utf8_bytes(last.get("text", ""))
+                frame = {"type": "output", "chunks": batch, "next": end}
+                if flagged_lossy:
+                    frame["lossy"] = True
+                    flagged_lossy = False
+                yield frame
+                batch = []
+                batch_bytes = 0
+        if batch or flagged_lossy:
+            frame = {"type": "output", "chunks": batch, "next": next_offset}
+            if flagged_lossy:
+                frame["lossy"] = True
+            yield frame
 
     # ---------- session/control（宿主级 live control） ----------
 

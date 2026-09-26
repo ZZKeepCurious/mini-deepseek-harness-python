@@ -193,9 +193,10 @@ client `connection/src/client/rpc.ts` 按 `/` 切两段）；`web/args.canonical
   `details` 为 `{endpoint, field: "uplink"}`。每次调用 `uplink()` 只能取一次（第二次抛错）；
   rc.1 出厂的全部 Remote 方法都是 `In = never`，故 `GatewayStreams.uplink_codecs()` 出厂为空表
   ——声明点即 typert 生成的描述符 `uplink.codec`（`packages/typert/protocol/src/types.ts:355-357`）。
-- `endpoint` 全集（`GatewayStreams.stream_kinds`，六条）：`$events`、`session/follow`、
+- `endpoint` 全集（`GatewayStreams.stream_kinds`，九条）：`$events`、`session/follow`、
   `session/control`、`terminal/retain`、`terminal/follow`、`workspace/follow`、
-  `workspaceFiles/changes`；未知 endpoint → `error` 帧 `gateway/invocation-unavailable`
+  `workspaceFiles/changes`、`job/list`、`job/follow`；未知 endpoint → `error` 帧
+  `gateway/invocation-unavailable`
   （消息 `typert gateway: <endpoint>: no active Remote method exports this endpoint`）。
 - 每条 open 的命名空间未挂载（`ctx` 无 `terminalController`/`workspaceController`/
   `workspaceFiles`）→ 该流 `error` 帧 `gateway/invocation-unavailable`；args 缺字段/类型不符
@@ -372,6 +373,40 @@ by deltas」。
   `order`，再 `archived`，最后 `pinned`（上游 `feed.ts` 的 `changed`）。`archived`/`pinned`
   都是全量替换（不是增量 diff）。
 - 断连期间的增量不重放：重连即新代次重发 `baseline`，消费者按「重开即全量」收敛（§4.4）。
+
+### 4.7 `job/list` / `job/follow`（后台作业 roster 与输出流）
+
+`job` namespace（上游 `packages/api/job-controller`，web-app 默认挂载）：
+
+- `job/list`（`{args:{sessionId}}`）：一次会话可见作业集的**整集替换**帧流。首帧即刻，
+  此后每次触及可见作业的 lifecycle 提交（registered/progress/stopping/settled/removed）
+  合并 100ms 后发下一整集；纯 output 追加不刷新 roster：
+
+```json
+{"type": "rows", "jobs": [{<JobView>}, ...]}
+```
+
+  `JobView` = `{id, kind, label, owner?, outputLimitBytes?, status, progress?, detail?,
+  startedAt, finishedAt?, output:{total, earliest, spillPaths?}}`（`status` ∈
+  `running|stopping|completed|killed|failed`）。
+- `job/follow`（`{args:{sessionId?, jobId, from?}}`）：一作业 retained 输出的观察流。
+  `from` 缺省 = 最老保留字节；`from` 显式提供时须为非负整数（否则 `gateway/arguments-invalid`）。
+  帧序：`opened{job, from}` → `output{chunks, next, lossy?}`* → `status{job}`（终态投影后流正常
+  关闭）：
+
+```json
+{"type": "opened", "job": {<JobView>}, "from": 0}
+{"type": "output", "chunks": [{at, text, channel?, gapBefore?}], "next": 1024, "lossy"?: true}
+{"type": "status", "job": {<JobView>}}
+```
+
+  output 帧按 64 KiB 软字节预算切帧（单块超预算整块带走，lossy 只随首帧）；`next` 是下一
+  帧的绝对字节偏移，重连时作为 `from` 传入恢复。已结算且排空（`cursor >= output.total`）发
+  `status` 后正常关闭；owner teardown 移除作业则以移除时的终态投影发 `status` 并关闭。
+- `job/kill`（unary `POST /api/job/kill`，`{args:{sessionId, jobId}}`）：请求取消一个作业，
+  返回 `{"outcome": "requested" | "already-finished"}`；未知/外会话作业 →
+  `job/not-found`（details `{sessionId, jobId}`）。
+- `job` namespace 未挂载（`ctx` 无 `jobs`）→ `gateway/invocation-unavailable`。
 
 ## 5. `$events/result`（HTTP unary 特判端点，`web/server.py` + `web/events.py`）
 `POST /api/$events/result`，body 为 `client-request` 全形，`payload` 恰：

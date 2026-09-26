@@ -277,6 +277,19 @@ _SPECS: dict[str, dict[str, tuple[str, bool]]] = {
         "agentId": (STR, True),
         "query": (STR, False),
     },
+    # job-controller（packages/api/job-controller）：`job` Remote namespace。
+    "job/list": {
+        "sessionId": (STR, True),
+    },
+    "job/follow": {
+        "sessionId": (STR, False),
+        "jobId": (STR, True),
+        "from": (INT, False),
+    },
+    "job/kill": {
+        "sessionId": (STR, True),
+        "jobId": (STR, True),
+    },
 }
 
 

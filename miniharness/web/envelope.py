@@ -55,6 +55,7 @@ RPC_ERROR_CODES = frozenset({
     "gateway/lookup-not-found",
     "gateway/protocol",
     "gateway/uplink-overflow",
+    "job/not-found",
     "session/agent-busy",
     "session/attachment-invalid",
     "session/conflict",

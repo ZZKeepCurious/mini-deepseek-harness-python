@@ -392,6 +392,7 @@ class WebApi:
         "credentials/set": "credentials_set",
         "credentials/unset": "credentials_unset",
         "sessionReferenceResolver/candidates": "session_reference_candidates",
+        "job/kill": "job_kill",
     }
 
     def methods(self) -> frozenset[str]:
@@ -775,6 +776,43 @@ class WebApi:
         agent = self.resolve_terminal_agent(payload.get("agentId"))
         return self._remote_call(lambda: self._session_reference_resolver().remote_export_candidates(
             agent, payload.get("query")))
+
+    # ---------- job 域（job-controller 的 Remote 方法面） ----------
+
+    def _jobs_registry(self):
+        registry = self.ctx.get("jobs")
+        if registry is None:
+            raise _Reject("gateway/invocation-unavailable",
+                          "job namespace is not mounted in this deployment", {})
+        return registry
+
+    def job_kill(self, payload: dict) -> dict:
+        """`job/kill`：请求取消一个作业；未知/外会话作业折 `job/not-found`。
+
+        对齐上游 job-controller index.ts:109-127：栅栏预检（get）与 kill 在同一
+        同步区间；kill 原因固定 `cancelled by the user`；返回 `{outcome}`。
+        """
+        session_id = _require_id(payload, "sessionId")
+        job_id = _require_id(payload, "jobId")
+        registry = self._jobs_registry()
+        try:
+            job = registry.get(job_id, session_id)
+        except Exception as error:  # noqa: BLE001 - 未知/外会话/内部一律折 not-found
+            raise _Reject("job/not-found", str(error),
+                          {"sessionId": session_id, "jobId": job_id}) from error
+        try:
+            outcome = registry.kill(job_id, session_id, "cancelled by the user")
+        except _Reject:
+            raise
+        except Exception as error:  # noqa: BLE001 - 域错误闭集 + gateway/internal
+            code = getattr(error, "code", None)
+            if code in RPC_ERROR_CODES:
+                raise _Reject(code, str(error),
+                              getattr(error, "details", None) or {}) from error
+            raise _Reject("gateway/internal", str(error), {}) from error
+        # job 已存在才走到这里：job 对象未用，但保留了栅栏语义（上游 get 预检）。
+        _ = job
+        return {"outcome": outcome}
 
     # ---------- session.list ----------
     @staticmethod
