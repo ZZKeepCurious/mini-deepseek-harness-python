@@ -193,8 +193,13 @@ client `connection/src/client/rpc.ts` 按 `/` 切两段）；`web/args.canonical
   `details` 为 `{endpoint, field: "uplink"}`。每次调用 `uplink()` 只能取一次（第二次抛错）；
   rc.1 出厂的全部 Remote 方法都是 `In = never`，故 `GatewayStreams.uplink_codecs()` 出厂为空表
   ——声明点即 typert 生成的描述符 `uplink.codec`（`packages/typert/protocol/src/types.ts:355-357`）。
-- 关键 `endpoint`（`GatewayStreams.stream_kinds`）：`$events`、`session/follow`、`session/control`；
-   未知 endpoint → `error` 帧 `gateway/internal`。
+- `endpoint` 全集（`GatewayStreams.stream_kinds`，六条）：`$events`、`session/follow`、
+  `session/control`、`terminal/retain`、`terminal/follow`、`workspace/follow`、
+  `workspaceFiles/changes`；未知 endpoint → `error` 帧 `gateway/invocation-unavailable`
+  （消息 `typert gateway: <endpoint>: no active Remote method exports this endpoint`）。
+- 每条 open 的命名空间未挂载（`ctx` 无 `terminalController`/`workspaceController`/
+  `workspaceFiles`）→ 该流 `error` 帧 `gateway/invocation-unavailable`；args 缺字段/类型不符
+  → `gateway/arguments-invalid`。
 - `workspaceFiles/changes`（`{args:{workspaceFileScopeId, path}}`）：先以 `ctx.fs.watch`
   建立目标监听（目录须在工作区内），成功给 `{kind:'ready'}`，随后命中目标的失效重 stat
   产出 `{kind:'change', change:{absolutePath, version}}`（目标已删除则 `{absolutePath, absent:true}`）；
@@ -296,8 +301,79 @@ by deltas」。
   （`web/launcher.py` 的 `uvicorn_options`，间隔取上游 `websocketHeartbeatIntervalMs`
   @default 2000）。
 
-## 5. `$events/result`（HTTP unary 特判端点，`web/server.py` + `web/events.py`）
+### 4.5 `terminal/retain` / `terminal/follow`（终端持有与恢复流）
 
+`terminal/retain` —— 一条物理 Remote 流为一个终端身份**持窗**（不激活 Agent、不取输入控制）。
+
+- open payload：`{args:{sessionId, id}}`（取 sessionId，不需要 `agentId`）。
+- 唯一一帧确认 `{"type":"retained"}`，此后**不再出帧**，流保持到本流被 `cancel`/断连，
+  或该身份被 `terminal/close`（含会话 owner 拆解、控制器 dispose）关闭。进程自己退出
+  **不**结束持窗（上游 `retention.ts` 的 `lifetime` 闩只随身份关闭而落）。
+- 载体差异（已登记）：上游 holders 集合的唯一作用是抑制「无人值守空闲回收」调度，
+  mini 无该调度器，故持有不改变清理时机。
+- 错误：身份缺失/已关闭/owner 正在清理 → `terminal/unavailable`；命名空间未挂载 →
+  `gateway/invocation-unavailable`（同 §4 头）。
+
+`terminal/follow` —— 附加到一个终端，**不把进程生命周期绑到传输**。
+
+- open payload：`{args:{agentId, id, attachmentId}}`；`attachmentId` 须合 `^[\w-]{1,128}$`。
+  附加即独占输入控制（较晚附加接管输入，旧的降为只读），分离不杀进程。
+- 首帧 `snapshot`（完整有界屏幕，含滚出历史；行尾空白裁剪、尾随空行去除）：
+
+```json
+{"type": "snapshot", "sequence": <int>, "screen": "<整屏文本>", "info": {<WebTerminalInfo>}}
+```
+
+  `info` = `{id, title, shell:{path,args,name}, cwd, cols, rows, state, exitCode, error?, controllerId?}`，
+  `state` ∈ `running|exited|failed`；`exited` 带 `exitCode`，`failed` 带 `error`；
+  `controllerId` 只在当前有输入控制者时出现（附加期间必有）。`cwd` 是创建时工作目录，
+  shell 内 `cd` 不回写该字段。
+- 续帧（有序，三型与上游 `TerminalFrame` 一一对应）：
+
+```json
+{"type": "output", "sequence": <int>, "data": "<本段输出>"}
+{"type": "state",  "info": {<WebTerminalInfo>}}
+```
+
+- 终态：进程退出/失败先投一帧 `state`（`state` 转 `exited`/`failed`），**队列里剩余帧投完后
+  流才 `end`**（上游 `TerminalFollower.finish`）。`state` 帧也会在 `resize`（cols/rows）、
+  `rename`（title）、输入控制权易手时出现。
+- 慢消费者：单 follower 排队字节超 `maxBufferedBytes`（缺省 2 MiB）→ 该流以
+  `gateway/internal` 中止（消息 `Terminal output consumer exceeded its buffer; reconnect to
+  recover the current screen`）；重连开新代次从 `snapshot` 恢复当前屏幕。
+- 错误：未知 `agentId` → `session/not-found`；身份缺失/已关闭 → `terminal/unavailable`；
+  `attachmentId` 非法 → `gateway/internal`（上游同为普通 `Error`，折算同一码）。
+
+### 4.6 `workspace/follow`（工作区投影流）
+
+- open payload 恰 `{args:{}}`（上游 `follow(signal)` 无入参）。
+- 首帧 `baseline`（重连必重发的完整基线）：
+
+```json
+{"type": "baseline",
+ "value": {"items": [{<WorkspaceView>}, ...],
+           "archivedSessionIds": ["<sessionId>", ...],
+           "pinnedSessionIds": ["<sessionId>", ...]}}
+```
+
+  `WorkspaceView` = `{workspaceId, path, title, sessionIds, createdAt, updatedAt}`（`sessionIds`
+  是该工作区名下按人工顺序记的会话）；`pinnedSessionIds` 是**注册表全局**钉选集（最近钉选在前）。
+- 续帧五型（插入/替换语义，同上游 `WorkspaceFollowIncrement`）：
+
+```json
+{"type": "upsert",   "workspace": {<WorkspaceView>}}
+{"type": "remove",   "workspaceId": "..."}
+{"type": "order",    "workspaceIds": ["..."]}
+{"type": "archived", "archivedSessionIds": ["..."]}
+{"type": "pinned",   "pinnedSessionIds": ["..."]}
+```
+
+- 一次变更的出帧顺序固定：先按新顺序给**新身份**发 `upsert`（已知名不再 upsert），顺序真变才发
+  `order`，再 `archived`，最后 `pinned`（上游 `feed.ts` 的 `changed`）。`archived`/`pinned`
+  都是全量替换（不是增量 diff）。
+- 断连期间的增量不重放：重连即新代次重发 `baseline`，消费者按「重开即全量」收敛（§4.4）。
+
+## 5. `$events/result`（HTTP unary 特判端点，`web/server.py` + `web/events.py`）
 `POST /api/$events/result`，body 为 `client-request` 全形，`payload` 恰：
 
 ```json
@@ -373,7 +449,7 @@ outcome 归一（`APPROVAL_OUTCOMES = {allowed-once, rejected, cancelled, unavai
 | `json-value.ts` | §4 上行项无损 JSON 校验（`isRemoteUplinkItem`，同上游 typert `isRemoteUplinkItem`） |
 | `events.ts` | §4.3 `$events` ready/emit/waterfall/cancel + §5 结算（settled 集合 fail-closed） |
 | `follow.ts` | §4.1 snapshot/event 帧 + seq 去重（`TrajectoryBuffer`） |
-| `control.ts` | §4.2 baseline/queue/jobs 替换帧（`applyControlFrame`） |
+| `control.ts` | §4.2 的 baseline/projection 帧——**当前只建模了 rc.1 退役前的 `queue`/`jobs` 帧**（`applyControlFrame` 对 baseline 是 no-op 标记），宿主已不发这两型，队列/作业面板恒空（换源待立项） |
 | `types.ts` | §2 信封 + §3.1 附件描述符 + 事件/消息/会话类型（镜像 core 模型） |
 
 测试：`webui/tests/wire.test.ts` + `webui/tests/wire-binary.test.ts`（vitest，mock fetch/WS；

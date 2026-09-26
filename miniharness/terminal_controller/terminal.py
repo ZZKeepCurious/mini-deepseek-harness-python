@@ -131,6 +131,15 @@ class BrowserTerminal:
 
     # ---------- 附加 / 控制 ----------
 
+    @property
+    def closed(self) -> bool:
+        """该身份是否已进入关闭（`close()` 起为真；清理失败可回退待重试）。
+
+        `terminal/retain` 的持窗代次以此为终态判据（上游 retention.ts:45-61 的
+        `lifetime` 闩：身份关闭即结束本代次，进程退出本身不结束）。
+        """
+        return self._closing
+
     def _attach(self, attachment_id: str, signal) -> tuple[dict, TerminalFollower]:
         if signal is not None:
             signal.throw_if_aborted()

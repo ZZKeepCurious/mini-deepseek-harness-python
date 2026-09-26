@@ -12,6 +12,8 @@ import unittest
 from miniharness.core.scope import Context
 from miniharness.core.session import create_message, text_block
 from miniharness.llm.fake import FakeLlmAdapter
+from miniharness.seams.sandbox_policy import SandboxPolicyService
+from miniharness.terminal_controller.index import install_terminal_controller
 from miniharness.web.api import WebApi
 from miniharness.web.streams import (
     GatewayStreams,
@@ -19,6 +21,8 @@ from miniharness.web.streams import (
     StreamInvocation,
 )
 from miniharness.web.uplink import UplinkInbox
+
+from tests.test_terminal_controller_terminal import FakeBrowserHandle
 
 
 def _zero_projection():
@@ -239,6 +243,125 @@ class TestControl(GatewayStreamsTest):
         self.assertEqual(frame["type"], "projection")
         self.assertEqual(frame["sessionId"], sid)
         self.assertEqual(frame["key"], "sessionStats")
+
+
+class TestTerminalStreams(GatewayStreamsTest):
+    """`terminal/retain` + `terminal/follow` 的 wire 帧契约。
+
+    对齐上游 `packages/api/terminal-controller`：`retain`（index.ts:191-205 →
+    retention.ts `retain`）一帧 `retained` 后保持到取消或身份关闭；`follow`
+    （index.ts:206-217 → types.ts `TerminalFrame`）一帧 `snapshot` 后跟有序
+    `output`/`state`。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.handles = []
+        SandboxPolicyService(self.ctx, {"mode": "danger-full-access"})
+        self.shell = {"path": "/bin/bash", "name": "bash", "args": ["-i"]}
+        self.controller = install_terminal_controller(
+            self.ctx, {"maxCols": 200, "maxRows": 100, "maxInputBytes": 1000,
+                       "scrollback": 100, "disposeGraceMs": 100},
+            spawn_terminal=self._spawn,
+            resolve_shell_fn=lambda configured, signal=None: self.shell)
+
+    def _spawn(self, spec):
+        handle = FakeBrowserHandle()
+        self.handles.append(handle)
+        return handle
+
+    def _terminal(self, terminal_id="terminal-1", session_id=None):
+        session_id = session_id or self._create(session_id="session-term")
+        agent = self.api.resolve_terminal_agent(session_id)
+        self.controller.create(agent, {"id": terminal_id, "cols": 80, "rows": 24})
+        return agent, session_id
+
+    def test_retain_acknowledges_then_holds_until_the_identity_closes(self):
+        async def go():
+            agent, session_id = self._terminal()
+            gen = self.gateway.open_stream("terminal/retain", {"args": {
+                "sessionId": session_id, "id": "terminal-1"}})
+            ack = await gen.__anext__()
+            pending = asyncio.ensure_future(gen.__anext__())
+            await asyncio.sleep(0.05)
+            held = not pending.done()
+            self.controller.close(agent, "terminal-1")
+            with self.assertRaises(StopAsyncIteration):
+                await asyncio.wait_for(pending, 5)
+            return ack, held
+
+        ack, held = _run(go())
+        self.assertEqual(ack, {"type": "retained"})
+        self.assertTrue(held)
+
+    def test_retain_ends_on_cancel_without_closing_the_terminal(self):
+        async def go():
+            agent, session_id = self._terminal()
+            gen = self.gateway.open_stream("terminal/retain", {"args": {
+                "sessionId": session_id, "id": "terminal-1"}})
+            await gen.__anext__()
+            await gen.aclose()
+            return self.controller.list(session_id), self.handles[0].terminate_calls
+
+        terminals, terminate_calls = _run(go())
+        self.assertEqual([t["id"] for t in terminals], ["terminal-1"])
+        self.assertEqual(terminate_calls, 0)
+
+    def test_retain_rejects_unknown_and_closed_identities(self):
+        async def go(session_id):
+            gen = self.gateway.open_stream("terminal/retain", {"args": {
+                "sessionId": session_id, "id": "missing"}})
+            with self.assertRaises(RemoteStreamError) as cm:
+                await gen.__anext__()
+            return cm.exception.code
+
+        agent, session_id = self._terminal()
+        self.assertEqual(_run(go(session_id)), "terminal/unavailable")
+        self.controller.close(agent, "terminal-1")
+        self.assertEqual(_run(go(session_id)), "terminal/unavailable")
+
+    def test_follow_streams_snapshot_then_ordered_frames(self):
+        async def go():
+            agent, session_id = self._terminal()
+            gen = self.gateway.open_stream("terminal/follow", {"args": {
+                "agentId": session_id, "id": "terminal-1", "attachmentId": "w1"}})
+            snapshot = await gen.__anext__()
+            self.assertEqual(snapshot["type"], "snapshot")
+            self.assertEqual(snapshot["sequence"], 0)
+            self.assertIn("screen", snapshot)
+            self.assertEqual(snapshot["info"]["controllerId"], "w1")
+            pending = asyncio.ensure_future(gen.__anext__())
+            await asyncio.sleep(0)
+            self.handles[0].output.emit_data(b"hi\r\n")
+            frame = await asyncio.wait_for(pending, 5)
+            self.controller.close(agent, "terminal-1")
+            # stream.ts:34-38 finish()：终态 state 帧先投完，流才结束
+            final = await asyncio.wait_for(gen.__anext__(), 5)
+            with self.assertRaises(StopAsyncIteration):
+                await asyncio.wait_for(gen.__anext__(), 5)
+            return snapshot, frame, final
+
+        snapshot, frame, final = _run(go())
+        self.assertEqual(frame, {"type": "output", "sequence": 1, "data": "hi\r\n"})
+        self.assertEqual(snapshot["info"]["state"], "running")
+        self.assertEqual(final["type"], "state")
+        self.assertEqual(final["info"]["state"], "exited")
+        self.assertEqual(final["info"]["exitCode"], 0)
+
+    def test_unmounted_terminal_namespace_rejects_honestly(self):
+        async def go():
+            bare = Context(name="bare-terminal")
+            try:
+                api = WebApi(bare, _fake())
+                gen = api.gateway.open_stream("terminal/retain", {"args": {
+                    "sessionId": "s1", "id": "terminal-1"}})
+                with self.assertRaises(RemoteStreamError) as cm:
+                    await gen.__anext__()
+            finally:
+                bare.dispose()
+            return cm.exception.code
+
+        self.assertEqual(_run(go()), "gateway/invocation-unavailable")
 
 
 class TestDispatchErrorHandling(GatewayStreamsTest):

@@ -196,11 +196,12 @@ alpha.1 把通信收拢为**单一两信封协议**（同 `packages/client/conne
 - **`web/streams.py`（`GatewayStreams`）**：`open_stream(endpoint, payload, uplink=..., signal=...)` 按 endpoint 分发，并**负责释放上行**——`$events` 这类网关自有流 open 即释放（其 `item` 帧被丢弃而不缓冲），其余流在整个流结束（含失败/取消/断连）时释放。每个流方法收到一个 `StreamInvocation`（同 `ctx.invocation`）：`uplink()` 取本调用的上行项迭代器（一次），`close()` 随下行结束释放；取消句柄在 `invocation.signal`。声明的 codec 走 `GatewayStreams.uplink_codecs()`（出厂空表——rc.1 全部 Remote 方法 `In` 皆为 `never`）：
   - `$events`：open 即 `ready`，随后事件帧转发。
   - `session/follow`：首帧 snapshot `{header, cursor, records, hasMore, projections}`，之后逐 event 帧（snapshot 后重投 cursor+1..end，同 `history.ts:92-149`）。lazy async 生成器错误时机——体部 `RemoteStreamError`（session/not-found/gateway/arguments-invalid）在首个 `await gen.__anext__()` 处抛、非调用时，测试须迭代驱动。
-  - `session/control`：首帧 baseline `{queues, jobs, projections}`，之后 queue/jobs/projection 替换帧（同 `control.ts:67-124`）。
-  - `terminal/follow`：先一个完整有界屏幕（baseline），随后有序 output/state 帧（`terminalController.follow`）；附加即独占输入，分离不杀进程；终态 namespace 未挂 → `gateway/invocation-unavailable`。
-  - `workspace/follow`：先一条完整 baseline，随后有序 upsert/remove/order/archived 帧（`workspaceController.follow`，重连重发 baseline）。
+  - `session/control`：首帧 baseline `{projections}`（rc.1 已去 queues/jobs），之后 projection 替换帧（同 `control.ts`）。
+  - `terminal/retain`：一帧 `{type:'retained'}` 后无帧保持到取消或该身份被关闭（不激活 Agent；mini 无空闲回收调度器，持有不改变清理时机）。逐帧契约见 `docs/interface-wire.md` §4.5。
+  - `terminal/follow`：首帧 `snapshot`（整屏文本 + `info`），随后有序 `output`/`state` 帧；进程终态 `state` 帧投完后流才 `end`；超 `maxBufferedBytes` 的慢消费者以 `gateway/internal` 中止，重连从新 `snapshot` 恢复（逐帧契约见 `docs/interface-wire.md` §4.5）。
+  - `workspace/follow`：首帧完整 baseline（`items`/`archivedSessionIds`/`pinnedSessionIds`），随后有序 upsert/remove/order/archived/pinned 增量（重连重发 baseline；逐帧契约见 `docs/interface-wire.md` §4.6）。
   - `workspaceFiles/changes`：见 `docs/interface-wire.md` §4（ready + change 帧）。
-  - 未知 endpoint → 抛 `RemoteStreamError`。
+  - 未知 endpoint → 抛 `RemoteStreamError`（`gateway/invocation-unavailable`）。
 
 **session/queue 快照**：`agent/inbox/spliced` 广播点观察到的是 **pre-splice** inbox（`Inbox._mutate` 先落日志后改内存、emit 同步），快照把 splice 的 `start/removedCount/inserted` **重投影**到 pre-splice 列表上（同 `packages/api/session-controller/src/control.ts` queueItems）；placement 三态：next-turn→`queued`、next-step 且 `source.kind=='user'`→`steering`、其余→`context`。
 

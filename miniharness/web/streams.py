@@ -1,4 +1,4 @@
-"""web 远程方法面（GatewayStreams）：`$events` 装配 + session/follow/control 流。
+"""web 远程方法面（GatewayStreams）：`$events` 装配 + session/terminal/workspace 流。
 
 对齐上游 `packages/api/gateway/src/` + `packages/api/session-controller/src/`：
 本类把 session-controller 进程侧能力折叠成一个可被 `web/mux.py` 按 endpoint
@@ -8,6 +8,11 @@
     帧（header/cursor/records/hasMore/projections）后逐条 `event` 帧。
   * `session/control` —— 宿主级 live control：首个 `baseline` 帧（projections）
     后按变更给 `projection` 替换帧。
+  * `terminal/retain` —— 窗口持有流：一帧 `retained` 后保持到取消或身份关闭。
+  * `terminal/follow` —— 终端恢复流：一个 `snapshot` 帧后跟有序 `output`/`state`。
+  * `workspace/follow` —— 工作区投影流：一个 `baseline` 帧后跟有序
+    `upsert`/`remove`/`order`/`archived`/`pinned` 增量。
+  * `workspaceFiles/changes` —— 文件观察流：`{kind:'ready'}` 后跟 `{kind:'change'}`。
   * `$events`         —— 远程事件流（`web/events.py` RemoteEventRegistry），承载
     api-session/* 转发源 + 审批瀑布 + 用户提问瀑布（`web/approvals.py` /
     `web/questions.py` bridge）。
@@ -28,8 +33,10 @@ turnWindow 截断，对齐 history.follow）；`_attach` 冷会话自动 resume 
 同款，重连健壮性由「重开全量 + 客户端按 seq 去重」（webui TrajectoryBuffer）
 保证，无游标也无需再造。control baseline 对齐上游 control.ts（全部 live 会话
 每会话一条 projections 块，空也放；替换帧只来自 `sessionProjections.onChanged`，
-queues/jobs 已从 rc.1 control wire 移除）。心跳 Ping 由 launcher 的 transport
-级 ping 闭合（`web/launcher.py` uvicorn_options，不在此层）。
+queues/jobs 已从 rc.1 control wire 移除）。terminal/workspace 三条流把控制器进程侧
+对象经 `TERMINAL_FOLLOW_POLL` 短轮询桥接成 async 生成器（`TerminalFollow`/
+`TerminalFollower`/`WorkspaceFollow` 的非阻塞 pop），帧形状与顺序同上游。心跳 Ping 由
+launcher 的 transport 级 ping 闭合（`web/launcher.py` uvicorn_options，不在此层）。
 """
 from __future__ import annotations
 
@@ -162,6 +169,7 @@ class GatewayStreams:
             REMOTE_EVENT_STREAM_ENDPOINT: "$events",
             "session/follow": "follow",
             "session/control": "control",
+            "terminal/retain": "terminal_retain",
             "terminal/follow": "terminal_follow",
             "workspace/follow": "workspace_follow",
             "workspaceFiles/changes": "workspace_changes",
@@ -213,6 +221,9 @@ class GatewayStreams:
             endpoint, uplink, signal, self._uplink_codecs.get(endpoint))
         if kind == "follow":
             return _with_uplink(self._follow(payload["args"], invocation), invocation)
+        if kind == "terminal_retain":
+            return _with_uplink(
+                self._terminal_retain(payload["args"], invocation), invocation)
         if kind == "terminal_follow":
             return _with_uplink(
                 self._terminal_follow(payload["args"], invocation), invocation)
@@ -277,6 +288,34 @@ class GatewayStreams:
     def _record(event: dict) -> dict:
         """SessionEventEntry 包装（上游 history.ts entryFor：`{type:'event', event}`）。"""
         return {"type": "event", "event": _as_plain(event)}
+
+    # ---------- terminal/retain（窗口持有流） ----------
+
+    async def _terminal_retain(self, args: dict, invocation: StreamInvocation):
+        """`terminal/retain`：一条物理 Remote 流为一个终端身份持窗（不激活 Agent）。
+
+        对齐上游 Remote stream `retain(sessionId, id)`（index.ts:191-205 → retention.ts
+        `retain`）：先给一帧 `{type:'retained'}` 确认，随后保持到本流被取消或该身份
+        被关闭（`terminal/close` / owner 拆解）——进程退出本身不结束持窗。
+        载体简化（已登记）：上游 holders 集合只用于抑制「无人值守空闲回收」调度，
+        mini 无该调度器，故持有不改变清理时机。
+        """
+        controller = self.api.ctx.get("terminalController")
+        if controller is None:
+            raise RemoteStreamError(
+                "gateway/invocation-unavailable",
+                "typert gateway: terminal/retain: terminal namespace is not mounted")
+        try:
+            terminal = controller.retain(args.get("sessionId"), args.get("id"))
+        except Exception as error:  # noqa: BLE001 - 折流 error 帧（不关 WS）
+            raise RemoteStreamError(getattr(error, "code", None) or "gateway/internal",
+                                    str(error)) from error
+        signal = invocation.signal
+        yield {"type": "retained"}
+        while not terminal.closed:
+            if signal is not None and getattr(signal, "cancelled", lambda: False)():
+                return
+            await asyncio.sleep(TERMINAL_FOLLOW_POLL)
 
     # ---------- terminal/follow（浏览器终端恢复流） ----------
 
