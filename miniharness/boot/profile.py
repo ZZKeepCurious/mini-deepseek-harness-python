@@ -179,15 +179,16 @@ def _read_manifest(bin_name: str, dir_path: str) -> dict:
     return load_document(manifest_path, bin_name, "profile manifest")
 
 
-def compose_entries(layers: list[list[dict]]) -> list[dict]:
-    """把补丁层组合成空根上的有效条目表（上游 composeEntries）。
+def compose_entries(layers: list[list[dict]], base: list[dict] | None = None) -> list[dict]:
+    """把补丁层组合成条目表（上游 composeEntries）。
 
-    复用 `loader/patch.py` 的 apply_entry_patches（空根单次应用，同上游
-    applyEntryPatches([], structuredClone(layers.flat()))）。
+    复用 `loader/patch.py` 的 apply_entry_patches。base 缺省为空根（对齐上游
+    applyEntryPatches([], layers.flat())）；传入 base 时在其上逐层应用
+    （config-editor 的 inherited 计算以 include 基础条目为基底）。
     """
     from ..loader.patch import apply_entry_patches
     flat = [dict(patch) for layer in layers for patch in layer]
-    return apply_entry_patches([], flat)
+    return apply_entry_patches(list(base) if base is not None else [], flat)
 
 
 def read_profile_patches(

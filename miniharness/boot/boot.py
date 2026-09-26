@@ -309,7 +309,7 @@ def reconcile_profile_patches(
     ]
     include_config = dict(entry.options.get("config") or {})
     include_config.pop("patches", None)
-    include_config["patches"] = _overlay_to_entry_patches(patches)
+    include_config["patches"] = [dict(p) for p in patches]
     entry.update({"config": include_config})
     _settle_fibers([row["fiber"] for row in previous_fibers])
     loader.await_all()
@@ -391,7 +391,8 @@ def watch_user_patches(
     def refresh() -> None:
         user_patches = load_optional_patches(filename, bin_name)
         composed = compose(user_patches) if compose is not None else user_patches
-        reconcile_profile_patches(ctx, composed, bin_name=bin_name)
+        reconcile_profile_patches(ctx, _overlay_to_entry_patches(composed),
+                                  bin_name=bin_name)
 
     try:
         return hmr.register_config(filename, refresh)

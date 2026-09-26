@@ -422,7 +422,7 @@ class TestReconcileProfilePatches(unittest.TestCase):
         reloaded = []
         self.ctx.on("app-boot/config-reload", lambda *args: reloaded.append(True))
         result = self._reload([
-            {"replace": {"id": "greeter", "config": {"greeting": "yo"}}}])
+            {"id": "greeter", "config": {"greeting": "yo"}}])
         self.assertEqual(result, [])
         self.assertTrue(reloaded)
         self.assertEqual(self.ctx.get("greeter")("x"), "yo, x!")
