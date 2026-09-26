@@ -92,7 +92,7 @@ def _check(value: Any, schema: dict, path: str, errors: list[str]) -> None:
 
 # ---------- 领域对象 ----------
 
-@dataclass
+@dataclass(eq=False)
 class ToolExec:
     """执行上下文：signal 是唯一可替换的字段（用于超时/取消）。
 

@@ -203,6 +203,29 @@ class SdkRuntime:
         self.provider = "fake"
         self.model = "fake-model"
 
+    @staticmethod
+    def _install_office_extras(ctx: Context, reg: Any) -> None:
+        """sdk-app 门控的 office 技能 + load_workspace_dependencies 装配。
+
+        对齐上游 sdk-app/cordis.patch.yml:29-41：`DSH_PRIMARY_RUNTIME` /
+        `DSH_BUNDLED_PRIMARY_RUNTIME` 在场才挂（工具回落运行中 Python 解释器）。
+        """
+        runtime = os.environ.get("DSH_PRIMARY_RUNTIME") \
+            or os.environ.get("DSH_BUNDLED_PRIMARY_RUNTIME")
+        if not runtime:
+            return
+        from ..skills.office import install_office_skills
+        from ..skills.workspace_dependencies import register_workspace_dependencies_tool
+        install_office_skills(ctx)
+        source = os.path.abspath(runtime)
+        root = os.environ.get("DSH_PRIMARY_RUNTIME_ROOT")
+        try:
+            register_workspace_dependencies_tool(
+                reg, source=source,
+                root=os.path.abspath(root) if root else None)
+        except Exception:  # noqa: BLE001 - 运行时清单坏掉不毒化 SDK 会话
+            register_workspace_dependencies_tool(reg)
+
     def handle(self, method: str, params: dict) -> Any:
         if method == "initialize":
             # cwd resolve 成绝对路径（上游 server.ts:116 resolve(params.cwd)）
@@ -228,6 +251,11 @@ class SdkRuntime:
                 reg = ToolRegistry(Context(name="sdk"))
                 register_job_tools(reg, ctx.get("jobs"))
                 register_skill_tools(reg, ctx.get("skills"))
+                # P2-25（对齐上游 sdk-app 门控装配）：DSH_PRIMARY_RUNTIME /
+                # DSH_BUNDLED_PRIMARY_RUNTIME 在场才挂 office 技能与
+                # load_workspace_dependencies（上游 sdk-app/cordis.patch.yml:29-41
+                # 同款 disabled 门控）。缺省无捆绑运行时 → 工具回落运行中 Python。
+                self._install_office_extras(ctx, reg)
                 loop = AgentLoop(Session(session_id), self._adapter, reg, ctx)
                 loop.publish()
                 self._sessions[session_id] = loop

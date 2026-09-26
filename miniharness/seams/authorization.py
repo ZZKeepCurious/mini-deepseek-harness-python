@@ -56,6 +56,7 @@ from ..core.scope import Context, Service
 
 __all__ = [
     "ALREADY_IN_FLIGHT",
+    "CANCELLED",
     "DECLINED",
     "DUPLICATE_FLOW",
     "NO_FLOW",
@@ -75,6 +76,7 @@ UNKNOWN_METHOD = "UNKNOWN_METHOD"
 ALREADY_IN_FLIGHT = "ALREADY_IN_FLIGHT"
 NOT_COMMITTED = "NOT_COMMITTED"
 DECLINED = "DECLINED"
+CANCELLED = "CANCELLED"
 
 
 class AuthorizationError(Exception):
@@ -107,19 +109,23 @@ class AuthorizationSession:
     """运行中 flow 与人类对话的窗口：全部成员限定一次 attempt。
 
     对齐上游 AuthorizationSession：method 是调用方拣选的方法 id，signal 是
-    撤销信号（调用方撤回或 cancel(key)），notify 只报告进度（fire-and-
-    forget——surface 渲染不了通知不许拖停 flow），prompt 等待人类回答（拒绝
-    → AuthorizationDeclinedError）。
+    撤销信号（调用方撤回或 cancel(key)），commit 把一条凭据记录写进 credentials
+    服务（signal.throwIfAborted + attempt 活跃检查 + committing 置位——
+    cancel 在提交中不取消，等完成），notify 只报告进度（fire-and-forget——
+    surface 渲染不了通知不许拖停 flow），prompt 等待人类回答（拒绝 →
+    AuthorizationDeclinedError）。
     """
 
-    __slots__ = ("method", "signal", "notify", "prompt")
+    __slots__ = ("method", "signal", "notify", "prompt", "commit")
 
     def __init__(self, method: str, signal: AbortSignal,
-                 notify: Callable[[dict], None], prompt: Callable[[dict], str]):
+                 notify: Callable[[dict], None], prompt: Callable[[dict], str],
+                 commit: Callable[[dict], None]):
         self.method = method
         self.signal = signal
         self.notify = notify
         self.prompt = prompt
+        self.commit = commit
 
 
 class AuthorizationService(Service):
@@ -184,9 +190,14 @@ class AuthorizationService(Service):
         }
 
     def cancel(self, key: str) -> None:
-        """中止该 key 的 in-flight attempt（无 attempt → no-op）。"""
+        """中止该 key 的 in-flight attempt（无 attempt → no-op）。
+
+        对齐上游 cancel（index.ts:263）：attempt 进入 `committing`（提交中）
+        后不取消——提交中的凭据写等完成（types.ts:96-100 "Once admitted,
+        cancellation waits for completion"）。
+        """
         running = self._running.get(key)
-        if running is not None:
+        if running is not None and not running.get("committing"):
             running["controller"].abort()
 
     # ---------- begin ----------
@@ -231,13 +242,35 @@ class AuthorizationService(Service):
                  interaction: dict | None) -> dict:
         """跑 flow，并把它钉在 commit 契约的这半边。"""
         observed = {"declined": False, "committed": False}
+        credentials = self.ctx.get("credentials")
 
         def on_record_updated(payload: Any) -> None:
-            # 事件 payload = 被写入的 CredentialKey；命中本 flow 的 key 即记账。
+            # 兼容直接经 credentials 提交的 flow（既有契约）：命中本 flow 的
+            # key 即记账；`session.commit` 路径经 commit() 自身置位。
             if payload == flow["key"]:
                 observed["committed"] = True
 
         watcher = self.ctx.on("credentials/record-updated", on_record_updated)
+
+        def commit(record: dict) -> None:
+            # 对齐上游 commit（index.ts:400-408）：signal.throwIfAborted →
+            # attempt 活跃检查 → committing 置位（cancel 等待完成）→
+            # modifyRecord 写记录。
+            if signal.aborted:
+                raise AuthorizationError(
+                    "authorization attempt is no longer active", CANCELLED)
+            running = self._running.get(flow["key"])
+            if running is None or running["controller"] is not signal:
+                raise AuthorizationError(
+                    "authorization attempt is no longer active", CANCELLED)
+            running["committing"] = True
+            if credentials is None:
+                raise AuthorizationError(
+                    f'authorization flow for "{flow["key"]}" requires the credentials service',
+                    NOT_COMMITTED)
+            credentials.modify_record(flow["key"], lambda _current: dict(record))
+            observed["committed"] = True
+
         runner_error: BaseException | None = None
         try:
             session = AuthorizationSession(
@@ -245,6 +278,7 @@ class AuthorizationService(Service):
                 signal=signal,
                 notify=lambda notice: self._safe_notify(interaction, notice),
                 prompt=lambda prompt: self._safe_prompt(interaction, prompt, observed),
+                commit=commit,
             )
             try:
                 flow["run"](session)
@@ -265,8 +299,7 @@ class AuthorizationService(Service):
             raise AuthorizationError(
                 f'authorization flow for "{flow["key"]}" resolved without committing a '
                 "credential record in this attempt", NOT_COMMITTED)
-        credentials = self.ctx.get("credentials")
-        stored = credentials.describe_record(flow["key"])
+        stored = credentials.describe_record(flow["key"]) if credentials is not None else {}
         if not stored.get("configured"):
             raise AuthorizationError(
                 f'authorization flow for "{flow["key"]}" deleted its credential record '

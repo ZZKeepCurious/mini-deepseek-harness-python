@@ -327,6 +327,10 @@ def _audit(session, type_: str, data: dict) -> None:
 
 # ---------- bridge ----------
 
+#: 钩子注入的 user 消息 source（对齐上游 hooks-claude-code CONTEXT_SOURCE）。
+_HOOK_CONTEXT_SOURCE = {"kind": "hooks-claude-code"}
+
+
 class ClaudeCodeBridge:
     """CC hooks.json → 拦截决策（dialect 'claude-code'）。
 
@@ -364,24 +368,55 @@ class ClaudeCodeBridge:
 
     def post_tool(self, tool_name: str, result: Any = None,
                   session=None, run_fn: Callable | None = None) -> dict | None:
-        """PostToolUse → post-execute 决策：deny → {'kind':'block', feedback}。"""
+        """PostToolUse → post-execute 决策：deny → {'kind':'block', feedback}。
+
+        对齐上游 index.ts:196-201：additionalContext 合并非空时，铸一条
+        `hooks-claude-code` source 的 user 消息并 prepend 进 additionalContexts
+        （上游 `context` 同款，index.ts:258/265/269）。
+        """
         merged = self._run_point("PostToolUse", tool_name,
                                  {"toolName": tool_name, "result": result},
                                  session, run_fn)
-        if merged["decision"] == "deny":
-            return {"kind": "block",
-                    "feedback": merged.get("reason") or "blocked by PostToolUse hook"}
+        decision = merged["decision"]
+        additional = merged.get("additionalContext") or []
+        context = None
+        if additional:
+            from ..core.session import create_message, text_block
+            context = create_message(
+                "user",
+                [text_block(text) for text in additional],
+                dict(_HOOK_CONTEXT_SOURCE),
+            )
+        if decision == "deny":
+            out: dict = {"kind": "block",
+                         "feedback": merged.get("reason") or "blocked by PostToolUse hook"}
+            if context is not None:
+                out["additionalContexts"] = [context]
+            return out
+        if context is not None:
+            return {"kind": "enter", "additionalContexts": [context]}
         return None
 
     def stop(self, session=None, run_fn: Callable | None = None) -> dict | None:
         """Stop → 阻塞钩子强制继续（continue:true + reason）。
 
-        对齐上游 index.ts:274：reason 只用合并结果的 reason（不走 stopReason）。
+        对齐上游 index.ts:274,281：reason 只用合并结果的 reason；阻塞时把
+        合并的 additionalContext 以 `hooks-claude-code` source steer 回 agent
+        （上游 agent.steer(createUserMessage({source: CONTEXT_SOURCE}))）。
         """
         merged = self._run_point("Stop", "", {}, session, run_fn)
         if merged["decision"] == "deny":
-            return {"continue": True,
-                    "reason": merged.get("reason") or "continue: blocked by Stop hook"}
+            result: dict = {"continue": True,
+                            "reason": merged.get("reason") or "continue: blocked by Stop hook"}
+            additional = merged.get("additionalContext") or []
+            if additional:
+                from ..core.session import create_message, text_block
+                result["message"] = create_message(
+                    "user",
+                    [text_block(text) for text in additional],
+                    dict(_HOOK_CONTEXT_SOURCE),
+                )
+            return result
         return None
 
     # ---------- 内部 ----------

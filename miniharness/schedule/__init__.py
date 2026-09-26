@@ -206,5 +206,9 @@ def install_schedule(ctx: Any) -> Callable[[], Any]:
         return teardown
 
     disposer = ctx.effect(build_lifecycle, "schedule.lifecycle()")
+    # 归档准入（对齐上游 schedule/src/index.ts:82-112）：activity 询问 +
+    # session-stop 删除 active reminders。与 install_schedule 同 fiber。
+    from .archive_admission import install_schedule_archive_admission
+    install_schedule_archive_admission(ctx)
     setattr(ctx, _INSTALLED_ATTR, disposer)
     return disposer

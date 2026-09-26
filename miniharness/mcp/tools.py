@@ -246,7 +246,13 @@ def create_mcp_tool_definition(
             projections[exec_] = {"value": value, "fallback": fallback, "content": projected}
         return value
 
-    def finalize_content(exec_: ToolExec, box: dict) -> Any:
+    def project_content(exec_: ToolExec, box: dict) -> Any:
+        """政策前内容安装（对齐上游 mcp-client projectContent，tools.ts:237-245）。
+
+        三条件一致才返回图片投影：isError→undefined、value 深等、content 与
+        fallback 深等（collapsed/被政策替换/不一致跳过）。post-execute 政策
+        仍可替换或阻止该内容。
+        """
         projection = projections.get(exec_)
         if projection is None:
             return None
@@ -266,7 +272,7 @@ def create_mcp_tool_definition(
         parameters=options.inputSchema,
         output=output_schema,
         render=render,
-        finalize_content=finalize_content,
+        project_content=project_content,
     )
 
 

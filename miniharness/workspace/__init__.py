@@ -48,7 +48,7 @@ __all__ = [
 #: 从其 Host/Client 双面共享模块合并自己的键。mini 以 `dict[str, object]` 承载
 #: 可合并映射（typert RPC 类型图未承载，见 verified-diffs §2.63/§3.40），三键
 #: 在此显式登记。
-SessionActivityKindMap = {"turn": object, "job": object, "subagent": object}
+SessionActivityKindMap = {"turn": object, "job": object, "subagent": object, "schedule": object}
 
 #: 一个活动家族键（对齐上游 `SessionActivityKind`）。
 SessionActivityKind = str
