@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..core.session import Session
+from ..core.session import Session, create_message
 from ..core.tools import Tool, ToolExec, ToolRegistry, ToolResult, run_pipeline
 
 __all__ = [
@@ -151,6 +151,13 @@ def create_run_code_tool(registry: ToolRegistry, *, runtime, ctx=None,
                     raise RuntimeError(f"run_code: tool {name!r} is not available to this agent")
                 sub_exec = ToolExec(agent=agent, parent=exec_, name=name, arguments=sub_args)
                 result = run_pipeline(ctx, tool, dict(sub_args), sub_exec)
+                # 成功的含图子调用结果 defer 为 ptc-mode user 消息（上游
+                # ptc.ts:639-644：`!result.isError && content.some(image)` →
+                # deferContext({content, source:{kind:'ptc-mode'}})）。
+                if not result.is_error and isinstance(result.content, list) \
+                        and any(b.get("type") == "image" for b in result.content):
+                    exec_.additional_contexts.append(
+                        create_message("user", list(result.content), {"kind": "ptc-mode"}))
                 # 嵌套派发的 post-execute additionalContexts（如 spill-policy 把被
                 # 省略整图的预览重注为 ptc-mode user 消息）只在成功结果上转发给外层
                 # run_code 调用（对齐上游 result.additionalContexts 语义）。

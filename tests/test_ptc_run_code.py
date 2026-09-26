@@ -158,5 +158,78 @@ class _FakeTsRuntime:
         return None
 
 
+class RunCodeImageDeferTest(unittest.TestCase):
+    """成功的含图子调用结果 defer 为 ptc-mode user 消息（上游 ptc.ts:639-644）。"""
+
+    def setUp(self):
+        self.session = Session("ptc-image")
+        self.ctx = Context(name="root")
+        self.registry = ToolRegistry(self.ctx)
+
+        def snap(args, exec_):
+            return ToolResult(ok=True, content=[
+                {"type": "text", "text": "shot"},
+                {"type": "image", "attachment": {"attachmentId": "abc"}},
+            ])
+
+        def text_only(args, exec_):
+            return ToolResult(ok=True, content=[{"type": "text", "text": "plain"}])
+
+        def snap_error(args, exec_):
+            return ToolResult(ok=False, is_error=True, error="snap failed", content=[
+                {"type": "text", "text": "boom"},
+            ])
+
+        self.registry.register(
+            Tool(name="snap", description="snap", parameters={}, execute=snap))
+        self.registry.register(
+            Tool(name="text_only", description="text_only",
+                 parameters={}, execute=text_only))
+        self.registry.register(
+            Tool(name="snap_error", description="snap_error",
+                 parameters={}, execute=snap_error))
+        self.runtime = PythonPtcRuntime()
+        self.tool = create_run_code_tool(self.registry, runtime=self.runtime,
+                                         ctx=self.ctx, session=self.session)
+
+    def _exec(self):
+        exec_ = ToolExec(agent=None, call_id="call-1", root_call_id="call-1")
+        exec_.name = RUN_CODE_NAME
+        exec_.signal = _Signal()
+        return exec_
+
+    def test_image_result_deferred_as_ptc_mode(self):
+        exec_ = self._exec()
+        self.tool.execute({
+            "code": "await tools.snap({})",
+            "description": "screenshot",
+        }, exec_)
+        contexts = exec_.additional_contexts
+        self.assertEqual(len(contexts), 1)
+        self.assertEqual(contexts[0]["role"], "user")
+        self.assertEqual(contexts[0]["source"], {"kind": "ptc-mode"})
+        self.assertEqual(contexts[0]["content"], [
+            {"type": "text", "text": "shot"},
+            {"type": "image", "attachment": {"attachmentId": "abc"}},
+        ])
+
+    def test_text_only_result_not_deferred(self):
+        exec_ = self._exec()
+        self.tool.execute({
+            "code": "await tools.text_only({})",
+            "description": "plain",
+        }, exec_)
+        self.assertEqual(exec_.additional_contexts, [])
+
+    def test_failed_image_result_not_deferred(self):
+        exec_ = self._exec()
+        with self.assertRaises(RunCodeFailedError):
+            self.tool.execute({
+                "code": "await tools.snap_error({})",
+                "description": "boom",
+            }, exec_)
+        self.assertEqual(exec_.additional_contexts, [])
+
+
 if __name__ == "__main__":
     unittest.main()

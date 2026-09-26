@@ -303,6 +303,18 @@ class AgentLoop:
         # P2-19：loop 侧 runtime-context 投影（上游 agent.ts 构造里
         # new RuntimeContextProjection(ctx, session)）——懒建于首次投影
         self._rt_projection: RuntimeContextProjection | None = None
+        # 注册 loop 拥有的会话投影单元（上游 agent-loop/index.ts:364-365
+        # 构造期注册 turnBoundary + inbox，注入 sessionProjections；mini 的
+        # 注册 effect 挂在本 loop 作用域，dispose() 随 scope 自动逆序回滚）。
+        # 未装 M7 注册表时跳过（裸单测/教学装配），不 fail loud。
+        self._projection_disposers: list = []
+        projections = self.ctx.get("sessionProjections")
+        if projections is not None:
+            from .projections import inbox_projection, turn_boundary_projection
+            self._projection_disposers = [
+                projections.register(turn_boundary_projection()),
+                projections.register(inbox_projection()),
+            ]
 
     @staticmethod
     def _validate_max_parallel_tool_calls(value: Any) -> int:
@@ -374,6 +386,12 @@ class AgentLoop:
         """
         self.cancel(cause="disposed")
         self.scope.dispose()
+        for disposer in reversed(self._projection_disposers):
+            try:
+                disposer()
+            except Exception:  # noqa: BLE001 - 注销尽力而为，不阻断拆解
+                pass
+        self._projection_disposers = []
         detach_agent, self._detach_agent = self._detach_agent, None
         if detach_agent is not None:
             detach_agent()
