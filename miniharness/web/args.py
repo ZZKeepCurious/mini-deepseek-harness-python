@@ -325,6 +325,12 @@ _SPECS: dict[str, dict[str, tuple[str, bool]]] = {
     },
     # permission-presets：catalog 无入参。
     "permissionPresets/catalog": {},
+    # account-controller：getState/getProfile/getBalance/signOut 无入参
+    # （startSignIn/cancelSignIn 依赖浏览器 PKCE 载体，未挂载时缺席）。
+    "account/getState": {},
+    "account/getProfile": {},
+    "account/getBalance": {},
+    "account/signOut": {},
 }
 
 

@@ -76,6 +76,7 @@ LAYER_UNITS = [
     ("workflow_ptc", 3),
     ("tool_workflow", 3),
     ("subprocess", 3),
+    ("deepseek_account", 3),
     ("core.agent_loop", 2),
     ("compaction", 2),
     ("ptc", 2),
@@ -253,6 +254,11 @@ class ImportDirectionTest(unittest.TestCase):
                     # §5 显式例外（单方向）：web profile 组装 api 残余三个控制器
                     # （上游 bundle/web compose api-{workspace-controller,workspace-files,
                     # settings-controller}）；运行面在各自控制器，不得反向 import cli
+                    continue
+                if src_unit == "cli" and dst_unit == "deepseek_account":
+                    # §5 显式例外（单方向）：web profile 组装 account 服务
+                    # （上游 web-app compose deepseek-account-platform）；
+                    # deepseek_account 不得反向 import cli
                     continue
                 if src_unit == "shell" and dst_unit == "seams":
                     # §5 显式例外（单方向）：bash-sandbox 是 ctx.sandbox 的消费者

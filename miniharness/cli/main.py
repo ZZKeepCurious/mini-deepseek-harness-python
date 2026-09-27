@@ -353,6 +353,11 @@ def _web_main(host: str | None = None, port: int | None = None) -> None:
         "maxOutputTokens": 64,
         "timeoutMs": 60000,
     })
+    # account-controller（P1-21 收口）：web-app 默认挂载 account namespace。
+    # 无浏览器 PKCE 载体 → 本地落空实现（恒 signed-out，getProfile/Balance →
+    # null；startSignIn 因无浏览器 fail loud）。
+    from ..deepseek_account import install_deepseek_account
+    install_deepseek_account(ctx)
     # userQuestions 装配（seam 由 web 组合挂；ask_user_question 工具对齐上游经
     # agent presets 挂载——mini 仅在 web 组合注册，headless/sessions 不挂）
     reg = default_tools(ctx)

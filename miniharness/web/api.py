@@ -401,6 +401,10 @@ class WebApi:
         "messageFeedback/put": "message_feedback_put",
         "messageFeedback/delete": "message_feedback_delete",
         "permissionPresets/catalog": "permission_presets_catalog",
+        "account/getState": "account_get_state",
+        "account/getProfile": "account_get_profile",
+        "account/getBalance": "account_get_balance",
+        "account/signOut": "account_sign_out",
     }
 
     def methods(self) -> frozenset[str]:
@@ -1647,6 +1651,29 @@ class WebApi:
     def permission_presets_catalog(self, payload: dict) -> dict:
         """`permissionPresets/catalog`：进程级可读目录。"""
         return self._remote_call(lambda: self._permission_presets().catalog())
+
+    def _deepseek_account(self):
+        service = self.ctx.get("deepseekAccount")
+        if service is None:
+            raise _Reject("gateway/invocation-unavailable",
+                          "account namespace is not mounted in this deployment", {})
+        return service
+
+    def account_get_state(self, payload: dict) -> dict:
+        """`account/getState`：安全账户投影（无凭据）。"""
+        return self._remote_call(lambda: self._deepseek_account().get_state())
+
+    def account_get_profile(self, payload: dict):
+        """`account/getProfile`：Platform 档案（未登录/无 grant → null）。"""
+        return self._remote_call(lambda: self._deepseek_account().get_profile())
+
+    def account_get_balance(self, payload: dict):
+        """`account/getBalance`：Platform 余额（未登录/无 grant → null）。"""
+        return self._remote_call(lambda: self._deepseek_account().get_balance())
+
+    def account_sign_out(self, payload: dict) -> dict:
+        """`account/signOut`：移除本地 grant 并在后台向 Platform 撤销。"""
+        return self._remote_call(lambda: self._deepseek_account().sign_out())
 
     # ---------- wire 辅助 ----------
 
