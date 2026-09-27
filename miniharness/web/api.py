@@ -396,6 +396,10 @@ class WebApi:
         "agentPresets/list": "agent_presets_list",
         "agentPresets/read": "agent_presets_read",
         "agentPresets/select": "agent_presets_select",
+        "sessionFeedback/record": "session_feedback_record",
+        "messageFeedback/list": "message_feedback_list",
+        "messageFeedback/put": "message_feedback_put",
+        "messageFeedback/delete": "message_feedback_delete",
     }
 
     def methods(self) -> frozenset[str]:
@@ -1589,6 +1593,48 @@ class WebApi:
     def control(self) -> _ControlSubscription:
         """session.control：投影基线 + projection 替换帧。"""
         return _ControlSubscription(self)
+
+    # ---------- feedback 域（command-feedback / message-feedback Remote） ----------
+
+    def _session_feedback(self):
+        service = self.ctx.get("sessionFeedback")
+        if service is None:
+            raise _Reject("gateway/invocation-unavailable",
+                          "sessionFeedback namespace is not mounted in this deployment", {})
+        return service
+
+    def _message_feedback(self):
+        service = self.ctx.get("messageFeedback")
+        if service is None:
+            raise _Reject("gateway/invocation-unavailable",
+                          "messageFeedback namespace is not mounted in this deployment", {})
+        return service
+
+    def session_feedback_record(self, payload: dict) -> dict:
+        """`sessionFeedback/record`：记录一条会话级反馈。"""
+        return self._remote_call(lambda: self._session_feedback().record({
+            "sessionId": payload.get("sessionId"),
+            "text": payload.get("text"),
+            "category": payload.get("category"),
+        }))
+
+    def message_feedback_list(self, payload: dict) -> dict:
+        return self._remote_call(lambda: self._message_feedback().list(
+            {"sessionId": payload.get("sessionId")}))
+
+    def message_feedback_put(self, payload: dict) -> dict:
+        return self._remote_call(lambda: self._message_feedback().put({
+            "sessionId": payload.get("sessionId"),
+            "item": payload.get("item"),
+            "ifVersion": payload.get("ifVersion"),
+        }))
+
+    def message_feedback_delete(self, payload: dict) -> dict:
+        return self._remote_call(lambda: self._message_feedback().delete({
+            "sessionId": payload.get("sessionId"),
+            "messageId": payload.get("messageId"),
+            "ifVersion": payload.get("ifVersion"),
+        }))
 
     # ---------- wire 辅助 ----------
 

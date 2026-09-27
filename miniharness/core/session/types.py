@@ -83,6 +83,9 @@ KNOWN_TYPES = frozenset({
     # surface：put = {sessionId, item:{messageId, rating, version, createdAt,
     # updatedAt, note?}}；delete = {sessionId, messageId}；mini 不产出，登记可读）
     "feedback/message-put", "feedback/message-delete",
+    # 会话级人工反馈（上游 feedback/command-feedback 包 SessionEventMap，
+    # log-only 非 surface：{text?, category?}；mini 不产出，登记可读）
+    "feedback/record",
     # Agent Teams 实验（上游 experimental/agent-team/src/journal.ts
     # SessionEventMap，四个事件 log-only 非 surface、version 2、存于
     # Team Lead 会话日志）：team/member 全量投标 {member}；
@@ -108,6 +111,25 @@ KNOWN_TYPES = frozenset({
     # {agentPreset}，log-only 非 surface，整值替换最后一条胜出——投影单元
     # agentPreset 的 fold 输入；init = header.agentPreset ?? null）
     "agent-preset/selected",
+    # 会话标题（上游 session/session-title/src/index.ts SessionEventMap，log-only
+    # 非 surface）：session/title {title, messageSeqs, source:{kind:'fallback'|'provider'|
+    # 'user', provider?, model?}}——标题状态是 durable 会话事件，整值替换最后一条胜出；
+    # session/title-llm-request 是 LLM 标题生成请求的审计（titleProvider/messageSeqs/
+    # route/system/messages/maxTokens）
+    "session/title", "session/title-llm-request",
+    # 权限预设选择（上游 interaction/permission-presets/src/index.ts
+    # SessionEventMap：{preset}，log-only 非 surface，整值替换最后一条胜出——permissions
+    # 投影的 fold 输入）
+    "permission/preset",
+    # 会话级人工反馈（上游 feedback/command-feedback/src/types.ts SessionEventMap：
+    # {text?, category?}，log-only 非 surface、独立 append-only 事实）
+    "feedback/record",
+    # 工作流编排记录（上游 workflow/tool-workflow/src/types.ts SessionEventMap，
+    # 四个事件 log-only 非 surface、version 1）：run-start {runId, name} /
+    # agent-start {runId, seq, label, childId, phase?} / agent-end {runId, seq, outcome} /
+    # run-end {runId, stopReason}
+    "tool-workflow/run-start", "tool-workflow/agent-start",
+    "tool-workflow/agent-end", "tool-workflow/run-end",
 })
 
 # message-投影事件类型（上游 known-event-types.ts MESSAGE_PROJECTION_EVENT_TYPES）：

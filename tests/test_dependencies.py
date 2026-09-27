@@ -101,6 +101,7 @@ LAYER_UNITS = [
     ("mcp", 3),
     ("web", 3),
     ("shell", 3),
+    ("feedback", 3),
 ]
 
 TEACHING_MODULES = {"miniharness.demo", "miniharness.example_plugins"}
@@ -227,6 +228,12 @@ class ImportDirectionTest(unittest.TestCase):
                     # dsh-user-questions、web-app 依赖 dsh-client-ui-user-questions，
                     # packages/bundle/{base,web-app}/package.json；同 cli→web 先例）；
                     # interaction 不得反向 import cli
+                    continue
+                if src_unit == "cli" and dst_unit == "feedback":
+                    # §5 显式例外（单方向）：web profile 组装 command-feedback /
+                    # message-feedback（上游 base/web-app bundle compose
+                    # dsh-command-feedback / dsh-message-feedback）；feedback 不得
+                    # 反向 import cli
                     continue
                 if src_unit == "cli" and dst_unit in (
                         "workspace_controller", "workspace_files", "settings_controller"):

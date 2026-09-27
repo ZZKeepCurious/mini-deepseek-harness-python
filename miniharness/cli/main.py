@@ -314,6 +314,12 @@ def _web_main(host: str | None = None, port: int | None = None) -> None:
     install_session_projections(ctx)
     install_usage_stats(ctx)
     install_turn_outline(ctx)
+    # feedback（M12）：/feedback 命令 + sessionFeedback/messageFeedback Remote。
+    # 上游 web-app 默认挂载 message-feedback（maxNoteBytes 8192），base 挂载
+    # command-feedback；无持久化服务时 message-feedback 只服务活会话。
+    from ..feedback import install_command_feedback, install_message_feedback
+    install_command_feedback(ctx)
+    install_message_feedback(ctx, {"maxNoteBytes": 8192})
     # userQuestions 装配（seam 由 web 组合挂；ask_user_question 工具对齐上游经
     # agent presets 挂载——mini 仅在 web 组合注册，headless/sessions 不挂）
     reg = default_tools(ctx)

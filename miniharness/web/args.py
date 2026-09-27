@@ -300,6 +300,29 @@ _SPECS: dict[str, dict[str, tuple[str, bool]]] = {
         "sessionId": (STR, True),
         "agentPreset": (STR, True),
     },
+    # feedback（command-feedback / message-feedback）：
+    # sessionFeedback/record 取 sessionId + 可选 text/category；
+    # messageFeedback/list 取 sessionId；put 取 sessionId + item{messageId,
+    # rating, note?, category?} + 可选 ifVersion；delete 取 sessionId + messageId
+    # + 可选 ifVersion。
+    "sessionFeedback/record": {
+        "sessionId": (STR, True),
+        "text": (STR, False),
+        "category": (STR, False),
+    },
+    "messageFeedback/list": {
+        "sessionId": (STR, True),
+    },
+    "messageFeedback/put": {
+        "sessionId": (STR, True),
+        "item": (OBJ, True),
+        "ifVersion": (STR, False),
+    },
+    "messageFeedback/delete": {
+        "sessionId": (STR, True),
+        "messageId": (STR, True),
+        "ifVersion": (STR, False),
+    },
 }
 
 

@@ -890,7 +890,9 @@ class TestDispatch(WebApiTest):
             "settings/replace", "settings/mutate", "settings/openSettingsDocument",
             "credentials/describe", "credentials/set", "credentials/unset",
             "sessionReferenceResolver/candidates", "job/kill",
-            "agentPresets/list", "agentPresets/read", "agentPresets/select"}))
+            "agentPresets/list", "agentPresets/read", "agentPresets/select",
+            "sessionFeedback/record",
+            "messageFeedback/list", "messageFeedback/put", "messageFeedback/delete"}))
 
     def test_bad_payload_shape(self):
         error = self._error(self.api.dispatch("session.list", "rid", "nope"))
