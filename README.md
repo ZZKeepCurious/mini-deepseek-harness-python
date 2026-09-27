@@ -61,6 +61,9 @@ See [ROADMAP.md](ROADMAP.md) for where this project is heading.
 | Session turn outline (`turnOutline` projection unit: whole-log turn rail from `turn/start` anchors + first human prompts + settled responses; preview budgets 50/120, strictly-increasing schema) | `packages/session/session-turn-outline` |
 | Session titles (`ctx.sessionTitle`: normalization + UTF-8-safe fallback derivation, `title`/`titleInput` projection units, user rename pin, explicit refresh unpin, provider registry; automatic first-prompt generation — fallback lands first, the routed main request then runs the provider; first-prompt LLM provider frames the title request with word/CJK budgets, byte/token limits) | `packages/session/session-title` + `session-title-first-prompt-llm` |
 | Session projection cache (`ctx.sessionProjectionCache`: write-behind checkpoint persistence to the `session_projcache` storage domain — turn/end/create/dispose mandatory + count/interval throttling; lifecycle + formatVersion identity matching, zero-I/O listing reads, cold-read seeding with fail-soft write-back) | `packages/session/session-projection-cache` |
+| Workflows (`ctx.workflowEngine` seam + Python workflow engine + `workflow` model tool: Python scripts orchestrate subagents at scale with six globals `agent`/`parallel`/`pipeline`/`phase`/`log`/`args`, FIFO concurrency slots, total-agent/items caps, schema-subset child option, durable `tool-workflow/run-start|agent-start|agent-end|run-end` records, foreground/background jobs; script language JS→Python is the registered carrier difference) | `packages/workflow/{workflow,workflow-ptc,tool-workflow}` |
+| Subprocess seam (`ctx.subprocess`: resolve_executable / terminal_environment / scrubbed_parent_env consolidated as the upstream SubprocessRuntime service-definition face over existing helpers) | `packages/subprocess/{subprocess,subprocess-local}` |
+| Account Remote (`account/getState`/`getProfile`/`getBalance`/`signOut` over `ctx.deepseekAccount`; signed-out default without a browser PKCE carrier — browser OAuth + Platform HTTP remain a browser-host carrier) | `packages/credentials/deepseek-account` + `packages/api/account-controller` |
 | Session query (`ctx.sessionQuery` + SQLite FTS5 index: cross-session / within-session full-text search, raw event windows, replacement/source traces, lineage; model tools `session_search`/`session_event_search`/`session_event_read`/`session_event_trace`/`session_trace`; log export via `web/downloads.py`) | `packages/session-query/{session-query,session-query-sqlite,tool-session-query}` |
 | Todo list (`to_todo_list` validation + `fold_todos` latest-write-wins fold + model tool `todo_write`; `todo/write` log-only event) | `packages/todo` |
 | Output spill (`ctx.spillStore` seam + per-session private-dir local store + `tools/post-execute` policy: token-budgeted text/image results spilled with whole-image head/tail retention, image-omission count, and retrieval hint; nested PTC omitted images re-injected as `ptc-mode` context) | `packages/spill/{spill,spill-local,spill-policy}` |
@@ -206,8 +209,9 @@ mini-deepseek-harness-python/
 │   ├── web/static/          # vanilla SPA teaching reference (old SSE wire; product frontend = ../webui)
 │   ├── web_tools/           # model-visible web tools (web + web-search-deepseek + web-fetch-http + tool-web)
 │   ├── preset/  extensions/  interaction/  feedback/  client/
-│   ├── tool_bash/  tool_pwsh/  # model-side bash / pwsh tools
+│   ├── tool_bash/  tool_pwsh/  tool_workflow/  # model-side bash / pwsh / workflow tools
 │   ├── session_projection/  session_turn_outline/  session_title/  session_projection_cache/  # session projection + title + cache
+│   ├── workflow/  workflow_ptc/  subprocess/  deepseek_account/  # workflow seam+engine, subprocess seam, account
 │   ├── demo.py              # end-to-end demo
 │   └── example_plugins.py   # boot demo plugins
 ├── tests/                   # acceptance tests (unittest)

@@ -57,13 +57,21 @@ web 半（传输层 + 浏览器前端）的 wire 面与上游一致：两信封 
 
 - **pwsh 变体（M16）**：`miniharness/shell/{pwsh_local,pwsh_sandbox}.py` + `miniharness/tool_pwsh/`（L3）——`PwshLocalExecutor`（`pwsh -NoLogo -NoProfile -NonInteractive -Command` + UTF-8 编码前导 + PATH/ProgramFiles 解析 + Windows PowerShell 5.1 兜底）、`SandboxPwshExecutor`（confine + 三路归因）、`tool_pwsh`（三态 + jobs 集成 + `kind:'pwsh'`）；`install_pwsh_executor`/`install_bash_executor` 幂等。**测试**：test_pwsh 16（本机无 pwsh，argv/渲染/沙箱装饰纯单元验收）。
 
+- **工作流（M13 Python 功能对标）**：`miniharness/workflow/`（L2 接缝：WorkflowEngine 服务定义 + WorkflowError 码 + validate_meta + 六事件）+ `miniharness/workflow_ptc/`（L3 引擎：`PtcWorkflowEngine` 经 `PythonPtcRuntime` 绑定面执行 Python 工作流脚本——`workflowHost` 绑定 begin/startChild/childResult/disposeChild/progress + 六脚本全局 + FIFO 并发槽 + caps + schema 子集 + 结果物化 + 取消）+ `miniharness/tool_workflow/`（L3 模型工具 + durable 记录 + 后台作业）。**载体差异**：脚本语言 JS→Python（同 run_code flavor）；子代理 structured 输出无载体（schema 子代理按上游「缺 structured = 失败 → null」语义）。**测试**：test_workflow 19 + test_tool_workflow 7。
+
+- **多 provider 协议适配器（M15 Python 功能对标）**：`miniharness/llm/pi_ai.py`——`PiAiAdapter(LlmAdapter)`：profile 解析/校验（api 闭集/baseURL/apiKeyEnv/模型容量）、按 provider+model 路由到 anthropic-messages / openai-completions / openai-responses 三协议（httpx 异步传输）、apiKeyEnv 凭据解析、模型能力/发现。**载体差异**：无 `ctx.llm` 注册表与 dormant→live 动态切换（mini 单适配器架构）；pi-ai SDK 目录数据与 OAuth 流不移植。**测试**：test_llm_pi_ai 22。
+
+- **subprocess 接缝服务（M17 功能对标）**：`miniharness/subprocess/`——`ctx.subprocess`（`resolve_executable`/`terminal_environment`/`scrubbed_parent_env` 收编既有实现，无复制）。**载体差异**：Windows Job/systemd scope/execve runner 平台专属 containment 无 Python 等价（Popen 近似）；spill 以内存缓冲承载。**测试**：test_subprocess 6。
+
+- **账户域（P1-21 收口）**：`miniharness/deepseek_account/`——`ctx.deepseekAccount` 服务定义 + `LocalAccountService`（恒 signed-out、getProfile/Balance → null、startSignIn 因无浏览器 fail loud）+ `account/*` Remote wire。**载体差异**：浏览器 PKCE + Platform HTTP 是浏览器宿主载体（触发条件：引入浏览器客户端时实现平台域）。**测试**：test_account_controller 8。
+
 ## 上游包观察清单（未复现，暂不纳入范围）
 
-以下上游 `packages/` 包尚未复现，未来想扩充复现范围可从中挑选；多数属于"能力扩展口 + 消费工具"的延伸，核心约定不依赖它们。已实现的家族中也有只做了一部分切片的（如 subprocess 仅环境清洗、client 仅 ui-trajectory、host 为 apiproxy 子集），权威归属以 docs/architecture.md 映射表为准。
+以下上游 `packages/` 包尚未复现，未来想扩充复现范围可从中挑选；多数属于"能力扩展口 + 消费工具"的延伸，核心约定不依赖它们。已实现的家族中也有只做了一部分切片的（如 client 仅 ui-trajectory、host 为 apiproxy 子集），权威归属以 docs/architecture.md 映射表为准。
 
 - **能力类**：`fs`、`e2b`、`lsp`、`code-runtime`、`spill`、`workspace`、`ssh`
-- **编排类**：`workflow`（JS 脚本 + Node TS PTC 运行时，架构不适用）、`schedule`、`todo`
-- **横切类**：`settings`、`session-query`、`feedback`、`guard`、`runtime-diagnostics`、`util`、`web`（`api` 组已全部复现；`context` 组六件已复现）、`llm-pi-ai`（外部 npm SDK，架构不适用）
+- **编排类**：`schedule`、`todo`（workflow 已复现）
+- **横切类**：`settings`、`session-query`、`feedback`、`guard`、`runtime-diagnostics`、`util`、`web`（`api` 组已全部复现；`context` 组六件已复现）
 - **平台类**：`typert`、`test-support`
 
 官方 Python SDK（`python/sdk` 的 stdio JSON-RPC 客户端 + `python/sdk-runtime` 运行时）协议面已实现（`protocol/sdk.py`），互操作测试以官方 SDK 为目标（`tests/test_upstream_sdk_interop.py`，缺 pydantic/上游源码自动 skip），不再列观察清单。
