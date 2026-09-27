@@ -40,16 +40,16 @@ __all__ = [
 
 def projection_values(session, service: "UsageStatsService | None" = None,
                       registry=None) -> dict:
-    """会话的投影视图 `{sessionStats, tokenUsage}`（wire values 块本体）。
+    """会话的投影视图（wire values 块本体）。
 
-    有 `ctx.sessionProjections` 且两个单元已注册 → 读注册表快照（M7 契约路径）；
-    否则有服务用服务的镜像状态（增量已折叠），再否现场从 session.events 全量折叠。
+    有 `ctx.sessionProjections` 且注册了 wire 单元 → 读注册表快照（M7 契约路径，
+    返回**全部**已注册带 view 的单元——上游 ProjectionBaseline.values 即注册表
+    snapshot 的 values，含 sessionStats/tokenUsage/title/turnOutline 等）；否则
+    有服务用服务的镜像状态（增量已折叠），再否现场从 session.events 全量折叠。
     """
     if registry is not None:
-        snapshot = registry.snapshot(session, ["sessionStats", "tokenUsage"])
-        values = snapshot["values"]
-        if "sessionStats" in values and "tokenUsage" in values:
-            return values
+        snapshot = registry.snapshot(session)
+        return snapshot["values"]
     if service is not None:
         return service._views(session)
     state = {"session_stats": None, "token_usage": None, "consumedEvents": 0}

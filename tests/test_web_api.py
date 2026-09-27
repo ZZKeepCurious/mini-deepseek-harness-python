@@ -36,7 +36,11 @@ def _fake(model: str = "fake-model") -> FakeLlmAdapter:
 
 
 def _zero_projection() -> dict:
-    """空/零统计投影的期望视图（projection_values 对无贡献事件会话的产出）。"""
+    """空/零统计投影的期望视图（projection_values 对无贡献事件会话的产出）。
+
+    注册表快照含全部 wire 单元：sessionStats/tokenUsage（telemetry）+ inbox
+    （AgentLoop 注册，空双队列）——上游 snapshot.values 同样含全部注册单元。
+    """
     return {
         "sessionStats": {
             "turns": 0, "steps": 0, "llmMs": 0, "toolMs": 0,
@@ -46,6 +50,7 @@ def _zero_projection() -> dict:
             "uncachedInputTokens": 0, "outputTokens": 0,
             "cacheReadTokens": 0, "cacheWriteTokens": 0,
         },
+        "inbox": {"next-turn": [], "next-step": []},
     }
 
 
@@ -724,14 +729,7 @@ class TestSessionFollow(WebApiTest):
         self.assertEqual(snapshot["records"], [])
         self.assertIs(snapshot["hasMore"], False)
         self.assertEqual(snapshot["projections"]["asOfSeq"], -1)
-        self.assertEqual(snapshot["projections"]["values"],
-                         {"sessionStats": {
-                             "turns": 0, "steps": 0, "llmMs": 0, "toolMs": 0,
-                             "ttftMs": 0, "ttftSteps": 0, "decodeMs": 0,
-                             "decodeTokens": 0},
-                          "tokenUsage": {
-                             "uncachedInputTokens": 0, "outputTokens": 0,
-                             "cacheReadTokens": 0, "cacheWriteTokens": 0}})
+        self.assertEqual(snapshot["projections"]["values"], _zero_projection())
         sub.close()
 
     def test_streams_live_events(self):
@@ -780,13 +778,7 @@ class TestSessionControl(WebApiTest):
         self.assertNotIn("jobs", baseline["value"])
         self.assertEqual(baseline["value"]["projections"][session_id]["asOfSeq"], -1)
         self.assertEqual(baseline["value"]["projections"][session_id]["values"],
-                         {"sessionStats": {
-                             "turns": 0, "steps": 0, "llmMs": 0, "toolMs": 0,
-                             "ttftMs": 0, "ttftSteps": 0, "decodeMs": 0,
-                             "decodeTokens": 0},
-                          "tokenUsage": {
-                             "uncachedInputTokens": 0, "outputTokens": 0,
-                             "cacheReadTokens": 0, "cacheWriteTokens": 0}})
+                         _zero_projection())
         self.assertEqual(self._drain(sub), [])
         sub.close()
 

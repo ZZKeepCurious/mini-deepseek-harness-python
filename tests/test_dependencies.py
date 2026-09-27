@@ -87,6 +87,7 @@ LAYER_UNITS = [
     ("todo", 2),
     ("spill", 2),
     ("session_projection", 1),
+    ("session_turn_outline", 2),
     ("workspace", 2),
     ("settings", 2),
     ("context", 2),

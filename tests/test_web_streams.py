@@ -26,7 +26,11 @@ from tests.test_terminal_controller_terminal import FakeBrowserHandle
 
 
 def _zero_projection():
-    """空/零统计投影的期望视图（projection_values 对无贡献事件会话的产出）。"""
+    """空/零统计投影的期望视图（projection_values 对无贡献事件会话的产出）。
+
+    注册表快照含全部 wire 单元：sessionStats/tokenUsage（telemetry）+ inbox
+    （AgentLoop 注册，空双队列）——上游 snapshot.values 同样含全部注册单元。
+    """
     return {
         "sessionStats": {
             "turns": 0, "steps": 0, "llmMs": 0, "toolMs": 0,
@@ -36,6 +40,7 @@ def _zero_projection():
             "uncachedInputTokens": 0, "outputTokens": 0,
             "cacheReadTokens": 0, "cacheWriteTokens": 0,
         },
+        "inbox": {"next-turn": [], "next-step": []},
     }
 
 
@@ -221,9 +226,10 @@ class TestControl(GatewayStreamsTest):
             self.assertNotIn("jobs", value)
             # baseline 对齐上游 control.ts：全部 live 会话每会话一条（空也放）
             self.assertIn(sid, value["projections"])
-            # projections 真实视图：sessionStats/tokenUsage 均为 8/4 键闭形状
+            # projections 真实视图：全部 wire 单元（sessionStats/tokenUsage +
+            # inbox），上游 snapshot.values 同形
             pvalues = value["projections"][sid]["values"]
-            self.assertEqual(set(pvalues), {"sessionStats", "tokenUsage"})
+            self.assertEqual(set(pvalues), {"sessionStats", "tokenUsage", "inbox"})
             self.assertEqual(
                 set(pvalues["sessionStats"]),
                 {"turns", "steps", "llmMs", "toolMs", "ttftMs",

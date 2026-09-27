@@ -290,6 +290,7 @@ def _web_main(host: str | None = None, port: int | None = None) -> None:
         sys.exit(1)
     from ..core.system_prompt import install_system_prompt
     from ..interaction import install_user_questions, register_ask_user_question
+    from ..session_turn_outline import install_turn_outline
     from ..web_tools import install_web
     install_system_prompt(ctx)
     install_web(ctx)
@@ -305,6 +306,14 @@ def _web_main(host: str | None = None, port: int | None = None) -> None:
     install_workspace_controller(ctx)
     install_workspace_files(ctx)
     install_settings_controller(ctx, roster=roster)
+    # sessionProjections（M7）+ telemetry + session-turn-outline（M18）投影单元：
+    # session/projections、follow snapshot、control baseline 的 values 块由注册表
+    # 快照产出（上游 web-app 默认挂载 session-turn-outline）。
+    from ..session_projection import install_session_projections
+    from ..telemetry import install_usage_stats
+    install_session_projections(ctx)
+    install_usage_stats(ctx)
+    install_turn_outline(ctx)
     # userQuestions 装配（seam 由 web 组合挂；ask_user_question 工具对齐上游经
     # agent presets 挂载——mini 仅在 web 组合注册，headless/sessions 不挂）
     reg = default_tools(ctx)
