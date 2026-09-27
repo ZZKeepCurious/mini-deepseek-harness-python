@@ -9,7 +9,8 @@
 
 ## 功能面
 
-会话列表 / 新建、Trajectory（虚拟化窗口 + Overview 折叠跳转 + 全文搜索）、审批瀑布、队列/作业面板。
+会话列表 / 新建、Trajectory（虚拟化窗口 + Overview 折叠跳转 + 全文搜索）、审批瀑布、队列/作业面板
+（rc.1 数据源：队列 = `session/control` 投影帧折叠出的 `inbox` 投影、作业 = `job/list` roster 流）。
 
 ## 环境要求
 
@@ -67,7 +68,7 @@ MINIHARNESS_WEBUI_DIST=webui/dist python -m miniharness.cli --profile web
 
 ```
 webui/
-├── src/wire/      # 约定客户端层（纯 TS，可单测）：rpc / mux / json-value / follow / control / events / auth
+├── src/wire/      # 约定客户端层（纯 TS，可单测）：rpc / mux / json-value / follow / control / jobs / events / auth
 ├── src/app/       # React 编排 hooks（useBackend）
 ├── src/ui/        # 无状态展示组件（SessionList / Trajectory / ApprovalPanel / ControlPanel）
 ├── tests/         # vitest 单测（jsdom，mock fetch/WS；wire-binary.test.ts 走 node 环境解析 multipart）

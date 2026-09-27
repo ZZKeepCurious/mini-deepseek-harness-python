@@ -10,6 +10,7 @@ import {
   RemoteEventClient,
   TrajectoryBuffer,
   applyControlFrame,
+  isControlFrame,
   resetWebTokenCache,
 } from "../src/wire";
 
@@ -443,19 +444,58 @@ describe("TrajectoryBuffer (session/follow)", () => {
   });
 });
 
-describe("applyControlFrame (session/control)", () => {
-  it("replaces queue/jobs per session", () => {
-    let s: ReturnType<typeof applyControlFrame> = {
+describe("applyControlFrame (session/control, rc.1 projection frames)", () => {
+  it("builds a per-session projection map from baseline + projection frames", () => {
+    let s: ReturnType<typeof applyControlFrame> = {};
+    s = applyControlFrame(s, {
+      type: "baseline",
+      value: {
+        projections: {
+          s1: {
+            asOfSeq: 4,
+            values: { inbox: { "next-turn": [{ id: "a" }], "next-step": [] }, title: "t1" },
+          },
+          s2: { asOfSeq: 0, values: { inbox: { "next-turn": [], "next-step": [] } } },
+        },
+      },
+    });
+    expect(s.s1?.inbox).toEqual({ "next-turn": [{ id: "a" }], "next-step": [] });
+    expect(s.s1?.title).toBe("t1");
+    expect(s.s2?.inbox).toEqual({ "next-turn": [], "next-step": [] });
+
+    // replacement frame updates one key of one session only
+    s = applyControlFrame(s, {
+      type: "projection",
       sessionId: "s1",
-      queue: [{ id: "a" }],
-      jobs: [],
+      key: "inbox",
+      value: { "next-turn": [], "next-step": [{ id: "b" }] },
+      seq: 5,
+    });
+    expect(s.s1?.inbox).toEqual({ "next-turn": [], "next-step": [{ id: "b" }] });
+    expect(s.s1?.title).toBe("t1");
+    // untouched session keeps its baseline
+    expect(s.s2?.inbox).toEqual({ "next-turn": [], "next-step": [] });
+  });
+
+  it("replaces the whole map on a fresh baseline", () => {
+    let s: ReturnType<typeof applyControlFrame> = {
+      s1: { inbox: { "next-turn": [{ id: "old" }], "next-step": [] } },
     };
-    s = applyControlFrame(s, { type: "queue", sessionId: "s1", items: [{ id: "b" }] });
-    expect(s?.queue).toEqual([{ id: "b" }]);
-    s = applyControlFrame(s, { type: "jobs", sessionId: "s1", jobs: [{ id: "j1", status: "running" }] });
-    expect(s?.jobs).toHaveLength(1);
-    // other session's frame ignored
-    s = applyControlFrame(s, { type: "queue", sessionId: "other", items: [] });
-    expect(s?.queue).toEqual([{ id: "b" }]);
+    s = applyControlFrame(s, {
+      type: "baseline",
+      value: { projections: { s2: { asOfSeq: 1, values: { inbox: { "next-turn": [], "next-step": [] } } } } },
+    });
+    expect(Object.keys(s)).toEqual(["s2"]);
+    expect(s.s1).toBeUndefined();
+  });
+});
+
+describe("isControlFrame (session/control, rc.1)", () => {
+  it("accepts baseline and projection frames only", () => {
+    expect(isControlFrame({ type: "baseline", value: { projections: {} } })).toBe(true);
+    expect(isControlFrame({ type: "projection", sessionId: "s1", key: "inbox", value: {}, seq: 1 })).toBe(true);
+    expect(isControlFrame({ type: "queue", sessionId: "s1", items: [] })).toBe(false);
+    expect(isControlFrame({ type: "jobs", sessionId: "s1", jobs: [] })).toBe(false);
+    expect(isControlFrame(null)).toBe(false);
   });
 });

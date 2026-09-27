@@ -9,7 +9,9 @@ import {
   RemoteMuxConnection,
   RemoteEventClient,
   TrajectoryBuffer,
+  applyControlFrame,
   type EventEnvelope,
+  type SessionProjections,
   type SessionSummary,
 } from "../wire";
 
@@ -35,7 +37,7 @@ export interface UseBackend {
   hasMore: boolean;
   running: boolean;
   approvals: PendingApproval[];
-  queues: Record<string, unknown[]>;
+  projections: SessionProjections;
   jobs: Record<string, unknown[]>;
   refresh: () => Promise<void>;
   createSession: (cwd?: string) => Promise<string | undefined>;
@@ -50,11 +52,11 @@ export function useBackend(): UseBackend {
   const eventsRef = useRef<RemoteEventClient | null>(null);
   const followRef = useRef<ReturnType<RemoteMuxConnection["openStream"]> | null>(null);
   const controlRef = useRef<ReturnType<RemoteMuxConnection["openStream"]> | null>(null);
+  const jobsRef = useRef<Record<string, unknown[]>>({});
   const bufRef = useRef<TrajectoryBuffer | null>(null);
   if (!bufRef.current) bufRef.current = new TrajectoryBuffer();
   const selectedRef = useRef<string | null>(null);
-  const queuesRef = useRef<Record<string, unknown[]>>({});
-  const jobsRef = useRef<Record<string, unknown[]>>({});
+  const projectionsRef = useRef<SessionProjections>({});
 
   const [ready, setReady] = useState(false);
   const [host, setHost] = useState<HostInfo | null>(null);
@@ -106,6 +108,26 @@ export function useBackend(): UseBackend {
     })();
   }, []);
 
+  const attachJobs = useCallback((sessionId: string) => {
+    const mux = muxRef.current;
+    if (!mux) return;
+    const stream = mux.openStream("job/list", { args: { sessionId } });
+    (async () => {
+      for (;;) {
+        const frame = await stream.next();
+        if (frame.type === "item") {
+          const value = frame.value as { type?: string; jobs?: unknown[] };
+          if (value?.type === "rows") {
+            jobsRef.current = { ...jobsRef.current, [sessionId]: value.jobs ?? [] };
+            bump((n) => n + 1);
+          }
+        } else if (frame.type === "end" || frame.type === "error") {
+          return;
+        }
+      }
+    })();
+  }, []);
+
   const attachControl = useCallback(() => {
     const mux = muxRef.current;
     if (!mux || controlRef.current) return;
@@ -115,24 +137,11 @@ export function useBackend(): UseBackend {
       for (;;) {
         const frame = await stream.next();
         if (frame.type === "item") {
-          const item = frame.value as {
-            type?: string;
-            value?: { queues?: Record<string, unknown[]>; jobs?: Record<string, unknown[]> };
-            sessionId?: string;
-            items?: unknown[];
-            jobs?: unknown[];
-          };
-          if (item?.type === "baseline") {
-            queuesRef.current = item.value?.queues ?? {};
-            jobsRef.current = item.value?.jobs ?? {};
-            bump((n) => n + 1);
-          } else if (item?.type === "queue" && item.sessionId) {
-            queuesRef.current = { ...queuesRef.current, [item.sessionId]: item.items ?? [] };
-            bump((n) => n + 1);
-          } else if (item?.type === "jobs" && item.sessionId) {
-            jobsRef.current = { ...jobsRef.current, [item.sessionId]: item.jobs ?? [] };
-            bump((n) => n + 1);
-          }
+          projectionsRef.current = applyControlFrame(
+            projectionsRef.current,
+            frame.value as Parameters<typeof applyControlFrame>[1],
+          );
+          bump((n) => n + 1);
         } else if (frame.type === "end" || frame.type === "error") {
           return;
         }
@@ -163,6 +172,7 @@ export function useBackend(): UseBackend {
             setSelectedId(f.agentId);
             selectedRef.current = f.agentId;
             attachFollow(f.agentId);
+            attachJobs(f.agentId);
           }
         }
       },
@@ -224,6 +234,7 @@ export function useBackend(): UseBackend {
       setSelectedId(created.sessionId);
       selectedRef.current = created.sessionId;
       attachFollow(created.sessionId);
+      attachJobs(created.sessionId);
       return created.sessionId;
     } catch (e) {
       setError((e as Error).message);
@@ -235,7 +246,8 @@ export function useBackend(): UseBackend {
     setSelectedId(id);
     selectedRef.current = id;
     attachFollow(id);
-  }, [attachFollow]);
+    attachJobs(id);
+  }, [attachFollow, attachJobs]);
 
   const sendPrompt = useCallback(async (text: string) => {
     if (!selected) return;
@@ -288,7 +300,7 @@ export function useBackend(): UseBackend {
       hasMore: false,
       running,
       approvals,
-      queues: queuesRef.current,
+      projections: projectionsRef.current,
       jobs: jobsRef.current,
       refresh,
       createSession,

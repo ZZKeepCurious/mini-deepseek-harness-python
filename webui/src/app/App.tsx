@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useBackend } from "./useBackend";
+import { inboxQueue } from "../wire/control";
 import { SessionList } from "../ui/SessionList";
 import { Trajectory } from "../ui/Trajectory";
 import { ApprovalPanel } from "../ui/ApprovalPanel";
@@ -9,7 +10,10 @@ export function App() {
   const bk = useBackend();
   const [prompt, setPrompt] = useState("");
 
-  const queue = bk.selectedId ? bk.queues[bk.selectedId] ?? [] : [];
+  // queue = inbox projection (next-turn + next-step pending messages); jobs =
+  // job-controller `job/list` roster. Both supersede the retired queue/jobs
+  // frames of the legacy session/control wire.
+  const queue = bk.selectedId ? inboxQueue(bk.projections[bk.selectedId]?.inbox) : [];
   const jobs = bk.selectedId ? bk.jobs[bk.selectedId] ?? [] : [];
 
   const submit = () => {

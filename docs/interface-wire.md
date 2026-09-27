@@ -250,23 +250,24 @@ client `connection/src/client/rpc.ts` 按 `/` 切两段）；`web/args.canonical
 
 ```json
 {"type": "baseline",
- "value": {"queues": {"<sessionId>": [<queue item>...]},
-           "jobs":   {"<sessionId>": [<job row>...]},
-           "projections": {"<sessionId>": {"asOfSeq": <seq>,
+ "value": {"projections": {"<sessionId>": {"asOfSeq": <seq>,
                                            "values": {"sessionStats": {...8 键...},
-                                                      "tokenUsage": {...4 键...}}}}}}
+                                                      "tokenUsage": {...4 键...},
+                                                      "inbox": {"next-turn": [...], "next-step": [...]},
+                                                      "agentPreset": "..."}}}}
 ```
 
-  control baseline 的 queues/jobs/projections 覆盖**全部 live 会话**（空会话也各放一条
-  空块）；projections.values 与 follow 同源（`telemetry.projection_values` 现场折叠，
-  真实 sessionStats/tokenUsage 视图，见 4.1）。
+  control baseline 的 projections 覆盖**全部 live 会话**（空会话也各放一条空块）；
+  projections.values 与 follow 同源（`telemetry.projection_values` 现场折叠 + 注册表快照，
+  见 4.1）。**rc.1 已移除 queues/jobs 帧**（退役前的 `queue`/`jobs` 替换帧与 baseline
+  queues/jobs 块均不再发）；队列数据经 `inbox` 投影单元（`{next-turn, next-step}` 待处理
+  消息）暴露，作业经 job-controller 的 `job/list` 流（§4.7）暴露。
 
-- 续帧（替换语义）：`{"type":"queue", "sessionId": "...", "items":[...]}`（inbox 拼接时）、
-  `{"type":"jobs", "sessionId": "...", "jobs":[...]}`（作业变更时）、会话 dispose →
-  `{"type":"queue", "sessionId": "...", "items":[]}`。
-- queue item：`{id, placement: "queued"|"steering"|"context", message: {id, content:[...]}}`
-  （user source 的 item 另带可选 `rpcId`，对应上游 promptRpcId）；
-  job row 键：`id / kind / label / status / startedAt / detail / finishedAt`（存在才带）。
+- 续帧（替换语义，rc.1）：`{"type":"projection", "sessionId": "...", "key": "inbox",
+  "value": {...}, "seq": <int>}`——投影单元整体替换（`sessionProjections.onChanged`
+  广播），会话 dispose → 不再有对应投影帧。
+- `inbox` 投影值：`{next-turn: PendingMessage[], next-step: PendingMessage[]}`（上游
+  InboxState）；PendingMessage = `{id, role, content: ContentBlock[], source}`（同消息模型）。
 
 ### 4.3 `$events`（远程事件流，`web/events.py`）
 
@@ -511,7 +512,8 @@ outcome 归一（`APPROVAL_OUTCOMES = {allowed-once, rejected, cancelled, unavai
 | `json-value.ts` | §4 上行项无损 JSON 校验（`isRemoteUplinkItem`，同上游 typert `isRemoteUplinkItem`） |
 | `events.ts` | §4.3 `$events` ready/emit/waterfall/cancel + §5 结算（settled 集合 fail-closed） |
 | `follow.ts` | §4.1 snapshot/event 帧 + seq 去重（`TrajectoryBuffer`） |
-| `control.ts` | §4.2 的 baseline/projection 帧——**当前只建模了 rc.1 退役前的 `queue`/`jobs` 帧**（`applyControlFrame` 对 baseline 是 no-op 标记），宿主已不发这两型，队列/作业面板恒空（换源待立项） |
+| `control.ts` | §4.2 的 baseline/projection 帧（rc.1）——`applyControlFrame` 折叠成逐会话投影 map（baseline 全量替换 / projection 逐键替换），队列经 `inboxQueue()` 从 `inbox` 投影展开（next-turn + next-step） |
+| `jobs.ts` | §4.7 `job/list` roster 流（`{type:'rows', jobs:[JobView]}` 整集替换）+ `JobView` 形状（`isJobListFrame`） |
 | `types.ts` | §2 信封 + §3.1 附件描述符 + 事件/消息/会话类型（镜像 core 模型） |
 
 测试：`webui/tests/wire.test.ts` + `webui/tests/wire-binary.test.ts`（vitest，mock fetch/WS；
