@@ -89,6 +89,7 @@ LAYER_UNITS = [
     ("session_projection", 1),
     ("session_turn_outline", 2),
     ("session_title", 2),
+    ("session_projection_cache", 2),
     ("workspace", 2),
     ("settings", 2),
     ("context", 2),
