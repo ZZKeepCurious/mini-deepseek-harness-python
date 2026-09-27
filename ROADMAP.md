@@ -45,13 +45,25 @@ web 半（传输层 + 浏览器前端）的 wire 面与上游一致：两信封 
 
 - **模型澄清（user-questions）**：`miniharness/interaction/{user_questions,tool_ask_user}.py`（L3）+ `web/questions.py` 桥 + CLI 四入口 seam——`UserQuestionError` 稳定码集（ASK_ABORTED/EMPTY_QUESTIONS/CALLER_NOT_LIVE/DELEGATED_CALLER/BAD_INTENT/NO_PROVIDER/ASK_CANCELLED）、`user-questions/request` waterfall + 无应答者 fail-loud（`core/scope.py` `awaterfall` base 扩展形参）、`restore_user_question_error` 传输恢复、取消归一（在航 signal aborted → ASK_ABORTED）；`ask_user_question` 工具 schema/execute 逐字 + canonical `{"answers":[...]}`（render 返回紧凑 JSON 字符串，mini 全局工具 content 载体等价，见 verified-diffs §3.36）；plan 审查（plan/review.py）与 web 桥（`$events/result` 结算）消费同一 seam；工具只装配了服务处注册（web 组合与 demo），headless 仅装 seam。**测试**：test_user_questions 20 + test_ask_user_question 10 + test_web_user_questions 4 + test_plan_review 20。详见 verified-diffs §2.59/§3.36。
 
+- **session-turn-outline（M18）**：`miniharness/session_turn_outline/`（L2）——`turnOutline` 投影单元（turn/start 锚定 + 首人类 prompt + draft 缓冲到 turn/end 落定回复，预览预算 50/120，wire view = turns 数组，state_schema 严格递增 turn）；web profile 装配，随 `session/follow`/`session/control` 的 projections 块暴露。**测试**：test_session_turn_outline 22。
+
+- **会话标题（M10）**：`miniharness/session_title/`（L2）——`SessionTitleService`（`ctx.sessionTitle`）：清洗/UTF-8 截断/fallback 派生、`title`/`titleInput` 投影单元、用户钉扎 rename、显式 refresh 取消钉扎、提供者注册表；自动 first-prompt 生成——fallback 先落、路由主请求（request/header）后执行提供者；first-prompt LLM 提供者按词/CJK 预算 framing + 输入字节上限 + max-tokens/error 映射。web profile 装配（base config 5/40/80 + 5/10/4096/64/60000）。**测试**：test_session_title 18。
+
+- **会话投影缓存（M14）**：`miniharness/session_projection_cache/`（L2）——`SessionProjectionCache`（`ctx.sessionProjectionCache`）：checkpoint 写后节流落盘 `session_projcache` storage domain（per-record、version 7、backup-and-skip；turn/end/create/dispose 强制 + 计数/间隔节流）；lifecycle + formatVersion 身份匹配、零 I/O `cached_snapshot`/跨格式边 `cached_predecessor_title`、`hydrate_prepared`/`cold_snapshot` 冷读播种 + fail-soft 写回；无损 JSON 校验拒绝非 JSON 单元。**测试**：test_session_projection_cache 12。
+
+- **权限预设 + 审批策略（M11）**：`miniharness/interaction/permission_presets.py`（L3）——`PermissionPresetService`（`ctx.permissionPresets`）：预设表捆绑沙箱模式 + 审批策略、derive/current/resolve/option_of、`set` 先写 `permission/preset` 再只写变更旋钮（事件序对齐上游）、`pinInitialPermission` 新会话/恢复会话钉扎、Auto 集成、`/permission` 命令、`permissions` 投影（stateVersion 2，wire `currentValue`）、`catalog` Remote；`ApprovalService` 增 `approval:policy` 上下文与 `setPolicy` 模型通知。web profile 装配三预设。**测试**：test_permission_presets 17。
+
+- **人工反馈（M12）**：`miniharness/feedback/`（L3）——`command_feedback.py`（`FEEDBACK_CATEGORIES` + `record_feedback` + `/feedback` 命令（recordInput:false）+ `sessionFeedback` Remote）与 `message_feedback.py`（`MessageFeedbackService` list/put/delete：note 校验先于一切、目标校验（append-origin 非空 assistant/message）、版本 CAS、无操作不追加、幂等 delete、活/冷会话路径）；`feedback/*` 事件入 KNOWN_TYPES。web profile 装配（maxNoteBytes 8192）。**测试**：test_feedback 31。
+
+- **pwsh 变体（M16）**：`miniharness/shell/{pwsh_local,pwsh_sandbox}.py` + `miniharness/tool_pwsh/`（L3）——`PwshLocalExecutor`（`pwsh -NoLogo -NoProfile -NonInteractive -Command` + UTF-8 编码前导 + PATH/ProgramFiles 解析 + Windows PowerShell 5.1 兜底）、`SandboxPwshExecutor`（confine + 三路归因）、`tool_pwsh`（三态 + jobs 集成 + `kind:'pwsh'`）；`install_pwsh_executor`/`install_bash_executor` 幂等。**测试**：test_pwsh 16（本机无 pwsh，argv/渲染/沙箱装饰纯单元验收）。
+
 ## 上游包观察清单（未复现，暂不纳入范围）
 
 以下上游 `packages/` 包尚未复现，未来想扩充复现范围可从中挑选；多数属于"能力扩展口 + 消费工具"的延伸，核心约定不依赖它们。已实现的家族中也有只做了一部分切片的（如 subprocess 仅环境清洗、client 仅 ui-trajectory、host 为 apiproxy 子集），权威归属以 docs/architecture.md 映射表为准。
 
 - **能力类**：`fs`、`e2b`、`lsp`、`code-runtime`、`spill`、`workspace`、`ssh`
-- **编排类**：`workflow`、`schedule`、`todo`
-- **横切类**：`settings`、`session-query`、`feedback`、`guard`、`runtime-diagnostics`、`util`、`web`（`api` 组已全部复现；`context` 组六件已复现）
+- **编排类**：`workflow`（JS 脚本 + Node TS PTC 运行时，架构不适用）、`schedule`、`todo`
+- **横切类**：`settings`、`session-query`、`feedback`、`guard`、`runtime-diagnostics`、`util`、`web`（`api` 组已全部复现；`context` 组六件已复现）、`llm-pi-ai`（外部 npm SDK，架构不适用）
 - **平台类**：`typert`、`test-support`
 
 官方 Python SDK（`python/sdk` 的 stdio JSON-RPC 客户端 + `python/sdk-runtime` 运行时）协议面已实现（`protocol/sdk.py`），互操作测试以官方 SDK 为目标（`tests/test_upstream_sdk_interop.py`，缺 pydantic/上游源码自动 skip），不再列观察清单。
