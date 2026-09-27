@@ -76,21 +76,23 @@ def _resolve_bind(host: str | None, port: int | None) -> tuple[str, int]:
 
 
 def build_app(adapter: Any, tools: Any, ctx: Context | None = None,
-              token: str | None = None) -> FastAPI:
+              token: str | None = None, roster: Any = None) -> FastAPI:
     """纯装配：上下文 + 适配器 + 工具 → 可挂载的 FastAPI 应用。
 
     返回前把 WebApi/GatewayStreams 挂到 root ctx（供测试/launcher 复用，
     与 headless 的 ctx 装配对称）。token = 可选认证门（None 读
     MINIHARNESS_WEB_TOKEN 环境变量，仍未配置 = 无门；见 web/auth.py）。
+    roster = preset roster（agentPresets/* + pluginInventory 的 agentPresets
+    组）；未提供时 web profile 部署的 preset 面不可用（见装配缺口修复）。
     """
     ctx = ctx or Context(name="web")
-    api = WebApi(ctx, adapter, tools)
+    api = WebApi(ctx, adapter, tools, roster=roster)
     return create_app(api, api.gateway, token=token)
 
 
 def run_web(adapter: Any, tools: Any, ctx: Context | None = None,
             host: str | None = None, port: int | None = None,
-            token: str | None = None) -> None:
+            token: str | None = None, roster: Any = None) -> None:
     """构建应用并阻塞监听（`--profile web` 的进程级入口）。
 
     生产纪律：监听 `0.0.0.0`（非回环）时**必须**已配置 token（参数或
@@ -104,5 +106,5 @@ def run_web(adapter: Any, tools: Any, ctx: Context | None = None,
         raise ValueError(
             "listening on 0.0.0.0 requires a web token "
             "(pass token= or set MINIHARNESS_WEB_TOKEN)")
-    app = build_app(adapter, tools, ctx, token=resolved_token)
+    app = build_app(adapter, tools, ctx, token=resolved_token, roster=roster)
     uvicorn.run(app, host=host, port=port, log_level="info", **uvicorn_options())

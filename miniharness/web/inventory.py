@@ -10,7 +10,9 @@
   `install_plugin_inventory(ctx, roster=...)` 幂等装配。
 
 载体差异：mini preset 为工具清单模型，只有组合形态（`agent.cordis.yml`/`agent.yml`）的
-preset 有插件行；`preset.json` 载体行投影为 `rows: []`（无行级数据）。
+preset 有插件行；`preset.json` 载体行投影为 `rows: []`（无行级数据）。组合行 flatten
+工具（disabled/group/conditional）归口 `preset/registry.py`（单一实现，对齐上游
+composition-inventory.ts）。
 """
 from __future__ import annotations
 
@@ -19,7 +21,7 @@ from typing import Any
 
 from ..core.scope import Context, FiberState, Service
 from ..loader.include import load_entry_list_yaml
-from ..loader.utils import evaluate_js_expr, is_js_expr
+from ..preset.registry import entry_list_problem, flatten_rows
 
 __all__ = [
     "PluginInventoryService",
@@ -60,61 +62,6 @@ def entries_snapshot(ctx: Context) -> list[dict]:
     return entries
 
 
-def entry_list_problem(rows: Any, at: str = "") -> str | None:
-    """组合行形状检查（对齐 agent-presets discovery.ts:77-98，措辞逐字）。"""
-    if not isinstance(rows, list):
-        return ("the composition must be a top-level list of plugin rows"
-                if at == "" else f"group {at} must hold a list of plugin rows")
-    for index, row in enumerate(rows):
-        label = f"row {index + 1}" if at == "" else f"{at} row {index + 1}"
-        if not isinstance(row, dict):
-            return f'{label} is not a plugin row (expected a map with a "name")'
-        name = row.get("name")
-        if not isinstance(name, str) or name == "":
-            return f'{label} names no plugin (a "name" string is required)'
-        if row.get("group") is True:
-            nested = entry_list_problem(row.get("config"), label)
-            if nested is not None:
-                return nested
-    return None
-
-
-def _disabled_contribution(value: Any) -> bool | str:
-    """一行 disabled 节点对有效启用的贡献（对齐 composition-inventory.ts:79-94）：
-    `!!js` 求值被拒 → `'conditional'`，其余即 `bool(value)`。"""
-    if is_js_expr(value):
-        try:
-            return bool(evaluate_js_expr(value["__jsExpr"]))
-        except BaseException:
-            return "conditional"
-    return bool(value)
-
-
-def _combine_disabled(outer: bool | str, own: bool | str) -> bool | str:
-    if outer is True or own is True:
-        return True
-    if outer == "conditional" or own == "conditional":
-        return "conditional"
-    return False
-
-
-def _flatten_rows(rows: list, outer_disabled: bool | str, found: list[dict]) -> None:
-    for row in rows:
-        disabled = _combine_disabled(outer_disabled, _disabled_contribution(row.get("disabled")))
-        if row.get("group") is True:
-            _flatten_rows(row.get("config") or [], disabled, found)
-            continue
-        entry: dict = {
-            "entryId": row.get("id") if isinstance(row.get("id"), str) and row.get("id") else None,
-            "moduleName": row.get("name"),
-            "enabled": (False if disabled is True
-                        else "conditional" if disabled == "conditional" else True),
-        }
-        if is_js_expr(row.get("disabled")):
-            entry["condition"] = row["disabled"]["__jsExpr"]
-        found.append(entry)
-
-
 def file_composition(path: Path) -> dict:
     """一个 preset 组合文件的行（对齐 composition-inventory.ts:159-178）。
 
@@ -131,7 +78,7 @@ def file_composition(path: Path) -> dict:
     if problem is not None:
         return {"broken": problem}
     found: list[dict] = []
-    _flatten_rows(rows, False, found)
+    flatten_rows(rows, False, found)
     return {"rows": found}
 
 

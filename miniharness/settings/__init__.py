@@ -24,9 +24,11 @@ from ..core.scope import Context, Service
 __all__ = [
     "SettingsConflictError",
     "SettingsFileProvider",
+    "SettingsForms",
     "SettingsProvider",
     "SettingsScope",
     "install_settings",
+    "install_settings_forms",
     "parse_settings_namespace",
     "redact_secrets",
 ]
@@ -439,3 +441,10 @@ def install_settings(ctx: Context, *, path: str | None = None) -> SettingsProvid
     provider = SettingsFileProvider(ctx, path)
     provider.watch_file()
     return provider
+
+
+# rc.1 核心（SettingsForms）在 boot/profile 上下文装配：读 configEditor 条目 +
+# 写经 config-editor.edit 持久化 cordis.patch.yml + legacy settings.yaml 导入。
+# 生产装配（web/headless 手写装配）不 boot loader，settings 域维持 SettingsFileProvider
+# 既有载体（§2.78 登记）；`install_settings_forms` 供 profile 驱动的启动使用。
+from .forms import SettingsForms, install_settings_forms  # noqa: E402

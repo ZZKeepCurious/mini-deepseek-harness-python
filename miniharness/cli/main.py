@@ -10,6 +10,7 @@ launcher 选项（对齐 args.ts，已核实）：
   --patch <path>              可重复 overlay 补丁（YAML/JSON）
   --dump-config               只读打印最终组合（boot-free）
   --dump-default-config       只打印内置默认组合；与 --patch 互斥
+  --dump-config-schema        打印 profile 组合的 JSON Schema 文档（boot-free）
   --config <path>             指定组合文件（mini 教学扩展：上游用 profile 目录机制）
 
   --host / --port             web profile 显式监听地址/端口（小写字面，P2-17）；
@@ -58,6 +59,7 @@ USAGE = (
     "                                          --host 127.0.0.1|0.0.0.0, --port 0..65535 (0 = OS assign)\n"
     "  miniharness --dump-config                print the final composed configuration (read-only)\n"
     "  miniharness --dump-default-config        print only the built-in default composition\n"
+    "  miniharness --dump-config-schema         print the composed configuration as a JSON Schema document\n"
     "  miniharness --patch <path> --profile headless \"task\"\n"
     "  miniharness sessions [list | resume <id> [task...] | delete <id>]\n"
     "  miniharness presets [list | show [id] | select <id> [session] | delete <id>]\n"
@@ -111,10 +113,15 @@ def _parse_launcher(args: list[str]) -> dict[str, Any]:
                 raise _UsageError(f"option {a!r} requires a value")
             parsed["patches"].append(args[i + 1])
             i += 2
-        elif a in ("--dump-config", "--dump-default-config"):
-            mode = "config" if a == "--dump-config" else "default"
+        elif a in ("--dump-config", "--dump-default-config", "--dump-config-schema"):
+            if a == "--dump-config-schema":
+                mode = "schema"
+            else:
+                mode = "config" if a == "--dump-config" else "default"
             if parsed["dump"] is not None:
-                raise _UsageError("--dump-config and --dump-default-config are mutually exclusive")
+                raise _UsageError(
+                    "--dump-config, --dump-default-config and --dump-config-schema "
+                    "are mutually exclusive")
             parsed["dump"] = mode
             i += 1
         elif a in ("-h", "--help"):
@@ -134,6 +141,9 @@ def _builtin_headless_entries() -> list[dict]:
 
 def _dump_configuration(parsed: dict[str, Any], warn: Any | None = None) -> None:
     warn = warn or sys.stderr
+    if parsed["dump"] == "schema":
+        _dump_config_schema(parsed, warn)
+        return
     if parsed["dump"] == "default":
         sys.stdout.write(
             "# == builtin:headless (mini 内置默认组合；headless 不走插件树，为空)\n"
@@ -149,6 +159,38 @@ def _dump_configuration(parsed: dict[str, Any], warn: Any | None = None) -> None
         base = load_composition(configs[0])
     layers = [(Path(p).name, load_patch_list(p, label="overlay")) for p in parsed["patches"]]
     sys.stdout.write(render_composition_dump("miniharness", base_label, base, layers, warn=warn.write))
+
+
+def _dump_config_schema(parsed: dict[str, Any], warn: Any) -> None:
+    """--dump-config-schema：profile 组合的 JSON Schema 文档（boot-free）。
+
+    对齐上游 apps/cli dump-config-schema.ts：需要已准备 profile（目录机制）；
+    无 profile 时用 --config 提供的组合文件（mini 教学扩展：上游用 profile
+    目录 + bundle 解析，mini 无 npm bundle）。层序：--config 基组合（缺省
+    内置空）+ --patch overlays。
+    """
+    import json as _json
+
+    from ..boot.config_schema import generate_config_schema
+    from ..boot.profile import (
+        Profile,
+        load_profile_directory,
+        resolve_profile_dir,
+    )
+    from ..core.home_paths import resolve_dsh_home
+
+    home = resolve_dsh_home()
+    profile_dir = resolve_profile_dir(parsed.get("profile") or "headless", home)
+    layers: list[list[dict]] = []
+    if parsed["configs"]:
+        base = load_composition(parsed["configs"][0])
+        layers.append([{"insert": [dict(e) for e in base]}])
+    for pp in parsed["patches"]:
+        layers.append(load_patch_list(pp, label="overlay"))
+    profile = Profile(name=os.path.basename(profile_dir), dir=profile_dir,
+                      layers=[], patch_path="", patches=[])
+    schema = generate_config_schema("miniharness", profile, layers, install_anchor="miniharness")
+    sys.stdout.write(_json.dumps(schema, indent=2) + "\n")
 
 
 def _validate_composition(parsed: dict[str, Any]) -> None:
@@ -362,7 +404,15 @@ def _web_main(host: str | None = None, port: int | None = None) -> None:
     # agent presets 挂载——mini 仅在 web 组合注册，headless/sessions 不挂）
     reg = default_tools(ctx)
     register_ask_user_question(reg, ctx)
-    run_web(adapter, reg, ctx, host=host, port=port)
+    # agentPreset 会话投影单元（缺口 C）：上游 web-app 默认挂载
+    # agent-preset-registry 的 agentPreset 投影；mini 生产装配此前只在测试
+    # 注册，真实 web profile 下 `session/projections` 不暴露该单元。这里与
+    # turnBoundary 等单元一同注册进 sessionProjections 注册表。
+    from ..preset.presets import register_agent_preset_projection
+    projections = ctx.get("sessionProjections")
+    if projections is not None:
+        register_agent_preset_projection(projections)
+    run_web(adapter, reg, ctx, host=host, port=port, roster=roster)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -236,6 +236,12 @@ class ImportDirectionTest(unittest.TestCase):
                     # packages/bundle/web-app/cordis.patch.yml:350：id: ui-user-questions）；
                     # interaction 不得反向 import web
                     continue
+                if src_unit == "web" and dst_unit == "preset":
+                    # §5 显式例外（单方向）：web 层 pluginInventory 投影复用
+                    # preset/registry 的组合行 flatten 工具（上游 web-app 依赖
+                    # dsh-agent-preset-registry，plugin-inventory 读其
+                    # compositionInventory）；preset 层不得反向 import web
+                    continue
                 if src_unit == "cli" and dst_unit == "interaction":
                     # §5 显式例外（单方向）：launcher 组装 user-questions 服务
                     # seam 与 ask_user_question 工具（上游 base bundle 依赖
