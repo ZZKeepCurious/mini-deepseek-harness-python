@@ -73,6 +73,8 @@ LAYER_UNITS = [
     ("workspace_controller", 3),
     ("workspace_files", 3),
     ("settings_controller", 3),
+    ("workflow_ptc", 3),
+    ("tool_workflow", 3),
     ("core.agent_loop", 2),
     ("compaction", 2),
     ("ptc", 2),
@@ -91,6 +93,7 @@ LAYER_UNITS = [
     ("session_turn_outline", 2),
     ("session_title", 2),
     ("session_projection_cache", 2),
+    ("workflow", 2),
     ("workspace", 2),
     ("settings", 2),
     ("context", 2),
@@ -255,6 +258,11 @@ class ImportDirectionTest(unittest.TestCase):
                     # （confine + 归因），上游 bash-sandbox 同样依赖 dsh-sandbox；
                     # seams 层不得反向 import shell
                     continue
+                if src_unit == "workflow_ptc" and dst_unit == "seams":
+                    # §5 显式例外（单方向）：workflow-ptc 经 continuation manager
+                    # 启动子代理（上游 workflow-ptc inject dsh-subagent）；
+                    # seams 层不得反向 import workflow_ptc
+                    continue
                 if src_unit == "tool_bash" and dst_unit == "shell":
                     # §5 显式例外（单方向）：tool-bash 是 ctx.shell + ctx.shellEnv 的
                     # 模型面消费者（上游 tool-bash 依赖 dsh-shell / dsh-shell-env）；
@@ -275,6 +283,11 @@ class ImportDirectionTest(unittest.TestCase):
                     # §5 显式例外（单方向）：default_tools 组装真实 bash 工具
                     # （上游 bundle/base compose tool-bash）；同 cli→shell 先例，
                     # tool_bash 不得反向 import cli
+                    continue
+                if src_unit == "cli" and dst_unit == "tool_workflow":
+                    # §5 显式例外（单方向）：default_tools 组装 workflow 工具
+                    # （上游 bundle/base compose tool-workflow）；同 cli→tool_bash
+                    # 先例，tool_workflow 不得反向 import cli
                     continue
                 if src_unit == "mcp" and dst_unit == "seams":
                     # §5 显式例外（单方向）：transport 复用 seams/subprocess_env 的

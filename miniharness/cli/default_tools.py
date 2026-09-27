@@ -51,4 +51,11 @@ def default_tools(ctx: Context) -> ToolRegistry:
     if web is not None:
         from ..web_tools import register_web_tools
         register_web_tools(reg, web, ctx.get("systemPrompt"))
+    # ctx.workflowEngine 服务存在时收编 `workflow` 工具（上游 base 挂载
+    # tool-workflow；web-app 禁用——模型面在预设层。tool-workflow 要求
+    # workflowEngine + 后台作业服务）。
+    engine = ctx.get("workflowEngine")
+    if engine is not None and ctx.get("jobs") is not None:
+        from ..tool_workflow import install_tool_workflow
+        install_tool_workflow(ctx)
     return reg
