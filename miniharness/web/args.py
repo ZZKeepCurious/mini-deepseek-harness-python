@@ -323,6 +323,8 @@ _SPECS: dict[str, dict[str, tuple[str, bool]]] = {
         "messageId": (STR, True),
         "ifVersion": (STR, False),
     },
+    # permission-presets：catalog 无入参。
+    "permissionPresets/catalog": {},
 }
 
 

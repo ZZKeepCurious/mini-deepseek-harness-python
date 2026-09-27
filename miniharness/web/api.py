@@ -400,6 +400,7 @@ class WebApi:
         "messageFeedback/list": "message_feedback_list",
         "messageFeedback/put": "message_feedback_put",
         "messageFeedback/delete": "message_feedback_delete",
+        "permissionPresets/catalog": "permission_presets_catalog",
     }
 
     def methods(self) -> frozenset[str]:
@@ -1635,6 +1636,17 @@ class WebApi:
             "messageId": payload.get("messageId"),
             "ifVersion": payload.get("ifVersion"),
         }))
+
+    def _permission_presets(self):
+        service = self.ctx.get("permissionPresets")
+        if service is None:
+            raise _Reject("gateway/invocation-unavailable",
+                          "permissionPresets namespace is not mounted in this deployment", {})
+        return service
+
+    def permission_presets_catalog(self, payload: dict) -> dict:
+        """`permissionPresets/catalog`：进程级可读目录。"""
+        return self._remote_call(lambda: self._permission_presets().catalog())
 
     # ---------- wire 辅助 ----------
 

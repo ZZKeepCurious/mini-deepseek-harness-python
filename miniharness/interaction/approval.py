@@ -35,6 +35,27 @@ from ..core.session import Session
 APPROVAL_OUTCOMES = ("allowed-once", "rejected", "cancelled", "unavailable")
 APPROVAL_POLICIES = ("ask", "never")
 
+#: 策略上下文句子（上游 index.ts:73-75，逐字）。
+_NEVER_SENTENCE = (
+    "Approval prompts are disabled in this session: actions that require "
+    "approval are rejected automatically — do not request sandbox escalation "
+    "(do not set `sandbox_permissions`)."
+)
+_ASK_SENTENCE = (
+    "Approval policy: ask. Operations that require approval may ask through "
+    "the configured answerers; without an available answerer, the request "
+    "fails closed."
+)
+
+
+def approval_policy_context_text(policy: str) -> str:
+    """按策略渲染 `approval:policy` 上下文正文（index.ts:162-174 同款）。"""
+    if policy == "never":
+        return _NEVER_SENTENCE
+    if policy == "ask":
+        return _ASK_SENTENCE
+    raise ValueError(f"unknown approval policy: {policy!r}")
+
 
 def effective_approval_policy(events: list | tuple) -> str | None:
     """会话级策略覆盖：日志中最后一条 approval/policy 的 policy，无则 None。
@@ -65,19 +86,65 @@ def has_open_turn(events: list | tuple) -> bool:
 
 
 class ApprovalService:
-    """审批能力：策略先行 + answerer 瀑布 + 审计对（对齐 ApprovalService）。"""
+    """审批能力：策略先行 + answerer 瀑布 + 审计对（对齐 ApprovalService）。
+
+    Config：`policy`（缺省 'ask'）。装配时挂 `approval:policy` 系统提示词
+    context（按会话决议当前策略，上游 index.ts:162-174 同款）。
+    """
 
     def __init__(self, ctx: Context, policy: str = "ask"):
         if policy not in APPROVAL_POLICIES:
             raise TypeError('approval policy must be one of "ask" or "never"')
         self.ctx = ctx
         self._config_policy = policy
+        # 装配系统提示词 context：每会话按 effective 策略渲染（上游挂
+        # `approval:policy` + getContextOrder('APPROVAL_POLICY')）。
+        ctx.inject(["systemPrompt"], self._mount_prompt_context)
+
+    def _mount_prompt_context(self, ctx: Context, _config=None) -> None:
+        prompt = ctx.get("systemPrompt")
+        if prompt is None:
+            return
+        prompt.context(
+            name="approval:policy",
+            order=120,
+            text=lambda context: self._policy_context_text(context),
+        )
+
+    def _policy_context_text(self, context: dict) -> str:
+        session = (context or {}).get("session")
+        if session is None:
+            return ""
+        policy = self.effective_policy(session)
+        return approval_policy_context_text(policy)
 
     # ---------- 策略 ----------
 
     def effective_policy(self, session: Session) -> str:
         """会话自己的 approval/policy 覆盖，否则回退配置默认。"""
         return effective_approval_policy(session.events) or self._config_policy
+
+    def set_policy(self, agent: Any, policy: str) -> None:
+        """运行时切换策略：写入 durable 覆盖 + 注入模型可见变更通知。
+
+        对齐上游 setPolicy（index.ts:184-195）：previous = effective；无变化
+        no-op；否则 setApprovalPolicy + `agent.inject` 一条
+        `The approval policy changed from "<prev>" to "<policy>" (changed by
+        the user).` 通知（source `{kind:'user-approval'}`）排进下个模型 step。
+        """
+        previous = self.effective_policy(agent.session)
+        if previous == policy:
+            return
+        set_approval_policy(agent.session, policy)
+        from ..core.agent_loop.agent import AgentLoop  # noqa: F401 - 只做类型提示
+        from ..core.session.message import create_message, text_block
+        notice = create_message(
+            "user",
+            [text_block(f'The approval policy changed from "{previous}" to '
+                        f'"{policy}" (changed by the user).')],
+            {"kind": "user-approval"},
+        )
+        agent.inject(notice)
 
     # ---------- 请求 ----------
 

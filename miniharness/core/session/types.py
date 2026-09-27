@@ -75,6 +75,11 @@ KNOWN_TYPES = frozenset({
     # SessionEventMap：{mode, source?: 'delegation'}，log-only 非 surface、
     # 整值替换最后一条胜出——effective = fold(events) ?? 部署默认）
     "sandbox/mode",
+    # 权限预设选择（上游 interaction/permission-presets/src/index.ts
+    # SessionEventMap：{preset}，log-only 非 surface、整值替换最后一条胜出——
+    # permissions 投影的 fold 输入；write 路径同时写 sandbox/mode 与
+    # approval/policy 两旋钮）
+    "permission/preset",
     # PTC 派发审计（上游 core/tools/src/ptc.ts SessionEventMap，log-only 非
     # surface；V3 由 tool/code-dispatch{,-start} 改名，payload 不变；mini 不
     # 产出（无 PTC 运行时），仅为读侧词汇一致性登记）

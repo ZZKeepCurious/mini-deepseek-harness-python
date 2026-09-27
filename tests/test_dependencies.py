@@ -215,6 +215,12 @@ class ImportDirectionTest(unittest.TestCase):
                     # packages/plan/plan-mode/package.json）——plan.review 经
                     # interaction.ask 提交 review 问答；interaction 不得反向 import plan
                     continue
+                if src_unit == "interaction" and dst_unit == "seams":
+                    # §5 显式例外（单方向）：permission-presets 消费 sandbox-policy
+                    # 的 set_sandbox_mode 写路径（上游 dsh-permission-presets 直接
+                    # 依赖 dsh-sandbox-policy，permission-presets/index.ts:25 注入
+                    # setSandboxMode）；seams 层不得反向 import interaction
+                    continue
                 if src_unit == "web" and dst_unit == "interaction":
                     # §5 显式例外（单方向）：web 层装载 ui-user-questions 应答者
                     # 并承载 user-questions 瀑布桥（上游 web-app 依赖并 compose

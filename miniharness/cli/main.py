@@ -296,7 +296,9 @@ def _web_main(host: str | None = None, port: int | None = None) -> None:
     install_web(ctx)
     install_user_questions(ctx)
     ctx.provide("sandbox", LocalSandboxProvider())
-    SandboxPolicyService(ctx, {})
+    # 沙箱策略缺省对齐上游 dsh-base（cordis.patch.yml:231）：
+    # `DSH_PERMISSION_MODE ?? 'workspace-write'`，workspaceRoot = 进程 cwd。
+    SandboxPolicyService(ctx, {"mode": os.environ.get("DSH_PERMISSION_MODE", "workspace-write")})
     install_terminal_controller(ctx)
     install_local_fs(ctx, {"cwd": os.getcwd()})
     install_settings(ctx, path=os.path.join(os.path.expanduser("~"), ".miniharness", "settings.json"))
@@ -320,6 +322,19 @@ def _web_main(host: str | None = None, port: int | None = None) -> None:
     from ..feedback import install_command_feedback, install_message_feedback
     install_command_feedback(ctx)
     install_message_feedback(ctx, {"maxNoteBytes": 8192})
+    # permission-presets（M11）+ approval:policy 上下文：上游 base 默认挂载
+    # user-approval + permission-presets（三预设，defaultPreset 由组合决议）。
+    # mini web 未装 confining shell → 组合沙箱缺省回落 sandboxPolicy.default_mode。
+    from ..interaction.approval import ApprovalService
+    from ..interaction.permission_presets import install_permission_presets
+    ctx.provide("approval", ApprovalService(ctx))
+    install_permission_presets(ctx, {
+        "presets": {
+            "read-only": {"sandbox": "read-only", "approval": "ask"},
+            "workspace-write": {"sandbox": "workspace-write", "approval": "ask"},
+            "danger-full-access": {"sandbox": "danger-full-access", "approval": "never"},
+        },
+    })
     # userQuestions 装配（seam 由 web 组合挂；ask_user_question 工具对齐上游经
     # agent presets 挂载——mini 仅在 web 组合注册，headless/sessions 不挂）
     reg = default_tools(ctx)

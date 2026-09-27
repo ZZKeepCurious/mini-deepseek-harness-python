@@ -42,8 +42,10 @@ class TestErrorCodeSet(unittest.TestCase):
         # workspace-file/watch-unsupported；workspace-controller 新增 workspace/session-active；
         # job-controller 新增 job/not-found；agent-preset-registry 新增
         # agent-preset/locked；feedback 新增 note-blank/note-too-large/
-        # session-not-found/target-not-found/version-conflict）
-        self.assertEqual(len(RPC_ERROR_CODES), 54)
+        # session-not-found/target-not-found/version-conflict；
+        # permission-presets 新增 permission/invalid + duplicate-auto +
+        # auto-unavailable）
+        self.assertEqual(len(RPC_ERROR_CODES), 57)
 
     def test_known_codes_present(self):
         for code in ("gateway/bad-request", "session/not-found", "session/model-unavailable",
@@ -65,7 +67,9 @@ class TestErrorCodeSet(unittest.TestCase):
                      "settings/rejected", "settings/conflict", "credential/rejected",
                      "agent-preset/read-only", "agent-preset/locked", "job/not-found",
                      "note-blank", "note-too-large", "session-not-found",
-                     "target-not-found", "version-conflict"):
+                     "target-not-found", "version-conflict",
+                     "permission/invalid", "permission/duplicate-auto",
+                     "permission/auto-unavailable"):
             self.assertIn(code, RPC_ERROR_CODES)
 
     def test_apiproxy_only_codes_retired(self):
