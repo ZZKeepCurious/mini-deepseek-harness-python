@@ -38,6 +38,11 @@ KNOWN_TYPES = frozenset({
     # request/context {provider, model, contextWindow?, systemPromptUpdate?}
     # 在任一字段变化时追加
     "request/header", "request/context", "session/end-seed",
+    # 会话标题（上游 session/session-title/src/index.ts SessionEventMap：
+    # session/title {title, messageSeqs, source:{kind:'fallback'|'provider'|
+    # 'user', provider?, model?}}，log-only 非 surface、整值替换最后一条胜出；
+    # session/title-llm-request 是 LLM 标题生成审计）
+    "session/title", "session/title-llm-request",
     # Inbox 变更（上游 agent/src/inbox.ts SessionEventMap，log-only 非 surface：
     # 每次入队/认领/清除的 splice 形状 {target, start, removedCount?, inserted,
     # outcome?}，冷恢复重放重建 live 状态；认领不写 outcome，丢弃式删除写

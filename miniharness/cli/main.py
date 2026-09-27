@@ -335,6 +335,24 @@ def _web_main(host: str | None = None, port: int | None = None) -> None:
             "danger-full-access": {"sandbox": "danger-full-access", "approval": "never"},
         },
     })
+    # session-title（M10）：上游 base 默认挂载 session-title + first-prompt-llm
+    # （fallback 5/40/80，LLM 5/10/4096/64/60000）。
+    from ..session_title import (
+        install_session_title,
+        register_first_prompt_llm_provider,
+    )
+    install_session_title(ctx, {
+        "fallbackMaxWords": 5,
+        "fallbackMaxBytes": 40,
+        "maxTitleBytes": 80,
+    }, adapter=adapter)
+    register_first_prompt_llm_provider(ctx, adapter, {
+        "targetWords": 5,
+        "targetCjkCharacters": 10,
+        "maxInputBytes": 4096,
+        "maxOutputTokens": 64,
+        "timeoutMs": 60000,
+    })
     # userQuestions 装配（seam 由 web 组合挂；ask_user_question 工具对齐上游经
     # agent presets 挂载——mini 仅在 web 组合注册，headless/sessions 不挂）
     reg = default_tools(ctx)
