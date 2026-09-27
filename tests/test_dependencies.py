@@ -75,6 +75,7 @@ LAYER_UNITS = [
     ("settings_controller", 3),
     ("workflow_ptc", 3),
     ("tool_workflow", 3),
+    ("subprocess", 3),
     ("core.agent_loop", 2),
     ("compaction", 2),
     ("ptc", 2),
@@ -262,6 +263,17 @@ class ImportDirectionTest(unittest.TestCase):
                     # §5 显式例外（单方向）：workflow-ptc 经 continuation manager
                     # 启动子代理（上游 workflow-ptc inject dsh-subagent）；
                     # seams 层不得反向 import workflow_ptc
+                    continue
+                if src_unit == "subprocess" and dst_unit == "seams":
+                    # §5 显式例外（单方向）：subprocess 接缝服务收编 subprocess_env
+                    # 的 env 清洗（上游 subprocess 定义在 subprocess 包内）；
+                    # seams 层不得反向 import subprocess
+                    continue
+                if src_unit == "subprocess" and dst_unit == "terminal_controller":
+                    # §5 显式例外（单方向）：subprocess 接缝服务收编
+                    # terminal_controller/shells.py 的 resolve_executable /
+                    # terminal_environment（上游 subprocess-local 提供两者）；
+                    # terminal_controller 不得反向 import subprocess
                     continue
                 if src_unit == "tool_bash" and dst_unit == "shell":
                     # §5 显式例外（单方向）：tool-bash 是 ctx.shell + ctx.shellEnv 的
