@@ -68,6 +68,7 @@ LAYER_UNITS = [
     ("terminal_bash", 3),
     ("tool_terminal", 3),
     ("tool_bash", 3),
+    ("tool_pwsh", 3),
     ("terminal_controller", 3),
     ("workspace_controller", 3),
     ("workspace_files", 3),
@@ -258,6 +259,17 @@ class ImportDirectionTest(unittest.TestCase):
                     # §5 显式例外（单方向）：tool-bash 是 ctx.shell + ctx.shellEnv 的
                     # 模型面消费者（上游 tool-bash 依赖 dsh-shell / dsh-shell-env）；
                     # shell 层不得反向 import tool_bash
+                    continue
+                if src_unit == "tool_pwsh" and dst_unit == "shell":
+                    # §5 显式例外（单方向）：tool-pwsh 是 ctx.shell + ctx.shellEnv 的
+                    # 模型面消费者（上游 tool-pwsh 依赖 dsh-shell / dsh-shell-env）；
+                    # shell 层不得反向 import tool_pwsh
+                    continue
+                if src_unit == "tool_pwsh" and dst_unit == "tool_bash":
+                    # §5 显式例外（单方向）：tool-pwsh 复用 tool-bash 的 background
+                    # 助手（process_sources/ring_delta/process_outcome——上游
+                    # tool-pwsh/src/background.ts 与 tool-bash 同款）；tool_bash
+                    # 不得反向 import tool_pwsh
                     continue
                 if src_unit == "cli" and dst_unit == "tool_bash":
                     # §5 显式例外（单方向）：default_tools 组装真实 bash 工具
