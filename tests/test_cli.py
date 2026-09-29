@@ -77,7 +77,7 @@ class TestLauncherFlags(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home:
             with mock_patch.object(web_launcher, "run_web") as run_web_mock:
                 out, err, code = _run_cli(["--profile", "web"],
-                                          env={"MINIHARNESS_HOME": home})
+                                          env={"DSH_HOME": home, "MINIHARNESS_HOME": home})
                 self.assertEqual(code, None)
                 self.assertEqual(run_web_mock.call_count, 1)
                 adapter, tools, ctx = run_web_mock.call_args.args
@@ -99,7 +99,7 @@ class TestLauncherFlags(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home:
             with mock_patch.object(web_launcher, "run_web") as run_web_mock:
                 _run_cli(["--host", "0.0.0.0", "--port", "9000", "--profile", "web"],
-                         env={"MINIHARNESS_HOME": home})
+                         env={"DSH_HOME": home, "MINIHARNESS_HOME": home})
                 kwargs = run_web_mock.call_args.kwargs
                 self.assertEqual(kwargs["host"], "0.0.0.0")
                 self.assertEqual(kwargs["port"], 9000)

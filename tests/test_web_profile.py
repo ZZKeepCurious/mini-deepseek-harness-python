@@ -30,7 +30,7 @@ from miniharness.settings.forms import SettingsForms, install_settings_forms
 
 EXPECTED_ENTRY_IDS = [
     "system-prompt", "web", "user-questions", "sandbox-policy",
-    "terminal-controller", "fs", "credentials", "workspaces",
+    "terminal-controller", "fs", "subprocess", "credentials", "workspaces",
     "workspace-controller", "workspace-files", "session-projections",
     "usage-stats", "turn-outline", "command-feedback", "message-feedback",
     "approval", "permission-presets", "session-title",
@@ -166,7 +166,7 @@ class TestWebMainWiresSettingsForms(unittest.TestCase):
                 code[0] = n
                 raise SystemExit(n)
 
-            with mock_patch.dict(os.environ, {"MINIHARNESS_HOME": home}, clear=False):
+            with mock_patch.dict(os.environ, {"DSH_HOME": home, "MINIHARNESS_HOME": home}, clear=False):
                 os.environ.pop("DEEPSEEK_API_KEY", None)
                 with mock_patch.object(web_launcher, "run_web", fake_run_web), \
                      mock_patch.object(sys, "stdout", _Stream(out)), \

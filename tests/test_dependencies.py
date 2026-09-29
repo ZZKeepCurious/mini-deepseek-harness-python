@@ -62,6 +62,7 @@ LAYER_UNITS = [
     ("attachment", 1),
     ("ptc_runtime", 1),
     ("fs", 1),
+    ("lsp", 1),
     ("identity", 1),
     ("storage", 1),
     ("terminal", 1),
@@ -92,6 +93,8 @@ LAYER_UNITS = [
     ("todo", 2),
     ("spill", 2),
     ("session_projection", 1),
+    ("lsp_stdio", 2),
+    ("tool_lsp", 2),
     ("session_turn_outline", 2),
     ("session_title", 2),
     ("session_projection_cache", 2),
@@ -312,6 +315,11 @@ class ImportDirectionTest(unittest.TestCase):
                     # §5 显式例外（单方向）：default_tools 组装 workflow 工具
                     # （上游 bundle/base compose tool-workflow）；同 cli→tool_bash
                     # 先例，tool_workflow 不得反向 import cli
+                    continue
+                if src_unit == "cli" and dst_unit == "subprocess":
+                    # §5 显式例外（单方向）：web profile 组合条目装配 ctx.subprocess
+                    # （上游 dsh-base 默认挂载 subprocess-local，M17）；同 cli→shell 先例，
+                    # subprocess 不得反向 import cli
                     continue
                 if src_unit == "mcp" and dst_unit == "seams":
                     # §5 显式例外（单方向）：transport 复用 seams/subprocess_env 的

@@ -22,6 +22,8 @@ plugins:
     module: miniharness.cli.plugins.terminal_controller
   - id: fs
     module: miniharness.cli.plugins.fs
+  - id: subprocess
+    module: miniharness.cli.plugins.subprocess
   - id: credentials
     module: miniharness.cli.plugins.credentials
   - id: workspaces

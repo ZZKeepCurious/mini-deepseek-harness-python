@@ -51,6 +51,11 @@ def default_tools(ctx: Context) -> ToolRegistry:
     if web is not None:
         from ..web_tools import register_web_tools
         register_web_tools(reg, web, ctx.get("systemPrompt"))
+    # ctx.lsp 服务存在时收编 `lsp` 工具 + tool:lsp prompt 节（上游 tool-lsp 独立挂载；
+    # mini 同 web/jobs/skills 先例，由 default_tools 条件收编）。
+    if ctx.get("lsp") is not None:
+        from ..tool_lsp import install_tool_lsp
+        install_tool_lsp(ctx, reg)
     # ctx.workflowEngine 服务存在时收编 `workflow` 工具（上游 base 挂载
     # tool-workflow；web-app 禁用——模型面在预设层。tool-workflow 要求
     # workflowEngine + 后台作业服务）。
