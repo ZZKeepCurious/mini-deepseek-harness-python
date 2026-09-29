@@ -1,0 +1,79 @@
+# mini 默认 web 组合（对齐上游 web-app bundle 的插件条目面）。
+#
+# 每个条目是 loader 插件：module 指向 miniharness.cli.plugins.* 的
+# apply(ctx, **config)，安装对应 web 服务。本文件是「bundle 层」的 mini
+# 载体（无 npm bundle 解析）——仅作为首次 boot 时用户 profile
+# （$MINIHARNESS_HOME/profiles/web/cordis.yml）的种子模板，Loader 不写它
+# （用户 include 文件才是可写面）；用户 profile 的 cordis.patch.yml 在
+# include 基础上按 id 覆盖 / 禁用 / 插入，构成 ConfigEditor.entries() 的
+# 可配置命名空间（SettingsForms 读面）。
+plugins:
+  - id: system-prompt
+    module: miniharness.cli.plugins.system_prompt
+  - id: web
+    module: miniharness.cli.plugins.web
+  - id: user-questions
+    module: miniharness.cli.plugins.user_questions
+  - id: sandbox-policy
+    module: miniharness.cli.plugins.sandbox_policy
+    config:
+      mode: workspace-write
+  - id: terminal-controller
+    module: miniharness.cli.plugins.terminal_controller
+  - id: fs
+    module: miniharness.cli.plugins.fs
+  - id: credentials
+    module: miniharness.cli.plugins.credentials
+  - id: workspaces
+    module: miniharness.cli.plugins.workspaces
+  - id: workspace-controller
+    module: miniharness.cli.plugins.workspace_controller
+  - id: workspace-files
+    module: miniharness.cli.plugins.workspace_files
+  - id: session-projections
+    module: miniharness.cli.plugins.session_projections
+  - id: usage-stats
+    module: miniharness.cli.plugins.usage_stats
+  - id: turn-outline
+    module: miniharness.cli.plugins.turn_outline
+  - id: command-feedback
+    module: miniharness.cli.plugins.command_feedback
+  - id: message-feedback
+    module: miniharness.cli.plugins.message_feedback
+    config:
+      maxNoteBytes: 8192
+  - id: approval
+    module: miniharness.cli.plugins.approval
+  - id: permission-presets
+    module: miniharness.cli.plugins.permission_presets
+    inject:
+      - approval
+    config:
+      presets:
+        read-only:
+          sandbox: read-only
+          approval: ask
+        workspace-write:
+          sandbox: workspace-write
+          approval: ask
+        danger-full-access:
+          sandbox: danger-full-access
+          approval: never
+  - id: session-title
+    module: miniharness.cli.plugins.session_title
+    config:
+      fallbackMaxWords: 5
+      fallbackMaxBytes: 40
+      maxTitleBytes: 80
+  - id: session-title-first-prompt-llm
+    module: miniharness.cli.plugins.session_title_first_prompt_llm
+    inject:
+      - sessionTitle
+    config:
+      targetWords: 5
+      targetCjkCharacters: 10
+      maxInputBytes: 4096
+      maxOutputTokens: 64
+      timeoutMs: 60000
+  - id: deepseek-account
+    module: miniharness.cli.plugins.deepseek_account

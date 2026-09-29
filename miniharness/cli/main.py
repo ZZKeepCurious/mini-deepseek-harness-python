@@ -20,8 +20,14 @@ launcher 选项（对齐 args.ts，已核实）：
 mini 扩展/简化（须标注）：
   - --config 为 mini 教学扩展（上游无此标志）
   - mini 内置默认组合为空（headless 不走插件树，见 headless.py 简化标注）
-  - 组合层与 headless/web 运行时解耦：带 --config/--patch 跑任务时先 boot 验证，
+  - 组合层与 headless 运行时解耦：带 --config/--patch 跑任务时先 boot 验证，
     headless 运行时仍为内置 adapter
+  - **web profile 是 boot/profile 驱动**：`--profile web` 首次把默认 web 组合
+    （cli/web_profile.yml 条目树，cli/plugins/* 插件）种子进
+    $MINIHARNESS_HOME/profiles/web/cordis.yml（Loader 只写用户 include 文件，
+    不写 shipped 资产），boot 之 → 装配 config-editor + SettingsForms
+    （rc.1 settings 核心，命名空间 = 组合条目 id，写经 config-editor 持久化
+    cordis.patch.yml）——对齐上游 web-app bundle 的插件组合面
   - web profile 的 host/port：`--host`/`--port` 显式参数 > 环境
     MINIHARNESS_WEB_HOST / MINIHARNESS_WEB_PORT（缺省 127.0.0.1 / 0，OS 分配），
     见 web/launcher.py
@@ -50,6 +56,10 @@ from ..boot import apply_patch
 from ..boot.composition import load_composition, load_patch_list, render_composition_dump, resolve_js_exprs
 
 KNOWN_PROFILES = ("headless", "web")
+
+#: shipped 默认 web 组合模板（首次 boot 种子进 profile include；Loader 只写
+#: 用户 include 文件，本模板资产绝不回写）。
+_WEB_PROFILE_PATH = os.path.join(os.path.dirname(__file__), "web_profile.yml")
 
 USAGE = (
     "Usage:\n"
@@ -294,121 +304,82 @@ def _main(args: list[str]) -> None:
 
 
 def _web_main(host: str | None = None, port: int | None = None) -> None:
-    """web profile 组装：默认 DeepSeek 适配器 + default_tools，交给 web/launcher。
+    """web profile 组装：boot/profile 驱动的组合装配。
 
     cli→web 是 launcher 语义的单方向依赖（组装面在 cli，运行面在 web，
-    test_dependencies.py §5 显式例外）。host/port 为 `--host`/`--port` 显式
-    参数（None 由 web/launcher 读环境/缺省，见 _resolve_bind）。
+    test_dependencies.py §5 显式例外）。web profile 现在是 boot/profile 驱动：
 
-    浏览器终端面（P4）：装配 `ctx.sandboxPolicy` + `ctx.sandbox` + 
-    `ctx.terminalController`（上游 web bundle 同样 compose 这三者），使
-    `terminal/*` 路由与 `terminal/follow` 流可用；终端由会话沙箱策略约束。
+      1. 解析/初始化 `$MINIHARNESS_HOME/profiles/web/`（首次自动落盘 manifest +
+         空 cordis.patch.yml + 从 cli/web_profile.yml 种子 cordis.yml）；
+      2. 读 profile + home + overlays 补丁层（read_profile_patches 5 层序）；
+      3. boot 用户 include（profile_dir/cordis.yml，首次由 web_profile.yml 模板
+         种子；每个条目是 cli/plugins/* 的 apply(ctx, **config)），补丁层经
+         根 Include 应用；
+      4. 在 boot 过的上下文安装 config-editor + SettingsForms + settings-
+         controller——rc.1 settings 核心：命名空间 = ConfigEditor.entries()
+         （唯一 profile entry id），写经 config-editor 持久化 cordis.patch.yml
+         （filelock + reconcile + 原子写 + HMR runExclusive）；
+      5. default_tools + ask_user_question 工具 + agentPreset 会话投影注册；
+      6. 交给 web/launcher（WebApi + GatewayStreams + FastAPI）。
 
-    api 残余控制器（本步）：装配 `ctx.fs`（workspace-files 读面）+ `ctx.workspaces`
-    + `ctx.settings` + `ctx.credentials` + 三个 Remote 控制器（workspace / workspaceFiles
-    / settings+credentials），使对应 namespace 可用（上游 web bundle 同样 compose）。
+    host/port 为 `--host`/`--port` 显式参数（None 由 web/launcher 读环境/缺省，
+    见 _resolve_bind）。装配缺省经组合条目 config 声明（SettingsForms 可改）：
+    sandbox mode workspace-write、feedback maxNoteBytes 8192、session-title
+    fallback/LLM 预算、permission-presets 三预设。上游依据 = 默认组合重评
+    （tasks.md「production web 装配接 profile boot」，migration-log 步骤 184）。
     """
-    from ..core.scope import Context
-    from ..fs import install_local_fs
+    import shutil
+
+    from ..boot import boot
+    from ..boot.config_editor import install_config_editor
+    from ..boot.profile import (
+        PROFILE_TEMPLATES,
+        init_profile,
+        load_profile_directory,
+        read_profile_patches,
+        resolve_profile_dir,
+    )
+    from ..core.home_paths import resolve_dsh_home
+    from ..interaction import register_ask_user_question
     from ..llm import DeepSeekAdapter, LlmFailure
-    from ..preset.presets import default_roster
-    from ..seams.credentials_local import install_credentials
-    from ..seams.sandbox_local import LocalSandboxProvider
-    from ..seams.sandbox_policy import SandboxPolicyService
-    from ..settings import install_settings
+    from ..preset.presets import default_roster, register_agent_preset_projection
+    from ..settings.forms import install_settings_forms
     from ..settings_controller import install_settings_controller
-    from ..terminal_controller import install_terminal_controller
     from ..web.launcher import run_web
-    from ..workspace import install_workspaces
-    from ..workspace_controller import install_workspace_controller
-    from ..workspace_files import install_workspace_files
     from .default_tools import default_tools
 
-    ctx = Context(name="web")
     try:
         adapter = DeepSeekAdapter()
     except LlmFailure as e:
         sys.stderr.write(f"dsh: {e.failure['code']}: {e.failure['message']}\n")
         sys.exit(1)
-    from ..core.system_prompt import install_system_prompt
-    from ..interaction import install_user_questions, register_ask_user_question
-    from ..session_turn_outline import install_turn_outline
-    from ..web_tools import install_web
-    install_system_prompt(ctx)
-    install_web(ctx)
-    install_user_questions(ctx)
-    ctx.provide("sandbox", LocalSandboxProvider())
-    # 沙箱策略缺省对齐上游 dsh-base（cordis.patch.yml:231）：
-    # `DSH_PERMISSION_MODE ?? 'workspace-write'`，workspaceRoot = 进程 cwd。
-    SandboxPolicyService(ctx, {"mode": os.environ.get("DSH_PERMISSION_MODE", "workspace-write")})
-    install_terminal_controller(ctx)
-    install_local_fs(ctx, {"cwd": os.getcwd()})
-    install_settings(ctx, path=os.path.join(os.path.expanduser("~"), ".miniharness", "settings.json"))
-    install_credentials(ctx)
-    install_workspaces(ctx)
+
+    home = resolve_dsh_home()
+    profile_dir = resolve_profile_dir("web", home)
+    init_profile(profile_dir, PROFILE_TEMPLATES["web"])
+    # 用户 include 文件：首次 boot 从 shipped 模板种子。Loader 的 unload 标记
+    # 与 config-editor 的补丁回写都会写 include 文件，必须落在用户 profile
+    # 而非 shipped 资产（shipped web_profile.yml 只当模板，绝不回写）。
+    include_path = os.path.join(profile_dir, "cordis.yml")
+    if not os.path.exists(include_path):
+        shutil.copyfile(_WEB_PROFILE_PATH, include_path)
+    profile = load_profile_directory("miniharness", profile_dir)
+    patches = read_profile_patches("miniharness", profile, home=home)
     roster = default_roster()
-    install_workspace_controller(ctx)
-    install_workspace_files(ctx)
+    ctx, _activations = boot(include_path, patches=patches,
+                             env={"adapter": adapter, "roster": roster})
+
+    editor = install_config_editor(ctx, profile_dir=profile_dir,
+                                   patch_path=profile.patch_path, home=home)
+    install_settings_forms(ctx, config_editor=editor, profile_home=home)
     install_settings_controller(ctx, roster=roster)
-    # sessionProjections（M7）+ telemetry + session-turn-outline（M18）投影单元：
-    # session/projections、follow snapshot、control baseline 的 values 块由注册表
-    # 快照产出（上游 web-app 默认挂载 session-turn-outline）。
-    from ..session_projection import install_session_projections
-    from ..telemetry import install_usage_stats
-    install_session_projections(ctx)
-    install_usage_stats(ctx)
-    install_turn_outline(ctx)
-    # feedback（M12）：/feedback 命令 + sessionFeedback/messageFeedback Remote。
-    # 上游 web-app 默认挂载 message-feedback（maxNoteBytes 8192），base 挂载
-    # command-feedback；无持久化服务时 message-feedback 只服务活会话。
-    from ..feedback import install_command_feedback, install_message_feedback
-    install_command_feedback(ctx)
-    install_message_feedback(ctx, {"maxNoteBytes": 8192})
-    # permission-presets（M11）+ approval:policy 上下文：上游 base 默认挂载
-    # user-approval + permission-presets（三预设，defaultPreset 由组合决议）。
-    # mini web 未装 confining shell → 组合沙箱缺省回落 sandboxPolicy.default_mode。
-    from ..interaction.approval import ApprovalService
-    from ..interaction.permission_presets import install_permission_presets
-    ctx.provide("approval", ApprovalService(ctx))
-    install_permission_presets(ctx, {
-        "presets": {
-            "read-only": {"sandbox": "read-only", "approval": "ask"},
-            "workspace-write": {"sandbox": "workspace-write", "approval": "ask"},
-            "danger-full-access": {"sandbox": "danger-full-access", "approval": "never"},
-        },
-    })
-    # session-title（M10）：上游 base 默认挂载 session-title + first-prompt-llm
-    # （fallback 5/40/80，LLM 5/10/4096/64/60000）。
-    from ..session_title import (
-        install_session_title,
-        register_first_prompt_llm_provider,
-    )
-    install_session_title(ctx, {
-        "fallbackMaxWords": 5,
-        "fallbackMaxBytes": 40,
-        "maxTitleBytes": 80,
-    }, adapter=adapter)
-    register_first_prompt_llm_provider(ctx, adapter, {
-        "targetWords": 5,
-        "targetCjkCharacters": 10,
-        "maxInputBytes": 4096,
-        "maxOutputTokens": 64,
-        "timeoutMs": 60000,
-    })
-    # account-controller（P1-21 收口）：web-app 默认挂载 account namespace。
-    # 无浏览器 PKCE 载体 → 本地落空实现（恒 signed-out，getProfile/Balance →
-    # null；startSignIn 因无浏览器 fail loud）。
-    from ..deepseek_account import install_deepseek_account
-    install_deepseek_account(ctx)
-    # userQuestions 装配（seam 由 web 组合挂；ask_user_question 工具对齐上游经
-    # agent presets 挂载——mini 仅在 web 组合注册，headless/sessions 不挂）
+    # userQuestions 工具：web 组合经 cli 挂载 ask_user_question 工具（上游经
+    # agent presets 挂载；mini 仅在 web profile 注册，headless/sessions 不挂）。
     reg = default_tools(ctx)
     register_ask_user_question(reg, ctx)
-    # agentPreset 会话投影单元（缺口 C）：上游 web-app 默认挂载
-    # agent-preset-registry 的 agentPreset 投影；mini 生产装配此前只在测试
-    # 注册，真实 web profile 下 `session/projections` 不暴露该单元。这里与
-    # turnBoundary 等单元一同注册进 sessionProjections 注册表。
-    from ..preset.presets import register_agent_preset_projection
+    # agentPreset 会话投影单元（M7）：web-app 默认挂载 agent-preset-registry 的
+    # agentPreset 投影；boot 组合只装了 roster/注册表，投影单元这里注册进
+    # sessionProjections，使 `session/projections` 暴露该单元。
     projections = ctx.get("sessionProjections")
     if projections is not None:
         register_agent_preset_projection(projections)

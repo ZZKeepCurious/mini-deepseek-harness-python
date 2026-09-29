@@ -445,6 +445,7 @@ def install_settings(ctx: Context, *, path: str | None = None) -> SettingsProvid
 
 # rc.1 核心（SettingsForms）在 boot/profile 上下文装配：读 configEditor 条目 +
 # 写经 config-editor.edit 持久化 cordis.patch.yml + legacy settings.yaml 导入。
-# 生产装配（web/headless 手写装配）不 boot loader，settings 域维持 SettingsFileProvider
-# 既有载体（§2.78 登记）；`install_settings_forms` 供 profile 驱动的启动使用。
+# 生产装配：web profile 自步骤 184 起为 boot/profile 驱动（cli/plugins/* 条目树 +
+# install_config_editor + install_settings_forms，SettingsForms 成为 ctx.settings）；
+# headless 手写装配不 boot loader，settings 域维持 SettingsFileProvider 既有载体。
 from .forms import SettingsForms, install_settings_forms  # noqa: E402

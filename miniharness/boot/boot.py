@@ -216,12 +216,17 @@ def boot(
     *patch_paths: str,
     env: dict[str, Any] | None = None,
     bin_name: str = "miniharness",
+    patches: list[dict] | None = None,
 ) -> tuple[Context, list[tuple[str, Callable]]]:
     """boot()：装载根配置 → 依序应用补丁 → 动态激活插件 → 断言全部就绪。
 
     config_path 与补丁支持 .json/.yaml/.yml；YAML 内 !!js 表达式在对应条目
     激活期求值。返回 (root, activations)：activations 为 [(entry_id,
     fiber.dispose)]，按配置条目创建序（含补丁插入序），载波条目不列入。
+
+    @param patches 预组合的 applyEntryPatches 形态补丁（profile 层序已由
+        read_profile_patches 算好时用此参数，跳过 overlay 文件转换）；非 None
+        时 *patch_paths 忽略。
     """
     env = env or {}
     root = Context(name="root")
@@ -231,9 +236,12 @@ def boot(
     root.on("internal/update", _contain_update(root), prepend=True)
 
     overlay_patches: list[dict] = []
-    for pp in patch_paths:
-        overlay_patches.extend(
-            _overlay_to_entry_patches(load_patch_list(pp, bin_name, label="overlay")))
+    if patches is not None:
+        overlay_patches = [dict(p) for p in patches]
+    else:
+        for pp in patch_paths:
+            overlay_patches.extend(
+                _overlay_to_entry_patches(load_patch_list(pp, bin_name, label="overlay")))
     try:
         root.plugin(Loader, {"baseUrl": root.baseUrl})
         mount_root_include(root, os.path.abspath(config_path), overlay_patches, bin_name)

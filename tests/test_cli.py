@@ -68,19 +68,23 @@ class TestLauncherFlags(unittest.TestCase):
         self.assertIn("takes no task", err)
 
     def test_web_profile_dispatches_to_launcher(self):
-        # --profile web → cli 组装 ctx/adapter/tools 交给 web.launcher.run_web
-        # （拉真服务器会阻塞；mock run_web 只验调度与装配契约）
+        # --profile web → cli boot/profile 组合装配 ctx/adapter/tools 交给
+        # web.launcher.run_web（拉真服务器会阻塞；mock run_web 只验调度与装配契约）。
+        # MINIHARNESS_HOME 隔离：_web_main 现在会初始化 $HOME/profiles/web/ 并
+        # boot 默认 web 组合（cli/web_profile.yml），须落在临时目录。
         from miniharness.web import launcher as web_launcher
 
-        with mock_patch.object(web_launcher, "run_web") as run_web_mock:
-            out, err, code = _run_cli(["--profile", "web"])
-            self.assertEqual(code, None)
-            self.assertEqual(run_web_mock.call_count, 1)
-            adapter, tools, ctx = run_web_mock.call_args.args
-            self.assertIsNotNone(adapter)
-            self.assertIsNotNone(tools)
-            self.assertIsNotNone(ctx)
-            ctx.dispose()
+        with tempfile.TemporaryDirectory() as home:
+            with mock_patch.object(web_launcher, "run_web") as run_web_mock:
+                out, err, code = _run_cli(["--profile", "web"],
+                                          env={"MINIHARNESS_HOME": home})
+                self.assertEqual(code, None)
+                self.assertEqual(run_web_mock.call_count, 1)
+                adapter, tools, ctx = run_web_mock.call_args.args
+                self.assertIsNotNone(adapter)
+                self.assertIsNotNone(tools)
+                self.assertIsNotNone(ctx)
+                ctx.dispose()
 
     # ---- P2-17：--host / --port 显式监听参数 ----
 
@@ -92,11 +96,13 @@ class TestLauncherFlags(unittest.TestCase):
     def test_host_port_forwarded_to_web_main(self):
         from miniharness.web import launcher as web_launcher
 
-        with mock_patch.object(web_launcher, "run_web") as run_web_mock:
-            _run_cli(["--host", "0.0.0.0", "--port", "9000", "--profile", "web"])
-            kwargs = run_web_mock.call_args.kwargs
-            self.assertEqual(kwargs["host"], "0.0.0.0")
-            self.assertEqual(kwargs["port"], 9000)
+        with tempfile.TemporaryDirectory() as home:
+            with mock_patch.object(web_launcher, "run_web") as run_web_mock:
+                _run_cli(["--host", "0.0.0.0", "--port", "9000", "--profile", "web"],
+                         env={"MINIHARNESS_HOME": home})
+                kwargs = run_web_mock.call_args.kwargs
+                self.assertEqual(kwargs["host"], "0.0.0.0")
+                self.assertEqual(kwargs["port"], 9000)
 
     def test_host_invalid_fails(self):
         out, err, code = _run_cli(["--host", "evil.example", "--profile", "web"])
