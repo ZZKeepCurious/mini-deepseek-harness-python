@@ -95,6 +95,9 @@ LAYER_UNITS = [
     ("session_projection", 1),
     ("lsp_stdio", 2),
     ("tool_lsp", 2),
+    ("persistent_shell", 2),
+    ("tool_bash_persistent", 3),
+    ("tool_pwsh_persistent", 3),
     ("session_turn_outline", 2),
     ("session_title", 2),
     ("session_projection_cache", 2),
@@ -320,6 +323,12 @@ class ImportDirectionTest(unittest.TestCase):
                     # §5 显式例外（单方向）：web profile 组合条目装配 ctx.subprocess
                     # （上游 dsh-base 默认挂载 subprocess-local，M17）；同 cli→shell 先例，
                     # subprocess 不得反向 import cli
+                    continue
+                if src_unit == "cli" and dst_unit in (
+                        "tool_bash_persistent", "tool_pwsh_persistent"):
+                    # §5 显式例外（单方向）：opt-in 组合条目装配持久 shell 工具
+                    # （上游 bundle compose tool-bash-persistent / tool-pwsh-persistent）；
+                    # 同 cli→tool_bash 先例，两工具不得反向 import cli
                     continue
                 if src_unit == "mcp" and dst_unit == "seams":
                     # §5 显式例外（单方向）：transport 复用 seams/subprocess_env 的

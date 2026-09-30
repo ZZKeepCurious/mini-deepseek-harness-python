@@ -19,6 +19,8 @@ backend 持有终端机制，本服务持有 id、发布、授权与等待清理
 
 from __future__ import annotations
 
+import time
+
 from ..core.scope import Context, Service
 from .types import (
     TerminalBackend,
@@ -176,6 +178,29 @@ class TerminalSessionService(Service):
 
     def read(self, owner, session_id: str, request: dict | None = None) -> dict:
         return self._expect_owned(owner, session_id)["session"].read(dict(request or {}))
+
+    def await_send(self, owner, session_id: str, operation=None, signal=None):
+        """同步驱动一次 send 至结算（mini 同步载体的 readiness 轮询驱动面）。
+
+        上游 backend 自驱动 async poll（`operation.done` 为 Promise）；mini 的同步
+        backend 经 backend 会话的 `run_until_settled` 驱动。本方法把它暴露给服务
+        消费者（`tool_terminal` / persistent shell 工具），使一次 `start_send` 能真正
+        结算。无驱动面的 backend（测试桩等）退化为轮询 `settled` + 取消。返回被驱动的
+        operation（调用方读 `.done` / `.result`）。
+        """
+        record = self._expect_owned(owner, session_id)
+        target = operation if operation is not None else record["active"]
+        if target is None:
+            raise RuntimeError(f"PTY session {session_id} has no active send to drive")
+        drive = getattr(record["session"], "run_until_settled", None)
+        if callable(drive):
+            drive(target, signal)
+            return target
+        while not target.settled:
+            if signal is not None and getattr(signal, "is_set", lambda: False)():
+                target.cancel()
+            time.sleep(0.01)
+        return target
 
     def signal(self, owner, session_id: str, signal: str) -> dict:
         return self._expect_owned(owner, session_id)["session"].signal(signal)

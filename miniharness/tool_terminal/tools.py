@@ -227,18 +227,14 @@ def _is_aborted(signal: Any) -> bool:
     return bool(is_set()) if callable(is_set) else False
 
 
-def _await_settle(operation, signal: Any):
-    """等 operation 结算（轮询桥接同步结算契约）；中止信号协作取消后继续排干。
+def _await_settle(terminals, agent, session_id, operation, signal: Any):
+    """驱动一次 send 至结算并返回 `operation.done`。
 
-    等价上游 startSend(…, signal) 的 abort 接线：signal 置位即 operation.cancel()
-    （触发 on_cancel → 前台 SIGINT），随后仍在后台等真正结算（'已启动的 promise
-    排干到静止'）。返回 operation.done——失败时重抛（上游 done 拒绝）。
+    经 `terminals.await_send` 驱动（mini 同步 backend 的 readiness 轮询面，等价上游
+    `startSend(…, signal)` 的 async 自驱动）：signal 置位即协作取消（`operation.cancel()`
+    → 前台 SIGINT），随后仍在后台等真正结算（'已启动的 promise 排干到静止'）。
     """
-    while not operation.settled:
-        if _is_aborted(signal):
-            if operation.cancel() is False:
-                pass  # 已结算/已取消，继续等结算
-        time.sleep(0.01)
+    terminals.await_send(agent, session_id, operation, signal)
     return operation.done
 
 
@@ -309,7 +305,7 @@ def _start_background_send(terminals, jobs, agent, session_id: str, request: dic
 
         def produce() -> None:
             try:
-                result = _await_settle(operation, None)
+                result = _await_settle(terminals, agent, session_id, operation, None)
             except BaseException as error:
                 box.settle({"status": "failed", "detail": str(error)})
                 return
@@ -411,7 +407,8 @@ def _terminal_send_tool(terminals, jobs_getter: Callable[[], Any], config: dict)
             return {"kind": "background", "jobId": _start_background_send(
                 terminals, jobs, agent, sid, request, max_bytes)}
         operation = terminals.start_send(agent, sid, request)
-        result = await asyncio.to_thread(_await_settle, operation, getattr(exec_, "signal", None))
+        result = await asyncio.to_thread(
+            _await_settle, terminals, agent, sid, operation, getattr(exec_, "signal", None))
         if _is_aborted(getattr(exec_, "signal", None)):
             raise RuntimeError("terminal send aborted")
         return {"kind": "foreground", **result}
