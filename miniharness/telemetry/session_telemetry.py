@@ -14,6 +14,7 @@ from typing import Any, Callable
 
 from ..core.scope import Context, Service
 from ..core.session import SESSION_FORMAT_VERSION
+from ..core.session.json import thaw
 
 __all__ = [
     "SessionTelemetryBackend",
@@ -32,6 +33,10 @@ class SessionTelemetryRecord:
     severity: str  # 'info' | 'warn' | 'error'
     attributes: dict
     body: Any
+    #: ledger 记录的 canonical 信封（去 data）；ops 记录为 None。
+    #: `{sessionId, envelope: Omit<SessionEvent,'data'>}`——OTel backend 据此重建
+    #: 可上传事件；脱敏规则若删除它，记录被 backend 丢弃（fail-closed）。
+    source_event: dict | None = None
 
 
 class SessionTelemetrySink:
@@ -179,10 +184,15 @@ class SessionTelemetryCoordinator:
             self.contain(lambda event=event: self._capture_event(session, event))
 
     def _capture_event(self, session: Any, event: dict) -> None:
+        envelope = {key: value for key, value in event.items() if key != "data"}
         record = self.redact(SessionTelemetryRecord(
             channel="ledger", time=event.get("time", _now_ms()),
             severity=_severity_of(event), attributes=_identity_of(session, event),
-            body=event.get("data")))
+            body=thaw(event.get("data")),
+            source_event={
+                "sessionId": session.session_id,
+                "envelope": thaw(envelope),
+            }))
         self._deliver(session, record, event.get("seq"))
 
     def redact(self, record: SessionTelemetryRecord) -> SessionTelemetryRecord:
@@ -246,10 +256,23 @@ class SessionTelemetryCoordinator:
             if hasattr(result, "__await__"):
                 import asyncio
                 try:
-                    asyncio.get_running_loop()
+                    loop = asyncio.get_running_loop()
                 except RuntimeError:
                     asyncio.run(result)
+                else:
+                    task = loop.create_task(result)
+                    task.add_done_callback(self._consume_shutdown)
         except BaseException as error:  # noqa: BLE001 - 最佳努力上报不得失败拆解
+            logger = self.ctx.root.logger
+            if logger is not None:
+                logger.warn(f"telemetry: backend shutdown failed: {error}")
+
+    def _consume_shutdown(self, task: Any) -> None:
+        """异步后端 shutdown 任务的失败在此收口（拆解路径已不再同步等待）。"""
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
             logger = self.ctx.root.logger
             if logger is not None:
                 logger.warn(f"telemetry: backend shutdown failed: {error}")

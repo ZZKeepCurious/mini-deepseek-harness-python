@@ -1,663 +1,446 @@
-"""C16 Schedule 边界验收：域 fail-closed 分支、工具错误路径、运行时退化路径。
+"""Schedule 边界验收：fail-closed 解码、时区/DST 边界、storage 记录准入、
+归档准入、工具与运行时退化路径。
 
 运行：python -m unittest tests.test_schedule_edges -v
 """
 import asyncio
+import json
+import os
+import tempfile
 import unittest
+from datetime import datetime, timezone
+
+from miniharness.core.agents import install_agents
+from miniharness.core.schema import ValidationError, validate_schema_value
+from miniharness.core.scope import Context
+from miniharness.core.session_store import install_sessions
+from miniharness.core.tools import ToolExec
+from miniharness.storage import install_storage
+from miniharness.storage.error import DomainError
 
 from miniharness.schedule import (
+    MAX_TITLE_LENGTH,
     MIN_EVERY_INTERVAL_SECONDS,
     ScheduleInputError,
     ScheduleLogError,
     allocate_schedule_id,
+    apply_schedule_changes,
+    canonicalize_time_zone,
     create_after_schedule_record,
     create_at_schedule_record,
+    create_cron_schedule_record,
+    create_daily_schedule_record,
     create_every_schedule_record,
+    create_weekly_schedule_record,
     decode_schedule_change,
+    decode_schedule_record,
+    decode_stored_title,
     fold_schedule_events,
-    register_schedule_tools,
-    resolve_every_occurrence,
-    schedule_view,
+    install_schedule,
+    parse_cron_input,
+    parse_daily_input,
+    parse_weekly_input,
+    schedule_domain,
+    schedule_task_schema,
 )
-from miniharness.schedule.domain import (
-    _MIN_EPOCH,
-    _MAX_EPOCH,
-    _epoch_ms,
-    _format_epoch_ms,
-    canonicalize_time_zone,
-    now_ms,
-    apply_schedule_changes,
-)
-from miniharness.schedule.runtime import ScheduleRuntime
-from tests.test_schedule import _call, _epoch_of, _parent_loop, _RuntimeAgent, _RuntimeHarness
-
-
-def _create_change(record):
-    return {"version": 1, "operation": "create", "schedule": record}
-
-
-def _future_canonical(seconds_ahead=60):
-    return _format_epoch_ms(now_ms() + seconds_ahead * 1000)
+from miniharness.schedule import domain as _d
+from tests.test_schedule import _ms, _iso, ServiceHarness, _ms_local
 
 
 # ===== 域 fail-closed =====
 
 class DomainFailClosedTest(unittest.TestCase):
-    def test_decode_id_empty(self):
-        from miniharness.schedule.domain import _decode_id
-        with self.assertRaises(ScheduleLogError):
-            _decode_id("")
+    def test_decode_id(self):
+        for bad in ("", " x", "x "):
+            with self.assertRaises(ScheduleLogError):
+                _d._decode_id(bad)
 
-    def test_decode_id_whitespace(self):
-        from miniharness.schedule.domain import _decode_id
-        with self.assertRaises(ScheduleLogError):
-            _decode_id(" x ")
+    def test_decode_instant(self):
+        for bad in ("not-a-date", "2025-02-30T00:00:00.000Z",
+                    "2026-01-01T00:00:00Z"):
+            with self.assertRaises(ScheduleLogError):
+                _d._decode_instant(bad)
 
-    def test_decode_instant_bad_format(self):
-        from miniharness.schedule.domain import _decode_instant
-        with self.assertRaises(ScheduleLogError):
-            _decode_instant("not-a-date")
-
-    def test_decode_instant_impossible_date(self):
-        # Python 的 strptime 会将 2025-02-30 规范化为 3 月 2 日；回读不匹配仍应不可用。
-        from miniharness.schedule.domain import _decode_instant
-        with self.assertRaises(ScheduleLogError):
-            _decode_instant("2025-02-30T00:00:00.000Z")
-
-    def test_decode_after_wrong_keys(self):
-        with self.assertRaises(ScheduleLogError):
-            from miniharness.schedule.domain import _decode_after_record
-            _decode_after_record({"id": "x", "kind": "after"})
-
-    def test_decode_after_bad_prompt(self):
-        with self.assertRaises(ScheduleLogError):
-            from miniharness.schedule.domain import _decode_after_record
-            _decode_after_record({"id": "x", "kind": "after", "prompt": "  ",
-                                   "afterSeconds": 1, "scheduledAt": _future_canonical()})
-
-    def test_decode_after_bad_after_seconds(self):
-        with self.assertRaises(ScheduleLogError):
-            from miniharness.schedule.domain import _decode_after_record
-            _decode_after_record({"id": "x", "kind": "after", "prompt": "hi",
-                                   "afterSeconds": 0, "scheduledAt": _future_canonical()})
-
-    def test_decode_at_wrong_keys(self):
-        with self.assertRaises(ScheduleLogError):
-            from miniharness.schedule.domain import _decode_at_record
-            _decode_at_record({"id": "x", "kind": "at"})
-
-    def test_decode_at_bad_prompt(self):
-        with self.assertRaises(ScheduleLogError):
-            from miniharness.schedule.domain import _decode_at_record
-            _decode_at_record({"id": "x", "kind": "at", "prompt": "  ",
-                                "scheduledAt": _future_canonical()})
-
-    def test_decode_every_too_small(self):
-        with self.assertRaises(ScheduleLogError):
-            from miniharness.schedule.domain import _decode_every_record
-            _decode_every_record({"id": "x", "kind": "every", "prompt": "hi",
-                                   "everySeconds": 299, "scheduledAt": _future_canonical()})
+    def test_decode_after_record_shape(self):
+        good = {"id": "x", "kind": "after", "prompt": "hi", "afterSeconds": 5,
+                "scheduledAt": "2099-01-01T00:00:00.000Z"}
+        for mutate in (
+            lambda r: {k: v for k, v in r.items() if k != "scheduledAt"},
+            lambda r: {**r, "prompt": "  "},
+            lambda r: {**r, "afterSeconds": 0},
+            lambda r: {**r, "title": " padded"},
+            lambda r: {**r, "title": "x" * (MAX_TITLE_LENGTH + 1)},
+        ):
+            with self.assertRaises(ScheduleLogError):
+                _d._decode_after_record(mutate(good))
 
     def test_decode_schedule_record_unknown_kind(self):
         with self.assertRaises(ScheduleLogError):
-            from miniharness.schedule.domain import _decode_schedule_record
-            _decode_schedule_record({"id": "x", "kind": "none", "prompt": "hi"})
+            decode_schedule_record({"id": "x", "kind": "nope", "prompt": "hi"})
 
-    def test_decode_change_non_object(self):
-        with self.assertRaises(ScheduleLogError):
-            decode_schedule_change("x")
+    def test_decode_change_variants(self):
+        for bad in (
+            "x",
+            {"version": 2, "operation": "create", "schedule": {}},
+            {"version": 1, "operation": "create", "id": "x"},
+            {"version": 1, "operation": "delete"},
+            {"version": 1, "operation": "dispatch", "foo": "bar"},
+            {"version": 1, "operation": "explode"},
+            {"version": 1, "operation": "dispatch", "id": "x", "extra": 1},
+        ):
+            with self.assertRaises(ScheduleLogError):
+                decode_schedule_change(bad)
 
-    def test_decode_change_bad_version(self):
-        with self.assertRaises(ScheduleLogError):
-            decode_schedule_change({"version": 2, "operation": "create",
-                                     "schedule": {"id": "x", "kind": "after",
-                                                  "prompt": "hi", "afterSeconds": 1,
-                                                  "scheduledAt": _future_canonical()}})
-
-    def test_decode_change_create_bad_keys(self):
-        with self.assertRaises(ScheduleLogError):
-            decode_schedule_change({"version": 1, "operation": "create", "id": "x"})
-
-    def test_decode_change_delete_bad_keys(self):
-        with self.assertRaises(ScheduleLogError):
-            decode_schedule_change({"version": 1, "operation": "delete"})
-
-    def test_decode_change_dispatch_bad_keys(self):
-        with self.assertRaises(ScheduleLogError):
-            decode_schedule_change({"version": 1, "operation": "dispatch", "foo": "bar"})
-
-    def test_decode_change_unknown_operation(self):
-        with self.assertRaises(ScheduleLogError):
-            decode_schedule_change({"version": 1, "operation": "explode"})
-
-    def test_decode_change_dispatch_no_accepted_at(self):
-        with self.assertRaises(ScheduleLogError):
-            decode_schedule_change({"version": 1, "operation": "dispatch", "id": "x",
-                                     "extra": 1})
-
-    def test_apply_id_reuse(self):
-        folded = {"active": (), "seenIds": ("schedule-1",)}
-        with self.assertRaises(ScheduleLogError):
-            apply_schedule_changes(folded, [_create_change(
-                {"id": "schedule-1", "kind": "after", "prompt": "hi",
-                 "afterSeconds": 1, "scheduledAt": _future_canonical()})])
-
-    def test_apply_delete_inactive(self):
-        folded = {"active": (), "seenIds": ()}
-        with self.assertRaises(ScheduleLogError):
-            apply_schedule_changes(folded, [{"version": 1, "operation": "delete", "id": "nope"}])
-
-    def test_apply_dispatch_inactive(self):
-        folded = {"active": (), "seenIds": ()}
-        with self.assertRaises(ScheduleLogError):
-            apply_schedule_changes(folded, [{"version": 1, "operation": "dispatch", "id": "nope"}])
-
-    def test_apply_one_shot_with_accepted_at(self):
-        record = create_after_schedule_record("schedule-1", "hi", 1, now_ms())
-        folded = {"active": [record], "seenIds": ("schedule-1",)}
-        with self.assertRaises(ScheduleLogError):
-            apply_schedule_changes(folded, [{"version": 1, "operation": "dispatch",
-                                              "id": "schedule-1", "acceptedAt": _future_canonical()}])
-
-    def test_apply_every_missing_accepted_at(self):
-        record = create_every_schedule_record("schedule-1", "hi", 300, now_ms())
-        folded = {"active": [record], "seenIds": ("schedule-1",)}
-        with self.assertRaises(ScheduleLogError):
-            apply_schedule_changes(folded, [{"version": 1, "operation": "dispatch", "id": "schedule-1"}])
-
-    def test_apply_unknown_decoded_operation(self):
-        folded = {"active": (), "seenIds": ()}
-        with self.assertRaises(ScheduleLogError):
-            apply_schedule_changes(folded, [{"version": 1, "operation": "explode"}])
-
-    def test_fold_inherited_out_of_range(self):
+    def test_fold_and_apply_errors(self):
         with self.assertRaises(ScheduleLogError):
             fold_schedule_events([], inherited_event_count=1)
-
-    def test_allocate_id_collision(self):
-        # 分配起点为 len(seen)+1 并跳过已有 id，不回填空洞
-        folded = {"active": (), "seenIds": ("schedule-1", "schedule-2", "schedule-4")}
-        self.assertEqual(allocate_schedule_id(folded), "schedule-5")
-
-    def test_future_instant_time_out_of_range(self):
-        with self.assertRaises(ScheduleInputError) as cm:
-            create_after_schedule_record("x", "hi", 1, _MAX_EPOCH)
-        self.assertEqual(cm.exception.code, "time_out_of_range")
-
-    def test_future_instant_not_future(self):
-        from miniharness.schedule.domain import _future_instant
-        with self.assertRaises(ScheduleInputError) as cm:
-            _future_instant(now_ms() - 1, now_ms())
-        self.assertEqual(cm.exception.code, "not_future")
-
-    def test_parse_offset_invalid_string(self):
-        with self.assertRaises(ScheduleInputError):
-            from miniharness.schedule.domain import _parse_offset_instant
-            _parse_offset_instant("bad")
-
-    def test_parse_offset_year_zero(self):
-        with self.assertRaises(ScheduleInputError):
-            from miniharness.schedule.domain import _parse_offset_instant
-            _parse_offset_instant("0000-01-01T00:00:00Z")
-
-    def test_parse_offset_hour_overflow(self):
-        with self.assertRaises(ScheduleInputError):
-            from miniharness.schedule.domain import _parse_offset_instant
-            _parse_offset_instant("2026-01-01T25:00:00Z")
-
-    def test_parse_offset_negative_offset_invalid(self):
-        with self.assertRaises(ScheduleInputError):
-            from miniharness.schedule.domain import _parse_offset_instant
-            _parse_offset_instant("2026-01-01T00:00:00-00:00")
-
-    def test_parse_offset_valid(self):
-        from miniharness.schedule.domain import _parse_offset_instant
-        result = _parse_offset_instant("2026-01-01T00:00:00+08:00")
-        self.assertIsInstance(result, int)
-
-    def test_parse_local_at_invalid_shape(self):
-        with self.assertRaises(ScheduleInputError):
-            from miniharness.schedule.domain import _parse_local_at
-            _parse_local_at({"date": "bad", "time": "bad"})
-
-    def test_parse_local_at_hour_overflow(self):
-        with self.assertRaises(ScheduleInputError):
-            from miniharness.schedule.domain import _parse_local_at
-            _parse_local_at({"date": "2026-01-01", "time": "25:00:00"})
-
-    def test_resolve_every_occurrence_before_target(self):
-        record = create_every_schedule_record("x", "hi", 300, now_ms())
+        folded = {"active": (), "seenIds": ("schedule-1",)}
         with self.assertRaises(ScheduleLogError):
-            resolve_every_occurrence(record, _epoch_of(record["scheduledAt"]) - 1)
-
-    def test_resolve_every_occurrence_bad_accepted(self):
-        record = create_every_schedule_record("x", "hi", 300, now_ms())
+            apply_schedule_changes(folded, [{
+                "operation": "create",
+                "schedule": {"id": "schedule-1", "kind": "after", "prompt": "hi",
+                             "afterSeconds": 1, "scheduledAt": "2099-01-01T00:00:00.000Z"}}])
         with self.assertRaises(ScheduleLogError):
-            resolve_every_occurrence(record, "not-an-int")  # type: ignore[arg-type]
-
-    def test_resolve_every_occurrence_interval_not_safe(self):
-        record = create_every_schedule_record("x", "hi", 300, now_ms())
-        record["everySeconds"] = 0
+            apply_schedule_changes({"active": (), "seenIds": ()},
+                                   [{"operation": "delete", "id": "nope"}])
         with self.assertRaises(ScheduleLogError):
-            resolve_every_occurrence(record, _epoch_of(record["scheduledAt"]))
+            apply_schedule_changes({"active": (), "seenIds": ()},
+                                   [{"operation": "dispatch", "id": "nope"}])
+        with self.assertRaises(ScheduleLogError):
+            apply_schedule_changes({"active": (), "seenIds": ()},
+                                   [{"operation": "explode"}])
 
-    def test_canonicalize_time_zone_invalid(self):
+    def test_allocate_collision(self):
+        self.assertEqual(allocate_schedule_id(
+            {"active": (), "seenIds": ("schedule-1", "schedule-2", "schedule-4")}),
+            "schedule-5")
+
+    def test_deadline_boundaries(self):
+        with self.assertRaises(ScheduleInputError) as ctx:
+            create_after_schedule_record("x", "hi", 1, _d._MAX_FOUR_DIGIT_YEAR_MS, "hi")
+        self.assertEqual(ctx.exception.code, "time_out_of_range")
+        with self.assertRaises(ScheduleInputError) as ctx:
+            _d._future_instant(_ms_local() - 1, _ms_local())
+        self.assertEqual(ctx.exception.code, "not_future")
+
+    def test_parse_offset_invalid(self):
+        for bad in ("bad", "0000-01-01T00:00:00Z", "2026-01-01T25:00:00Z",
+                    "2026-01-01T00:00:00-00:00", "2026-02-30T00:00:00Z"):
+            with self.assertRaises(ScheduleInputError):
+                _d._parse_offset_instant(bad)
+
+    def test_parse_local_at_invalid(self):
+        for bad in ({"date": "bad", "time": "bad"},
+                    {"date": "2026-01-01", "time": "25:00:00"}):
+            with self.assertRaises(ScheduleInputError):
+                _d._parse_local_at(bad)
+
+    def test_canonicalize_time_zone(self):
+        for bad in ("Not/A-Zone", "", "CST", "+08:00", " UTC"):
+            with self.assertRaises(ScheduleInputError):
+                canonicalize_time_zone(bad)
+        self.assertEqual(canonicalize_time_zone("UTC"), "UTC")
+
+    def test_local_at_gap_and_past(self):
+        with self.assertRaises(ScheduleInputError) as ctx:
+            create_at_schedule_record(
+                "x", "hi", {"date": "2011-12-30", "time": "12:00:00",
+                            "time_zone": "Pacific/Apia"},
+                _ms("2011-12-29T00:00:00Z"), "hi")
+        self.assertEqual(ctx.exception.code, "invalid_rule")
+        with self.assertRaises(ScheduleInputError) as ctx:
+            create_at_schedule_record(
+                "x", "hi", {"date": "2020-01-01", "time": "00:00:00",
+                            "time_zone": "UTC"}, _ms("2026-01-01T00:00:00Z"), "hi")
+        self.assertEqual(ctx.exception.code, "not_future")
         with self.assertRaises(ScheduleInputError):
-            canonicalize_time_zone("Not/A-Zone")
+            create_at_schedule_record("x", "hi", 99, _ms_local(), "hi")
 
-    def test_canonicalize_time_zone_empty(self):
-        with self.assertRaises(ScheduleInputError):
-            canonicalize_time_zone("")
+    def test_view_overdue(self):
+        record = create_after_schedule_record(
+            "x", "hi", 1, _ms_local() - 10_000, "hi")
+        self.assertEqual(_d.schedule_view(record, _ms_local())["state"], "overdue")
 
-    def test_schedule_view_overdue(self):
-        record = create_after_schedule_record("x", "hi", 1, now_ms() - 10_000)
-        view = schedule_view(record, now_ms())
-        self.assertEqual(view["state"], "overdue")
-
-    def test_json_stringify_u2029(self):
-        from miniharness.schedule.domain import _json_stringify
-        rendered = _json_stringify({"s": "\u2029"})
+    def test_json_stringify(self):
+        rendered = _d._json_stringify({"s": "\u2029", "a": "\u2028"})
         self.assertIn("\\u2029", rendered)
         self.assertNotIn("\u2029", rendered)
 
-    def test_create_at_past_not_future(self):
-        with self.assertRaises(ScheduleInputError) as cm:
-            create_at_schedule_record("x", "hi", {"date": "2020-01-01", "time": "00:00:00",
-                                                      "time_zone": "UTC"}, now_ms())
-        self.assertEqual(cm.exception.code, "not_future")
-
-    def test_create_at_bad_time_zone_type(self):
-        with self.assertRaises(ScheduleInputError):
-            create_at_schedule_record("x", "hi", {"date": "2099-01-02", "time": "00:00:00",
-                                                      "time_zone": 42}, now_ms())
-
-    def test_create_at_non_string_non_dict(self):
-        with self.assertRaises(ScheduleInputError):
-            create_at_schedule_record("x", "hi", 99, now_ms())
-
-    def test_create_after_bad_after_seconds(self):
-        with self.assertRaises(ScheduleInputError) as cm:
-            create_after_schedule_record("x", "hi", "1", now_ms())
-        self.assertEqual(cm.exception.code, "invalid_rule")
-
-    def test_create_after_zero(self):
-        with self.assertRaises(ScheduleInputError) as cm:
-            create_after_schedule_record("x", "hi", 0, now_ms())
-        self.assertEqual(cm.exception.code, "invalid_rule")
-
-    def test_create_after_bool(self):
-        with self.assertRaises(ScheduleInputError) as cm:
-            create_after_schedule_record("x", "hi", True, now_ms())
-        self.assertEqual(cm.exception.code, "invalid_rule")
-
-    def test_create_every_not_int(self):
-        with self.assertRaises(ScheduleInputError) as cm:
-            create_every_schedule_record("x", "hi", "300", now_ms())
-        self.assertEqual(cm.exception.code, "invalid_rule")
-
-    def test_create_after_past_not_future(self):
-        from miniharness.schedule.domain import _future_instant
-        with self.assertRaises(ScheduleInputError) as cm:
-            _future_instant(now_ms() - 1_000, now_ms())
-        self.assertEqual(cm.exception.code, "not_future")
-
-
-# ===== 工具错误路径 =====
-
-class ScheduleToolsPersistTest(unittest.TestCase):
-    """flush 不参与 → persistence_uncertain / internal_error。"""
-
-    def setUp(self):
-        self.root, self.ctx, self.reg = _parent_loop()
-        from miniharness.schedule.tools import register_schedule_tools
-        self.disp = register_schedule_tools(self.ctx, self.root, lambda: None)
-
-    def tearDown(self):
-        self.disp()
-
-    def test_create_persistence_uncertain(self):
-        result = _call(self.reg, "schedule_create", {"prompt": "hi", "after_seconds": 1}, self.root)
-        self.assertEqual(result["code"], "persistence_uncertain")
-
-    def test_list_persistence_uncertain(self):
-        result = _call(self.reg, "schedule_list", {}, self.root)
-        self.assertEqual(result["code"], "persistence_uncertain")
-
-    def test_delete_persistence_uncertain(self):
-        result = _call(self.reg, "schedule_delete", {"id": "x"}, self.root)
-        self.assertEqual(result["code"], "persistence_uncertain")
-
-    def test_create_internal_error_on_agent_mismatch(self):
-        exec_ = __import__("miniharness.core.tools", fromlist=["ToolExec"]).ToolExec(agent=None)
-        value = self.reg.resolve("schedule_create").execute(
-            {"prompt": "hi", "after_seconds": 1}, exec_)
-        if __import__("inspect").isawaitable(value):
-            value = asyncio.run(value)
-        self.assertEqual(value["code"], "internal_error")
-
-
-class ScheduleToolsFlushTest(unittest.TestCase):
-    """flush 参与者 → 工具走完整流程。"""
-
-    def setUp(self):
-        self.root, self.ctx, self.reg = _parent_loop()
-        self.ctx.on("session/flush", lambda payload: None)
-        from miniharness.schedule.tools import register_schedule_tools
-        self.disp = register_schedule_tools(self.ctx, self.root, lambda: None)
-
-    def tearDown(self):
-        self.disp()
-
-    def test_delete_not_found(self):
-        result = _call(self.reg, "schedule_delete", {"id": "schedule-none"}, self.root)
-        self.assertFalse(result["deleted"])
-        self.assertEqual(result["code"], "schedule_not_found")
-
-    def test_list_empty(self):
-        result = _call(self.reg, "schedule_list", {}, self.root)
-        self.assertEqual(result, [])
-
-    def test_create_present_call(self):
-        from miniharness.core.tools import call_render
-        tool = self.reg.resolve("schedule_create")
-        exec_ = __import__("miniharness.core.tools", fromlist=["ToolExec"]).ToolExec(agent=self.root)
-        value = call_render(tool, {"prompt": "hi", "after_seconds": 1},
-                            _call(self.reg, "schedule_create", {"prompt": "hi", "after_seconds": 1}, self.root))
-        self.assertIsInstance(value, list)
-        self.assertEqual(value[0]["type"], "text")
-
-    def test_notify_observer_failure(self):
-        called = []
-        def on_change():
-            called.append(1)
-            raise RuntimeError("observer boom")
-        fresh_root, fresh_ctx, fresh_reg = _parent_loop()
-        fresh_ctx.on("session/flush", lambda payload: None)
-        disp = register_schedule_tools(fresh_ctx, fresh_root, on_change)
-        _call(fresh_reg, "schedule_create", {"prompt": "hi", "after_seconds": 1}, fresh_root)
-        self.assertTrue(called)
-        disp()
-
-
-# ===== 运行时退化路径 =====
-
-class RuntimeEdgeTest(unittest.TestCase):
-    def test_dispose_idempotent(self):
-        agent = _RuntimeAgent()
-        harness = _RuntimeHarness(agent)
-        runtime = ScheduleRuntime(harness.ctx, agent)
-        runtime.start()
-        async def main():
-            await runtime.dispose()
-            await runtime.dispose()
-        asyncio.run(main())
-
-    def test_decide_failure_warns(self):
-        agent = _RuntimeAgent()
-        harness = _RuntimeHarness(agent)
-        runtime = ScheduleRuntime(harness.ctx, agent)
-        folded = {"active": [{"id": "x", "kind": "after", "prompt": "hi",
-                               "afterSeconds": 1, "scheduledAt": "bad-utc"}], "seenIds": ("x",)}
-        runtime._read_folded = lambda: folded  # type: ignore[method-assign]
-        decision = runtime._decide(folded, now_ms())
-        self.assertIsNone(decision)
-
-    def test_maintenance_wait_branch(self):
-        agent = _RuntimeAgent()
-        harness = _RuntimeHarness(agent)
-        runtime = ScheduleRuntime(harness.ctx, agent)
-        runtime._read_folded = lambda: {"active": [], "seenIds": ()}  # type: ignore[method-assign]
-        result = runtime._maintenance({"kind": "wait"})
-        self.assertFalse(result)
-
-    def test_maintenance_overdue_one_shot(self):
-        agent = _RuntimeAgent()
-        harness = _RuntimeHarness(agent)
-        runtime = ScheduleRuntime(harness.ctx, agent)
-        record = {"id": "x", "kind": "after", "prompt": "hi",
-                   "afterSeconds": 1, "scheduledAt": _format_epoch_ms(now_ms() - 10_000)}
-        runtime._read_folded = lambda: {"active": [record], "seenIds": ("x",)}  # type: ignore[method-assign]
-        result = runtime._maintenance({"kind": "one-shot"})
-        self.assertTrue(result)
-
-    def test_maintenance_append_failure_faults(self):
-        agent = _RuntimeAgent()
-        harness = _RuntimeHarness(agent)
-        runtime = ScheduleRuntime(harness.ctx, agent)
-        record = {"id": "x", "kind": "after", "prompt": "hi",
-                   "afterSeconds": 1, "scheduledAt": _format_epoch_ms(now_ms() - 10_000)}
-        runtime._read_folded = lambda: {"active": [record], "seenIds": ("x",)}  # type: ignore[method-assign]
-        orig_append = agent.session.append
-        def raise_append(*args, **kwargs):
-            raise RuntimeError("disk full")
-        agent.session.append = raise_append  # type: ignore[method-assign]
-        try:
-            result = runtime._maintenance({"kind": "one-shot"})
-            self.assertFalse(result)
-            self.assertTrue(runtime._faulted)
-        finally:
-            agent.session.append = orig_append
-
-    def test_maintenance_followup_failure_warns(self):
-        agent = _RuntimeAgent()
-        harness = _RuntimeHarness(agent)
-        runtime = ScheduleRuntime(harness.ctx, agent)
-        record = {"id": "x", "kind": "after", "prompt": "hi",
-                   "afterSeconds": 1, "scheduledAt": _format_epoch_ms(now_ms() - 10_000)}
-        runtime._read_folded = lambda: {"active": [record], "seenIds": ("x",)}  # type: ignore[method-assign]
-        orig_followup = agent.followup
-        def raise_followup(*args, **kwargs):
-            raise RuntimeError("oom")
-        agent.followup = raise_followup  # type: ignore[method-assign]
-        try:
-            result = runtime._maintenance({"kind": "one-shot"})
-            self.assertFalse(result)
-            self.assertTrue(harness.warns)
-        finally:
-            agent.followup = orig_followup
-
-    def test_loopless_start_then_drive(self):
-        agent = _RuntimeAgent()
-        harness = _RuntimeHarness(agent)
-        runtime = ScheduleRuntime(harness.ctx, agent)
-        runtime.start()  # 无 loop
-        self.assertIsNone(runtime._run)
-        record = create_after_schedule_record("x", "hi", 1, now_ms())
-        agent.append_change({"version": 1, "operation": "create", "schedule": record})
-        async def main():
-            runtime.request_drive()
-            await asyncio.sleep(1.1)
-            await runtime.dispose()
-        asyncio.run(main())
-        self.assertEqual(agent.maintenance_calls, 1)
-
-    def test_request_drive_while_running(self):
-        agent = _RuntimeAgent()
-        harness = _RuntimeHarness(agent)
-        runtime = ScheduleRuntime(harness.ctx, agent)
-        async def main():
-            runtime.start()
-            runtime.request_drive()
-            runtime.request_drive()
-            self.assertIsNotNone(runtime._run)
-            await runtime.dispose()
-        asyncio.run(main())
-
-    def test_is_live_false(self):
-        class FakeCtx:
-            def get(self, key, strict=True):
-                return self._reg
-            def __init__(self, reg): self._reg = reg
-        class FakeRegistry:
-            def get(self, aid): return None
-            def roots(self): return []
-        runtime = ScheduleRuntime(FakeCtx(FakeRegistry()), _RuntimeAgent())
-        self.assertFalse(runtime.is_live())
-
-    def test_is_live_true(self):
-        agent = _RuntimeAgent()
-        harness = _RuntimeHarness(agent)
-        runtime = ScheduleRuntime(harness.ctx, agent)
-        self.assertTrue(runtime.is_live())
-
-    def test_retire_runtime_with_loop(self):
-        from miniharness.schedule import _retire_runtime
-        agent = _RuntimeAgent()
-        harness = _RuntimeHarness(agent)
-        runtime = ScheduleRuntime(harness.ctx, agent)
-        runtime.start()
-
-        async def main():
-            runtime.stop()
-            retired = _retire_runtime(runtime)
-            if retired is not None:
-                await retired
-            await asyncio.sleep(0.01)
-
-        asyncio.run(main())
-
-    def test_install_schedule_requires_agents_and_sessions(self):
-        from miniharness.schedule import install_schedule
-        ctx = type("Ctx", (), {"get": lambda self, k: None})()
-        with self.assertRaisesRegex(RuntimeError, "requires ctx.agents and ctx.sessions"):
-            install_schedule(ctx)
-
-
-
-    def test_maintenance_faulted_request_drive_ignored(self):
-        agent = _RuntimeAgent()
-        harness = _RuntimeHarness(agent)
-        runtime = ScheduleRuntime(harness.ctx, agent)
-        runtime._faulted = True
-        runtime._request_drive()
-        self.assertIsNone(runtime._run)
-
-    def test_request_drive_stops_when_stopping(self):
-        agent = _RuntimeAgent()
-        harness = _RuntimeHarness(agent)
-        runtime = ScheduleRuntime(harness.ctx, agent)
-        runtime._stopping = True
-        runtime._request_drive()
-        self.assertIsNone(runtime._run)
-
-    def test_is_live_registry_no_get(self):
-        class FakeCtx:
-            def get(self, key, strict=True):
-                return self._reg
-            def __init__(self, reg): self._reg = reg
-        class FakeRegistry:
-            pass  # no get method
-        runtime = ScheduleRuntime(FakeCtx(FakeRegistry()), _RuntimeAgent())
-        self.assertFalse(runtime.is_live())
-
-    def test_maintenance_run_requested_faulted(self):
-        agent = _RuntimeAgent()
-        harness = _RuntimeHarness(agent)
-        runtime = ScheduleRuntime(harness.ctx, agent)
-        runtime._requested = True
-        runtime._stopping = True
-        async def main():
-            await runtime._run_requested()
-        asyncio.run(main())
-        self.assertFalse(runtime._run)
-
-    def test_maintenance_read_folded_corrupt(self):
-        agent = _RuntimeAgent()
-        harness = _RuntimeHarness(agent)
-        runtime = ScheduleRuntime(harness.ctx, agent)
-        def raise_corrupt():
-            raise RuntimeError("corrupt")
-        agent.session.own_events = raise_corrupt  # type: ignore[method-assign]
-        result = runtime._read_folded()
-        self.assertIsNone(result)
-        self.assertTrue(runtime._faulted)
-
-    def test_run_requested_base_exception(self):
-        agent = _RuntimeAgent()
-        harness = _RuntimeHarness(agent)
-        runtime = ScheduleRuntime(harness.ctx, agent)
-        runtime._requested = True
-        import miniharness.schedule.runtime as rtmod
-        orig_txn = rtmod.run_schedule_transaction
-        async def bad_txn(*args, **kwargs):
-            raise RuntimeError("boom")
-        rtmod.run_schedule_transaction = bad_txn
-        try:
-            async def main():
-                await runtime._run_requested()
-            asyncio.run(main())
-            self.assertTrue(runtime._faulted)
-        finally:
-            rtmod.run_schedule_transaction = orig_txn
-
-    def test_create_at_empty_prompt(self):
-        with self.assertRaises(ScheduleInputError) as cm:
-            create_at_schedule_record("x", "  ", {"date": "2099-01-02",
-                "time": "00:00:00", "time_zone": "UTC"}, now_ms())
-        self.assertEqual(cm.exception.code, "invalid_prompt")
-
-    def test_create_at_local_bad_keys(self):
-        with self.assertRaises(ScheduleInputError):
-            create_at_schedule_record("x", "hi", {"date": "2099-01-02",
-                "time": "00:00:00", "time_zone": "UTC", "extra": 1}, now_ms())
-
-
-# ===== 全局拆解 allSettled =====
-
-class TeardownAllSettledTest(unittest.TestCase):
-    def test_teardown_async_skips_none_and_awaits(self):
-        from miniharness.schedule import _teardown_async
-
-        settled = []
-
-        async def one():
-            settled.append("one")
-
-        async def two():
-            settled.append("two")
-
-        async def main():
-            await _teardown_async([None, one(), None, two()])
-
-        asyncio.run(main())
-        self.assertEqual(settled, ["one", "two"])
-
-    def test_teardown_async_contains_failure(self):
-        from miniharness.schedule import _teardown_async
-
-        async def boom():
-            raise RuntimeError("cleanup boom")
-
-        async def main():
-            await _teardown_async([boom(), None])
-
-        asyncio.run(main())
-
-    def test_retire_cleanup_contains_sync_failure(self):
-        from miniharness.schedule import _retire_cleanup
-
-        def broken():
-            raise RuntimeError("sync boom")
-
-        self.assertIsNone(_retire_cleanup(broken))
-
-    def test_teardown_mixed_owner_cleanup(self):
-        from miniharness.schedule import _teardown_async, _retire_cleanup
-
-        async def good():
-            return None
-
-        def broken():
-            raise RuntimeError("sync boom")
-
-        retired = [_retire_cleanup(broken), _retire_cleanup(good)]
-        pending = [item for item in retired if item is not None]
-        self.assertEqual(len(pending), 1)
-
-        async def main():
-            await _teardown_async(retired)
-
-        asyncio.run(main())
+    def test_local_date_at_low_year_boundary(self):
+        # UTC year 1 with a negative offset resolves to local year 0 without raising.
+        fields = _d._civil_fields(_d._MIN_FOUR_DIGIT_YEAR_MS
+                                  + _d._utc_offset_ms("Etc/GMT+1", _d._MIN_FOUR_DIGIT_YEAR_MS))
+        self.assertEqual(fields[:3], (0, 12, 31))
+        self.assertEqual(fields[3], 23)
+
+
+# ===== 选择器 / cron 边界 =====
+
+class SelectorEdgesTest(unittest.TestCase):
+    def test_daily_selector_shapes(self):
+        for bad in (None, [], {}, {"time": "23:00:00"}, {"time_zone": "UTC"},
+                    {"time": 23, "time_zone": "UTC"},
+                    {"time": "23:00:00", "time_zone": "Unknown/Zone"},
+                    {"time": "23:00:00", "time_zone": "UTC", "extra": 1}):
+            with self.assertRaises(ScheduleInputError):
+                parse_daily_input(bad)
+
+    def test_weekly_selector_shapes(self):
+        for bad in (None, [], {}, {"time": "09:00:00", "time_zone": "UTC"},
+                    {"time": "09:00:00", "time_zone": "UTC", "weekdays": []},
+                    {"time": "09:00:00", "time_zone": "UTC", "weekdays": [1, 1]},
+                    {"time": "09:00:00", "time_zone": "UTC", "weekdays": [1], "extra": 1}):
+            with self.assertRaises(ScheduleInputError):
+                parse_weekly_input(bad)
+
+    def test_cron_selector_shapes(self):
+        for bad in (None, [], {}, {"expression": "0 0 * * *"},
+                    {"time_zone": "UTC"},
+                    {"expression": "0 0 * * *", "time_zone": 7},
+                    {"expression": "0 0 * * *", "time_zone": "+08:00"},
+                    {"expression": "0 0 * * *", "time_zone": "UTC", "extra": 1}):
+            with self.assertRaises(ScheduleInputError):
+                parse_cron_input(bad)
+
+    # 上游 packages/schedule/schedule/tests/cron.spec.ts 的四位数年份边界四组用例。
+    @staticmethod
+    def _at(year: int, month: int, day: int, hour: int = 0, minute: int = 0,
+            second: int = 0, micro: int = 0) -> int:
+        return _d._epoch_ms(datetime(year, month, day, hour, minute, second,
+                                     micro, tzinfo=timezone.utc))
+
+    def _cron(self, expression: str, now: int, time_zone: str = "UTC") -> dict:
+        return create_cron_schedule_record(
+            "t", "Reminder", {"expression": expression, "time_zone": time_zone}, now, "Reminder")
+
+    def test_cron_lowest_utc_year_boundaries(self):
+        # cron.spec.ts「resolves local dates on either side of the lowest
+        # supported UTC year」：年 1 下界的 scheduledAt 与 backward search。
+        self.assertEqual(self._cron("30 0 * * *", self._at(1, 1, 1))["scheduledAt"],
+                         "0001-01-01T00:30:00.000Z")
+        self.assertEqual(self._cron("0 0 * * *", self._at(1, 1, 1), "Etc/GMT-1")["scheduledAt"],
+                         "0001-01-01T23:00:00.000Z")
+        record = self._cron("0 0 * * *", self._at(1, 1, 1))
+        decision = _d.resolve_cron_occurrence(record, self._at(1, 1, 2))
+        self.assertEqual(decision, {
+            "occurrenceAt": "0001-01-02T00:00:00.000Z",
+            "nextScheduledAt": "0001-01-03T00:00:00.000Z",
+        })
+
+    def test_cron_negative_offset_due_minute_inside_floor_date(self):
+        # cron.spec.ts「resolves a negative-offset due minute inside the floor
+        # date of its own zone」：四位数下限是 instant，本时区当日回溯早一天。
+        record = self._cron("* * * * *", self._at(1, 1, 1, 0, 1), "Etc/GMT+1")
+        decision = _d.resolve_cron_occurrence(record, self._at(1, 1, 1, 0, 30))
+        self.assertEqual(decision, {
+            "occurrenceAt": "0001-01-01T00:30:00.000Z",
+            "nextScheduledAt": "0001-01-01T00:31:00.000Z",
+        })
+
+    def test_cron_final_occurrence_and_exhaustion(self):
+        # cron.spec.ts「retains the final occurrence and reports exhaustion
+        # without a five-digit target」：上界保留末次 occurrence，之后创建抛
+        # time_out_of_range（不得产生五位年份目标）。
+        record = self._cron("* * * * *", self._at(9999, 12, 31, 23, 0))
+        decision = _d.resolve_cron_occurrence(record, _d._MAX_FOUR_DIGIT_YEAR_MS)
+        self.assertEqual(decision, {"occurrenceAt": "9999-12-31T23:59:00.000Z"})
+        with self.assertRaises(ScheduleInputError) as ctx:
+            self._cron("* * * * *", self._at(9999, 12, 31, 23, 59))
+        self.assertEqual(ctx.exception.code, "time_out_of_range")
+
+    def test_cron_impossible_schedule_and_unsupported_instant(self):
+        # cron.spec.ts「rejects an impossible schedule and an unsupported
+        # creation instant」：2 月 30 日无解须报 four-digit-year；创建时刻须为
+        # 四位数年份安全整数（NaN/小数/年 0/年 10000 一律 time_out_of_range）。
+        with self.assertRaises(ScheduleInputError) as ctx:
+            self._cron("0 0 30 2 *", self._at(2026, 1, 1))
+        self.assertIn("four-digit-year", str(ctx.exception))
+        # 年 0 / 年 10000 超出 datetime 年界，用 civil days 手算（等价上游
+        # Date.parse('0000-12-31T23:59:59.999Z') 与 '+010000-01-01T00:00:00Z'）
+        for now in (float("nan"), 0.5, _d._MIN_FOUR_DIGIT_YEAR_MS - 1,
+                    _d._days_from_civil(10000, 1, 1) * 86_400_000):
+            with self.subTest(now=now), self.assertRaises(ScheduleInputError) as ctx:
+                self._cron("0 0 * * *", now)
+            self.assertEqual(ctx.exception.code, "time_out_of_range")
+
+    def test_every_and_after_types(self):
+        with self.assertRaises(ScheduleInputError) as ctx:
+            create_every_schedule_record("x", "hi", "300", _ms_local(), "hi")
+        self.assertEqual(ctx.exception.code, "invalid_rule")
+        with self.assertRaises(ScheduleInputError) as ctx:
+            create_after_schedule_record("x", "hi", True, _ms_local(), "hi")
+        self.assertEqual(ctx.exception.code, "invalid_rule")
+        with self.assertRaises(ScheduleInputError) as ctx:
+            create_after_schedule_record("x", "  ", 5, _ms_local(), "hi")
+        self.assertEqual(ctx.exception.code, "invalid_prompt")
+
+    def test_decode_stored_title(self):
+        for bad in ("", "  ", " padded", "x" * (MAX_TITLE_LENGTH + 1)):
+            with self.assertRaises(ScheduleLogError):
+                decode_stored_title(bad)
+        self.assertEqual(decode_stored_title("ok"), "ok")
+
+
+# ===== storage 记录准入 =====
+
+class StorageSchemaTest(unittest.TestCase):
+    def _task(self, **overrides):
+        record = create_after_schedule_record(
+            "t", "p", 1, _ms("2026-09-15T00:00:00Z"), "t")
+        task = {"sessionId": "s1", "record": record, "status": "active"}
+        task.update(overrides)
+        return task
+
+    def test_valid_task_and_default_status(self):
+        task = {"sessionId": "s1", "record": create_after_schedule_record(
+            "t", "p", 1, _ms("2026-09-15T00:00:00Z"), "t")}
+        parsed = validate_schema_value(schedule_task_schema, task)
+        self.assertEqual(parsed["status"], "active")
+
+    def test_rejections(self):
+        daily = create_daily_schedule_record(
+            "d", "D", {"time": "09:00:00", "time_zone": "UTC"},
+            _ms("2026-09-15T00:00:00Z"), "D")
+        bad_tasks = [
+            {"sessionId": "", "record": self._task()["record"]},
+            {"sessionId": "s1", "record": {**daily, "title": ""}},
+            self._task(status="bogus"),
+            self._task(extra=True),
+            self._task(lastDelivery={"scheduledAt": "bad", "deliveredAt": "bad",
+                                     "messageId": "m"}),
+            self._task(deliveryHistory={"records": [], "earlierRecordsUnavailable": "no"}),
+            # lastDelivery must match the latest retained receipt.
+            self._task(lastDelivery={"scheduledAt": "2026-09-15T00:00:00.000Z",
+                                     "deliveredAt": "2026-09-15T00:00:01.000Z",
+                                     "messageId": "m"},
+                       deliveryHistory={"records": [
+                           {"scheduledAt": "2026-09-15T00:00:00.000Z",
+                            "deliveredAt": "2026-09-15T00:00:01.000Z",
+                            "messageId": "other", "prompt": "p"}],
+                           "earlierRecordsUnavailable": False}),
+        ]
+        for bad in bad_tasks:
+            with self.assertRaises(ValidationError):
+                validate_schema_value(schedule_task_schema, bad)
+
+    def test_malformed_task_rejects_opening_domain(self):
+        tmp = tempfile.mkdtemp()
+        # A single-layout unit whose stored task fails the schema must refuse open.
+        document = {
+            "unit": {"name": "schedule", "version": 1},
+            "global": None,
+            "tables": {"tasks": {"kept": {"sessionId": "s1", "record": {
+                "id": "kept", "kind": "after", "prompt": "p", "afterSeconds": 1,
+                "scheduledAt": "2099-01-01T00:00:00.000Z"}, "status": "active"}}},
+        }
+        with open(os.path.join(tmp, "schedule.json"), "w", encoding="utf-8") as handle:
+            json.dump(document, handle)
+        ctx = Context(name="malformed")
+        self.addCleanup(ctx.dispose)
+        install_sessions(ctx)
+        install_agents(ctx)
+        install_storage(ctx, tmp)
+        service = install_schedule(ctx)
+        with self.assertRaises(DomainError):
+            asyncio.run(service.list({"sessionId": "s1"}))
+
+    def test_key_mismatch_rejects_opening(self):
+        tmp = tempfile.mkdtemp()
+        record = create_after_schedule_record(
+            "right", "p", 1, _ms("2026-09-15T00:00:00Z"), "p")
+        document = {
+            "unit": {"name": "schedule", "version": 1},
+            "global": None,
+            "tables": {"tasks": {"wrong": {"sessionId": "s1", "record": record,
+                                           "status": "active"}}},
+        }
+        with open(os.path.join(tmp, "schedule.json"), "w", encoding="utf-8") as handle:
+            json.dump(document, handle)
+        ctx = Context(name="mismatch")
+        self.addCleanup(ctx.dispose)
+        install_sessions(ctx)
+        install_agents(ctx)
+        install_storage(ctx, tmp)
+        service = install_schedule(ctx)
+        with self.assertRaises(RuntimeError):
+            asyncio.run(service.list({"sessionId": "s1"}))
+
+
+# ===== 归档准入 =====
+
+class ArchiveAdmissionTest(ServiceHarness):
+    def test_activity_reports_schedule_kind(self):
+        async def run():
+            await self.service.create(
+                "root", {"prompt": "提醒", "title": "提醒", "after_seconds": 60})
+            activities = await self.ctx.awaterfall(
+                "workspace/session-activity", {"sessionId": "root"},
+                base=lambda _payload: [])
+            kinds = [entry.kind for entry in activities]
+            self.assertIn("schedule", kinds)
+            own = next(entry for entry in activities if entry.kind == "schedule")
+            self.assertTrue(own.items)
+            self.assertEqual(own.items[0].label, "提醒")
+        asyncio.run(run())
+
+    def test_stop_deletes_active_tasks(self):
+        async def run():
+            record = await self.service.create(
+                "root", {"prompt": "提醒", "title": "提醒", "after_seconds": 60})
+            await self.ctx.aparallel("workspace/session-stop", {"sessionId": "root"})
+            self.assertIsNone(self.service._table.get(record["id"]))
+            self.assertEqual(await self.service.list({"sessionId": "root"}), [])
+        asyncio.run(run())
+
+
+# ===== 工具 / 运行时退化 =====
+
+class ToolRuntimeEdgesTest(ServiceHarness):
+    def _call(self, name, args):
+        return self.agent.tools.resolve(name).execute(args, ToolExec(agent=self.agent))
+
+    def test_agent_mismatch_internal_error(self):
+        async def run():
+            value = await self.agent.tools.resolve("schedule_create").execute(
+                {"prompt": "p", "title": "t", "after_seconds": 1},
+                ToolExec(agent=None))
+            self.assertEqual(value["code"], "internal_error")
+        asyncio.run(run())
+
+    def test_update_needs_a_change(self):
+        async def run():
+            created = await self._call("schedule_create",
+                                       {"prompt": "p", "title": "t", "every_seconds": 300})
+            result = await self._call("schedule_update", {"id": created["id"]})
+            self.assertEqual(result["code"], "invalid_selector")
+            result = await self._call("schedule_update", {"id": " x ", "title": "y"})
+            self.assertEqual(result["code"], "invalid_rule")
+        asyncio.run(run())
+
+    def test_update_ended_via_catalog(self):
+        async def run():
+            created = await self._call("schedule_create",
+                                       {"prompt": "p", "title": "t", "every_seconds": 300})
+            await self.service._table.put(created["id"], {
+                **self.service._table.get(created["id"]), "status": "inactive"})
+            result = await self._call("schedule_update",
+                                      {"id": created["id"], "title": "renamed"})
+            self.assertEqual(result["code"], "schedule_ended")
+        asyncio.run(run())
+
+    def test_future_task_only_arms_timer(self):
+        async def run():
+            await self.service._ensure_domain()
+            record = create_after_schedule_record(
+                "schedule-1", "p", 3600, _ms_local(), "t")
+            await self.service._table.put("schedule-1", {
+                "sessionId": "root", "record": record, "status": "active"})
+            self.service._runtime.request_drive()
+            await asyncio.sleep(0.05)
+            self.assertEqual(self.followups, [])
+            self.assertIsNotNone(self.service._runtime._timer)
+            await self.service._runtime.dispose()
+        asyncio.run(run())
 
 
 if __name__ == "__main__":

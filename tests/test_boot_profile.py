@@ -1,16 +1,22 @@
 """boot profile 目录机制（对齐 packages/boot/app-boot/src/{profile,profile-context}.ts）。"""
+import io
+import json
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 
 from miniharness.boot.profile import (
+    OPTIONAL_BUNDLES,
     PROFILES_DIR,
     PROFILE_PATCH_FILENAME,
+    SkippedBundle,
     bundle_patch_files,
     compose_entries,
     init_profile,
     load_profile_directory,
     read_profile_patches,
+    report_skipped_bundles,
     resolve_profile_dir,
 )
 
@@ -100,16 +106,71 @@ class TestLoadProfileDirectory(unittest.TestCase):
                                          user_layer=False)
         self.assertEqual(profile.patches, [])
 
-    def test_bundles_recorded_but_not_resolved(self):
+    def test_bundles_reported_as_skipped(self):
+        # mini 无 npm bundle 解析载体：选中的 bundle 贡献不了层 → skipped_bundles。
         init_profile(self.dir, ["@deepseek-ai/dsh-base"])
         profile = load_profile_directory("miniharness", self.dir)
-        self.assertEqual([layer.package_name for layer in profile.layers],
-                         ["@deepseek-ai/dsh-base"])
-        self.assertEqual(profile.layers[0].patches, [])
+        self.assertEqual(profile.layers, [])
+        self.assertEqual(len(profile.skipped_bundles), 1)
+        skipped = profile.skipped_bundles[0]
+        self.assertIsInstance(skipped, SkippedBundle)
+        self.assertEqual(skipped.package_name, "@deepseek-ai/dsh-base")
+        self.assertIn("cannot resolve profile bundle", skipped.reason)
+
+    def test_load_is_side_effect_free(self):
+        init_profile(self.dir, ["@deepseek-ai/dsh-base"])
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            load_profile_directory("miniharness", self.dir)
+        self.assertEqual(stderr.getvalue(), "")
 
     def test_missing_manifest_fails_loud(self):
         with self.assertRaises(FileNotFoundError):
             load_profile_directory("miniharness", self.dir)
+
+
+class TestSkippedBundleReporting(unittest.TestCase):
+    def test_optional_bundles_names(self):
+        self.assertIn("@deepseek-ai/dsh-experimental-auto-review",
+                      OPTIONAL_BUNDLES)
+        self.assertIn("@deepseek-ai/dsh-experimental-schedule-bundle",
+                      OPTIONAL_BUNDLES)
+
+    def test_report_prints_once_per_bundle(self):
+        from miniharness.boot.profile import Profile
+        profile = Profile(name="p", dir=".", layers=[], patch_path="",
+                          patches=[],
+                          skipped_bundles=[
+                              SkippedBundle("@deepseek-ai/dsh-base", "boom"),
+                              SkippedBundle("@deepseek-ai/dsh-web-app", "bam"),
+                          ])
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            report_skipped_bundles("dsh", profile)
+        lines = stderr.getvalue().splitlines()
+        self.assertEqual(lines, [
+            'dsh: skipping profile bundle "@deepseek-ai/dsh-base": boom',
+            'dsh: skipping profile bundle "@deepseek-ai/dsh-web-app": bam',
+        ])
+
+    def test_report_noop_when_nothing_skipped(self):
+        from miniharness.boot.profile import Profile
+        profile = Profile(name="p", dir=".", layers=[], patch_path="",
+                          patches=[])
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            report_skipped_bundles("dsh", profile)
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_report_quotes_package_name_like_json(self):
+        from miniharness.boot.profile import Profile
+        profile = Profile(name="p", dir=".", layers=[], patch_path="",
+                          patches=[],
+                          skipped_bundles=[SkippedBundle("x", "r")])
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            report_skipped_bundles("dsh", profile)
+        self.assertIn(json.dumps("x"), stderr.getvalue())
 
 
 class TestReadProfilePatches(unittest.TestCase):

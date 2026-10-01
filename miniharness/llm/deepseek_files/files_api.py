@@ -1,12 +1,13 @@
 """DeepSeek Files API 传输（Messages 协议端点）。
 
-对应 dsh 真实源码：packages/llm/llm-deepseek/src/common/files-api.ts。
+对应 dsh 真实源码：packages/llm/llm-deepseek/src/files-api.ts（dsh-v0.2.0-rc.2
+起自 common/ 上移顶层）。
 
 上游 llm-deepseek 自 dsh-v0.1.7-rc.1 起只保留 Anthropic 兼容 Messages；Files
-资源挂在 ``messagesApiRoot(baseURL)`` 下（``/v1/files``），头为 ``x-api-key`` +
-``anthropic-version: 2023-06-01`` + ``anthropic-beta: files-api-2025-04-14``，
-列表游标为 ``after_id``（无升序查询），时间戳为 ISO 字符串，删除回执
-``type == "file_deleted"``。
+资源挂在 ``messagesApiRoot(baseURL)`` 下（``/v1/files``），认证头由 provider 的
+``resolveAuth`` 逐字提供，另加 ``anthropic-version: 2023-06-01`` +
+``anthropic-beta: files-api-2025-04-14``；列表游标为 ``after_id``（无升序查询），
+时间戳为 ISO 字符串，删除回执 ``type == "file_deleted"``。
 
 载体差异：上游以 Web `fetch`/`FormData`/`Blob` 实现；mini 用 httpx（异步）。
 `redirect: 'error'` 语义以 httpx 缺省不跟随重定向承载——凭据不会离开配置源。
@@ -29,6 +30,7 @@ from ..protocol import (
     SERVER,
     TRANSPORT,
     LlmFailure,
+    attribution_headers,
 )
 from .file_id import DeepSeekFileId
 
@@ -202,18 +204,18 @@ def provider_error_detail(value: Any) -> dict:
 class DeepSeekFilesClient:
     """直接 Files 客户端，保留配置的 URL 根并拒绝重定向以免凭据离开源。"""
 
-    def __init__(self, *, baseURL: str, apiKey: str, accountCredential: bool = False,
+    def __init__(self, *, baseURL: str, headers: dict,
                  transport: httpx.AsyncBaseTransport | None = None) -> None:
         self.baseURL = messages_api_root(baseURL)
-        self.apiKey = apiKey
-        self.accountCredential = accountCredential
+        self.headers = dict(headers)
         self._transport = transport
 
     def _parse_file(self, value: Any, operation: str) -> DeepSeekFileObject:
         return parse_messages_file(value, operation)
 
     def _headers(self) -> dict:
-        return {(("x-dsh-auth-token" if self.accountCredential else "x-api-key")): self.apiKey,
+        return {**attribution_headers(),
+                **self.headers,
                 "anthropic-version": "2023-06-01",
                 "anthropic-beta": MESSAGES_FILES_BETA}
 

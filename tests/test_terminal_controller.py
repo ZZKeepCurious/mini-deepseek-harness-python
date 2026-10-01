@@ -3,6 +3,7 @@
 对齐 terminal-controller/tests/controller.spec.ts 的确定性面；真实 PTY 走 e2e 冒烟。
 """
 
+import os
 import sys
 import unittest
 
@@ -279,6 +280,18 @@ class TestShellResolution(unittest.TestCase):
         shells = discover_shells({"path": sys.executable, "name": "python", "args": ["-i"]},
                                  ["dsh-command-that-does-not-exist"], None)
         self.assertEqual([shell["path"] for shell in shells], [sys.executable])
+
+    def test_discover_shells_dedupes_by_executable_name_keeping_earliest(self):
+        # dsh-v0.2.0-rc.2：按可执行名（忽略大小写、剥 .exe）去重，保留最早出现者。
+        name = os.path.basename(sys.executable)
+        shells = discover_shells({"path": sys.executable, "name": name, "args": ["-i"]},
+                                 [sys.executable], None)
+        self.assertEqual([shell["path"] for shell in shells], [sys.executable])
+
+    def test_shell_kind_ignores_case_and_exe(self):
+        from miniharness.terminal_controller.shells import shell_kind
+        self.assertEqual(shell_kind("C:\\Windows\\System32\\cmd.exe"), "cmd")
+        self.assertEqual(shell_kind("/usr/bin/PWSH.EXE"), "pwsh")
 
 
 if __name__ == "__main__":

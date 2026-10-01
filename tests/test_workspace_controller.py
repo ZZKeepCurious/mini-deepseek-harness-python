@@ -113,23 +113,27 @@ class WorkspaceControllerCase(unittest.TestCase):
         self.assertEqual(self.controller.unarchive_session({"sessionId": "s1"}),
                          {"archivedSessionIds": []})
 
-    def test_initialize_default_creates_and_validates(self):
-        created = self.controller.initialize_default(
-            {"directoryName": "proj", "title": "My Project"})
+    def test_initialize_default_creates_fixed_directory(self):
+        # dsh-v0.2.0-rc.2：无入参，固定叶目录 default-workspace，标题即同名。
+        created = self.controller.initialize_default()
         expected = os.path.realpath(
-            os.path.join(self.root, "deepseek-harness", "proj"))
-        self.assertEqual(created["workspace"]["title"], "My Project")
+            os.path.join(self.root, "deepseek-harness", "default-workspace"))
+        self.assertEqual(created["workspace"]["title"], "default-workspace")
         self.assertEqual(created["workspace"]["path"], expected)
         self.assertTrue(os.path.isdir(expected))
-        # 重复请求复用持久身份
-        again = self.controller.initialize_default(
-            {"directoryName": "other", "title": "Other"})
+        # 重复请求复用持久身份（不重命名/迁移既有默认）
+        again = self.controller.initialize_default()
         self.assertEqual(again["workspace"]["workspaceId"],
                          created["workspace"]["workspaceId"])
-        self.assertEqual(self._code(lambda: self.controller.initialize_default(
-            {"directoryName": "a/b", "title": "X"})), "gateway/bad-request")
-        self.assertEqual(self._code(lambda: self.controller.initialize_default(
-            {"directoryName": "proj2", "title": "   "})), "gateway/bad-request")
+
+    def test_workspace_display_title(self):
+        from miniharness.workspace_controller import (
+            DEFAULT_WORKSPACE_DIRECTORY,
+            workspace_display_title,
+        )
+        self.assertEqual(workspace_display_title(DEFAULT_WORKSPACE_DIRECTORY, "默认工作区"),
+                         "默认工作区")
+        self.assertEqual(workspace_display_title("My Project", "默认工作区"), "My Project")
 
     def test_archive_session_reports_activity_and_stop(self):
         path = self._dir("proj")

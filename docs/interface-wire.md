@@ -93,6 +93,7 @@ gateway/arguments-invalid gateway/input-invalid     gateway/invocation-unavailab
 gateway/protocol          gateway/uplink-overflow
 session/not-found
 session/model-unavailable session/conflict          session/invalid-time-zone
+session/provider-credentials-unavailable session/provider-models-unavailable
 session/workspace-attach-failed workspace/not-found agent-preset/conflict
 agent-preset/not-found    agent-preset/invalid      agent-preset/locked
 session/agent-busy
@@ -105,6 +106,11 @@ workspace-file/watch-unsupported
 workspace/session-active
 job/not-found
 ```
+
+> dsh-v0.2.0-rc.2 新增码：`session/model-unavailable` 由 `session/selectModel`
+> 的模型可用性门（`buildModelCatalog` 派生的可路由 provider）签发；
+> `session/provider-credentials-unavailable` / `session/provider-models-unavailable`
+> 由 `session/initializeDefaultModel` 签发（见 §3）。
 
 寄送方签发 `rpcId`（实践中 UUID 即可，递增非零即可）；`transport_error` 把载体层异常折进
 `result.ok=false` 分支，兜底码恒 `gateway/internal`。
@@ -120,8 +126,9 @@ client `connection/src/client/rpc.ts` 按 `/` 切两段）；`web/args.canonical
 | `session/list` | 会话清单（附 running 位） | —（gateway/bad-request 守卫） |
 | `session/search` | 按查询过滤会话 | gateway/bad-request |
 | `session/create` | 新建会话（`cwd` 或 `workspaceId` 二选一、`sessionId` 可注入幂等、`agentPreset` 可选） | gateway/bad-request / workspace/not-found / agent-preset/conflict / session/conflict / gateway/internal |
-| `session/selectModel` | 设置模型 + `reasoningEffort` | gateway/bad-request / session/not-found / session/model-unavailable |
-| `session/modelCatalog` | 模型目录 | — |
+| `session/selectModel` | 设置模型 + `reasoningEffort`（先过模型可用性门） | gateway/bad-request / session/not-found / session/model-unavailable |
+| `session/modelCatalog` | 模型目录（可路由 provider 由「有 ≥1 目录模型」派生） | — |
+| `session/initializeDefaultModel` | 登录后无 API key 时选首个可用账户模型 | session/provider-credentials-unavailable / session/provider-models-unavailable |
 | `session/canOpenWorkspacePath` | 工作区路径可达性检查 | — |
 | `session/openWorkspacePath` | 打开工作区 | gateway/bad-request |
 | `session/rename` | 改标题 | gateway/bad-request / session/not-found |
@@ -196,9 +203,10 @@ client `connection/src/client/rpc.ts` 按 `/` 切两段）；`web/args.canonical
   `details` 为 `{endpoint, field: "uplink"}`。每次调用 `uplink()` 只能取一次（第二次抛错）；
   rc.1 出厂的全部 Remote 方法都是 `In = never`，故 `GatewayStreams.uplink_codecs()` 出厂为空表
   ——声明点即 typert 生成的描述符 `uplink.codec`（`packages/typert/protocol/src/types.ts:355-357`）。
-- `endpoint` 全集（`GatewayStreams.stream_kinds`，九条）：`$events`、`session/follow`、
+- `endpoint` 全集（`GatewayStreams.stream_kinds`，十一条）：`$events`、`session/follow`、
   `session/control`、`terminal/retain`、`terminal/follow`、`workspace/follow`、
-  `workspaceFiles/changes`、`job/list`、`job/follow`；未知 endpoint → `error` 帧
+  `workspaceFiles/changes`、`job/list`、`job/follow`、`account/watchExpiry`、
+  `userQuestions/attachWait`；未知 endpoint → `error` 帧
   `gateway/invocation-unavailable`
   （消息 `typert gateway: <endpoint>: no active Remote method exports this endpoint`）。
 - 每条 open 的命名空间未挂载（`ctx` 无 `terminalController`/`workspaceController`/
@@ -285,6 +293,10 @@ client `connection/src/client/rpc.ts` 按 `/` 切两段）；`web/args.canonical
 - emit 转发源（api-session/* 族）：`session/created → api-session/added`（初始 list row）、
   `session/disposed → api-session/removed`、`agent/status → api-session/status`（running 位）、
   `agent/error → api-session/error`、user `user/message → api-session/activity`。
+- 无重命名转发（`API_REMOTE_FORWARDED_EVENTS`，dsh-v0.2.0-rc.2）：`settings/document-updated`
+  （`[ns, revision]`）、`deepseek-account/session-expired`、`deepseek-account/model-sign-in-required`、
+  `credentials/record-updated`/`credentials/reference-updated`（`[subject]`）、`schedule/changed`。
+- `hasLiveClient`：仅当某条 `$events` 流的 signal 未中止时为 true（裸 socket 不计）。
 - waterfall：审批问询 `event="approval/request"`、`agentId=<会话 id>`、`request={toolName}`；
   由首个客户端的 `$events/result` 结算（§5）。
 
@@ -412,14 +424,70 @@ by deltas」。
   `job/not-found`（details `{sessionId, jobId}`）。
 - `job` namespace 未挂载（`ctx` 无 `jobs`）→ `gateway/invocation-unavailable`。
 
-### 4.8 `agentPresets`（声明式组合 roster 的 Remote 面）
+### 4.8 `account`（账户 Remote 面）
+
+`account` namespace（上游 `packages/api/account-controller`，dsh-v0.2.0-rc.2）。
+unary `POST /api/account/<method>`；除 `getState`/`hasRunningAccountTasks` 外，
+`getProfile`/`getBalance`/`getUnnotifiedBonuses`/`ackBonusNotified`/`signOut` 均带
+`client: AccountClientMetadata{version:string, locale:string, timezoneOffsetSeconds:number}`
+（Host 据此派生 Platform 请求头）。
+
+- `account/getState`（`{args:{}}`）→ `AccountView` `{status:'signed-out'|'credential-stored', links, attempt}`。
+- `account/getProfile`/`getBalance`（带 client）→ Platform 档案/余额（无 grant → null）。
+- `account/getUnnotifiedBonuses`（带 client）→ `AccountBonusBatch|null`（无 grant → null）。
+- `account/ackBonusNotified`（`{accountId, orderId, client}`）→ boolean；无账户 → false。
+- `account/hasRunningAccountTasks`（`{args:{}}`）→ boolean（mini 单适配器无账户路由 → false）。
+- `account/signOut`（带 client）→ `AccountView`。
+- `account/watchExpiry`（Remote 流，`{args:{}}`）：无重放地订阅 `deepseek-account/session-expired`，
+  订阅期间每事件产一帧 `'session-expired'`；命名空间未挂 → `gateway/invocation-unavailable`。
+
+> 载体差异（登记）：浏览器 PKCE 登录与 Platform HTTP 是浏览器宿主载体，mini 以本地
+> 落空实现（恒 signed-out）承载服务面；`startSignIn`/`cancelSignIn` 不挂载。四个
+> 账户 RPC 的 `client` 元数据被接受但未消费（无 Platform 载体）。
+
+### 4.9 `schedule`（Host 全局提醒 Remote 面）
+
+`schedule` namespace（上游 `packages/schedule/schedule`，dsh-v0.2.0-rc.2）。unary
+`POST /api/schedule/<method>`；读取与删除都不激活会话：
+
+- `schedule/list`（`{args:{sessionId}}`）→ 该会话的 active 记录数组。
+- `schedule/catalog`（`{args:{}}`）→ 全部 active/inactive 记录（带 `sessionId`/`status`，
+  按 `scheduledAt` 升序、`id` 字典序），可含 `lastDelivery`。
+- `schedule/history`（`{args:{sessionId, id, limit(1..100), before?}}`）→ 分页交付记录，
+  或 `{id, code:'schedule_not_found'}`。
+- `schedule/delete`（`{args:{sessionId, id}}`）→ `{id, deleted}` 或
+  `{id, deleted:false, code:'schedule_not_found'}`。
+- `schedule/update`（`{args:{sessionId, id, expected, change?, title?, prompt?}}`，compare-and-update）
+  → 提交的记录、无操作/查找失败结果，或 `ScheduleToolError`。
+- `schedule/changed` 经 `$events` 转发（无 args；任务集变更时客户端重取目录）。
+- 命名空间未挂 → `gateway/invocation-unavailable`。
+
+### 4.10 `userQuestions`（timed 提问 Remote 面）
+
+`userQuestions` namespace（上游 `packages/interaction/user-questions`，dsh-v0.2.0-rc.2）：
+
+- `userQuestions/answer`（unary `{args:{agentId, callId, answer:{answers}}} `）→ boolean
+  （该提问是否仍为 continued）。回复以 `user-question-reply` 来源的 user 消息 steer 进 agent；
+  批次须逐问一次命中（否则 `UserQuestionError BAD_ANSWER`），已有排队回复 → `REPLY_QUEUED`。
+- `userQuestions/attachWait`（Remote 流 `{args:{agentId, callId}}`）：持有一条 live timed
+  等待，产出一帧 `{remainingMs}`（客户端持有时 Host 计时暂停）；未知 callId/非 continued
+  无帧即结束。
+- 命名空间未挂 → `gateway/invocation-unavailable`。
+
+> 会话投影：`userQuestions` 单元（stateVersion 2，view `{active, settled}`）——fold
+> `request/header`（判读 timed schema 的 `timeout` 参数）、`tool/call`、`tool/result`、
+> `tool/ptc-dispatch`、`user/message`（`source.kind==='user-question-reply'`）。legacy
+> 阻塞 schema 下的调用**永不**被追踪。`session/projections` 与 control projection 帧
+> 暴露该单元。
+
+### 4.11 `agentPresets`（声明式组合 roster 的 Remote 面）
 
 `agentPresets` namespace（上游 `packages/preset/agent-preset-registry`，web-app 默认挂载）。
 三个 unary `POST /api/<endpoint>`：
 
 - `agentPresets.list`（`{args:{}}`）→ `AgentPresetRoster`：
-  `{presets: [{id, isDefault, name?, description?, broken?}], modeSelectionEnabled}`；
-  `modeSelectionEnabled` mini 恒 `true`（无 settings 配置面）。未知端点集合不固定——roster
+  `{presets: [{id, isDefault, name?, description?, broken?}]}`。dsh-v0.2.0-rc.2 删除了
+  `modeSelectionEnabled` 字段（roster 形状收窄）。未知端点集合不固定——roster
   是当前部署的声明列表。
 - `agentPresets.read`（`{args:{agentPreset}}`）→ `AgentPresetDocument`：
   `{agentPreset, content, name?, description?}`；`content` 是声明行/组合的 entry-list YAML

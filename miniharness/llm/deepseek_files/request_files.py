@@ -1,6 +1,7 @@
 """共享 Files 解析、有界 stale-id 恢复与规范化图片诊断。
 
-对应 dsh 真实源码：packages/llm/llm-deepseek/src/common/request-files.ts。
+对应 dsh 真实源码：packages/llm/llm-deepseek/src/request-files.ts（dsh-v0.2.0-rc.2
+起自 common/ 上移顶层）。
 """
 from __future__ import annotations
 
@@ -161,11 +162,13 @@ class RequestFiles:
         return resolved.record.fileId
 
     async def retry(self, detail: str) -> bool:
-        """使被拒绝的映射失效；仅第一次 stale-id 响应允许再次请求（上游 retry）。"""
+        """一次索引更新中使全部被拒绝映射失效；仅第一次 stale-id 响应允许再次请求（上游 retry）。"""
         if len(self._used) == 0 or not provider_rejected_file_id(detail):
             return False
-        for file in stale_mappings(self._used, detail):
-            await self._files.invalidate(file.version, file.fileId, self._connection)
+        await self._files.invalidate(
+            [{"variantId": str(file.version.variantId), "fileId": file.fileId}
+             for file in stale_mappings(self._used, detail)],
+            self._connection)
         if self._retried:
             return False
         self._retried = True

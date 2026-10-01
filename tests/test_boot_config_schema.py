@@ -17,7 +17,7 @@ def _profile(name="headless"):
 class TestGenerateConfigSchema(unittest.TestCase):
     def test_document_shape(self):
         schema = generate_config_schema(
-            "miniharness", _profile(),
+            _profile(),
             [[{"insert": [{"id": "a", "name": "miniharness.example_plugins",
                            "config": {"greeting": "hi"}}]}]],
             "miniharness")
@@ -36,7 +36,7 @@ class TestGenerateConfigSchema(unittest.TestCase):
 
     def test_entry_without_config_absent(self):
         schema = generate_config_schema(
-            "miniharness", _profile(),
+            _profile(),
             [[{"insert": [{"id": "a", "name": "miniharness.example_plugins",
                            "config": {"greeting": "hi"}}]}]],
             "miniharness")
@@ -66,12 +66,35 @@ class TestGenerateConfigSchema(unittest.TestCase):
 
     def test_complete_false_on_error(self):
         schema = generate_config_schema(
-            "miniharness", _profile(),
+            _profile(),
             [[{"insert": [{"name": "cordis:nope"}]}]],
             "miniharness")
         self.assertEqual(schema["x-cordis"]["complete"], False)
         self.assertTrue(any(d["level"] == "error"
                             for d in schema["x-cordis"]["diagnostics"]))
+
+    def test_skipped_bundle_yields_error_diagnostic(self):
+        from miniharness.boot.profile import SkippedBundle
+        profile = _profile()
+        profile = Profile(name=profile.name, dir=profile.dir,
+                          layers=profile.layers, patch_path=profile.patch_path,
+                          patches=profile.patches,
+                          skipped_bundles=[SkippedBundle("@deepseek-ai/dsh-base",
+                                                         "cannot resolve")])
+        schema = generate_config_schema(profile, [], "miniharness")
+        diagnostics = schema["x-cordis"]["diagnostics"]
+        self.assertTrue(any(d["level"] == "error" for d in diagnostics))
+        self.assertTrue(any("could not be loaded" in d["message"]
+                            for d in diagnostics))
+        self.assertEqual(schema["x-cordis"]["complete"], False)
+
+    def test_no_manifest_read_needed(self):
+        # generate_config_schema 不再读 manifest：dir 不存在也不抛。
+        schema = generate_config_schema(
+            Profile(name="p", dir="/does/not/exist", layers=[],
+                    patch_path="", patches=[]),
+            [], "miniharness")
+        self.assertEqual(schema["x-cordis"]["profile"], "p")
 
 
 class TestProjectNativeSchema(unittest.TestCase):

@@ -81,7 +81,14 @@ def model_info(connection, provider: str, model: str) -> dict:
                           else connection.maxTokens)
     info["defaultMaxTokens"] = default_max_tokens
     if configured is not None and configured.systemPromptUpdate is not None:
-        info["systemPromptUpdate"] = configured.systemPromptUpdate
+        info["system_prompt_update"] = configured.systemPromptUpdate
+    if configured is not None and configured.toolUpdate is not None:
+        # 上游 config.ts:167-169 载入期拒绝非法值；mini 在此 fail loud。
+        if configured.toolUpdate not in ("in-history", "addition-only"):
+            raise ValueError(
+                f"model {configured.id!r} toolUpdate must be 'in-history' or "
+                f"'addition-only', got {configured.toolUpdate!r}")
+        info["tool_update"] = configured.toolUpdate
 
     if connection.defaults.thinking == "disabled":
         info["reasoning"] = {"efforts": [dict(_OFF)],

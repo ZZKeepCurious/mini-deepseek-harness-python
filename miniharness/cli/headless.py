@@ -114,7 +114,7 @@ def run_headless(
         from ..seams.sandbox_policy import SandboxPolicyService
         from ..shell import install_bash_executor
         # provider 是纯能力对象（非 Service）：显式登记 "sandbox" 标签
-        ctx.provide("sandbox", LocalSandboxProvider())
+        ctx.provide("sandbox", LocalSandboxProvider(ctx=ctx))
         SandboxPolicyService(ctx, sandbox if isinstance(sandbox, dict) else {})
         install_bash_executor(ctx)
     tools = tools or default_tools(ctx)

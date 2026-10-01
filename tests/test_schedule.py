@@ -1,25 +1,15 @@
-"""C16 Schedule 移植验收：域折叠、工具三态、运行时派发、Install 装配。
+"""Schedule 域重写验收（对齐 packages/schedule/schedule/src/*）。
 
-上游对照：packages/schedule/schedule/src/{domain,runtime,transaction,
-persistence,tools,index}.ts。
-
-覆盖点：
-  域 fold：三变体解码（after/at/every）、dispatch 从 active 摘除、id 分配永不复用、
-  事件引用元素交错证明唯一性、四位数年范围、canonical 即时回读、安全整数边界、
-  非法输入码闭集、corrupt fail-closed。
-  事务：FIFO 串行、异常向后继冒泡不中断、并发不串扰。
-  持久化：flush false → SchedulePersistenceError；非 persistence 异常 wrap+cause。
-  工具：create/list/delete canonical 错误形状、persistence_uncertain 半成功、
-  schedule_not_found 半成功、cancelled 前置、render=JSON 字节对齐、scoped 注册&拆解。
-  运行时：create→arm→dispatch（followup+事件）、无重复派发、corrupt 熔断、dispose 收敛。
-  Install：root-only、未来 agent、幂等、全局拆解 allSettled。
+覆盖：六规则算术（every/daily/weekly/cron，Vixie DOM/DOW、DST 间隙跳过/重叠
+取早、400 年搜索界）、title 必填、legacy `schedule/change` 只读重放、compare-and-
+update、delivery-history 裁剪与身份游标分页、Host 全局 ScheduleService（storage-
+domain 权威表）、工具四件套、单一 Host 定时器投递。
 
 运行：python -m unittest tests.test_schedule -v
 """
 import asyncio
-import inspect
-import json
-import time
+import os
+import tempfile
 import unittest
 
 from miniharness.core.agent_loop.agent import AgentLoop
@@ -27,723 +17,729 @@ from miniharness.core.agents import install_agents
 from miniharness.core.scope import Context
 from miniharness.core.session import Session
 from miniharness.core.session_store import install_sessions
-from miniharness.core.tools import ToolExec, ToolRegistry
+from miniharness.core.tools import ToolExec, ToolRegistry, call_render
 from miniharness.llm import FakeLlmAdapter
+from miniharness.storage import install_storage
 
 from miniharness.schedule import (
+    MAX_TITLE_LENGTH,
     MIN_EVERY_INTERVAL_SECONDS,
-    SCHEDULE_CHANGE_VERSION,
+    SCHEDULED_MESSAGE_FRAMING,
     ScheduleInputError,
     ScheduleLogError,
-    allocate_schedule_id,
+    append_delivery,
+    canonicalize_cron_expression,
+    canonicalize_time_zone,
     create_after_schedule_record,
     create_at_schedule_record,
+    create_cron_schedule_record,
+    create_daily_schedule_record,
     create_every_schedule_record,
+    create_weekly_schedule_record,
     decode_schedule_change,
+    decode_schedule_record,
+    delivery_history_page,
     fold_schedule_events,
     install_schedule,
-    render_every_reminder_batch_framing,
+    is_recurring_schedule_record,
+    normalize_weekdays,
+    render_recurring_reminder_batch_framing,
     render_reminder_framing,
+    resolve_cron_occurrence,
+    resolve_daily_occurrence,
     resolve_every_occurrence,
+    resolve_recurring_occurrence,
+    resolve_schedule_update,
+    resolve_weekly_occurrence,
+    schedule_title,
     schedule_view,
 )
-from miniharness.schedule.domain import _json_stringify
-from miniharness.schedule.persistence import SchedulePersistenceError, flush_schedule_persistence
+from miniharness.schedule.domain import _format_epoch_ms, _parse_offset_instant
 from miniharness.schedule.runtime import ScheduleRuntime
-from miniharness.schedule.transaction import run_schedule_transaction
 
 
-def _parent_loop(session_id="root"):
-    ctx = Context()
-    install_sessions(ctx)
-    install_agents(ctx)
-    reg = ToolRegistry(ctx)
-    loop = AgentLoop(Session(session_id), FakeLlmAdapter(final_text="父响应"),
-                     reg, ctx, system_prompt="你是 root。")
-    loop.publish()
-    return loop, ctx, reg
+def _ms(value: str) -> int:
+    return _parse_offset_instant(value)
 
 
-def _call(reg, name, args, agent, signal=None):
-    """经 agent.tools 解析并执行（可同步/异步），返回 canonical 值。"""
-    exec_ = ToolExec(agent=agent)
-    if signal is not None:
-        exec_.signal = signal
-    value = reg.resolve(name).execute(args, exec_)
-    if inspect.isawaitable(value):
-        return asyncio.run(value)
-    return value
+def _iso(epoch: int) -> str:
+    return _format_epoch_ms(epoch)
 
 
-class _FakeSignal:
-    def __init__(self, aborted=False):
-        self._aborted = aborted
+# ===== 规则算术 =====
 
-    def set(self):
-        self._aborted = True
-
-    def is_set(self):
-        return self._aborted
-
-    def wait(self, timeout=None):
-        return self._aborted
-
-
-def _now_ms():
-    return int(time.time() * 1000)
-
-
-# ===== 域 fold =====
-
-class DomainFoldTest(unittest.TestCase):
-    def setUp(self):
-        self.root, self.ctx, self.reg = _parent_loop()
-
-    def _fold(self, changes):
-        session = Session("sched")
-        for change in changes:
-            session.append("schedule/change", change)
-        return fold_schedule_events(session.own_events())
-
-    def test_after_record_roundtrip(self):
-        record = create_after_schedule_record(
-            "schedule-1", " 喝水面膜 ", 5, _now_ms())
-        self.assertEqual(record["kind"], "after")
-        self.assertEqual(record["prompt"], "喝水面膜")
-        decoded = decode_schedule_change({
-            "version": 1, "operation": "create", "schedule": record})
-        self.assertEqual(decoded["schedule"]["afterSeconds"], 5)
-        # scheduledAt = now + 5s
-        self.assertGreaterEqual(
-            record["scheduledAt"], _format_now_canonical())
-
-    def test_whitespace_only_prompt_fail_closed(self):
-        with self.assertRaises(ScheduleInputError) as cm:
-            create_after_schedule_record("x", "   ", 5, _now_ms())
-        self.assertEqual(cm.exception.code, "invalid_prompt")
-
-    def test_at_record_local(self):
-        record = create_at_schedule_record(
-            "schedule-2", "开会", {"date": "2099-01-02", "time": "10:30:00",
-                                   "time_zone": "Asia/Shanghai"}, _now_ms())
-        self.assertEqual(record["kind"], "at")
-        self.assertRegex(record["scheduledAt"], r"^20\d\d-.*Z$")
-
-    def test_every_interval_floor(self):
-        with self.assertRaises(ScheduleInputError) as cm:
-            create_every_schedule_record("x", "心跳", 299, _now_ms())
-        self.assertEqual(cm.exception.code, "frequency_too_high")
+class EveryRuleTest(unittest.TestCase):
+    def test_create_and_resolve_latest_only(self):
         record = create_every_schedule_record(
-            "x", "心跳", MIN_EVERY_INTERVAL_SECONDS, _now_ms())
-        self.assertEqual(record["everySeconds"], MIN_EVERY_INTERVAL_SECONDS)
+            "e", "Every", 300, _ms("2026-09-15T00:00:00Z"), "Every")
+        self.assertEqual(record["scheduledAt"], "2026-09-15T00:05:00.000Z")
+        resolved = resolve_every_occurrence(record, _ms("2026-09-15T00:17:30Z"))
+        self.assertEqual(resolved, {
+            "occurrenceAt": "2026-09-15T00:15:00.000Z",
+            "nextScheduledAt": "2026-09-15T00:20:00.000Z",
+        })
 
-    def test_fold_derives_active_and_seen(self):
-        changes = [
-            {"version": 1, "operation": "create",
-             "schedule": create_after_schedule_record("schedule-1", "a", 5, _now_ms())},
-            {"version": 1, "operation": "create",
-             "schedule": create_after_schedule_record("schedule-2", "b", 5, _now_ms())},
-            {"version": 1, "operation": "delete", "id": "schedule-1"},
+    def test_interval_floor(self):
+        with self.assertRaises(ScheduleInputError) as ctx:
+            create_every_schedule_record("e", "E", MIN_EVERY_INTERVAL_SECONDS - 1,
+                                         _ms("2026-09-15T00:00:00Z"), "E")
+        self.assertEqual(ctx.exception.code, "frequency_too_high")
+
+    def test_dispatch_before_target_rejected(self):
+        record = create_every_schedule_record(
+            "e", "E", 300, _ms("2026-09-15T00:00:00Z"), "E")
+        with self.assertRaises(ScheduleLogError):
+            resolve_every_occurrence(record, _ms("2026-09-15T00:00:00Z"))
+
+
+class DailyRuleTest(unittest.TestCase):
+    def test_strictly_future_and_view(self):
+        record = create_daily_schedule_record(
+            "d", "  Daily reminder  ", {"time": "23:00:00", "time_zone": "Asia/Shanghai"},
+            _ms("2026-09-16T14:59:59.999Z"), "Daily reminder")
+        self.assertEqual(record, {
+            "id": "d", "kind": "daily", "title": "Daily reminder",
+            "prompt": "Daily reminder", "time": "23:00:00.000",
+            "timeZone": "Asia/Shanghai", "scheduledAt": "2026-09-16T15:00:00.000Z",
+        })
+        self.assertEqual(schedule_view(record, record_scheduled(record)),
+                         {**record, "state": "overdue", "deliveryMode": "host"})
+        self.assertEqual(schedule_view(record, record_scheduled(record) - 1)["state"], "scheduled")
+
+    def test_next_decision(self):
+        record = create_daily_schedule_record(
+            "d", "D", {"time": "23:00:00", "time_zone": "Asia/Shanghai"},
+            _ms("2026-09-16T14:59:59.999Z"), "D")
+        self.assertEqual(resolve_daily_occurrence(record, _ms("2026-09-16T15:00:00Z")), {
+            "occurrenceAt": "2026-09-16T15:00:00.000Z",
+            "nextScheduledAt": "2026-09-17T15:00:00.000Z",
+        })
+
+    def test_dst_gap_skips_date(self):
+        record = create_daily_schedule_record(
+            "d", "D", {"time": "02:30:00", "time_zone": "America/New_York"},
+            _ms("2026-03-07T00:00:00Z"), "D")
+        self.assertEqual(record["scheduledAt"], "2026-03-07T07:30:00.000Z")
+        self.assertEqual(resolve_daily_occurrence(record, _ms(record["scheduledAt"])), {
+            "occurrenceAt": "2026-03-07T07:30:00.000Z",
+            "nextScheduledAt": "2026-03-09T06:30:00.000Z",
+        })
+
+    def test_dst_overlap_uses_earlier_once(self):
+        record = create_daily_schedule_record(
+            "d", "D", {"time": "01:30:00", "time_zone": "America/New_York"},
+            _ms("2026-11-01T04:00:00Z"), "D")
+        self.assertEqual(record["scheduledAt"], "2026-11-01T05:30:00.000Z")
+        for now in ("2026-11-01T05:30:00Z", "2026-11-01T06:00:00Z", "2026-11-01T06:30:00Z"):
+            self.assertEqual(resolve_daily_occurrence(record, _ms(now)), {
+                "occurrenceAt": "2026-11-01T05:30:00.000Z",
+                "nextScheduledAt": "2026-11-02T06:30:00.000Z",
+            })
+
+    def test_latest_only_after_downtime(self):
+        record = create_daily_schedule_record(
+            "d", "D", {"time": "23:00:00", "time_zone": "Asia/Shanghai"},
+            _ms("1800-01-01T00:00:00Z"), "D")
+        self.assertEqual(resolve_daily_occurrence(record, _ms("2026-09-16T14:59:59Z")), {
+            "occurrenceAt": "2026-09-15T15:00:00.000Z",
+            "nextScheduledAt": "2026-09-16T15:00:00.000Z",
+        })
+
+
+class WeeklyRuleTest(unittest.TestCase):
+    def test_normalize_weekdays(self):
+        self.assertEqual(normalize_weekdays([7, 2, 5, 1]), [1, 2, 5, 7])
+        for bad in ([], [0], [8], [1.5], ["1"], [1, 1]):
+            with self.assertRaises(ScheduleInputError):
+                normalize_weekdays(bad)
+
+    def test_creation_and_earliest_weekday(self):
+        record = create_weekly_schedule_record(
+            "w", "Weekly", {"time": "09:00:00", "time_zone": "Asia/Shanghai",
+                            "weekdays": [3]},
+            _ms("2026-09-14T00:00:00Z"), "Weekly")
+        self.assertEqual((record["weekdays"], record["scheduledAt"]),
+                         ([3], "2026-09-16T01:00:00.000Z"))
+        earlier = create_weekly_schedule_record(
+            "w", "W", {"time": "09:00:00", "time_zone": "Europe/Paris",
+                       "weekdays": [5, 2]},
+            _ms("2026-09-14T00:00:00Z"), "W")
+        self.assertEqual(earlier["scheduledAt"], "2026-09-15T07:00:00.000Z")
+
+    def test_dst_gap_and_overlap(self):
+        gap = create_weekly_schedule_record(
+            "w", "W", {"time": "02:30:00", "time_zone": "America/New_York",
+                       "weekdays": [7]},
+            _ms("2026-03-07T00:00:00Z"), "W")
+        self.assertEqual(gap["scheduledAt"], "2026-03-15T06:30:00.000Z")
+        overlap = create_weekly_schedule_record(
+            "w", "W", {"time": "01:30:00", "time_zone": "America/New_York",
+                       "weekdays": [7]},
+            _ms("2026-10-26T00:00:00Z"), "W")
+        self.assertEqual(overlap["scheduledAt"], "2026-11-01T05:30:00.000Z")
+        self.assertEqual(resolve_weekly_occurrence(overlap, _ms("2026-11-01T06:00:00Z")), {
+            "occurrenceAt": "2026-11-01T05:30:00.000Z",
+            "nextScheduledAt": "2026-11-08T06:30:00.000Z",
+        })
+
+
+class CronRuleTest(unittest.TestCase):
+    CANONICAL = [
+        ("0 0 * * *", "0 0 * * *"),
+        ("*/15 9-17 * * 1-5", "*/15 9-17 * * 1-5"),
+        ("30,10,20 * * * *", "10-30/10 * * * *"),
+        ("*/1 * * * *", "* * * * *"),
+        ("0-59 0-23 1-31 1-12 0-7", "0-59 0-23 1-31 1-12 0-6"),
+        ("0 0 * * 7", "0 0 * * 0"),
+        ("0 0 * * 1-2,3-4", "0 0 * * 1-4"),
+        ("0 0 * * 5-7", "0 0 * * 0,5-6"),
+        ("00 09 * * 5,4,3,2,1", "0 9 * * 1-5"),
+        ("0 9 1-31 * */7", "0 9 1-31 * */7"),
+        ("0 9 */2 * 1", "0 9 */2 * 1"),
+        ("*,5 0 * * *", "* 0 * * *"),
+        ("5,* 0 * * *", "0-59 0 * * *"),
+    ]
+
+    def test_canonicalization(self):
+        for raw, canonical in self.CANONICAL:
+            self.assertEqual(canonicalize_cron_expression(raw), canonical)
+            self.assertEqual(canonicalize_cron_expression(canonical), canonical)
+
+    def test_star_flag_preserved(self):
+        for raw in ("0 9 1-31 * */7", "0 9 */2 * 1", "0 9 * * 1", "*/1 * * * *"):
+            canonical = canonicalize_cron_expression(raw)
+            for index, field in enumerate(raw.split()):
+                self.assertEqual(canonical.split()[index].startswith("*"),
+                                 field.startswith("*"))
+
+    def test_rejections(self):
+        for bad in ("0 0 * * * *", "@daily", "0 0 L * *", "60 0 * * *",
+                    "0 24 * * *", "0 0 0 * *", "0 0 * 13 *", "0 0 * * 8",
+                    "0 0 20-10 * *", "*/0 * * * *", "0,,1 * * * *",
+                    "0 0 * * 1,", "5/2 * * * *", " 0 0 * * *"):
+            with self.assertRaises(ScheduleInputError):
+                canonicalize_cron_expression(bad)
+
+    def test_target_selection(self):
+        cases = [
+            ("2026-09-16T00:00:00Z", "30 9 * * *", "Asia/Shanghai", "2026-09-16T01:30:00.000Z"),
+            ("2026-04-01T00:00:00Z", "0 0 31 * *", "UTC", "2026-05-31T00:00:00.000Z"),
+            ("2026-01-01T00:00:00Z", "0 0 29 2 *", "UTC", "2028-02-29T00:00:00.000Z"),
+            ("2026-09-01T00:00:00Z", "0 0 13 * 5", "UTC", "2026-09-04T00:00:00.000Z"),
+            ("2026-09-12T00:00:00Z", "0 0 13 * 5", "UTC", "2026-09-13T00:00:00.000Z"),
+            ("2026-09-01T00:00:00Z", "0 9 */2 * 1", "UTC", "2026-09-07T09:00:00.000Z"),
+            ("2026-09-13T00:00:00Z", "0 9 */2 * 1", "UTC", "2026-09-21T09:00:00.000Z"),
+            ("2026-09-02T00:00:00Z", "0 9 1-31 * */2", "UTC", "2026-09-03T09:00:00.000Z"),
         ]
-        folded = self._fold(changes)
-        self.assertEqual([r["id"] for r in folded["active"]], ["schedule-2"])
-        self.assertEqual(sorted(folded["seenIds"]), ["schedule-1", "schedule-2"])
+        for now, expression, zone, want in cases:
+            record = create_cron_schedule_record(
+                "c", "C", {"expression": expression, "time_zone": zone}, _ms(now), "C")
+            self.assertEqual(record["scheduledAt"], want, expression)
 
-    def test_dispatch_removes_from_active(self):
-        record = create_after_schedule_record("schedule-1", "a", 5, _now_ms())
-        folded = self._fold([
-            {"version": 1, "operation": "create", "schedule": record},
-            {"version": 1, "operation": "dispatch", "id": "schedule-1"},
-        ])
-        self.assertEqual(folded["active"], ())
-        self.assertIn("schedule-1", folded["seenIds"])
+    def test_dst_gap_and_overlap(self):
+        gap = create_cron_schedule_record(
+            "c", "C", {"expression": "30 2 * 3 0", "time_zone": "America/New_York"},
+            _ms("2026-03-01T00:00:00Z"), "C")
+        self.assertEqual(gap["scheduledAt"], "2026-03-01T07:30:00.000Z")
+        self.assertEqual(resolve_cron_occurrence(gap, _ms("2026-03-08T12:00:00Z")), {
+            "occurrenceAt": "2026-03-01T07:30:00.000Z",
+            "nextScheduledAt": "2026-03-15T06:30:00.000Z",
+        })
+        overlap = create_cron_schedule_record(
+            "c", "C", {"expression": "30 1 * 11 0", "time_zone": "America/New_York"},
+            _ms("2026-10-25T00:00:00Z"), "C")
+        self.assertEqual(overlap["scheduledAt"], "2026-11-01T05:30:00.000Z")
+        self.assertEqual(resolve_cron_occurrence(overlap, _ms("2026-11-01T06:30:00Z")), {
+            "occurrenceAt": "2026-11-01T05:30:00.000Z",
+            "nextScheduledAt": "2026-11-08T06:30:00.000Z",
+        })
 
-    def test_every_dispatch_reschedules(self):
-        record = create_every_schedule_record("schedule-1", "隅", 300, _now_ms())
+    def test_unsatisfiable_returns_saved_target_and_creation_exhausts(self):
+        impossible = {
+            "id": "i", "kind": "cron", "title": "I", "prompt": "I",
+            "expression": "0 0 30 2 *", "timeZone": "UTC",
+            "scheduledAt": "2026-09-15T00:00:00.000Z",
+        }
+        self.assertEqual(resolve_cron_occurrence(impossible, _ms("2026-09-16T00:00:00Z")),
+                         {"occurrenceAt": "2026-09-15T00:00:00.000Z"})
+        with self.assertRaises(ScheduleInputError) as ctx:
+            create_cron_schedule_record(
+                "c", "C", {"expression": "0 0 30 2 *", "time_zone": "UTC"},
+                _ms("2026-01-01T00:00:00Z"), "C")
+        self.assertEqual(ctx.exception.code, "time_out_of_range")
+
+    def test_recurring_dispatch_shared(self):
+        record = create_cron_schedule_record(
+            "c", "C", {"expression": "0 9 * * 1-5", "time_zone": "UTC"},
+            _ms("2026-09-14T00:00:00Z"), "C")
+        self.assertTrue(is_recurring_schedule_record(record))
+        self.assertFalse(is_recurring_schedule_record(
+            create_at_schedule_record("a", "A", "2026-09-16T01:00:00Z",
+                                      _ms("2026-09-15T00:00:00Z"), "A")))
+        self.assertEqual(resolve_recurring_occurrence(record, _ms(record["scheduledAt"])),
+                         resolve_cron_occurrence(record, _ms(record["scheduledAt"])))
+
+
+def record_scheduled(record):
+    return _ms(record["scheduledAt"])
+
+
+# ===== title =====
+
+class TitleTest(unittest.TestCase):
+    def test_required_and_trimmed(self):
+        self.assertEqual(schedule_title("  hi  "), "hi")
+        for bad in ("", "   ", "x" * (MAX_TITLE_LENGTH + 1)):
+            with self.assertRaises(ScheduleInputError) as ctx:
+                schedule_title(bad)
+            self.assertEqual(ctx.exception.code, "invalid_prompt")
+
+    def test_create_requires_title(self):
+        with self.assertRaises(ScheduleInputError):
+            create_after_schedule_record("x", "p", 5, _ms("2026-09-15T00:00:00Z"), "")
+
+    def test_legacy_events_may_lack_title(self):
+        legacy = {"id": "schedule-1", "kind": "after", "prompt": "p",
+                  "afterSeconds": 5, "scheduledAt": "2099-01-01T00:00:00.000Z"}
+        decoded = decode_schedule_change(
+            {"version": 1, "operation": "create", "schedule": legacy})
+        self.assertEqual(decoded["schedule"]["id"], "schedule-1")
+        with self.assertRaises(ScheduleLogError):
+            decode_schedule_record(legacy)
+
+
+# ===== legacy fold =====
+
+class LegacyFoldTest(unittest.TestCase):
+    def _fold(self, changes):
+        return fold_schedule_events([{"type": "schedule/change", "data": change}
+                                     for change in changes])
+
+    def test_create_delete_dispatch(self):
+        record = create_every_schedule_record(
+            "schedule-1", "E", 300, _ms("2026-09-15T00:00:00Z"), "E")
         folded = self._fold([
             {"version": 1, "operation": "create", "schedule": record},
             {"version": 1, "operation": "dispatch", "id": "schedule-1",
-             "acceptedAt": record["scheduledAt"]},
+             "acceptedAt": "2026-09-15T00:05:00.000Z"},
         ])
-        # every 派发后重排下一 occurrence（仍 active），seenIds 保留
         self.assertEqual(len(folded["active"]), 1)
-        self.assertEqual(folded["active"][0]["id"], "schedule-1")
-        self.assertGreater(_epoch_of(folded["active"][0]["scheduledAt"]),
-                           _epoch_of(record["scheduledAt"]))
-        self.assertIn("schedule-1", folded["seenIds"])
+        self.assertGreater(_ms(folded["active"][0]["scheduledAt"]), _ms(record["scheduledAt"]))
 
-    def test_allocate_never_reuses(self):
-        folded = {"active": (), "seenIds": ("schedule-1", "schedule-2")}
-        self.assertEqual(allocate_schedule_id(folded), "schedule-3")
-
-    def test_unknown_operation_fails(self):
-        with self.assertRaises(ScheduleLogError):
-            self._fold([{"version": 1, "operation": "explode"}])
-
-    def test_bad_version_fails(self):
-        with self.assertRaises(ScheduleLogError):
-            self._fold([{"version": 2, "operation": "create",
-                         "schedule": create_after_schedule_record("s1", "a", 5, _now_ms())}])
-
-    def test_extra_key_fails(self):
-        with self.assertRaises(ScheduleLogError):
-            self._fold([{"version": 1, "operation": "delete", "id": "x", "extra": 1}])
-
-    def test_trailing_whitespace_id_fails(self):
-        with self.assertRaises(ScheduleLogError):
-            self._fold([{"version": 1, "operation": "delete", "id": " x"}])
-
-    def test_impossible_date_fails(self):
-        with self.assertRaises(ScheduleInputError):
-            create_at_schedule_record(
-                "x", "a", {"date": "2025-02-30", "time": "00:00:00",
-                           "time_zone": "UTC"}, _now_ms())
-
-    def test_resolve_every_occurrence(self):
-        record = create_every_schedule_record("s1", "隅", 300, _now_ms())
-        target = _epoch_of(record["scheduledAt"])
-        followup = target + 300_000 + 1
-        resolved = resolve_every_occurrence(record, followup)
-        occurrence = _epoch_of(resolved["occurrenceAt"])
-        # 对齐 target 网格、不枚举积压、落在 followup 前一个周期内
-        self.assertEqual((occurrence - target) % 300_000, 0)
-        self.assertGreaterEqual(occurrence, followup - 300_000)
-        self.assertLessEqual(occurrence, followup)
-        self.assertIn("nextScheduledAt", resolved)
-        self.assertEqual(_epoch_of(resolved["nextScheduledAt"]), occurrence + 300_000)
-
-    def test_corrupt_log_fails_closed(self):
-        changed = _now_ms()
+    def test_delete_and_unknown(self):
         record = create_after_schedule_record(
-            "schedule-1", "a", 5, changed)
-        del record["scheduledAt"]
+            "schedule-1", "A", 5, _ms("2026-09-15T00:00:00Z"), "A")
+        folded = self._fold([
+            {"version": 1, "operation": "create", "schedule": record},
+            {"version": 1, "operation": "delete", "id": "schedule-1"},
+        ])
+        self.assertEqual(folded["active"], ())
         with self.assertRaises(ScheduleLogError):
-            decode_schedule_change({
-                "version": 1, "operation": "create", "schedule": record})
+            self._fold([{"version": 1, "operation": "delete", "id": "nope"}])
 
-    def test_schedule_view_state(self):
-        record = create_after_schedule_record("schedule-1", "a", 5, _now_ms())
-        view = schedule_view(record, _now_ms() + 10_000)
-        self.assertEqual(view["id"], "schedule-1")
-        self.assertIn(view["state"], ("scheduled", "overdue"))
-        self.assertEqual(view["deliveryMode"], "session-local")
-
-    def test_json_stringify_byte_parity(self):
-        value = {"id": "schedule-1", "prompt": "a\u2028b", "é": "中文"}
-        rendered = _json_stringify(value)
-        # JS JSON.stringify：无空格分隔、unicode 原样、U+2028/29 转义
-        self.assertNotIn(" ", rendered)
-        self.assertNotIn("\u2028", rendered)
-        self.assertIn("\\u2028", rendered)
-        self.assertIn("中文", rendered)
-        self.assertEqual(json.dumps(value, ensure_ascii=False, separators=(",", ":")),
-                         rendered.replace("\\u2028", "\u2028"))
+    def test_daily_and_cron_rejected_by_legacy_decoder(self):
+        daily = create_daily_schedule_record(
+            "d", "D", {"time": "09:00:00", "time_zone": "UTC"},
+            _ms("2026-09-16T00:00:00Z"), "D")
+        with self.assertRaises(ScheduleLogError):
+            decode_schedule_change(
+                {"version": 1, "operation": "create", "schedule": daily})
 
 
-# ===== framing 文本 =====
+# ===== compare-and-update =====
 
-class FramingTest(unittest.TestCase):
-    def test_one_shot_framing(self):
-        record = create_after_schedule_record("schedule-1", "喝水", 5, _now_ms())
-        text = render_reminder_framing(record)
-        self.assertIn("SCHEDULE REMINDER", text)
-        self.assertIn("schedule-1", text)
-        self.assertIn("喝水", text)
+class UpdateTest(unittest.TestCase):
+    NOW = _ms("2026-09-16T00:00:00.125Z")
 
-    def test_every_batch_framing(self):
-        record = create_every_schedule_record("schedule-1", "隅", 300, _now_ms())
-        text = render_every_reminder_batch_framing([
-            {"record": record, "occurrenceAt": _format_now_canonical()}])
-        self.assertIn("schedule-1", text)
-        self.assertIn("隅", text)
+    def _daily(self):
+        return create_daily_schedule_record(
+            "t", "Keep prompt", {"time": "09:00:00.125", "time_zone": "US/Eastern"},
+            self.NOW, "Kept name")
 
+    def test_stale_expected_conflicts(self):
+        daily = self._daily()
+        self.assertEqual(
+            resolve_schedule_update(daily, {**daily, "prompt": "other"},
+                                    {"kind": "every", "every_seconds": 600}, self.NOW),
+            {"id": "t", "updated": False, "code": "schedule_conflict"})
 
-# ===== 事务 + 持久化 =====
+    def test_invalid_expected_returns_fixed_error(self):
+        daily = self._daily()
+        del daily["title"]
+        self.assertEqual(
+            resolve_schedule_update(self._daily(), daily, None, self.NOW),
+            {"code": "invalid_rule",
+             "message": "expected must be a complete valid Schedule record."})
 
-class _TxnAgent:
-    def __init__(self, id_):
-        self.id = id_
+    def test_equivalent_normalized_timing_keeps_target(self):
+        daily = {**self._daily(), "time": "09:00:00.100",
+                 "timeZone": "America/New_York"}
+        result = resolve_schedule_update(
+            daily, daily, {"kind": "daily",
+                           "daily": {"time": "09:00:00.1", "time_zone": "America/New_York"}},
+            self.NOW + 86_400_000)
+        self.assertIs(result["record"], daily)
+        self.assertFalse(result["updated"])
 
+    def test_kind_change_recomputes(self):
+        daily = self._daily()
+        result = resolve_schedule_update(
+            daily, daily, {"kind": "every", "every_seconds": 600}, self.NOW)
+        self.assertTrue(result["updated"])
+        self.assertEqual(result["record"]["kind"], "every")
+        self.assertEqual(result["record"]["title"], "Kept name")
 
-class TransactionTest(unittest.TestCase):
-    def test_fifo_serialization(self):
-        agent = _TxnAgent("a")
-        order = []
+    def test_content_only_keeps_target(self):
+        daily = self._daily()
+        result = resolve_schedule_update(daily, daily, None, self.NOW,
+                                         {"title": "Renamed", "prompt": "New"})
+        self.assertTrue(result["updated"])
+        self.assertEqual(result["record"]["scheduledAt"], daily["scheduledAt"])
+        self.assertEqual(result["record"]["kind"], "daily")
 
-        async def main():
-            r1 = await run_schedule_transaction(agent, lambda: order.append(1))
-            r2 = await run_schedule_transaction(agent, lambda: order.append(2))
-            return r1, r2
-
-        asyncio.run(main())
-        self.assertEqual(order, [1, 2])
-
-    def test_async_operations_awaited(self):
-        agent = _TxnAgent("a")
-        results = []
-
-        async def op():
-            await asyncio.sleep(0.001)
-            results.append("done")
-
-        asyncio.run(run_schedule_transaction(agent, op))
-        self.assertEqual(results, ["done"])
-
-    def test_failure_propagates_and_breaks_chain(self):
-        # 上游 Promise 链：失败的后继拒绝（不吞错、不重排）
-        agent = _TxnAgent("a")
-        seen = []
-
-        def bad():
-            seen.append("bad")
-            raise ValueError("boom")
-
-        with self.assertRaises(ValueError):
-            asyncio.run(run_schedule_transaction(agent, bad))
-        self.assertEqual(seen, ["bad"])
-
-    def test_tail_isolation_between_agents(self):
-        a = _TxnAgent("a")
-        b = _TxnAgent("b")
-        out = []
-
-        async def main():
-            await asyncio.gather(
-                run_schedule_transaction(a, lambda: out.append("a1")),
-                run_schedule_transaction(b, lambda: out.append("b1")),
-                run_schedule_transaction(a, lambda: out.append("a2")),
-            )
-
-        asyncio.run(main())
-        # a 组串行，b 独立：a1 < a2 恒成立
-        self.assertLess(out.index("a1"), out.index("a2"))
-        self.assertIn("b1", out)
+    def test_invalid_replacement(self):
+        daily = self._daily()
+        self.assertEqual(resolve_schedule_update(daily, daily, None, self.NOW,
+                                                 {"title": "   "}),
+                         {"code": "invalid_prompt",
+                          "message": "title is required and must be non-empty after trimming."})
 
 
-class PersistenceTest(unittest.TestCase):
-    def test_flush_false_raises_schedule_persistence_error(self):
-        class NoParticipants:
-            def flush(self, session):
-                return False
+# ===== delivery history =====
 
-        ctx = Context()
-        ctx.provide("sessions", NoParticipants())
-        with self.assertRaises(SchedulePersistenceError):
-            flush_schedule_persistence(ctx, Session("s1"))
+class DeliveryHistoryTest(unittest.TestCase):
+    def _task(self, records):
+        latest = records[-1] if records else None
+        task = {
+            "sessionId": "s1", "status": "inactive",
+            "record": create_after_schedule_record(
+                "t", "Current", 1, _ms("2026-09-15T00:00:00Z"), "Current"),
+            "deliveryHistory": {"records": records, "earlierRecordsUnavailable": False},
+        }
+        if latest is not None:
+            task["lastDelivery"] = {
+                "scheduledAt": latest["scheduledAt"], "deliveredAt": latest["deliveredAt"],
+                "messageId": latest["messageId"]}
+        return task
 
-    def test_non_persistence_error_wrapped_with_cause(self):
-        class Broken:
-            def flush(self, session):
-                raise OSError("disk full")
+    def _receipt(self, index):
+        return {"messageId": f"message-{index}", "prompt": f"Sent {index}",
+                "scheduledAt": "2026-09-15T00:00:00.000Z",
+                "deliveredAt": ("2026-09-15T00:00:01.000Z" if index % 2 == 0
+                                else "2026-09-14T00:00:01.000Z")}
 
-        ctx = Context()
-        ctx.provide("sessions", Broken())
-        with self.assertRaises(SchedulePersistenceError) as cm:
-            flush_schedule_persistence(ctx, Session("s1"))
-        self.assertIsInstance(cm.exception.__cause__, OSError)
-        self.assertEqual(cm.exception.name, "SchedulePersistenceError")
+    def test_append_prunes_by_cap_and_marks_flags(self):
+        task = self._task([self._receipt(1), self._receipt(2)])
+        appended = append_delivery(task, self._receipt(3), {"days": 30, "records": 2})
+        self.assertEqual([r["messageId"] for r in appended["deliveryHistory"]["records"]],
+                         ["message-2", "message-3"])
+        self.assertTrue(appended["deliveryHistory"]["earlierRecordsUnavailable"])
+        self.assertTrue(appended["deliveryHistory"]["earlierRecordsPruned"])
+        self.assertEqual(appended["lastDelivery"], self._receipt(3))
+
+    def test_append_window_and_legacy_unavailable_not_pruned(self):
+        task = self._task([self._receipt(1), self._receipt(2)])
+        fresh = {**self._receipt(9), "deliveredAt": "2026-09-16T00:00:00.000Z"}
+        appended = append_delivery(task, fresh, {"days": 1, "records": 200})
+        self.assertEqual([r["messageId"] for r in appended["deliveryHistory"]["records"]],
+                         ["message-2", "message-9"])
+        legacy = self._task([self._receipt(1)])
+        legacy["deliveryHistory"] = {"records": [self._receipt(1)],
+                                     "earlierRecordsUnavailable": True}
+        appended = append_delivery(legacy, self._receipt(2), {"days": 30, "records": 200})
+        self.assertTrue(appended["deliveryHistory"]["earlierRecordsUnavailable"])
+        self.assertFalse(appended["deliveryHistory"]["earlierRecordsPruned"])
+
+    def test_page_identity_cursor(self):
+        records = [self._receipt(index) for index in range(103)]
+        task = self._task(records)
+        meta = {"earlierRecordsUnavailable": False,
+                "earlierRecordsPruned": False, "retention": {"days": 30, "records": 200}}
+        first = delivery_history_page(task, {"id": "t", "limit": 100}, {"days": 30, "records": 200})
+        self.assertEqual(len(first["records"]), 100)
+        self.assertEqual(first["records"][0]["messageId"], "message-102")
+        self.assertEqual(first["nextBefore"], "message-3")
+        self.assertFalse(first["earlierRecordsPruned"])
+        second = delivery_history_page(
+            task, {"id": "t", "limit": 100, "before": "message-3"},
+            {"days": 30, "records": 200})
+        self.assertEqual([r["messageId"] for r in second["records"]],
+                         ["message-2", "message-1", "message-0"])
+        self.assertNotIn("nextBefore", second)
+        unknown = delivery_history_page(
+            task, {"id": "t", "limit": 10, "before": "missing"},
+            {"days": 30, "records": 200})
+        self.assertEqual(unknown, {"id": "t", "code": "delivery_cursor_not_found"})
+        self.assertIn("retention", first)
 
 
-# ===== 工具 =====
+# ===== service =====
 
-class ScheduleToolsTest(unittest.TestCase):
+class ServiceHarness(unittest.TestCase):
     def setUp(self):
-        self.root, self.ctx, self.reg = _parent_loop()
-        # flush 参与位（真实 SessionStore 参与者）
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.ctx = Context(name="schedule-service")
+        self.addCleanup(self.ctx.dispose)
+        install_sessions(self.ctx)
+        install_agents(self.ctx)
+        install_storage(self.ctx, os.path.join(self.tmp.name, "storage"))
         self.ctx.on("session/flush", lambda payload: None)
-        from miniharness.schedule.tools import register_schedule_tools
-        self.disposers = register_schedule_tools(
-            self.ctx, self.root, lambda: None)
-        self.reg = self.root.tools
-
-    def tearDown(self):
-        self.disposers()
-
-    def _create(self, **args):
-        return _call(self.reg, "schedule_create", args, self.root)
-
-    def test_requires_agent_bound_exec(self):
-        exec_ = ToolExec(agent=None)
-        value = self.reg.resolve("schedule_create").execute(
-            {"prompt": "x", "after_seconds": 1}, exec_)
-        if inspect.isawaitable(value):
-            value = asyncio.run(value)
-        self.assertEqual(value["code"], "internal_error")
-
-    def test_create_after_success(self):
-        result = self._create(prompt="喝水", after_seconds=1)
-        self.assertEqual(result["kind"], "after")
-        self.assertEqual(result["prompt"], "喝水")
-        self.assertIn(result["id"], (
-            r["id"] for r in fold_schedule_events(self.root.session.own_events())["active"]))
-
-    def test_invalid_selector(self):
-        result = self._create(prompt="x", after_seconds=1, every_seconds=300)
-        self.assertEqual(result["code"], "invalid_selector")
-
-    def test_select_missing(self):
-        result = self._create(prompt="x")
-        self.assertEqual(result["code"], "invalid_selector")
-
-    def test_invalid_prompt(self):
-        result = self._create(prompt="  ", after_seconds=1)
-        self.assertEqual(result["code"], "invalid_prompt")
-
-    def test_frequency_too_high(self):
-        result = self._create(prompt="x", every_seconds=299)
-        self.assertEqual(result["code"], "frequency_too_high")
-
-    def test_every_ok(self):
-        result = self._create(prompt="x", every_seconds=300)
-        self.assertEqual(result["kind"], "every")
-
-    def test_list_returns_active(self):
-        self._create(prompt="a", after_seconds=1)
-        listed = _call(self.reg, "schedule_list", {}, self.root)
-        self.assertTrue(any(v["id"] for v in listed))
-
-    def test_delete_success(self):
-        created = self._create(prompt="a", after_seconds=1)
-        deleted = _call(self.reg, "schedule_delete",
-                        {"id": created["id"]}, self.root)
-        self.assertTrue(deleted["deleted"])
-
-    def test_delete_unknown_half_success(self):
-        deleted = _call(self.reg, "schedule_delete", {"id": "schedule-no"}, self.root)
-        self.assertFalse(deleted["deleted"])
-        self.assertEqual(deleted["code"], "schedule_not_found")
-
-    def test_delete_invalid_id(self):
-        deleted = _call(self.reg, "schedule_delete", {"id": " x "}, self.root)
-        self.assertEqual(deleted["code"], "invalid_rule")
-
-    def test_cancelled_before_fifo_turn(self):
-        result = self._create(prompt="x", after_seconds=1)
-        cancelled = self._create_signal_aborted()
-        gone = _call(self.reg, "schedule_delete", {"id": result["id"]}, self.root,
-                     signal=cancelled)
-        self.assertEqual(gone["code"], "internal_error")
-
-    def _create_signal_aborted(self):
-        sig = _FakeSignal()
-        sig.set()
-        return sig
-
-    def test_render_json_parity(self):
-        created = self._create(prompt="hello world", after_seconds=1)
-        # render 经 call_render 双参派发
-        tool = self.reg.resolve("schedule_create")
-        from miniharness.core.tools import call_render
-        value = call_render(tool, {"prompt": "hello world", "after_seconds": 1}, created)
-        text = value[0]["text"]
-        self.assertIn('"prompt":"hello world"', text)
-        self.assertIn("hello world", text)
-        # JSON.stringify 紧凑载体：无分隔空格
-        self.assertNotIn(", ", text)
-        self.assertNotIn(": ", text)
-
-
-# ===== 运行时 =====
-
-class _RuntimeHarness:
-    """进程内合成 ctx + 注册表，让 ScheduleRuntime 视为 root live。"""
-
-    def __init__(self, agent):
-        flushed = []
-        warns = []
-
-        class _Agents:
-            def get(self, agent_id):
-                return agent
-
-            def roots(self):
-                return [agent]
-
-        class _Sessions:
-            def flush(self, session):
-                flushed.append(session)
-                return True
-
-        class _Logger:
-            def warn(self, message):
-                warns.append(message)
-
-        ctx = Context()
-        ctx.provide("agents", _Agents())
-        ctx.provide("sessions", _Sessions())
-        ctx.logger = _Logger()  # 属性覆写，遮蔽内建 LoggerService
-        self.ctx = ctx
-        self.flushed = flushed
-        self.warns = warns
-
-    def flush_count(self):
-        return len(self.flushed)
-
-
-class _RuntimeAgent:
-    def __init__(self, agent_id="runtime-agent"):
-        self.id = agent_id
-        self.session = Session(agent_id)
-        self._idle = True
-        self.status = "idle"
+        self.reg = ToolRegistry(self.ctx)
+        self.agent = AgentLoop(
+            Session("root"), FakeLlmAdapter(final_text="ok"), self.reg, self.ctx,
+            system_prompt="root")
+        self.agent.publish()
         self.followups = []
-        self.maintenance_calls = 0
+        original = self.agent.followup
 
-    def when_idle(self):
-        return self._idle
+        def recording(message, source="user"):
+            self.followups.append(message)
+            return original(message, source)
 
-    def when_idle_async(self):
-        raise RuntimeError("no driver")
-
-    def run_maintenance(self, task):
-        if not self.when_idle():
-            raise RuntimeError("run_maintenance 要求 true idle")
-        self.status = "maintenance"
-        self._idle = False
-        try:
-            result = task()
-        finally:
-            self.status = "idle"
-            self._idle = True
-        if result:
-            self.maintenance_calls += 1
-        return True
-
-    def followup(self, message):
-        self.followups.append(message)
-
-    def append_change(self, payload):
-        self.session.append("schedule/change", payload)
+        self.agent.followup = recording
+        self.service = install_schedule(self.ctx)
+        self.changed = []
+        self.ctx.on("schedule/changed", lambda *_args: self.changed.append(1))
 
 
-def _format_now_canonical():
-    from miniharness.schedule.domain import _format_epoch_ms
-    return _format_epoch_ms(_now_ms())
+class ServiceTest(ServiceHarness):
+    def test_create_writes_table_not_session_events(self):
+        async def run():
+            record = await self.service.create(
+                "root", {"prompt": "喝水", "title": "喝水", "after_seconds": 60})
+            self.assertEqual(record["kind"], "after")
+            self.assertTrue(record["title"])
+            self.assertIsNotNone(self.service._table.get(record["id"]))
+            self.assertTrue(self.changed)
+            self.assertFalse(any(event["type"] == "schedule/change"
+                                 for event in self.agent.session.snapshot_events()))
+        asyncio.run(run())
+
+    def test_list_catalog_history_delete_update(self):
+        async def run():
+            record = await self.service.create(
+                "root", {"prompt": "喝水", "title": "喝水", "after_seconds": 60})
+            self.assertEqual([r["id"] for r in await self.service.list({"sessionId": "root"})],
+                             [record["id"]])
+            catalog = await self.service.catalog()
+            self.assertEqual(catalog[0]["status"], "active")
+            self.assertEqual(catalog[0]["sessionId"], "root")
+            history = await self.service.history(
+                {"sessionId": "root", "id": record["id"], "limit": 10})
+            self.assertEqual(history["records"], [])
+            self.assertEqual(history["retention"], {"days": 30, "records": 200})
+            updated = await self.service.update(
+                {"sessionId": "root", "id": record["id"], "expected": record,
+                 "prompt": "新"})
+            self.assertTrue(updated["updated"])
+            self.assertEqual(updated["record"]["scheduledAt"], record["scheduledAt"])
+            conflict = await self.service.update(
+                {"sessionId": "root", "id": record["id"], "expected": record,
+                 "prompt": "x"})
+            self.assertEqual(conflict["code"], "schedule_conflict")
+            self.assertEqual(await self.service.delete(
+                {"sessionId": "root", "id": record["id"]}), {"id": record["id"], "deleted": True})
+            self.assertEqual(await self.service.delete(
+                {"sessionId": "root", "id": record["id"]}),
+                {"id": record["id"], "deleted": False, "code": "schedule_not_found"})
+        asyncio.run(run())
+
+    def test_history_lookup_failures_and_limit(self):
+        async def run():
+            record = await self.service.create(
+                "root", {"prompt": "p", "title": "p", "after_seconds": 60})
+            self.assertEqual(await self.service.history(
+                {"sessionId": "wrong", "id": record["id"], "limit": 1}),
+                {"id": record["id"], "code": "schedule_not_found"})
+            self.assertEqual(await self.service.history(
+                {"sessionId": "root", "id": record["id"], "limit": 1, "before": "unknown"}),
+                {"id": record["id"], "code": "delivery_cursor_not_found"})
+            for limit in (0, -1, 101, 1.5, None):
+                with self.assertRaises(ScheduleInputError):
+                    await self.service.history(
+                        {"sessionId": "root", "id": record["id"], "limit": limit})
+        asyncio.run(run())
+
+    def test_update_ended(self):
+        async def run():
+            record = await self.service.create(
+                "root", {"prompt": "p", "title": "p", "after_seconds": 60})
+            await self.service._table.put(record["id"], {
+                **self.service._table.get(record["id"]), "status": "inactive"})
+            result = await self.service.update(
+                {"sessionId": "root", "id": record["id"], "expected": record, "prompt": "x"})
+            self.assertEqual(result, {"id": record["id"], "updated": False, "code": "schedule_ended"})
+        asyncio.run(run())
+
+    def test_config_bounds(self):
+        from miniharness.schedule.service import ScheduleService
+        for bad in ({"deliveryHistoryDays": 0}, {"deliveryHistoryDays": 3651},
+                    {"deliveryHistoryRecords": 0}, {"deliveryHistoryRecords": 10001}):
+            obj = ScheduleService.__new__(ScheduleService)
+            with self.assertRaises(ValueError):
+                ScheduleService.__init__(obj, self.ctx, bad)
 
 
-def _epoch_of(canonical):
-    from miniharness.schedule.domain import _parse_canonical
-    return int(_parse_canonical(canonical).timestamp() * 1000)
+# ===== tools =====
+
+class ToolsTest(ServiceHarness):
+    def _call(self, name, args):
+        return self.agent.tools.resolve(name).execute(args, ToolExec(agent=self.agent))
+
+    def test_create_list_delete(self):
+        async def run():
+            created = await self._call("schedule_create",
+                                       {"prompt": "喝水", "title": "喝水", "after_seconds": 60})
+            self.assertEqual(created["kind"], "after")
+            self.assertEqual(created["deliveryMode"], "host")
+            listed = await self._call("schedule_list", {})
+            self.assertEqual([v["id"] for v in listed], [created["id"]])
+            deleted = await self._call("schedule_delete", {"id": created["id"]})
+            self.assertTrue(deleted["deleted"])
+            missing = await self._call("schedule_delete", {"id": "schedule-none"})
+            self.assertEqual(missing, {"id": "schedule-none", "deleted": False,
+                                       "code": "schedule_not_found"})
+        asyncio.run(run())
+
+    def test_selector_and_title_validation(self):
+        async def run():
+            result = await self._call("schedule_create",
+                                      {"prompt": "x", "title": "x", "after_seconds": 1,
+                                       "every_seconds": 300})
+            self.assertEqual(result["code"], "invalid_selector")
+            result = await self._call("schedule_create", {"prompt": "x", "after_seconds": 1})
+            self.assertEqual(result["code"], "invalid_prompt")
+            result = await self._call("schedule_create",
+                                      {"prompt": "x", "title": "x"})
+            self.assertEqual(result["code"], "invalid_selector")
+            result = await self._call("schedule_create",
+                                      {"prompt": "x", "title": "x", "every_seconds": 1})
+            self.assertEqual(result["code"], "frequency_too_high")
+        asyncio.run(run())
+
+    def test_update_compare_and_update(self):
+        async def run():
+            created = await self._call("schedule_create",
+                                       {"prompt": "p", "title": "t", "every_seconds": 300})
+            updated = await self._call("schedule_update",
+                                       {"id": created["id"], "title": "renamed"})
+            self.assertEqual(updated["title"], "renamed")
+            self.assertEqual(updated["scheduledAt"], created["scheduledAt"])
+            ended = await self._call("schedule_update",
+                                     {"id": "schedule-nope", "title": "x"})
+            self.assertEqual(ended["code"], "schedule_not_found")
+        asyncio.run(run())
+
+    def test_render_is_compact_json(self):
+        async def run():
+            created = await self._call("schedule_create",
+                                       {"prompt": "hello world", "title": "t",
+                                        "after_seconds": 60})
+            tool = self.agent.tools.resolve("schedule_create")
+            rendered = call_render(tool, {"prompt": "x", "title": "t",
+                                          "after_seconds": 60}, created)
+            self.assertIn('"prompt":"hello world"', rendered[0]["text"])
+            self.assertNotIn(", ", rendered[0]["text"])
+        asyncio.run(run())
 
 
-class RuntimeTest(unittest.TestCase):
-    def test_create_then_dispatch_once(self):
-        agent = _RuntimeAgent()
-        harness = _RuntimeHarness(agent)
-        runtime = ScheduleRuntime(harness.ctx, agent)
+# ===== runtime =====
 
-        async def main():
-            runtime.start()
-            await asyncio.sleep(0.03)
-            record = create_after_schedule_record(
-                allocate_schedule_id({"active": (), "seenIds": ()}), "提醒", 1, _now_ms())
-            agent.append_change(
-                {"version": 1, "operation": "create", "schedule": record})
-            runtime.request_drive()
-            await asyncio.sleep(1.25)
-            # 二次驱动无重复派发
-            runtime.request_drive()
+class RuntimeHarness(ServiceHarness):
+    def _past(self, record, seconds_ago=5):
+        now = _ms_local()
+        return {**record, "scheduledAt": _iso(now - seconds_ago * 1000)}
+
+
+def _ms_local():
+    import time
+    return int(time.time() * 1000)
+
+
+class RuntimeTest(RuntimeHarness):
+    def test_one_shot_delivers_and_retires(self):
+        async def run():
+            await self.service._ensure_domain()
+            record = self._past(create_after_schedule_record(
+                "schedule-1", "提醒喝水", 60, _ms_local(), "喝水"))
+            await self.service._table.put("schedule-1", {
+                "sessionId": "root", "record": record, "status": "active",
+                "deliveryHistory": {"records": [], "earlierRecordsUnavailable": False}})
+            self.service._runtime.request_drive()
             await asyncio.sleep(0.1)
-            await runtime.dispose()
+            self.assertEqual(len(self.followups), 1)
+            text = self.followups[0]["content"][0]["text"]
+            self.assertIn(SCHEDULED_MESSAGE_FRAMING, text)
+            self.assertIn("提醒喝水", text)
+            task = self.service._table.get("schedule-1")
+            self.assertEqual(task["status"], "inactive")
+            self.assertEqual(len(task["deliveryHistory"]["records"]), 1)
+            self.assertEqual(task["deliveryHistory"]["records"][0]["messageId"],
+                             self.followups[0]["id"])
+            await asyncio.sleep(0.1)
+            self.assertEqual(len(self.followups), 1)
+        asyncio.run(run())
 
-        asyncio.run(main())
-        self.assertEqual(agent.maintenance_calls, 1)
-        self.assertEqual(len(agent.followups), 1)
-        self.assertIn("提醒", agent.followups[0]["content"][0]["text"])
-        types = [e["type"] for e in agent.session.events]
-        self.assertEqual(types.count("schedule/change"), 2)
+    def test_recurring_tasks_share_one_batch(self):
+        async def run():
+            await self.service._ensure_domain()
+            for id_, prompt in (("schedule-1", "甲"), ("schedule-2", "乙")):
+                record = self._past(create_every_schedule_record(
+                    id_, prompt, 60, _ms_local(), id_))
+                await self.service._table.put(id_, {
+                    "sessionId": "root", "record": record, "status": "active",
+                    "deliveryHistory": {"records": [], "earlierRecordsUnavailable": False}})
+            self.service._runtime.request_drive()
+            await asyncio.sleep(0.1)
+            self.assertEqual(len(self.followups), 1)
+            text = self.followups[0]["content"][0]["text"]
+            self.assertIn("[SCHEDULE REMINDER BATCH]", text)
+            self.assertIn("甲", text)
+            self.assertIn("乙", text)
+            for id_ in ("schedule-1", "schedule-2"):
+                task = self.service._table.get(id_)
+                self.assertEqual(task["status"], "active")
+                self.assertEqual(len(task["deliveryHistory"]["records"]), 1)
+                self.assertEqual(task["deliveryHistory"]["records"][0]["messageId"],
+                                 self.followups[0]["id"])
+        asyncio.run(run())
 
-    def test_no_schedule_no_followup(self):
-        agent = _RuntimeAgent()
-        harness = _RuntimeHarness(agent)
-        runtime = ScheduleRuntime(harness.ctx, agent)
+    def test_flush_failure_leaves_task_uncommitted(self):
+        async def run():
+            await self.service._ensure_domain()
+            record = self._past(create_after_schedule_record(
+                "schedule-1", "p", 60, _ms_local(), "t"))
+            await self.service._table.put("schedule-1", {
+                "sessionId": "root", "record": record, "status": "active",
+                "deliveryHistory": {"records": [], "earlierRecordsUnavailable": False}})
+            # Force the persistence barrier to report failure; nothing may commit.
+            self.service._runtime._flush = _false_flush
+            self.service._runtime.request_drive()
+            await asyncio.sleep(0.1)
+            task = self.service._table.get("schedule-1")
+            self.assertEqual(task["status"], "active")
+            self.assertEqual(len(task["deliveryHistory"]["records"]), 0)
+        asyncio.run(run())
 
-        async def main():
-            runtime.start()
-            await asyncio.sleep(0.05)
-            runtime.request_drive()
-            await asyncio.sleep(0.05)
-            await runtime.dispose()
-
-        asyncio.run(main())
-        self.assertEqual(agent.followups, [])
-
-    def test_corrupt_log_faults_runtime(self):
-        agent = _RuntimeAgent()
-        harness = _RuntimeHarness(agent)
-        agent.session.append("schedule/change",
-                             {"version": 1, "operation": "create",
-                              "schedule": {"id": "bad"}})
-        runtime = ScheduleRuntime(harness.ctx, agent)
-
-        async def main():
-            runtime.start()
-            await asyncio.sleep(0.05)
-            await runtime.dispose()
-
-        asyncio.run(main())
-        self.assertEqual(agent.followups, [])
-        self.assertTrue(runtime._faulted)
-        self.assertTrue(harness.warns)
-
-    def test_loopless_start_defers_then_drives(self):
-        # 同步装配阶段 start()：不崩，等 loop 内 request_drive 兜住
-        agent = _RuntimeAgent()
-        harness = _RuntimeHarness(agent)
-        runtime = ScheduleRuntime(harness.ctx, agent)
-        runtime.start()  # 无 loop，无异常
-        self.assertIsNone(runtime._run)
-        record = create_after_schedule_record(
-            allocate_schedule_id({"active": (), "seenIds": ()}), "x", 1, _now_ms())
-        agent.append_change({"version": 1, "operation": "create", "schedule": record})
-
-        async def main():
-            runtime.request_drive()
-            await asyncio.sleep(1.25)
-            await runtime.dispose()
-
-        asyncio.run(main())
-        self.assertEqual(agent.maintenance_calls, 1)
-
-    def test_dispose_cancels_timer(self):
-        agent = _RuntimeAgent()
-        harness = _RuntimeHarness(agent)
-        runtime = ScheduleRuntime(harness.ctx, agent)
-        record = create_after_schedule_record(
-            allocate_schedule_id({"active": (), "seenIds": ()}), "x", 5, _now_ms())
-        agent.append_change({"version": 1, "operation": "create", "schedule": record})
-
-        async def main():
-            runtime.start()
-            await asyncio.sleep(0.02)
-            runtime.request_drive()
-            await asyncio.sleep(0.02)
-            await runtime.dispose()
-            await asyncio.sleep(0.05)
-
-        asyncio.run(main())
-        self.assertEqual(agent.followups, [])
-
-    def test_transaction_cancellation_does_not_break_serialization(self):
-        """事务外层 await 被取消：操作完成 + 后继事务仍严格串行（上游尾链在
-        Promise 语义下不被 awaiter 取消摧毁，transaction.ts:13-23）。"""
-        agent = _TxnAgent("cancel-a")
-        order = []
-
-        async def main():
-            slow_started = asyncio.Event()
-
-            async def slow():
-                slow_started.set()
-                await asyncio.sleep(0.05)
-                order.append("slow")
-
-            outer = asyncio.ensure_future(run_schedule_transaction(agent, slow))
-            await slow_started.wait()
-            outer.cancel()
-            try:
-                await outer
-            except asyncio.CancelledError:
-                pass
-            await run_schedule_transaction(agent, lambda: order.append("fast"))
-
-        asyncio.run(main())
-        self.assertEqual(order, ["slow", "fast"])
-
-    def test_same_session_id_shares_serialization_key(self):
-        """相同 session_id 的同一 agent 复用一条尾链（上游 exact Agent 键的
-        mini 载体：session_id 唯一标识 owner）。"""
-        agent = _TxnAgent("shared-key")
-        order = []
-
-        async def main():
-            await asyncio.gather(
-                run_schedule_transaction(agent, lambda: order.append(1)),
-                run_schedule_transaction(agent, lambda: order.append(2)),
-            )
-
-        asyncio.run(main())
-        self.assertEqual(order, [1, 2])
-
-
-# ===== Install 装配 =====
-
-class InstallTest(unittest.TestCase):
-    def setUp(self):
-        self.root, self.ctx, self.reg = _parent_loop()
-
-    def _publish(self, session_id):
-        """在同一 ctx 发布一个未来 root（触发 agent/created）。"""
-        loop = AgentLoop(Session(session_id), FakeLlmAdapter(final_text="x"),
-                         self.reg, self.ctx, system_prompt="x")
-        loop.publish()
-        return loop
-
-    def test_requires_agents_and_sessions(self):
-        bare = Context()
-        with self.assertRaises(RuntimeError):
-            install_schedule(bare)
-
-    def test_install_idempotent_and_adopts_future_root(self):
-        d1 = install_schedule(self.ctx)
-        d2 = install_schedule(self.ctx)
-        self.assertIs(d1, d2)
-        # 既有 root 不被收养（上游仅未来 root）
-        self.assertNotIn("schedule_create", self.root.tools.names())
-        fresh = self._publish("fresh")
-        try:
-            self.assertIn("schedule_create", fresh.tools.names())
-            self.assertIn("schedule_list", fresh.tools.names())
-            self.assertIn("schedule_delete", fresh.tools.names())
-        finally:
-            fresh.dispose()
-
-    def test_existing_root_not_adopted(self):
-        install_schedule(self.ctx)
-        self.assertNotIn("schedule_list", self.reg.names())
-
-    def test_teardown_stops_future_adoption(self):
-        d = install_schedule(self.ctx)
-        d()
-        late = self._publish("late")
-        try:
-            self.assertNotIn("schedule_create", late.tools.names())
-        finally:
-            late.dispose()
-
-    def test_teardown_disposes_adopted_owner(self):
-        install_schedule(self.ctx)
-        adopted = self._publish("adopted")
-        self.assertIn("schedule_create", adopted.tools.names())
-        adopted.dispose()
-        self.assertNotIn("schedule_create", self.reg.names())
-
-    def test_status_idle_event_drives_runtime(self):
-        """agent/status idle + 会话含 schedule/change → requestDrive（上游
-        index.ts:57-62 的 status 监听契约）。"""
-        self.ctx.on("session/flush", lambda payload: None)
-        install_schedule(self.ctx)
-        adopted = self._publish("adopted-status")
-        try:
+    def test_dispose_stops_timer(self):
+        async def run():
+            await self.service._ensure_domain()
             record = create_after_schedule_record(
-                allocate_schedule_id({"active": (), "seenIds": ()}),
-                "idle 唤醒", 1, _now_ms())
-            adopted.session.append("schedule/change",
-                                   {"version": 1, "operation": "create",
-                                    "schedule": record})
+                "schedule-1", "p", 60, _ms_local(), "t")
+            record = {**record, "scheduledAt": _iso(_ms_local() + 60_000)}
+            await self.service._table.put("schedule-1", {
+                "sessionId": "root", "record": record, "status": "active"})
+            self.service._runtime.request_drive()
+            await asyncio.sleep(0.02)
+            await self.service._runtime.dispose()
+            await asyncio.sleep(0.05)
+            self.assertEqual(self.followups, [])
+        asyncio.run(run())
 
-            async def main():
-                adopted.ctx.emit("agent/status",
-                                 {"agent": adopted, "status": "idle"})
-                await asyncio.sleep(1.25)
 
-            asyncio.run(main())
-            changes = [e for e in adopted.session.events
-                       if e["type"] == "schedule/change"
-                       and e["data"]["operation"] == "dispatch"]
-            self.assertEqual(len(changes), 1)
-        finally:
-            adopted.dispose()
+async def _false_flush(agent):
+    return False
 
 
 if __name__ == "__main__":

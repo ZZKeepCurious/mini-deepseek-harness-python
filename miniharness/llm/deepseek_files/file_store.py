@@ -1,6 +1,7 @@
 """DeepSeek Files API 上传复用、失效与配额恢复。
 
-对应 dsh 真实源码：packages/llm/llm-deepseek/src/common/file-store.ts。
+对应 dsh 真实源码：packages/llm/llm-deepseek/src/file-store.ts（dsh-v0.2.0-rc.2
+起自 common/ 上移顶层）。
 
 载体差异：上游用 AbortController/共享 Promise；mini 用 asyncio 共享 task +
 等待者计数（全等待者取消即取消共享上传），对齐「并发调用共享一次上传、各自
@@ -55,9 +56,8 @@ class DeepSeekFileConnection:
     """文件操作所需的连接事实（上游 DeepSeekFileConnection）。"""
 
     baseURL: str
-    apiKey: str
-    #: 使用 DSH 账户头（x-dsh-auth-token）；普通 API key 为 False。
-    accountCredential: bool = False
+    #: provider 为该端点解析出的认证头，逐字发送。
+    headers: dict
 
 
 @dataclass(frozen=True)
@@ -70,7 +70,7 @@ class DeepSeekFileReference:
 
 def _file_scope(connection: DeepSeekFileConnection):
     # Files 资源的父 URL 标识上传命名空间（上游 fileScope → messagesApiRoot）。
-    return deep_seek_file_scope(messages_api_root(connection.baseURL), connection.apiKey)
+    return deep_seek_file_scope(messages_api_root(connection.baseURL), connection.headers)
 
 
 def _extension(media_type: str) -> str:
@@ -108,8 +108,8 @@ class DeepSeekFileStore:
 
     def _client(self, connection: DeepSeekFileConnection) -> DeepSeekFilesClient:
         return DeepSeekFilesClient(
-            baseURL=connection.baseURL, apiKey=connection.apiKey,
-            accountCredential=connection.accountCredential, transport=self._transport)
+            baseURL=connection.baseURL, headers=connection.headers,
+            transport=self._transport)
 
     async def ensure_uploaded(self, version, connection: DeepSeekFileConnection,
                               policy: DeepSeekFilePolicy, signal=None) -> DeepSeekFileReference:
@@ -208,10 +208,12 @@ class DeepSeekFileStore:
                 pass
         return DeepSeekFileReference(committed.record, committed.accepted)
 
-    async def invalidate(self, version, file_id: DeepSeekFileId,
-                         connection: DeepSeekFileConnection) -> None:
-        """一条模型请求拒绝其远程 id 后使该精确本地映射失效（上游 invalidate）。"""
-        self._index.remove(_file_scope(connection), str(version.variantId), file_id)
+    async def invalidate(self, generations, connection: DeepSeekFileConnection) -> None:
+        """一次索引更新中使多条精确本地映射失效（上游 invalidate）。
+
+        ``generations`` 为 ``{"variantId": str, "fileId": DeepSeekFileId}`` 序列。
+        """
+        self._index.remove(_file_scope(connection), generations)
 
     async def release(self, version, connection: DeepSeekFileConnection,
                       policy: DeepSeekFilePolicy, signal=None) -> bool:
@@ -222,7 +224,8 @@ class DeepSeekFileStore:
         if record is None:
             return False
         await self._client(connection).delete(record.fileId, signal)
-        self._index.remove(scope, str(version.variantId), record.fileId)
+        self._index.remove(scope, [{"variantId": str(version.variantId),
+                                    "fileId": record.fileId}])
         return True
 
     async def reclaim_oldest_owned(self, connection: DeepSeekFileConnection,

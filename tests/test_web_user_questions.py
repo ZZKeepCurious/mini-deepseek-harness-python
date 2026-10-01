@@ -9,6 +9,7 @@ cancelled/dispose 归一为 ASK_ABORTED。
 """
 
 import asyncio
+import json
 import os
 import unittest
 
@@ -173,6 +174,78 @@ class QuestionBridgeTest(unittest.TestCase):
                              {"name": "UserQuestionError", "code": "ASK_ABORTED"})
 
         _run(go())
+
+
+class UserQuestionsWireTest(unittest.TestCase):
+    """dsh-v0.2.0-rc.2：userQuestions/answer unary + attachWait 流。"""
+
+    def setUp(self):
+        self.ctx = Context(name="uq-wire")
+        install_user_questions(self.ctx)
+        self.api = WebApi(self.ctx, FakeLlmAdapter())
+
+    def tearDown(self):
+        self.api.gateway.dispose()
+        self.ctx.dispose()
+
+    def _create(self):
+        response = self.api.dispatch("session.create", "r1",
+                                     {"cwd": os.getcwd(), "sessionId": "uq-s"})
+        self.assertTrue(response["result"]["ok"])
+        return "uq-s"
+
+    def _seed_timed(self, sid):
+        session = self.api.store.get(sid)
+        session.append("request/header", {
+            "header": {"tools": [{"name": "ask_user_question", "parameters": {
+                "properties": {"timeout": {"type": "integer"}}}}]},
+            "reason": "initial"})
+        session.append("tool/call", {
+            "callId": "c1", "name": "ask_user_question",
+            "arguments": json.dumps({"questions": [{"id": "q1", "question": "?"}]})})
+        session.append("tool/result", {"message": {
+            "role": "tool", "toolCallId": "c1",
+            "source": {"kind": "tool", "callId": "c1"},
+            "content": [{"type": "text", "text": json.dumps(
+                {"pending": True, "callId": "c1", "message": "pending"})}],
+            "isError": False}}, surfaceOp="append")
+
+    def test_answer_route_closes_question(self):
+        sid = self._create()
+        self._seed_timed(sid)
+        response = self.api.dispatch("userQuestions/answer", "a1", {
+            "agentId": sid, "callId": "c1",
+            "answer": {"answers": [{"id": "q1", "selected": ["ok"]}]}})
+        self.assertTrue(response["result"]["ok"], response["result"].get("error"))
+        self.assertTrue(response["result"]["value"])
+
+    def test_answer_unknown_call_returns_false(self):
+        sid = self._create()
+        response = self.api.dispatch("userQuestions/answer", "a2", {
+            "agentId": sid, "callId": "ghost", "answer": {"answers": []}})
+        self.assertTrue(response["result"]["ok"])
+        self.assertFalse(response["result"]["value"])
+
+    def test_answer_not_mounted(self):
+        ctx2 = Context(name="bare-uq")
+        try:
+            api = WebApi(ctx2, FakeLlmAdapter())
+            response = api.dispatch("userQuestions/answer", "a3", {
+                "agentId": "s", "callId": "c", "answer": {"answers": []}})
+            self.assertFalse(response["result"]["ok"])
+            self.assertEqual(response["result"]["error"]["code"],
+                             "gateway/invocation-unavailable")
+        finally:
+            ctx2.dispose()
+
+    def test_attach_wait_unknown_call_ends_immediately(self):
+        async def go():
+            sid = self._create()
+            gen = self.api.gateway.open_stream(
+                "userQuestions/attachWait", {"args": {"agentId": sid, "callId": "ghost"}})
+            with self.assertRaises(StopAsyncIteration):
+                await gen.__anext__()
+        asyncio.run(go())
 
 
 if __name__ == "__main__":

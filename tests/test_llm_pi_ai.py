@@ -192,6 +192,14 @@ class PiAiAdapterTest(unittest.TestCase):
             {"type": "message_delta", "delta": {"stop_reason": "tool_use"}}, "m1")
         self.assertEqual(tool_stop[0]["reason"]["kind"], "tool-calls")
 
+    def test_request_headers_carry_attribution(self):
+        # 上游 requestHeaders：每个 provider 请求带 user-agent（Harness 归因胜）。
+        from miniharness.llm import user_agent
+        from miniharness.llm.pi_ai import _anthropic_headers, _openai_headers
+        self.assertEqual(_openai_headers("k")["user-agent"], user_agent())
+        self.assertEqual(_anthropic_headers("k")["user-agent"], user_agent())
+        self.assertEqual(_anthropic_headers(None)["user-agent"], user_agent())
+
 
 if __name__ == "__main__":
     unittest.main()

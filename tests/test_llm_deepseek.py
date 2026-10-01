@@ -12,7 +12,8 @@ import unittest
 
 import httpx
 
-from miniharness.llm import DeepSeekAdapter, LlmFailure
+from miniharness.identity import get_or_create_anonymous_user_id
+from miniharness.llm import DeepSeekAdapter, LlmFailure, user_agent
 from miniharness.llm.deepseek_files import DEFAULT_MODELS
 from miniharness.llm.deepseek_messages import messages_api_root
 from miniharness.llm.protocol import StreamAborted
@@ -366,6 +367,10 @@ class TransportTest(unittest.TestCase):
         def handler(request):
             self.assertEqual(request.headers['x-api-key'], 'sk-test')
             self.assertEqual(request.headers['anthropic-version'], '2023-06-01')
+            # 上游 runtime.spec.ts:376-378：归因与请求身份是独立 wire 事实。
+            self.assertEqual(request.headers['user-agent'], user_agent())
+            self.assertEqual(request.headers['x-deepseek-harness-user-id'],
+                             get_or_create_anonymous_user_id())
             self.assertEqual(request.url.path, '/anthropic/v1/messages')
             return _sse_response()
 
@@ -406,12 +411,30 @@ class TransportTest(unittest.TestCase):
         self.assertEqual(cm.exception.provider_retry_after_ms, 5000)
 
     def test_quota_wording_wins_over_status(self):
-        def handler(request):
-            return httpx.Response(429, text='insufficient_quota')
+        # 上游 error.ts:97-103 isQuotaExceededError 的五条文案逐条覆盖
+        # （修复前 mini 只认前两条，后三条会被误判为可重试限流）。
+        wordings = [
+            'insufficient_quota',
+            'usage limit exceeded',
+            'You exceeded your current quota',
+            'balance exhausted',
+            'out of credits',
+        ]
+        for wording in wordings:
+            with self.subTest(wording=wording):
+                def handler(request, text=wording):
+                    return httpx.Response(429, text=text)
+
+                with self.assertRaises(LlmFailure) as cm:
+                    _collect(_stream(handler))
+                self.assertEqual(cm.exception.code, 'QUOTA')
+
+        def limited(request):
+            return httpx.Response(429, text='rate limited, retry after 5s')
 
         with self.assertRaises(LlmFailure) as cm:
-            _collect(_stream(handler))
-        self.assertEqual(cm.exception.code, 'QUOTA')
+            _collect(_stream(limited))
+        self.assertEqual(cm.exception.code, 'RATE_LIMIT')
 
     def test_400_context_window_exceeded(self):
         def handler(request):
@@ -492,6 +515,142 @@ class ReasoningEffortTest(unittest.TestCase):
     def test_property_exposes_tier(self):
         adapter = DeepSeekAdapter(api_key='sk-test', reasoning_effort='high')
         self.assertEqual(adapter.reasoning_effort, 'high')
+
+
+class AuthSeamTest(unittest.TestCase):
+    """resolveAuth 双 provider 拆分：official(x-api-key) / account(x-dsh-auth-token)。"""
+
+    def test_default_infers_provider_from_account_token(self):
+        self.assertEqual(DeepSeekAdapter(api_key='sk-test').provider,
+                         'deepseek-official')
+        self.assertEqual(DeepSeekAdapter(api_key='sk-test',
+                                         account_token='acct-1').provider,
+                         'deepseek-account')
+        self.assertEqual(DeepSeekAdapter(api_key='sk-test', auth='account',
+                                         account_token='acct-1').provider,
+                         'deepseek-account')
+        with self.assertRaises(ValueError):
+            DeepSeekAdapter(api_key='sk-test', auth='nope')
+
+    def test_official_missing_key_fails_before_fetch(self):
+        calls = []
+
+        def handler(request):
+            calls.append(request)
+            return _sse_response()
+
+        adapter = DeepSeekAdapter(api_key='', transport=httpx.MockTransport(handler))
+        with self.assertRaises(LlmFailure) as cm:
+            _collect(adapter)
+        self.assertEqual(cm.exception.code, 'MISSING_CREDENTIAL')
+        self.assertEqual(calls, [])
+
+    def test_official_malformed_key_fails_before_fetch(self):
+        calls = []
+
+        def handler(request):
+            calls.append(request)
+            return _sse_response()
+
+        adapter = DeepSeekAdapter(api_key='bad\nkey',
+                                  transport=httpx.MockTransport(handler))
+        with self.assertRaises(LlmFailure) as cm:
+            _collect(adapter)
+        self.assertEqual(cm.exception.code, 'INVALID_CREDENTIAL')
+        self.assertEqual(calls, [])
+
+    def test_account_signed_out_fails_before_fetch(self):
+        calls = []
+
+        def handler(request):
+            calls.append(request)
+            return _sse_response()
+
+        adapter = DeepSeekAdapter(auth='account',
+                                  transport=httpx.MockTransport(handler))
+        with self.assertRaises(LlmFailure) as cm:
+            _collect(adapter)
+        self.assertEqual(cm.exception.code, 'ACCOUNT_SIGN_IN_REQUIRED')
+        self.assertEqual(calls, [])
+
+    def test_account_402_maps_to_account_quota_without_rejection(self):
+        rejected = []
+
+        def handler(request):
+            return httpx.Response(402, json={'error': {
+                'code': 'insufficient_balance', 'message': 'Insufficient balance'}})
+
+        adapter = DeepSeekAdapter(account_token='acct-1',
+                                  reject_token=rejected.append,
+                                  transport=httpx.MockTransport(handler))
+        with self.assertRaises(LlmFailure) as cm:
+            _collect(adapter)
+        self.assertEqual(cm.exception.code, 'ACCOUNT_QUOTA')
+        self.assertEqual(rejected, [])
+
+    def test_official_402_stays_provider_neutral_quota(self):
+        def handler(request):
+            return httpx.Response(402, json={'error': {
+                'code': 'insufficient_balance', 'message': 'Insufficient balance'}})
+
+        adapter = _stream(handler)
+        with self.assertRaises(LlmFailure) as cm:
+            _collect(adapter)
+        self.assertEqual(cm.exception.code, 'QUOTA')
+
+    def test_account_in_band_quota_maps_to_account_quota(self):
+        def handler(request):
+            body = ('event: error\ndata: ' + json.dumps({'type': 'error', 'error': {
+                'type': 'invalid_request_error', 'code': 'insufficient_balance',
+                'message': 'Insufficient balance'}}) + '\n\n')
+            return httpx.Response(200, content=body.encode(),
+                                  headers={'content-type': 'text/event-stream'})
+
+        adapter = DeepSeekAdapter(account_token='acct-1', reject_token=lambda _t: None,
+                                  transport=httpx.MockTransport(handler))
+        with self.assertRaises(LlmFailure) as cm:
+            _collect(adapter)
+        self.assertEqual(cm.exception.code, 'ACCOUNT_QUOTA')
+
+    def test_account_401_rejects_token(self):
+        rejected = []
+
+        def handler(request):
+            return httpx.Response(401, text='Unauthorized')
+
+        adapter = DeepSeekAdapter(account_token='acct-1',
+                                  reject_token=rejected.append,
+                                  transport=httpx.MockTransport(handler))
+        with self.assertRaises(LlmFailure) as cm:
+            _collect(adapter)
+        self.assertEqual(cm.exception.code, 'ACCOUNT_TOKEN_INVALID')
+        self.assertEqual(rejected, ['acct-1'])
+
+    def test_account_403_passes_through_without_rejection(self):
+        rejected = []
+
+        def handler(request):
+            return httpx.Response(403, text='Forbidden')
+
+        adapter = DeepSeekAdapter(account_token='acct-1',
+                                  reject_token=rejected.append,
+                                  transport=httpx.MockTransport(handler))
+        with self.assertRaises(LlmFailure) as cm:
+            _collect(adapter)
+        self.assertEqual(cm.exception.code, 'AUTH')
+        self.assertEqual(rejected, [])
+
+    def test_account_token_uses_auth_token_header_and_provider(self):
+        def handler(request):
+            self.assertNotIn('x-api-key', request.headers)
+            self.assertEqual(request.headers['x-dsh-auth-token'], 'acct-1')
+            return _sse_response()
+
+        adapter = DeepSeekAdapter(api_key='sk-test', account_token='acct-1',
+                                  transport=httpx.MockTransport(handler))
+        out = _collect(adapter)
+        self.assertEqual(out[-1]['type'], 'finish')
+        self.assertEqual(adapter.provider, 'deepseek-account')
 
 
 if __name__ == '__main__':

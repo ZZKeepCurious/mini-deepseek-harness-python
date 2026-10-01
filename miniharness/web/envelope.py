@@ -72,6 +72,8 @@ RPC_ERROR_CODES = frozenset({
     "session/invalid-time-zone",
     "session/model-unavailable",
     "session/not-found",
+    "session/provider-credentials-unavailable",
+    "session/provider-models-unavailable",
     "session/projections-unavailable",
     "session/queue-item-not-found",
     "session/steer-unavailable",

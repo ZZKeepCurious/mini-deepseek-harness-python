@@ -12,6 +12,9 @@ definition.ts / composition-inventory.ts / mount.ts）。
   `disabled`、`!!js` 求值被拒标 `'conditional'`）。
 - **composition_inventory()**：每声明 preset 的 `AgentPresetComposition`（id/
   name?/isDefault/broken?/rows），与目录发现侧共用投影面。
+- **roster()**：`AgentPresetRoster` 形态——**只含 `presets`**（上游 0.2.0-rc.2
+  删除 `modeSelectionEnabled` 后 roster 恒 `{presets}`）。缺省 id 语义对齐上游
+  `defaultId = selectedDefault ?? default`（见 `default_id`）。
 - **mounted_composition_rows**：上游激活态读 EntryTree 真实 fiber 状态——mini
   无 live fiber 常驻挂载（preset 是工具清单模型 + 每 agent 工具视图安装，既有
   载体差异登记），只提供声明态行；挂载树载体差异随 verified-diffs §2.77 延续。
@@ -152,10 +155,23 @@ class AgentPresetRegistry:
     载体差异延续（§2.77）。
     """
 
-    def __init__(self, ctx: Context | None = None):
+    def __init__(self, ctx: Context | None = None, *,
+                 default: str | None = None,
+                 selected_default: str | None = None):
         self.ctx = ctx
         self._definitions: dict[str, PresetDefinition] = {}
         self._default_id: str | None = None
+        self._configured_default = default
+        self._selected_default = selected_default
+
+    @property
+    def default_id(self) -> str | None:
+        """随后创建会话的缺省 preset（上游 `defaultId = selectedDefault ?? default`）。
+
+        用户选择（`selected_default`，经 Settings 写入）优先于部署缺省
+        （`default`）；两者皆无时回落到首个注册的声明（mini 声明式载体补充）。
+        """
+        return self._selected_default or self._configured_default or self._default_id
 
     def register(self, definition: PresetDefinition) -> Callable[[], None]:
         """注册一个声明式 preset；重复 id → ValueError。
@@ -199,7 +215,7 @@ class AgentPresetRegistry:
         for definition in self.definitions():
             group: dict = {
                 "id": definition.id,
-                "isDefault": definition.id == self._default_id,
+                "isDefault": definition.id == self.default_id,
             }
             if definition.name:
                 group["name"] = definition.name
@@ -212,16 +228,51 @@ class AgentPresetRegistry:
             groups.append(group)
         return groups
 
+    def list_presets(self) -> list[dict]:
+        """每声明 preset 的显示元数据（对齐上游 `list()` 的 `AgentPreset` 行）。"""
+        rows: list[dict] = []
+        for definition in self.definitions():
+            row: dict = {"id": definition.id}
+            if definition.name is not None:
+                row["name"] = definition.name
+            if definition.description is not None:
+                row["description"] = definition.description
+            result = definition_composition(definition.plugins)
+            if "broken" in result:
+                row["broken"] = result["broken"]
+            rows.append(row)
+        return rows
 
-def install_agent_preset_registry(ctx: Context) -> AgentPresetRegistry:
+    def roster(self) -> dict:
+        """选择名单 `AgentPresetRoster`（对齐上游 remoteExportList）。
+
+        上游 0.2.0-rc.2 起 roster **只有 `presets`**——`modeSelectionEnabled`
+        字段删除。每条行按当前 `default_id` 标 `isDefault`。
+        """
+        default_id = self.default_id
+        return {"presets": [
+            {**row, "isDefault": row["id"] == default_id}
+            for row in self.list_presets()
+        ]}
+
+
+def install_agent_preset_registry(
+    ctx: Context,
+    *,
+    default: str | None = None,
+    selected_default: str | None = None,
+) -> AgentPresetRegistry:
     """幂等装配 `ctx.agentPresets` 声明式注册表。
 
     mini 既有 `ctx.agentPresets` 服务由 web 组合装配（`install_settings_controller`
     的 roster 是目录发现）；本注册表是声明式补充。已装返回既有实例。
+    `default` / `selected_default` 配置缺省 id（对齐上游 Config 的
+    `default` / `selectedDefault`；后者为 Settings 写入的用户选择）。
     """
     existing = ctx.get("agentPresets")
     if isinstance(existing, AgentPresetRegistry):
         return existing
-    registry = AgentPresetRegistry(ctx)
+    registry = AgentPresetRegistry(
+        ctx, default=default, selected_default=selected_default)
     ctx.provide("agentPresets", registry)
     return registry

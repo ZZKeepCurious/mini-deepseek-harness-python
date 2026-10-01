@@ -52,6 +52,10 @@ AUTO_PRESET = "auto"
 #: SANDBOX_MODES（上游 dsh-sandbox-policy/session-mode.ts:42）。
 SANDBOX_MODES = ("read-only", "workspace-write", "danger-full-access")
 
+#: Auto 集成的固定执行 bundle（index.ts:89-92）：`ask` 把审查拒绝路由给用户；
+#: 已存的 Auto 身份也匹配 `never`——委派子会话钉 `never` 使审查拒绝成为终态。
+AUTO_PRESET_SPEC = {"sandbox": "danger-full-access", "approval": "ask"}
+
 _DEFAULT_PRESETS = {
     "workspace-write": {
         "sandbox": "workspace-write", "approval": "ask",
@@ -181,7 +185,7 @@ class PermissionPresetService(Service):
     def resolve(self, name: str) -> dict:
         """按名解析预设 bundle；未知（且非 live Auto）抛错。"""
         if name == AUTO_PRESET and self._auto_admit is not None:
-            return {"sandbox": "danger-full-access", "approval": "never"}
+            return dict(AUTO_PRESET_SPEC)
         spec = self.presets.get(name)
         if spec is None:
             raise PermissionPresetError(
@@ -238,15 +242,26 @@ class PermissionPresetService(Service):
         return CUSTOM_PRESET
 
     def derive(self, state: dict) -> str:
-        """按投影状态派生当前预设（含 durable preset 优先）。"""
+        """按投影状态派生当前预设（含 durable preset 优先）。
+
+        仍被选中且 bundle 匹配的 durable preset 胜出（shared-bundle 平手）；
+        仍被选中的 Auto 也匹配 `never` 审批策略（委派子会话钉 never
+        解析回 Auto）——对 index.ts:348-361 逐条同构。
+        """
         sandbox = state.get("sandbox") or self._composition_sandbox
         approval = state.get("approval") or self._composition_approval
         preset = state.get("preset")
-        if preset is not None and preset != CUSTOM_PRESET and preset != AUTO_PRESET:
-            spec = self.presets.get(preset)
+        if preset is not None and preset != CUSTOM_PRESET:
+            if preset == AUTO_PRESET:
+                spec = AUTO_PRESET_SPEC if self._auto_admit is not None else None
+            else:
+                spec = self.presets.get(preset)
             if spec is not None and spec["sandbox"] == sandbox \
                     and spec["approval"] == approval:
                 return preset
+            if (preset == AUTO_PRESET and spec is not None
+                    and spec["sandbox"] == sandbox and approval == "never"):
+                return AUTO_PRESET
         for name, spec in self.presets.items():
             if spec["sandbox"] == sandbox and spec["approval"] == approval:
                 return name

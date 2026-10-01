@@ -73,7 +73,8 @@ class RemoteQuestionBridge:
                 wire["agent"] = agent.id
             try:
                 kind, value = await self.streams.events.invoke(
-                    "user-questions/request", session_id, wire)
+                    "user-questions/request", session_id, wire,
+                    signal=request.get("signal"))
             except asyncio.CancelledError:
                 raise aborted_question() from None
             if kind == "result":

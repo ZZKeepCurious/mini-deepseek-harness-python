@@ -138,6 +138,28 @@ class FsToolsTestCase(unittest.IsolatedAsyncioTestCase):
             self.ctx, tool, {"file_path": "q.txt", "content": "x"}, nested_exec)
         self.assertEqual(nested.meta, {})
 
+    async def test_read_presentation_meta_carries_lang(self):
+        (self.dir / "main.py").write_text("print(1)\n", encoding="utf-8")
+        tool = self.registry.resolve("read")
+        value = await tool.execute({"file_path": "main.py"}, self._exec())
+        meta = tool.presentation_meta({"file_path": "main.py"}, value)
+        self.assertEqual(meta["lang"], "py")
+        self.assertEqual(meta["path"], value["path"])
+        self.assertEqual(meta["totalLines"], 1)
+
+    def test_read_presentation_meta_omits_unknown_lang(self):
+        from miniharness.fs.tools import read_presentation_meta
+        meta = read_presentation_meta({}, {"path": "notes.txt", "offset": 1,
+                                           "lines": [], "totalLines": 0})
+        self.assertNotIn("lang", meta)
+
+    def test_sandbox_permissions_description_verbatim(self):
+        from miniharness.fs.tools import sandbox_permissions_description
+        self.assertEqual(
+            sandbox_permissions_description("operation"),
+            "The narrowest wider sandbox mode for a one-shot retry of the exact "
+            "operation the sandbox just denied; the retry asks the user for approval.")
+
     async def test_tool_result_event_carries_presentation_meta(self):
         session = Session("s-meta")
         call_seq = append_tool_call(session, 1, 1, "c1", "write", "{}")

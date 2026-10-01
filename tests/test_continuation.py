@@ -75,7 +75,7 @@ class _ScriptedParent(FakeLlmAdapter):
         if self.calls == 1:
             text = self._last_user_text(messages)
             arguments = json.dumps(
-                {"subagentId": self.cid, "message": text, **self.tool_args},
+                {"agent_id": self.cid, "message": text, **self.tool_args},
                 ensure_ascii=False)
             yield StreamChunk("block-start", index=0, blockType="tool-call")
             yield StreamChunk("tool-call-delta", index=0, id="call_0",
@@ -698,6 +698,59 @@ class TestControlTools(unittest.TestCase):
         message = results[0]["data"]["message"]
         self.assertIn("Interrupted subagent", message["content"][0]["text"])
         self.assertFalse(message.get("isError"))
+
+
+class TestListAgentsDescendants(unittest.TestCase):
+    """list_agents 模型面投影（上游 tool-subagent-control/list-agents.ts project）：
+    descendants 行带 parent/depth、diagnostic 行带 reason；服务面的
+    hasChildren/activity/mode 不进模型输出。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.persistence = JsonlPersistence(self.tmp.name)
+        self.parent, self.ctx, self.reg = _parent_loop()
+        self.mgr = SubagentContinuationManager(self.parent, self.persistence, max_depth=2)
+        install_subagent_control_tools(self.ctx, self.reg, self.mgr)
+
+    def test_descendants_projection_and_diagnostics(self):
+        cid = self.mgr.start_continuable(label="子")
+        child_act = self.mgr._get_or_resume(cid)
+        gid = self.mgr.start_continuable(label="孙", parent=child_act["loop"])
+        grand_act = self.mgr._get_or_resume(gid, parent=child_act["loop"])
+        self.mgr._settle(gid, grand_act, force=True)
+        self.mgr._settle(cid, child_act, force=True)
+        self.persistence.declare("mystery", {
+            "parentSession": self.parent.id, "origin": "subagent", "delegationDepth": 1,
+        })
+        tool = self.reg.resolve("list_agents")
+        out = json.loads(asyncio.run(
+            tool.execute({"scope": "descendants"}, ToolExec(agent=self.parent))))
+        by_id = {row["id"]: row for row in out}
+        self.assertEqual(by_id[cid], {
+            "kind": "child", "id": cid, "label": "子", "status": "inactive",
+            "parent": self.parent.id, "depth": 1,
+        })
+        self.assertEqual(by_id[gid], {
+            "kind": "child", "id": gid, "label": "孙", "status": "inactive",
+            "parent": cid, "depth": 2,
+        })
+        self.assertEqual(by_id["mystery"], {
+            "kind": "diagnostic", "id": "mystery", "reason": "unsupported",
+            "parent": self.parent.id, "depth": 1,
+        })
+        self.assertNotIn("hasChildren", by_id[cid])
+        self.assertNotIn("activity", by_id[cid])
+
+    def test_children_scope_omits_unknown(self):
+        cid = self.mgr.start_continuable(label="子")
+        self.persistence.declare("mystery", {
+            "parentSession": self.parent.id, "origin": "subagent", "delegationDepth": 1,
+        })
+        tool = self.reg.resolve("list_agents")
+        out = json.loads(asyncio.run(
+            tool.execute({}, ToolExec(agent=self.parent))))
+        self.assertEqual([row["id"] for row in out], [cid])
 
 
 class TestAsyncContinuation(unittest.TestCase):

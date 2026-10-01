@@ -96,6 +96,21 @@ class TestApprovalService(unittest.TestCase):
         asked = [e for e in self.session.events if e["type"] == "approval/asked"]
         self.assertEqual(len(asked), 2)
 
+    def test_display_reason_is_presentation_only(self):
+        open_turn(self.session)
+        seen = []
+        self.ctx.on("approval/request",
+                    lambda req, next: seen.append(req) or "allowed-once")
+        outcome = self.service.request(
+            self.session, "write", reason="escalate sandbox to workspace-write",
+            display_reason={"en": "Allow this operation", "zh": "允许本次操作"})
+        self.assertEqual(outcome, "allowed-once")
+        self.assertEqual(seen[0]["displayReason"],
+                         {"en": "Allow this operation", "zh": "允许本次操作"})
+        asked = [e for e in self.session.events if e["type"] == "approval/asked"][0]
+        self.assertNotIn("displayReason", asked["data"])
+        self.assertEqual(asked["data"]["reason"], "escalate sandbox to workspace-write")
+
     def test_waterfall_answerer_can_shortcircuit(self):
         open_turn(self.session)
         seen = []

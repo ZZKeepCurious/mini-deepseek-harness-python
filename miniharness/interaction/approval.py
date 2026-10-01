@@ -150,12 +150,16 @@ class ApprovalService:
 
     def request(self, session: Session, tool_name: str,
                 call_id: str | None = None, reason: str | None = None,
-                signal: object | None = None) -> str:
+                signal: object | None = None,
+                display_reason: dict | None = None) -> str:
         """问一次决策，返回 closed outcome；'allowed-once' 是唯一授权。
 
         前置条件：open turn（审计对必须 turn-enclosed）。每个 ask 都追加
         approval/asked + approval/decided 一对（id 配对），审计追加前失败
         直接抛错——绝不返回一项未记录的决定。
+
+        `display_reason`（`{en, <locale>}`）**仅供呈现**：随 `approval/request`
+        瀑布投给 answerer，绝不入 `approval/asked` 审计（types.ts:72-73）。
         """
         if not has_open_turn(session.events):
             raise RuntimeError(
@@ -170,14 +174,16 @@ class ApprovalService:
         if reason is not None:
             asked["reason"] = reason
         session.append("approval/asked", asked)
-        outcome = self._decide(session, tool_name, call_id, reason, signal)
+        outcome = self._decide(session, tool_name, call_id, reason, signal,
+                               display_reason)
         session.append("approval/decided", {"id": req_id, "outcome": outcome})
         return outcome
 
     # ---------- 内部 ----------
 
     def _decide(self, session: Session, tool_name: str,
-                call_id: str | None, reason: str | None, signal: object | None) -> str:
+                call_id: str | None, reason: str | None, signal: object | None,
+                display_reason: dict | None = None) -> str:
         if signal is not None and getattr(signal, "aborted", False):
             return "cancelled"
         # 'never' 在这里、在任何派发之前决定：监听器形状的拦截器无法保证
@@ -189,6 +195,9 @@ class ApprovalService:
             req["callId"] = call_id
         if reason is not None:
             req["reason"] = reason
+        # 展示用本地化文案（仅呈现，不入审计）。
+        if display_reason is not None:
+            req["displayReason"] = display_reason
         try:
             answer = self.ctx.waterfall("approval/request", req)
         except Exception:

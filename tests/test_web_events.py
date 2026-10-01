@@ -193,6 +193,33 @@ class RemoteEventRegistryTest(unittest.TestCase):
         self.assertEqual(cancel["type"], "cancel")
         self.assertEqual(cancel["eventId"], frame["eventId"])
 
+    def test_request_signal_abort_settles_cancelled_and_emits_cancel(self):
+        """request.signal 中止结算挂起（上游 request.signal 中止客户端 pending）。"""
+        async def go():
+            import time
+            from miniharness.interaction.user_questions import (
+                ASK_TIMED_OUT, TimedQuestionWait, UserQuestionError)
+            client = self.reg.open({"args": {}}).__aiter__()
+            await client.__anext__()  # ready
+            timeout = UserQuestionError(
+                "ask_user_question timed out before the user answered",
+                ASK_TIMED_OUT)
+            wait = TimedQuestionWait(time.time() * 1000 + 5_000, None, timeout)
+            task = asyncio.ensure_future(self.reg.invoke(
+                "user-questions/request", "s1", {"questions": []},
+                signal=wait.signal))
+            await asyncio.sleep(0)
+            frame = await client.__anext__()  # waterfall
+            wait.close(timeout)  # Host 截止（ask_timed 的 deadline）
+            kind, value = await asyncio.wait_for(task, timeout=3)
+            cancel = await client.__anext__()
+            return frame, kind, value, cancel
+        frame, kind, value, cancel = _run(go())
+        self.assertEqual(kind, "cancelled")
+        self.assertEqual(value.code, "ASK_TIMED_OUT")
+        self.assertEqual(cancel["type"], "cancel")
+        self.assertEqual(cancel["eventId"], frame["eventId"])
+
 
 class SettingsDocumentUpdatedForwardingTest(unittest.TestCase):
     """`settings/document-updated` 经 `$events` 转发（上游 remote-events.ts:40）。"""
@@ -237,6 +264,67 @@ class SettingsDocumentUpdatedForwardingTest(unittest.TestCase):
         # payload 缺 ns/revision 时不转发（守卫）
         frames = _consume(self.api.gateway.events.open({"args": {}}), 1)
         self.assertEqual(frames[0]["type"], "ready")
+
+
+class RemoteForwardedEventsTest(unittest.TestCase):
+    """dsh-v0.2.0-rc.2 remote-events.ts:29-31,46 新增转发源 + hasLiveClient。"""
+
+    def setUp(self):
+        import tempfile
+        from miniharness.core.scope import Context
+        from miniharness.llm.fake import FakeLlmAdapter
+        from miniharness.web.api import WebApi
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.ctx = Context(name="forwarded-events")
+        self.addCleanup(self.ctx.dispose)
+        self.api = WebApi(self.ctx, FakeLlmAdapter())
+
+    def _first_emit(self):
+        async def go():
+            client = self.api.gateway.events.open({"args": {}}).__aiter__()
+            await client.__anext__()  # ready
+            self.ctx.emit(_EVENT, *_ARGS)
+            return await client.__anext__()
+        return asyncio.run(go())
+
+    def test_session_expired_forwarded(self):
+        global _EVENT, _ARGS
+        _EVENT, _ARGS = "deepseek-account/session-expired", ()
+        frame = self._first_emit()
+        self.assertEqual(frame["event"], "deepseek-account/session-expired")
+        self.assertEqual(frame["args"], [])
+
+    def test_model_sign_in_required_forwarded(self):
+        global _EVENT, _ARGS
+        _EVENT, _ARGS = "deepseek-account/model-sign-in-required", ()
+        frame = self._first_emit()
+        self.assertEqual(frame["event"], "deepseek-account/model-sign-in-required")
+
+    def test_credentials_record_updated_forwarded_with_subject(self):
+        global _EVENT, _ARGS
+        _EVENT, _ARGS = "credentials/record-updated", ("provider/deepseek",)
+        frame = self._first_emit()
+        self.assertEqual(frame["event"], "credentials/record-updated")
+        self.assertEqual(frame["args"], ["provider/deepseek"])
+
+    def test_schedule_changed_forwarded(self):
+        global _EVENT, _ARGS
+        _EVENT, _ARGS = "schedule/changed", ()
+        frame = self._first_emit()
+        self.assertEqual(frame["event"], "schedule/changed")
+
+    def test_has_live_client_false_without_events_stream(self):
+        self.assertFalse(self.api.gateway.has_live_client())
+
+    def test_has_live_client_and_not_closed(self):
+        async def go():
+            gen = self.api.gateway.events.open({"args": {}})
+            await gen.__anext__()
+            live = self.api.gateway.has_live_client()
+            await gen.aclose()
+            return live
+        self.assertTrue(asyncio.run(go()))
 
 
 if __name__ == "__main__":

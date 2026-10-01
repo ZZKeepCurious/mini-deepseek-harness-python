@@ -96,5 +96,68 @@ class SandboxFsTestCase(unittest.IsolatedAsyncioTestCase):
             ctx.dispose()
 
 
+class EscalationTestCase(unittest.IsolatedAsyncioTestCase):
+    """FsSandboxGate 沙箱升级：displayReason 仅呈现、拒绝措辞对齐。"""
+
+    class _Agent:
+        def __init__(self, session):
+            self.session = session
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(self._tmp.name)
+        from miniharness.core.tools import ToolRegistry
+        self.ctx = Context(name="escalation")
+        ToolRegistry(self.ctx)
+        install_sandboxed_fs(self.ctx, {"cwd": str(self.dir)},
+                             default_mode="read-only")
+        from miniharness.interaction.approval import ApprovalService
+        from miniharness.seams.sandbox_policy import SandboxPolicyService
+        SandboxPolicyService(self.ctx, {"mode": "read-only",
+                                        "workspaceRoot": str(self.dir)})
+        self.ctx.provide("approval", ApprovalService(self.ctx))
+        from miniharness.fs import install_fs_tools
+        self.tools = install_fs_tools(self.ctx)
+
+    def tearDown(self):
+        self.ctx.dispose()
+        self._tmp.cleanup()
+
+    def _exec(self):
+        from miniharness.core.session.session import Session
+        from miniharness.core.tools import ToolExec
+        session = Session("s1", meta={"cwd": str(self.dir)})
+        session.append("turn/start", {"turn": 1})
+        return ToolExec(agent=self._Agent(session), call_id="call-1"), session
+
+    async def test_escalation_passes_display_reason_and_grants(self):
+        seen = []
+        self.ctx.on("approval/request",
+                    lambda req, next: seen.append(req) or "allowed-once")
+        exec_, session = self._exec()
+        value = await self.tools["write"].execute(
+            {"file_path": "out.txt", "content": "hi",
+             "sandbox_permissions": "workspace-write",
+             "justification": "write the result"}, exec_)
+        self.assertEqual(value["operation"], "create")
+        self.assertEqual(seen[0]["displayReason"], {
+            "en": "Allow this operation with workspace-write permissions: write the result",
+            "zh": "允许本次操作使用 workspace-write 权限：write the result",
+        })
+        asked = [e for e in session.events if e["type"] == "approval/asked"][0]
+        self.assertNotIn("displayReason", asked["data"])
+        self.assertEqual(asked["data"]["reason"],
+                         "escalate sandbox to workspace-write: write the result")
+
+    async def test_rejected_escalation_denial_wording(self):
+        self.ctx.on("approval/request", lambda req, next: "rejected")
+        exec_, _session = self._exec()
+        with self.assertRaisesRegex(RuntimeError, "stays denied, so stop"):
+            await self.tools["write"].execute(
+                {"file_path": "out.txt", "content": "hi",
+                 "sandbox_permissions": "danger-full-access",
+                 "justification": "need full access"}, exec_)
+
+
 if __name__ == "__main__":
     unittest.main()

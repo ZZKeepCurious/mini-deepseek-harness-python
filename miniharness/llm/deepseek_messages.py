@@ -58,7 +58,9 @@ from .protocol import (
 
 __all__ = [
     "MESSAGES_FILES_BETA",
+    "MESSAGES_TOOL_CHANGES_BETA",
     "UNSUPPORTED_CONTENT",
+    "has_tool_changes",
     "messages_api_root",
     "provider_error",
     "provider_retry_after_ms",
@@ -71,6 +73,9 @@ __all__ = [
 
 #: Messages 文件操作与 file-referenced 图片请求所需的显式 opt-in。
 MESSAGES_FILES_BETA = "files-api-2025-04-14"
+
+#: 会话中途工具声明变更（tool_addition/tool_removal）所需的显式 opt-in。
+MESSAGES_TOOL_CHANGES_BETA = "mid-conversation-tool-changes-2026-07-01"
 
 UNSUPPORTED_CONTENT = "UNSUPPORTED_CONTENT"
 
@@ -92,6 +97,15 @@ def messages_api_root(base_url: str) -> str:
 
 def _unsupported(type_: str) -> None:
     raise LlmFailure(UNSUPPORTED_CONTENT, f"DeepSeek Messages cannot represent {type_}")
+
+
+def has_tool_changes(body: dict) -> bool:
+    """请求体内是否含会话中途工具声明变更块（上游 adapter.ts anthropic-beta 判定）。"""
+    for message in body.get("messages") or []:
+        for block in message.get("content") or []:
+            if block.get("type") in ("tool_addition", "tool_removal"):
+                return True
+    return False
 
 
 def tool_input(raw: str) -> dict:
@@ -178,8 +192,28 @@ def _build_messages(messages: list, *, in_history: bool,
         role = message.get("role")
         content = message.get("content") or []
         if role == "developer":
-            # 延迟工具定义持久化给 V4；provider 加载有意推迟。
-            _unsupported("developer message")
+            # developer 消息映射为 system-role 更新（上游 serialize.ts:90-100）：
+            # 文本 + tool_addition/tool_removal 引用块，置于前一个 user/tool-result
+            # 轮之后（与 system 更新的 flush 时序一致）。
+            dev_content: list[dict] = []
+            for block in content:
+                btype = block.get("type")
+                if btype == "text":
+                    if block.get("text"):
+                        dev_content.append({"type": "text", "text": block["text"]})
+                elif btype == "tool-addition":
+                    dev_content.append({"type": "tool_addition",
+                                        "tool": {"type": "tool_reference",
+                                                 "name": block["toolName"]}})
+                elif btype == "tool-removal":
+                    dev_content.append({"type": "tool_removal",
+                                        "tool": {"type": "tool_reference",
+                                                 "name": block["toolName"]}})
+                else:
+                    _unsupported(f"developer content {btype}")
+            if dev_content:
+                system_updates.append({"role": "system", "content": dev_content})
+            continue
         if any(block.get("type") in ("tool-addition", "tool-removal") for block in content):
             _unsupported("tool-change blocks outside developer messages")
         if role == "system":
@@ -379,8 +413,6 @@ def serialize(messages: list, *, model: str, models=(), system: str | None = Non
     """
     if in_history is None:
         in_history = _in_history(models, model)
-    if tools is not None and any(tool.get("deferLoading") is True for tool in tools):
-        _unsupported("deferred tool loading")
     wire, history_system = _build_messages(
         messages, in_history=in_history, image_parts=image_parts)
     effort = reasoning_effort if reasoning_effort is not None else (
@@ -416,7 +448,8 @@ def serialize(messages: list, *, model: str, models=(), system: str | None = Non
     if tools is not None:
         body["tools"] = [
             {"name": tool["name"], "description": tool.get("description", ""),
-             "input_schema": tool.get("parameters", {})}
+             "input_schema": tool.get("parameters", {}),
+             **({"defer_loading": True} if tool.get("deferLoading") is True else {})}
             for tool in tools
         ]
     return body
@@ -451,6 +484,10 @@ _EXCEEDS_MODEL_CONTEXT = re.compile(
 )
 _QUOTA_INSUFFICIENT = re.compile(r"\binsufficient[\s_-]+(?:quota|balance|credits?)\b", re.I)
 _QUOTA_EXCEEDED = re.compile(r"\b(?:quota|usage[\s_-]+limit)[\s_-]+(?:exceeded|exhausted|reached)\b", re.I)
+_QUOTA_EXCEEDED_CURRENT = re.compile(
+    r"\bexceed(?:ed|s)?[\s_-]+(?:(?:your|the)[\s_-]+)?(?:current[\s_-]+)?quota\b", re.I)
+_QUOTA_BALANCE_EXHAUSTED = re.compile(r"\b(?:balance|credits?)[\s_-]+(?:exhausted|depleted)\b", re.I)
+_QUOTA_OUT_OF = re.compile(r"\bout[\s_-]+of[\s_-]+(?:credits?|budget)\b", re.I)
 
 
 def _is_context_window_exceeded(detail: str) -> bool:
@@ -464,7 +501,14 @@ def _is_context_window_exceeded(detail: str) -> bool:
 
 
 def _is_quota_exceeded(detail: str) -> bool:
-    return bool(_QUOTA_INSUFFICIENT.search(detail) or _QUOTA_EXCEEDED.search(detail))
+    """终态账户额度/余额耗尽判定（上游 error.ts:97-103 isQuotaExceededError 五条）。"""
+    return bool(
+        _QUOTA_INSUFFICIENT.search(detail)
+        or _QUOTA_EXCEEDED.search(detail)
+        or _QUOTA_EXCEEDED_CURRENT.search(detail)
+        or _QUOTA_BALANCE_EXHAUSTED.search(detail)
+        or _QUOTA_OUT_OF.search(detail)
+    )
 
 
 def _error_code(status: int | None, detail: str, type_: str = "") -> str:

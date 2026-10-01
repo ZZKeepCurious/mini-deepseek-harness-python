@@ -1,6 +1,7 @@
 """durable DeepSeek attachment→file-id 索引。
 
-对应 dsh 真实源码：packages/llm/llm-deepseek/src/common/upload-index.ts。
+对应 dsh 真实源码：packages/llm/llm-deepseek/src/upload-index.ts（dsh-v0.2.0-rc.2
+起自 common/ 上移顶层）。
 
 上游用 `withFileLock` + `writeFileAtomic`（dsh-atomic-write）；mini 用 filelock
 （跨进程写锁，credentials-local 同款）+ 临时文件 `os.replace` 原子发布。
@@ -57,12 +58,23 @@ class InvalidUploadIndexError(Exception):
     """索引不是可识别的 files-v3 文档（读作空，绝不搞垮整个索引）。"""
 
 
-def deep_seek_file_scope(baseURL: str, apiKey: str) -> DeepSeekFileScope:
-    """派生一个不持久化/不记录 API key 的稳定索引命名空间摘要（上游同名函数）。"""
+def deep_seek_file_scope(baseURL: str, headers: dict) -> DeepSeekFileScope:
+    """派生一个不持久化/不记录 auth 头的稳定索引命名空间摘要（上游 deepSeekFileScope）。
+
+    上游哈希输入 = ``baseURL.rstrip('/')`` + NUL + ``JSON.stringify`` 的
+    entries 数组（file-store.ts:52 先按 header 名排——比较器是
+    ``localeCompare``，locale 敏感）。mini 在此用码元序 ``sorted`` 完成排序与
+    JS 等价序列化：载体差异（Python 无 localeCompare 等价物，其结果还依赖
+    运行环境 locale；本地索引不跨实现共享，码元序跨环境更稳定）。
+    header 名唯一，故上游「只比名」与元组排序等价。
+    """
+    credentials = json.dumps(
+        [[name, value] for name, value in sorted(headers.items())],
+        separators=(",", ":"), ensure_ascii=False)
     digest = hashlib.sha256()
     digest.update(baseURL.rstrip("/").encode("utf-8"))
     digest.update(b"\0")
-    digest.update(apiKey.encode("utf-8"))
+    digest.update(credentials.encode("utf-8"))
     return DeepSeekFileScope(digest.hexdigest())
 
 
@@ -205,13 +217,21 @@ class DeepSeekUploadIndex:
             self._save({"formatVersion": _FORMAT_VERSION, "records": records})
             return UploadIndexCommit(candidate, True)
 
-    def remove(self, scope: DeepSeekFileScope, variantId: str, fileId: DeepSeekFileId) -> None:
-        """移除一条精确映射，不删除并发安装的后继（上游 remove）。"""
+    def remove(self, scope: DeepSeekFileScope, generations) -> None:
+        """在一次加锁重写中移除多条精确映射，不删除并发安装的后继（上游 remove）。
+
+        ``generations`` 为 ``{"variantId": str, "fileId": DeepSeekFileId}`` 序列；
+        索引中不存在的对忽略。
+        """
+        invalidated = {
+            f"{generation['variantId']}\0{generation['fileId']}"
+            for generation in generations
+        }
         with self._lock():
             index = self._load()
             records = [record for record in index["records"] if not (
-                record.scope == scope and record.variantId == variantId
-                and record.fileId == fileId)]
+                record.scope == scope
+                and f"{record.variantId}\0{record.fileId}" in invalidated)]
             if len(records) != len(index["records"]):
                 self._save({"formatVersion": _FORMAT_VERSION, "records": records})
 

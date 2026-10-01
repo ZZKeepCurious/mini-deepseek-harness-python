@@ -34,6 +34,7 @@ from .protocol import (
     LlmDiscoveredModel,
     LlmFailure,
     StreamChunk,
+    attribution_headers,
 )
 from .retry_policy import resolve_retry_policy
 
@@ -383,7 +384,8 @@ def _openai_headers(api_key: str | None) -> dict:
     headers = {"Content-Type": "application/json"}
     if api_key is not None:
         headers["Authorization"] = f"Bearer {api_key}"
-    return headers
+    # attribution 后置覆盖 reserved 名（对齐 requestHeaders：Harness 归因胜）。
+    return {**headers, **attribution_headers()}
 
 
 def _anthropic_headers(api_key: str | None) -> dict:
@@ -391,7 +393,7 @@ def _anthropic_headers(api_key: str | None) -> dict:
                "anthropic-version": "2023-06-01"}
     if api_key is not None:
         headers["x-api-key"] = api_key
-    return headers
+    return {**headers, **attribution_headers()}
 
 
 def _build_anthropic_body(profile, model, messages, tools) -> dict:

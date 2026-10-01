@@ -129,6 +129,54 @@ class TestTools(unittest.TestCase):
         self.assertEqual(value["target"]["seq"], 0)
 
 
+class TestProjections(unittest.TestCase):
+    def setUp(self):
+        from miniharness.session_projection import (
+            ProjectionDefinition,
+            install_session_projections,
+        )
+        self.ctx = Context(name="sq-proj")
+        ToolRegistry(self.ctx)
+        self.store = SessionStore(self.ctx)
+        self.registry = install_session_projections(self.ctx)
+        self.query = SessionQuery(self.ctx)
+        self.session = self.store.create("s1", {"meta": {"cwd": _CWD}})
+        self.ProjectionDefinition = ProjectionDefinition
+
+    def tearDown(self):
+        self.ctx.dispose()
+
+    def test_snapshot_returns_view_values(self):
+        self.registry.register(self.ProjectionDefinition(
+            "counter", init=lambda header, inherited: 0,
+            apply=lambda state, event: state, state_version=1,
+            view=lambda state: {"n": state}))
+        snapshot = self.query.projections("s1")
+        self.assertEqual(snapshot["values"]["counter"], {"n": 0})
+
+    def test_projection_failure_is_classified(self):
+        def boom(state):
+            raise ValueError("kaboom")
+        self.registry.register(self.ProjectionDefinition(
+            "broken", init=lambda header, inherited: 0,
+            apply=lambda state, event: state, state_version=1, view=boom))
+        with self.assertRaises(SessionQueryError) as raised:
+            self.query.projections("s1")
+        self.assertEqual(raised.exception.code, "SESSION_QUERY_CORRUPT_SESSION")
+        self.assertIn('failed to project session "s1": kaboom', str(raised.exception))
+
+    def test_unknown_session_and_missing_registry_return_none(self):
+        self.assertIsNone(self.query.projections("nope"))
+        bare = Context(name="sq-bare")
+        try:
+            ToolRegistry(bare)
+            store = SessionStore(bare)
+            store.create("s1", {"meta": {"cwd": _CWD}})
+            self.assertIsNone(SessionQuery(bare).projections("s1"))
+        finally:
+            bare.dispose()
+
+
 class TestDocuments(unittest.TestCase):
     def test_structural_events_omitted(self):
         events = [

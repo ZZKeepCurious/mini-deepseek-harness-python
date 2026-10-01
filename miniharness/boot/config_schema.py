@@ -1,7 +1,7 @@
 """Profile 配置 schema 导出（对齐 packages/boot/app-boot/src/config-schema）。
 
-`generate_config_schema(bin_name, profile, layers, install_anchor)` 为已准备
-profile 的有序补丁层生成 **JSON Schema 2020-12 文档**（`ConfigSchemaDump`）：
+`generate_config_schema(profile, layers, install_anchor)` 为已准备 profile 的
+有序补丁层生成 **JSON Schema 2020-12 文档**（`ConfigSchemaDump`）：
 不挂载插件、不求值 `!!js`（但会执行 trusted 代码：import、Config getter、
 lazy builder）。返回文档带 `$defs`（loaderExpression/entryMetadata/entry/
 entryList/patchList/patch/unknownConfig/includeConfig/includePatch/configN）
@@ -650,20 +650,27 @@ def collect_config_schemas(entries: list[dict], diagnostics: list[dict]) -> tupl
 
 
 def generate_config_schema(
-    bin_name: str,
     profile: Any,
     layers: list[list[dict]],
     install_anchor: str,
 ) -> dict:
     """为已准备 profile 的有序补丁层生成 JSON Schema 2020-12 文档。
 
-    @param bin_name 诊断前缀。
-    @param profile 已加载的 profile（Profile 对象）。
+    不读 profile manifest；`profile.skipped_bundles` 里每条选中的 bundle 记一条
+    error 诊断（对齐上游读取已加载 profile 的 skippedBundles 而非重读 manifest）。
+
+    @param profile 已加载的 profile（Profile 对象，读其 skipped_bundles）。
     @param layers 有序补丁层（含调用方选的 home/argv overlay）。
     @param install_anchor 安装锚点（mini 载体为占位——无 npm bundle 解析）。
     @returns ConfigSchemaDump（JSON Schema 文档 + x-cordis 注解）。
     """
     diagnostics: list[dict] = []
+    for skipped in getattr(profile, "skipped_bundles", ()):
+        diagnostics.append({
+            "level": "error",
+            "message": f"Selected profile bundle {json.dumps(skipped.package_name)} "
+                       f"could not be loaded; repair or remove its bundle selection.",
+        })
     entries = compose_entries(layers)
     collected, extra_definitions = collect_config_schemas(entries, diagnostics)
     return build_config_schema_document(

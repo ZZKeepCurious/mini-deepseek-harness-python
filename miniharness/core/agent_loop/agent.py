@@ -37,6 +37,7 @@ status/mini-harness/asyncio-refactor-design.md）：
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from typing import Any, Callable
 
@@ -50,7 +51,7 @@ from ..scope import Context
 from ..system_prompt import join_context_sections, render_context_sections, render_prompt
 from ..agents import _CURRENT_INITIATOR
 from ...llm import LlmAdapter, LlmFailure, StreamAborted
-from ...llm.content import project_files_to_text
+from ...llm.content import project_files_to_text, project_tool_updates
 from .assistant_stream import AssistantStreamAttempt
 from .inbox import Inbox
 from .resident_loop import run_on_resident
@@ -58,10 +59,15 @@ from .runtime_context import RuntimeContextProjection
 from .tool_calls import DEFAULT_MAX_PARALLEL_TOOL_CALLS, schedule_tool_calls
 from ..session import (
     Session,
+    ToolCallRecovery,
     create_message,
     default_message_projections,
     derive_messages,
+    developer_message,
     text_block,
+    thaw,
+    tool_addition_block,
+    tool_removal_block,
 )
 from ..tools import ToolExec, ToolRegistry
 
@@ -91,6 +97,17 @@ def canonical_header(config: dict, *, tools: list | None = None,
     return header
 
 
+def header_equals(left: Any, right: Any) -> bool:
+    """请求信封值相等（上游 session/src/request-header.ts headerEquals：
+    `JSON.stringify(left) === JSON.stringify(right)`）。
+
+    header 在会话日志里是冻结结构（MappingProxyType/tuple），新建的是普通
+    dict/list；Python 的 `==` 会因 tuple≠list 误判不等，故先经 `thaw` 归一
+    再按 JSON 序列化比较（键序敏感，对齐上游 stringify）。
+    """
+    return json.dumps(thaw(left), ensure_ascii=False) == json.dumps(thaw(right), ensure_ascii=False)
+
+
 def system_prompt_update_capability(adapter: LlmAdapter) -> str | None:
     """路由的 systemPromptUpdate 能力位（上游 preparedCall.systemPromptUpdate：
     LlmResolvedModelInfo.systemPromptUpdate）。`'in-history'` = 端点把 messages
@@ -104,6 +121,22 @@ def system_prompt_update_capability(adapter: LlmAdapter) -> str | None:
         raise ValueError(
             f"adapter {adapter.provider!r} system_prompt_update must be "
             f"'in-history' when present, got {value!r}")
+    return value
+
+
+def tool_update_capability(adapter: LlmAdapter) -> str | None:
+    """路由的 toolUpdate 能力位（上游 preparedCall.toolUpdate：
+    LlmResolvedModelInfo.toolUpdate）。`'addition-only'` = 端点把后续
+    developer 消息里的 tool-addition 视为激活 deferLoading 声明；
+    `'in-history'` = 额外读 tool-removal；缺省 = 每个请求声明完整当前工具表。
+    mini 以适配器 resolve_model_info 的 `tool_update` 键承载。
+    """
+    info = adapter.resolve_model_info()
+    value = info.get("tool_update")
+    if value is not None and value not in ("in-history", "addition-only"):
+        raise ValueError(
+            f"adapter {adapter.provider!r} tool_update must be 'in-history' or "
+            f"'addition-only' when present, got {value!r}")
     return value
 
 
@@ -279,11 +312,16 @@ class AgentLoop:
         # 重试规划器（agent/request-error 监听器）由装配方显式挂载：
         # AgentLoop 构造无副作用（迁移步骤 3，对齐上游插件 apply 时挂载）
         self._abort_proxy = _AbortProxy(self)
-        self._header_baseline: dict | None = None   # request/header 频次基线（上游 requestHeaderLogged）
-        self._context_baseline: dict | None = None  # request/context 频次基线（provider/model 变化时落）
-        # A5：最近一次 request/header 落打印时的 surface 位置替换代数
-        # （上游 agent.ts requestSurfaceGeneration，undefined 起步）
-        self._request_surface_generation: int | None = None
+        # request/header 频次基线（上游 requestHeaderLogged/first anchor）：布尔，
+        # 表示本 loop 是否已落过自己的 initial/resume 锚。header 内容基线每步
+        # 从会话日志读取（上游 buildRequest 的 `session.requestHeader()`），
+        # 故冷恢复/新 loop 实例也能正确 diff 工具增删。
+        self._header_logged = False
+        # A5：最近一次 request/header 落打印时的 surface 内容代数
+        # （上游 agent.ts requestSurfaceGeneration：构造时播种为当前
+        # session.surface.contentGeneration，非 undefined）。读的是
+        # contentGeneration（替换 + 插件消息变更），不是 replaceGeneration。
+        self._request_surface_generation: int = session.content_generation
         # A8：消息认领通道（携带被认领消息本身，含 id）——continuation 管理器
         # 据此跟踪激活的 accepted 集合；job 的 wake 预算恢复不再经此，
         # 走 ctx 事件 agent/inbox/claimed（jobs/tools.py 订阅）
@@ -842,10 +880,26 @@ class AgentLoop:
             isinstance(m, dict) and (m.get("source") or {}).get("kind") == "goal"
             for m in claimed
         )
+        step_start_seq = self.session.seq
         try:
             tool_calls = await self._stream_step_async(messages, starts_request_series)
             concluded = await self._execute_tools_async(tool_calls)
             self._continue = bool(tool_calls)
+        except BaseException as error:
+            # 失败步恢复（上游 agent.ts:342-353）：为悬挂 tool 请求补保守 error
+            # 结果后再让 step/end 落日志；恢复补记失败则以原错为 __cause__ 抛出。
+            try:
+                recovery = ToolCallRecovery()
+                for event in self.session.snapshot_events(step_start_seq):
+                    recovery.observe(event)
+                for event in recovery.results():
+                    kwargs: dict[str, Any] = {"surfaceOp": "append"}
+                    if event.get("sourceEventSeqs") is not None:
+                        kwargs["sourceEventSeqs"] = list(event["sourceEventSeqs"])
+                    self.session.append("tool/result", dict(event["data"]), **kwargs)
+            except BaseException as recovery_error:
+                raise recovery_error from error
+            raise
         finally:
             self.session.append("step/end", {"turn": self._turn, "step": self._step})
         if self._turn_end is not None and self._turn_end.get("kind") == "max-tokens":
@@ -876,7 +930,8 @@ class AgentLoop:
         initial/resume/change 外新增 reason 'series' 与可选 startsSeries:true
         （RequestHeaderReason，session/types.ts:205-213）。startsSeries 由
         starts_request_series（goal round 等判定层系列边界信号）或最近一次
-        header 落打印后 surface 发生位置替换（session.replace_generation 前进）
+        header 落打印后 surface 内容代数前进（session.content_generation：
+        位置替换或插件消息变更）
         触发，对齐上游 `startsSeries = startsRequestSeries ||
         (requestSurfaceGeneration !== surfaceGeneration)`。
         """
@@ -892,9 +947,10 @@ class AgentLoop:
         # （空提示词也预留 node 0）
         tools = self._tool_definitions()
         in_history = system_prompt_update_capability(self.adapter) == "in-history"
+        tool_update = tool_update_capability(self.adapter)
         starts_series = (starts_request_series
-                         or self._request_surface_generation != self.session.replace_generation
-                         or self._tools_changed(tools))
+                         or self._request_surface_generation != self.session.content_generation
+                         or (tool_update is None and self._tools_changed(tools)))
         for message, intent in self._system_prompt_projection(
                 self._system_prompt_text(), in_history, starts_series):
             self.session.append("system/message",
@@ -915,24 +971,50 @@ class AgentLoop:
             tools=tools,
             adapter_defaults=self._adapter_defaults(),
         )
+        baseline_header = self.session.request_header()
         header_starts_series = (starts_request_series
-                                or self._request_surface_generation != self.session.replace_generation)
-        if self._header_baseline is None:
-            resume = any(e["type"] == "request/header" for e in self.session.events)
-            self.session.append("request/header", {
-                "header": header, "reason": "resume" if resume else "initial",
-            })
-        elif header != self._header_baseline:
+                                or self._request_surface_generation != self.session.content_generation)
+        header_seq: int | None = None
+        if not self._header_logged:
+            # 首个锚（上游 requestHeaderLogged=false 分支）：baseline 缺失 → initial，
+            # 否则 resume；startsSeries 在系列边界同样带出。
+            data = {"header": header,
+                    "reason": "resume" if baseline_header is not None else "initial"}
+            if header_starts_series:
+                data["startsSeries"] = True
+            header_seq = self.session.append("request/header", data)["seq"]
+            self._header_logged = True
+        elif baseline_header is None or not header_equals(baseline_header, header):
             data = {"header": header, "reason": "change"}
             if header_starts_series:
                 data["startsSeries"] = True
-            self.session.append("request/header", data)
+            header_seq = self.session.append("request/header", data)["seq"]
         elif header_starts_series:
             self.session.append("request/header", {
                 "header": header, "reason": "series",
             })
-        self._header_baseline = header
-        self._request_surface_generation = self.session.replace_generation
+
+        # 动态工具更新（上游 agent.ts:635-648）：新 header 落日志后，若工具名集合
+        # 相对上一个 header（从会话日志读取，含冷恢复）变化，追加一条
+        # developer/message——新增块带 headerSeq（指向刚落的 header），移除块不带；
+        # source 'tool-registry'。
+        if baseline_header is not None and header_seq is not None:
+            previous_tools = baseline_header.get("tools") or []
+            previous_names = {tool.get("name") for tool in previous_tools}
+            current_names = {tool.get("name") for tool in tools}
+            additions = [tool for tool in tools if tool.get("name") not in previous_names]
+            removals = [tool for tool in previous_tools if tool.get("name") not in current_names]
+            if additions or removals:
+                content = [tool_addition_block(tool["name"]) for tool in additions]
+                content += [tool_removal_block(tool["name"]) for tool in removals]
+                dev_data: dict[str, Any] = {
+                    "turn": self._turn, "step": self._step,
+                    "message": developer_message(content),
+                }
+                if additions:
+                    dev_data["headerSeq"] = header_seq
+                self.session.append("developer/message", dev_data, surfaceOp="append")
+        self._request_surface_generation = self.session.content_generation
         context_window = getattr(self.adapter, "context_window", None)
         context = {"provider": config.get("provider"), "model": config.get("model")}
         if context_window is not None:
@@ -940,9 +1022,11 @@ class AgentLoop:
         capability = system_prompt_update_capability(self.adapter)
         if capability is not None:
             context["systemPromptUpdate"] = capability
-        if context != self._context_baseline:
+        # 基线从会话日志读取（上游 buildRequest 的 `session.requestContext()`），
+        # 冷恢复 / 新 loop 实例也能正确抑制重复 event。
+        previous_context = self.session.request_context()
+        if previous_context != context:
             self.session.append("request/context", context)
-            self._context_baseline = context
 
         # 语义检查点（上游 session-checkpoint-policy 的模型请求屏障）：请求
         # 信封落日志后、adapter 派发前刷盘。`agent/checkpoint` waterfall 无
@@ -1017,7 +1101,7 @@ class AgentLoop:
             baseline.get("config") or {},
             tools=list(tools),
             adapter_defaults=baseline.get("adapterDefaults"))
-        return probe != baseline
+        return not header_equals(probe, baseline)
 
     def _derive_history(self) -> list[dict]:
         """从当前会话事件派生完整消息列表（V3：系统提示词是 surface node 0 的
@@ -1112,14 +1196,21 @@ class AgentLoop:
             attachments = self.ctx.get("attachments")
             resolve = (attachments.file_host_path) if attachments is not None else None
             messages = project_files_to_text(messages, resolve)
+            # 工具更新投影（上游 llm/index.ts projectToolUpdates，运行时在
+            # adapter 派发前执行）：按路由 toolUpdate 能力裁剪 developer 工具
+            # 增删块与声明；缺省路由发完整当前工具表、无更新消息。
+            projected = project_tool_updates(
+                messages, self._tool_definitions(),
+                tool_update_capability(self.adapter), self.session.tool_history())
+            messages = projected["messages"]
+            tools = projected["tools"]
             live = AssistantStreamAttempt(
                 self.session.session_id, self._assistant_attempt_counter,
                 self._turn, self._step)
             self._assistant_attempt_counter += 1
             settled = False
             try:
-                stream = self.adapter.stream(
-                    messages, self._tool_definitions(), self._abort_proxy)
+                stream = self.adapter.stream(messages, tools, self._abort_proxy)
                 live.start()
                 async for chunk in stream:
                     live.push(chunk)

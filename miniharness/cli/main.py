@@ -199,7 +199,7 @@ def _dump_config_schema(parsed: dict[str, Any], warn: Any) -> None:
         layers.append(load_patch_list(pp, label="overlay"))
     profile = Profile(name=os.path.basename(profile_dir), dir=profile_dir,
                       layers=[], patch_path="", patches=[])
-    schema = generate_config_schema("miniharness", profile, layers, install_anchor="miniharness")
+    schema = generate_config_schema(profile, layers, install_anchor="miniharness")
     sys.stdout.write(_json.dumps(schema, indent=2) + "\n")
 
 

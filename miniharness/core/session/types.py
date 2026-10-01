@@ -134,6 +134,10 @@ KNOWN_TYPES = frozenset({
     # 会话级人工反馈（上游 feedback/command-feedback/src/types.ts SessionEventMap：
     # {text?, category?}，log-only 非 surface、独立 append-only 事实）
     "feedback/record",
+    # 会话日志投递确认（上游 session-log-deepseek/src/index.ts SessionEventMap 的
+    # 读侧词汇 + known-event-types.ts:54 登记）：{version, watermark}，log-only 非
+    # surface、最后一条胜出；mini session_log_deepseek 模块据此推进已接受水位
+    "session-log-deepseek/delivery-accepted",
     # 工作流编排记录（上游 workflow/tool-workflow/src/types.ts SessionEventMap，
     # 四个事件 log-only 非 surface、version 1）：run-start {runId, name} /
     # agent-start {runId, seq, label, childId, phase?} / agent-end {runId, seq, outcome} /

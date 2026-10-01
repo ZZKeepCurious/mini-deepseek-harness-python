@@ -5,8 +5,10 @@ sse.ts + translate.ts）。
 
 上游 llm-deepseek 自 dsh-v0.1.7-rc.1 起只保留 Anthropic 兼容 Messages 协议
 （Chat Completions 已删除）：默认 base ``https://api.deepseek.com/anthropic``，
-请求 POST 到 ``messagesApiRoot(baseURL) + "/messages"``，头为 ``x-api-key`` +
-``anthropic-version: 2023-06-01``（file id 请求追加 ``anthropic-beta``）。协议
+请求 POST 到 ``messagesApiRoot(baseURL) + "/messages"``。自 dsh-v0.2.0-rc.2 起
+认证经 ``resolveAuth`` seam 拆双 provider：``deepseek-official`` 发 ``x-api-key``、
+``deepseek-account`` 发 ``x-dsh-auth-token``；另加 ``anthropic-version:
+2023-06-01``（file id 请求追加 ``anthropic-beta``）。协议
 细节在 deepseek_messages.py；本模块是传输适配器：
 
   * 请求体 stream:true，响应以 message_stop 为完成点；EOF 未到 message_stop
@@ -23,17 +25,26 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any
 
 import httpx
 
 from .protocol import (
+    ACCOUNT_QUOTA,
+    ACCOUNT_SIGN_IN_REQUIRED,
+    ACCOUNT_TOKEN_INVALID,
     IMAGE_OFFLOAD_REQUIRED,
+    INVALID_CREDENTIAL,
+    MISSING_CREDENTIAL,
+    QUOTA,
     TIMEOUT,
     TRANSPORT,
     LlmAdapter,
     LlmFailure,
+    attribution_headers,
 )
+from ..identity import get_or_create_anonymous_user_id
 from .retry_policy import resolve_retry_policy
 from .content import (
     content_has_image,
@@ -48,7 +59,9 @@ from .content import (
 )
 from .deepseek_messages import (
     MESSAGES_FILES_BETA,
+    MESSAGES_TOOL_CHANGES_BETA,
     UNSUPPORTED_CONTENT,
+    has_tool_changes,
     messages_api_root,
     parse_sse_frames,
     provider_error,
@@ -114,6 +127,10 @@ __all__ = [
 ]
 
 
+# 上游 api-key.ts LEGAL_API_KEY：HTTP 头可逐字携带的字符（可打印 ASCII，空格除外）。
+_LEGAL_API_KEY = re.compile(r"^[\x21-\x7E]+$")
+
+
 # ---------- image-capable 请求辅助（serialize.ts / request-files.ts 载体桥） ----------
 
 def _ref_from_dict(value):
@@ -171,11 +188,19 @@ class DeepSeekAdapter(LlmAdapter):
       * per-read idle 超时 300s（对齐上游 fetch watchdog）+ 真取消：abort
         置位即关闭连接（httpx 原生 asyncio 传输，无遗留线程）
 
+    认证 seam（dsh-v0.2.0-rc.2 的 resolveAuth 拆分）：``auth`` 选择凭据模式
+    ——``"official"``（x-api-key）或 ``"account"``（x-dsh-auth-token）；缺省按
+    account_token 是否存在推断。``provider`` 随之返回 ``deepseek-official`` /
+    ``deepseek-account``。两模式无交叉回退。请求与 Files API 都经
+    ``_auth_headers()`` 取头。
+
     推理 effort 与上游 serialize.ts 一致：请求级 reasoningEffort 承载
     off/low/high/max 四档，经 thinking/output_config 入请求体；thinking
     禁用仅允许 off。响应侧 thinking→reasoning、usage 按 Anthropic 拼写映射。
     """
 
+    # 凭据模式对应的 provider id（上游 llm-deepseek-api-key / -account 两包）；
+    # 实例构造时按 auth 覆盖为 "deepseek-account"。
     provider = "deepseek-official"
 
     # 上游 llm-deepseek REASONING_EFFORTS：'off' 在 wire 上省略
@@ -192,10 +217,23 @@ class DeepSeekAdapter(LlmAdapter):
                  models=None, attachments=None, map_host_path=None,
                  files_store=None, files_transport=None,
                  file_policy=None, default_context_window=None,
-                 thinking=None, account_token=None):
+                 thinking=None, account_token=None,
+                 auth: str | None = None, reject_token=None):
         self._key = api_key if api_key is not None else os.environ.get("DEEPSEEK_API_KEY", "")
-        # DSH 账户 token：配置后以 x-dsh-auth-token 取代 x-api-key（上游 resolveAccountToken）。
+        # DSH 账户 token：配置后以 x-dsh-auth-token 发送（账户 provider 路由）。
         self._account_token = account_token
+        # 认证 seam（上游 resolveAuth 拆分）：显式 auth 选择凭据模式；缺省按
+        # account_token 是否存在推断（account_token 在场 → account，否则 official）。
+        if auth is None:
+            auth = "account" if account_token is not None else "official"
+        if auth not in ("official", "account"):
+            raise ValueError(
+                f'invalid auth {auth!r}; expected "official" or "account"')
+        self._auth = auth
+        # provider id 随凭据模式（实例覆盖类缺省 deepseek-official）。
+        self.provider = "deepseek-account" if auth == "account" else "deepseek-official"
+        # 账户 token 被 401 拒绝时的回调（上游 account.rejectToken；mini 由宿主注入）。
+        self._reject_token = reject_token
         self._base = (base_url or os.environ.get(
             "DEEPSEEK_BASE_URL", "https://api.deepseek.com/anthropic")).rstrip("/")
         self._model = model
@@ -272,6 +310,65 @@ class DeepSeekAdapter(LlmAdapter):
         """推理 effort 档位（'off'|'low'|'high'|'max'，None 表示未设置）。"""
         return self._reasoning_effort
 
+    def _auth_headers(self) -> dict:
+        """解析本次请求/文件操作的认证头（上游 resolveAuth → { headers }）。
+
+        * official：x-api-key，缺失/畸形分别抛 MISSING_CREDENTIAL / INVALID_CREDENTIAL；
+        * account：x-dsh-auth-token，未登录抛 ACCOUNT_SIGN_IN_REQUIRED。
+        两模式无交叉回退。
+        """
+        if self._auth == "account":
+            token = self._account_token
+            if token is None or len(token) == 0:
+                raise LlmFailure(
+                    ACCOUNT_SIGN_IN_REQUIRED,
+                    "Sign in to DeepSeek to use the account provider. The request "
+                    "destination must allow account authentication.")
+            return {"x-dsh-auth-token": token}
+        key = (self._key or "").strip()
+        if len(key) == 0:
+            raise LlmFailure(
+                MISSING_CREDENTIAL,
+                'llm-deepseek: no API key for provider route "deepseek-official"; '
+                "store DEEPSEEK_API_KEY through the credentials service (the web "
+                "Models page writes it), or export DEEPSEEK_API_KEY in the launching "
+                "environment")
+        if not _LEGAL_API_KEY.match(key):
+            raise LlmFailure(
+                INVALID_CREDENTIAL,
+                "llm-deepseek: the API key resolved from DEEPSEEK_API_KEY contains "
+                "characters no HTTP header can carry; set DEEPSEEK_API_KEY to the raw "
+                "key alone (the web Models page writes it)")
+        return {"x-api-key": key}
+
+    def _map_request_error(self, error: LlmFailure) -> LlmFailure:
+        """账户路由的失败分类（上游 DeepSeekRequestAuth.onRequestError）。
+
+        * QUOTA → ACCOUNT_QUOTA（HTTP 402 与带内 SSE error 同码）；
+        * HTTP 401 → ACCOUNT_TOKEN_INVALID 并调用 reject_token(token)；
+        * 其余状态（含 403）原样透传；official 一律原样透传。
+        """
+        if self._auth != "account":
+            return error
+        if error.code == QUOTA:
+            return LlmFailure(
+                ACCOUNT_QUOTA, str(error), status=error.status,
+                provider_retry_after_ms=error.provider_retry_after_ms,
+                request_id=error.request_id)
+        if error.status != 401:
+            return error
+        token = self._account_token
+        if token is not None and self._reject_token is not None:
+            try:
+                self._reject_token(token)
+            except Exception:
+                # 凭据清除失败不得取代推断失败（上游注释同款）。
+                pass
+        return LlmFailure(
+            ACCOUNT_TOKEN_INVALID, str(error), status=error.status,
+            provider_retry_after_ms=error.provider_retry_after_ms,
+            request_id=error.request_id)
+
     def resolve_model_info(self) -> dict:
         """按模型目录解析能力（上游 adapter.ts resolveModelInfo → modelInfo）。"""
         return model_info(self._connection, self.provider, self._model)
@@ -285,11 +382,25 @@ class DeepSeekAdapter(LlmAdapter):
         abort_event = getattr(signal, "event", None) if signal is not None else None
         if not any(content_has_image(message.get("content") or []) for message in messages):
             body = self._build_body(messages, tools)
-            async for chunk in self._iter_chunks(body, abort_event):
+            async for chunk in self._iter_request_chunks(body, abort_event):
                 yield chunk
             return
         async for chunk in self._stream_images_impl(messages, tools, abort_event, signal):
             yield chunk
+
+    async def _iter_request_chunks(self, *args, **kwargs):
+        """请求执行段（HTTP + SSE）的账户失败映射包装（上游 request 的 catch 块）。
+
+        模型能力校验/附件准备在进入本包装前完成，故其失败不经 onRequestError。
+        """
+        try:
+            async for chunk in self._iter_chunks(*args, **kwargs):
+                yield chunk
+        except LlmFailure as error:
+            mapped = self._map_request_error(error)
+            if mapped is error:
+                raise
+            raise mapped from error
 
     async def _stream_images_impl(self, messages, tools, abort_event, signal):
         model = next((entry for entry in self._models if entry.id == self._model), None)
@@ -309,10 +420,8 @@ class DeepSeekAdapter(LlmAdapter):
             def resolve_access(ref):
                 return resolve_image_attachment_access(
                     attachments, self._map_host_path, _ref_from_dict(ref))
-        key = self._account_token if self._account_token is not None else self._key
         file_connection = DeepSeekFileConnection(
-            baseURL=self._base, apiKey=key,
-            accountCredential=self._account_token is not None)
+            baseURL=self._base, headers=self._auth_headers())
         request_files = RequestFiles(
             self._files(), file_connection, self._connection.filePolicy,
             self._connection.filesApiTimeoutMs, abort_event, lambda: None)
@@ -346,7 +455,7 @@ class DeepSeekAdapter(LlmAdapter):
                 continue
             body = self._build_body(projected, tools, image_parts=image_parts)
             retry_state = {"retry": False}
-            async for chunk in self._iter_chunks(
+            async for chunk in self._iter_request_chunks(
                     body, abort_event, request_files, retry_state,
                     files_beta=representation["kind"] == "file"):
                 yield chunk
@@ -395,16 +504,20 @@ class DeepSeekAdapter(LlmAdapter):
         invalidate 重试，retry_state["retry"]=True 由调用方重新序列化派发。
         """
         headers = {
+            **attribution_headers(),
+            "x-deepseek-harness-user-id": get_or_create_anonymous_user_id(),
             "content-type": "application/json",
             "accept": "text/event-stream",
             "anthropic-version": "2023-06-01",
+            **self._auth_headers(),
         }
-        if self._account_token is not None:
-            headers["x-dsh-auth-token"] = self._account_token
-        else:
-            headers["x-api-key"] = self._key
+        betas = []
         if files_beta:
-            headers["anthropic-beta"] = MESSAGES_FILES_BETA
+            betas.append(MESSAGES_FILES_BETA)
+        if has_tool_changes(body):
+            betas.append(MESSAGES_TOOL_CHANGES_BETA)
+        if betas:
+            headers["anthropic-beta"] = ",".join(betas)
         timeout = httpx.Timeout(self.CONNECT_TIMEOUT_S, read=self.READ_TIMEOUT_S)
         kwargs: dict[str, Any] = {"timeout": timeout}
         if self._transport is not None:

@@ -63,36 +63,27 @@ _PROMPT_DESCRIPTION = (
     "freely and state only what is new."
 )
 
-# 描述后缀（逐字 index.ts:386-388，rc.1：send_message 措辞 inactive 化）
+# 描述后缀（逐字 index.ts:383-388，2026-09-30 精简）
 _SUFFIX_CONTINUABLE = (
-    " This tool runs in the background by default, immediately returns a durable subagent id, and keeps "
-    "the child conversation available for later turns. When that run settles, the runtime sends the "
-    "parent a notice containing its outcome and any final assistant message; `send_message` steers the "
-    "child's nearest step while it is running and starts or resumes a turn while it is inactive. Set "
-    "`run_in_background: false` only when your next action depends on receiving the result."
+    " It runs in the background by default and returns a subagent id you can continue with "
+    "`send_message`; you are notified when the run settles."
 )
-_SUFFIX_ONE_SHOT = (
-    " This call waits for the result by default. Set `run_in_background: true` to return a job id; "
-    "collect with `job_output` and stop with `job_kill`."
-)
+_SUFFIX_ONE_SHOT = " This call waits for the result by default."
 _SUFFIX_DISABLED = " This call waits for the subagent and returns its result."
 
-# run_in_background 参数描述（逐字 index.ts:320-326）
+# run_in_background 参数描述（逐字 index.ts:421-426）
 _PARAM_DESC_CONTINUABLE = (
-    "Whether to run in the background and return a durable subagent id immediately. Defaults to true. "
-    "Set false to wait for the result when your next action depends on it."
+    "Defaults to true. Set false only when your next action depends on the result."
 )
 _PARAM_DESC_ONE_SHOT = (
-    "Whether to run as a background job and return its id. Defaults to false; collect with "
-    "job_output or stop with job_kill."
+    "Run as a background job and return its id (collect with job_output, stop with job_kill). "
+    "Defaults to false."
 )
 
-# continuable 常驻提示节（逐字 index.ts:466）
+# continuable 常驻提示节（逐字 index.ts:600-604）
 _SECTION_TEXT = (
-    "Use {name} in the background by default. Start independent delegations together in one assistant "
-    "message and continue useful work while they run. Set `run_in_background: false` only when your "
-    "next action depends on that subagent's result. When a background run settles, the runtime sends "
-    "you a notice containing its outcome and any final assistant message."
+    "Start independent {name} delegations together in one assistant message and continue useful "
+    "work while they run."
 )
 
 # ---- 模型选择（对齐 tool-subagent model-selection.ts + index.ts:364-412）----

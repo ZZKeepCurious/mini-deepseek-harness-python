@@ -334,6 +334,85 @@ class TestRequestEnvelope(unittest.TestCase):
         self.assertEqual(headers[1]["data"]["reason"], "change")
         self.assertTrue(headers[1]["data"].get("startsSeries") is True)
 
+    @staticmethod
+    def _fresh_loop(session):
+        """以同一会话重建 loop 实例（上游 resumeSession 路径同款）。"""
+        ctx = Context()
+        reg = ToolRegistry(ctx)
+        reg.register(Tool(
+            name="bash", description="Run a shell command.",
+            parameters={"type": "object", "properties": {"cmd": {"type": "string"}},
+                        "required": ["cmd"]},
+            execute=lambda args, e: "stdout"))
+        return AgentLoop(session, FakeLlmAdapter(final_text="恢复完成。"), reg, ctx)
+
+    @staticmethod
+    def _compact(session):
+        a_msg = next(e for e in reversed(session.events) if e["type"] == "assistant/message")
+        session.append(
+            "user/message",
+            create_message("user", [text_block("压缩摘要")],
+                           {"kind": "plugin", "plugin": "compact", "compactionId": "c1"}),
+            surfaceOp={"op": "replace", "startSeq": a_msg["seq"], "endSeq": a_msg["seq"]},
+            sourceEventSeqs=[a_msg["seq"]],
+        )
+
+    def test_resume_without_compaction_does_not_start_series(self):
+        # 上游 agent.ts:128 构造时播种 requestSurfaceGeneration = 当前
+        # contentGeneration（注释 "at attachment"）：附件前已发生的替换不再
+        # 视作系列断裂，故 resume 锚不带 startsSeries。
+        session, loop, _ = _make_env()
+        loop.followup("第一句")
+        loop2 = self._fresh_loop(session)
+        loop2.followup("第二句")
+        headers = [e for e in session.events if e["type"] == "request/header"]
+        self.assertEqual(headers[0]["data"]["reason"], "initial")
+        self.assertNotIn("startsSeries", headers[0]["data"])
+        self.assertEqual(headers[1]["data"]["reason"], "resume")
+        self.assertNotIn("startsSeries", headers[1]["data"])
+
+    def test_compaction_during_first_resumed_step_marks_new_series(self):
+        # 回归（F1/F2）：上游 agent.ts:619-624 注释「Compaction during the
+        # first resumed pre-step must still mark a new series」——resume 与
+        # initial 分支同样携带 startsSeries；播种值非 None（上游
+        # requestSurfaceGeneration 构造即取当前 contentGeneration）。
+        session, loop, _ = _make_env()
+        loop.followup("第一句")
+        loop2 = self._fresh_loop(session)   # 先附件（播种当前代数）
+        self._compact(session)              # 再压缩（附件后的首个 resume pre-step）
+        loop2.followup("第二句")
+        headers = [e for e in session.events if e["type"] == "request/header"]
+        self.assertEqual(headers[0]["data"]["reason"], "initial")
+        self.assertNotIn("startsSeries", headers[0]["data"])
+        self.assertEqual(headers[1]["data"]["reason"], "resume")
+        self.assertTrue(headers[1]["data"].get("startsSeries") is True)
+
+    def test_fresh_session_first_request_has_no_starts_series(self):
+        # 回归（F2）：修复前 _request_surface_generation 初值 None，首请求
+        # None != 0 恒真 → 误判系列断裂。播种后首请求不带 startsSeries。
+        session, loop, _ = _make_env()
+        loop.followup("第一句")
+        headers = [e for e in session.events if e["type"] == "request/header"]
+        self.assertEqual(headers[0]["data"]["reason"], "initial")
+        self.assertNotIn("startsSeries", headers[0]["data"])
+
+    def test_header_equals_thaws_frozen_log_entries(self):
+        # 回归：日志里的 header 是冻结结构（MappingProxyType/tuple），直接 `==`
+        # 比较新 dict/list 会因 tuple≠list 误判不等，导致 reason 落 'change'。
+        from miniharness.core.agent_loop.agent import canonical_header, header_equals
+
+        session, loop, _ = _make_env()
+        loop.followup("第一句")
+        baseline = session.request_header()
+        cfg = loop._request_config(loop._turn, loop._step)
+        built = canonical_header(cfg, tools=loop._tool_definitions(),
+                                 adapter_defaults=loop._adapter_defaults())
+        self.assertIsInstance(baseline["tools"], tuple)  # 冻结容器 ≠ list
+        self.assertTrue(header_equals(baseline, built))
+        # 值差异必须判不等（键序敏感，对齐上游 JSON.stringify）
+        other = dict(built, config=dict(built["config"], model="other"))
+        self.assertFalse(header_equals(baseline, other))
+
     def test_goal_round_starts_request_series(self):
         # A5（上游 goal-round-driver → agent.ts startsRequestSeries 传参）：
         # 后续 step 认领消息含 goal round 源头 → 即使 header 未变也落

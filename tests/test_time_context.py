@@ -69,6 +69,34 @@ class TestBrowserZone(unittest.TestCase):
         with self.assertRaises(TypeError):
             derive_browser_time_zone_context([self._user("Shanghai")])
 
+    def test_rejects_noncanonical_zone_before_classifying(self):
+        # 上游 request-zone.spec.ts:51-53：Etc/UTC 的 canonical 回读是 UTC。
+        with self.assertRaisesRegex(TypeError, "must be canonical:"):
+            derive_browser_time_zone_context([self._user("Etc/UTC")])
+        # 大小写变体经回读被拒（Intl 可解析但 canonical ≠ 输入）。
+        with self.assertRaisesRegex(TypeError, "must be canonical:"):
+            derive_browser_time_zone_context([self._user("ASIA/SHANGHAI")])
+        # IANA 别名同样非 canonical（回读解析到 Link 目标）。
+        with self.assertRaisesRegex(TypeError, "must be canonical:"):
+            derive_browser_time_zone_context([self._user("US/Pacific")])
+        # 无斜杠的 'utc' 在词法一步即拒（上游 request-zone.ts:25）。
+        with self.assertRaisesRegex(
+                TypeError, "must be canonical UTC or IANA Area/Location"):
+            derive_browser_time_zone_context([self._user("utc")])
+
+    def test_error_text_quotes_value_as_json(self):
+        # 上游消息用 JSON.stringify（双引号），不是 Python repr 的单引号。
+        with self.assertRaises(TypeError) as cm:
+            derive_browser_time_zone_context([self._user("+08:00")])
+        self.assertIn('"+08:00"', str(cm.exception))
+
+    def test_non_string_rpc_id_reads_as_missing(self):
+        # 上游 request-zone.ts:18：rpcId 非字符串即不是普通 user-rpc 消息。
+        self.assertEqual(
+            derive_browser_time_zone_context(
+                [self._user("Asia/Shanghai", rpc_id=42)]),
+            {"kind": "missing"})
+
     def test_render_policy_lines(self):
         self.assertEqual(
             render_browser_time_zone_context({"kind": "resolved", "timeZone": "UTC"}),
@@ -123,7 +151,8 @@ class TimeContextCase(unittest.TestCase):
         self.assertIn("[Asia/Shanghai]", text)
 
     def test_later_step_measures_from_preceding_step_context(self):
-        install_time_context(self.ctx, {"timeZone": "UTC"})
+        # 0 = 每个合格 step 都注入（上游 Config 文档）；否则 10 分钟缺省会抑制。
+        install_time_context(self.ctx, {"timeZone": "UTC", "refreshIntervalMs": 0})
         self.session.append("user/message", create_message(
             "user", [text_block("q")], {"kind": "user", "rpcId": "r1"})["content"][0],
             surfaceOp="append")
@@ -144,6 +173,15 @@ class TimeContextCase(unittest.TestCase):
 
     def test_refresh_interval_suppresses_near_duplicate(self):
         install_time_context(self.ctx, {"timeZone": "UTC", "refreshIntervalMs": 3_600_000})
+        first = self._pre_step()
+        self.assertEqual(len(first["messages"]), 1)
+        self.session.append("user/message", first["messages"][-1], surfaceOp="append")
+        second = self._pre_step(step=2)
+        self.assertEqual(second["messages"], [])
+
+    def test_default_refresh_interval_is_ten_minutes(self):
+        # 未配置 refreshIntervalMs → 600000ms（10 分钟），同 turn 的下一步被抑制。
+        install_time_context(self.ctx, {"timeZone": "UTC"})
         first = self._pre_step()
         self.assertEqual(len(first["messages"]), 1)
         self.session.append("user/message", first["messages"][-1], surfaceOp="append")

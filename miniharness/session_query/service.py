@@ -199,6 +199,27 @@ class SessionQuery(Service):
             "events": surface,
         }
 
+    def projections(self, session_id: str, keys: list | None = None):
+        """活会话当前割面的投影快照（对齐 observation.live 的 snapshot 段）。
+
+        仅活会话可投影（冷/持久化会话无注册表 cell）；`sessionProjections`
+        缺席返回 None。`snapshot(session)` 抛错统一折算
+        `SESSION_QUERY_CORRUPT_SESSION`（observation.ts:284-294 同构）。
+        """
+        registry = self.ctx.get("sessionProjections")
+        if registry is None:
+            return None
+        store = self._store()
+        session = store.get(session_id) if store is not None else None
+        if session is None:
+            return None
+        try:
+            return registry.snapshot(session, keys)
+        except BaseException as error:
+            raise SessionQueryError(
+                f'failed to project session "{session_id}": {error}',
+                "SESSION_QUERY_CORRUPT_SESSION", error) from error
+
     def read_event(self, request: dict) -> dict:
         session_id = request.get("sessionId")
         seq = request.get("seq")

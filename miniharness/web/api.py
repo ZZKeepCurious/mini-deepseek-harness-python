@@ -1,12 +1,15 @@
 """web 会话服务：session 域 unary + 流订阅工厂（对齐 `packages/api/session-controller`）。
 
 方法集（alpha.1 已核实）：`session/list` / `session/search` / `session/create` /
-`session/selectModel` / `session/modelCatalog` / `session/canOpenWorkspacePath` /
-`session/openWorkspacePath` / `session/rename` / `session/fork` / `session/prompt` /
-`session/attachment` / `session/updateQueue` / `session/cancel` / `session/page`；
-流方法 `session/follow` / `session/control` 返回缓冲订阅对象（api 层同步可测，
-事件循环泵由载体层 web/mux.py 驱动）。`host.describe` / `session/history` /
-`session/models` 已从新契约消失，连同 apiproxy 阶段的命令路由一起移除。
+`session/selectModel` / `session/modelCatalog` / `session/initializeDefaultModel` /
+`session/canOpenWorkspacePath` / `session/openWorkspacePath` / `session/rename` /
+`session/fork` / `session/prompt` / `session/attachment` / `session/updateQueue` /
+`session/cancel` / `session/page`；流方法 `session/follow` / `session/control` 返回
+缓冲订阅对象（api 层同步可测，事件循环泵由载体层 web/mux.py 驱动）。`host.describe` /
+`session/history` / `session/models` 已从新契约消失，连同 apiproxy 阶段的命令路由一起移除。
+本文件另承载 workspace / workspaceFiles / terminal / settings / credentials / job /
+agentPresets / schedule / account / userQuestions / feedback / permissionPresets /
+sessionReferenceResolver 等 Remote namespace 的 unary 方法面（各域见对应小节）。
 
 契约已逐条对照上游源码核实（status/upstream/baseline.md D18-21）；错误分支的
 消息文案与 details 形状来自 session-controller/src/{commands,agent,history,
@@ -43,6 +46,7 @@ from ..attachment.types import (
     ImageAttachmentRef,
 )
 from ..core.agent_loop.agent import AgentLoop
+from ..core.agent_loop.resident_loop import run_on_resident
 from ..core.scope import Context
 from ..core.session import SESSION_FORMAT_VERSION, Session, thaw
 from ..core.session.message import create_message, image_block, text_block
@@ -328,7 +332,13 @@ class WebApi:
         # sessionProjections 注册表 + telemetry 投影单元：session/projections 读面与
         # session/control 的 projection 帧都要求注册表在场（对齐上游 control.ts
         # 构造注入 `ctx.sessionProjections`）。已装则幂等复用。
-        install_session_projections(ctx)
+        projections = install_session_projections(ctx)
+        # dsh-v0.2.0-rc.2：userQuestions 服务在场时注册其提问投影单元（上游
+        # UserQuestionService 构造时 ctx.inject(['sessionProjections']) 注册）。
+        if ctx.get("userQuestions") is not None:
+            from ..interaction.user_questions import register_user_question_projection
+
+            register_user_question_projection(projections)
         install_usage_stats(ctx)
         self.attachments = ctx.get("attachments")
         self._agents: dict[str, AgentLoop] = {}
@@ -349,6 +359,7 @@ class WebApi:
         "session/create": "create_session",
         "session/selectModel": "select_model",
         "session/modelCatalog": "model_catalog",
+        "session/initializeDefaultModel": "initialize_default_model",
         "session/canOpenWorkspacePath": "can_open_workspace_path",
         "session/openWorkspacePath": "open_workspace_path",
         "session/rename": "rename",
@@ -396,14 +407,23 @@ class WebApi:
         "agentPresets/list": "agent_presets_list",
         "agentPresets/read": "agent_presets_read",
         "agentPresets/select": "agent_presets_select",
+        "userQuestions/answer": "user_questions_answer",
         "sessionFeedback/record": "session_feedback_record",
         "messageFeedback/list": "message_feedback_list",
         "messageFeedback/put": "message_feedback_put",
         "messageFeedback/delete": "message_feedback_delete",
         "permissionPresets/catalog": "permission_presets_catalog",
+        "schedule/list": "schedule_list",
+        "schedule/catalog": "schedule_catalog",
+        "schedule/history": "schedule_history",
+        "schedule/delete": "schedule_delete",
+        "schedule/update": "schedule_update",
         "account/getState": "account_get_state",
         "account/getProfile": "account_get_profile",
         "account/getBalance": "account_get_balance",
+        "account/getUnnotifiedBonuses": "account_get_unnotified_bonuses",
+        "account/ackBonusNotified": "account_ack_bonus_notified",
+        "account/hasRunningAccountTasks": "account_has_running_account_tasks",
         "account/signOut": "account_sign_out",
     }
 
@@ -631,8 +651,9 @@ class WebApi:
             lambda: self._workspace_controller().create({"path": payload.get("path")}))
 
     def workspace_initialize_default(self, payload: dict) -> dict | None:
-        return self._remote_call(lambda: self._workspace_controller().initialize_default(
-            {"directoryName": payload.get("directoryName"), "title": payload.get("title")}))
+        # dsh-v0.2.0-rc.2：入参删除（上游 initializeDefault(signal) 无载荷，固定目录）。
+        return self._remote_call(
+            lambda: self._workspace_controller().initialize_default())
 
     def workspace_rename(self, payload: dict) -> dict:
         return self._remote_call(lambda: self._workspace_controller().rename(
@@ -839,13 +860,12 @@ class WebApi:
         """`agentPresets.list`：当前部署的 preset 选择列表（AgentPresetRoster）。
 
         对齐上游 agent-preset-registry remoteExportList：`{presets: rows.map(
-        ...isDefault), modeSelectionEnabled}`。roster.rows() 已产 AgentPresetRow
-        形态（{id, isDefault, name?, description?, broken?}）。modeSelectionEnabled
-        缺省 true（mini 部署无 settings 配置面，见载体差异登记）。
+        ...isDefault)}`。dsh-v0.2.0-rc.2 删除了 `modeSelectionEnabled` 字段
+        （roster 形状收窄，changelog 2026-09-30 boot/preset 行）。roster.rows()
+        已产 AgentPresetRow 形态（{id, isDefault, name?, description?, broken?}）。
         """
         roster = self._agent_preset_roster()
-        return {"presets": roster.rows(),
-                "modeSelectionEnabled": True}
+        return {"presets": roster.rows()}
 
     def agent_presets_read(self, payload: dict) -> dict:
         """`agentPresets.read`：一条声明行的可读文档（AgentPresetDocument）。
@@ -918,6 +938,22 @@ class WebApi:
                           {"agentPreset": preset_id, "available": roster.ids()}) from error
         session.append("agent-preset/selected", {"agentPreset": preset.id})
         return preset.id
+
+    # ---------- userQuestions 域（user-questions Remote 方法面，dsh-v0.2.0-rc.2） ----------
+
+    def _user_questions_service(self):
+        service = self.ctx.get("userQuestions")
+        if service is None:
+            raise _Reject("gateway/invocation-unavailable",
+                          "userQuestions namespace is not mounted in this deployment", {})
+        return service
+
+    def user_questions_answer(self, payload: dict) -> bool:
+        """`userQuestions/answer`：回答一个 continued timed 提问（上游 index.ts:165）。"""
+        service = self._user_questions_service()
+        agent = self.resolve_terminal_agent(payload.get("agentId"))
+        return bool(self._remote_call(lambda: service.answer(
+            agent, payload.get("callId"), payload.get("answer"))))
 
     # ---------- session.list ----------
     @staticmethod
@@ -1081,7 +1117,22 @@ class WebApi:
 
     # ---------- session.selectModel / modelCatalog ----------
 
+    def _model_available(self, provider: Any, model: Any) -> bool:
+        """模型可用性门（上游 catalog.ts modelAvailable）。
+
+        部署的单适配器路由 = 当前 resolve_model_info 报出的 provider/model。
+        未列出的 provider/model → False → 调用方折 `session/model-unavailable`。
+        """
+        selection = self._selection()
+        return selection["provider"] == provider and selection["model"] == model
+
     def select_model(self, payload: dict) -> dict:
+        """`session/selectModel`：安装会话级模型选择（上游 commands.ts selectModel）。
+
+        dsh-v0.2.0-rc.2：默认保存改为 fire-and-forget（保存失败不再让 RPC 失败）；
+        mini 的保存即 advisory `_selections` 记录，天然不抛错（载体等价）。
+        先过 `modelAvailable` 门（未列 → `session/model-unavailable`）。
+        """
         session_id = _require_id(payload, "sessionId")
         provider = payload.get("provider")
         model = payload.get("model")
@@ -1091,10 +1142,9 @@ class WebApi:
             raise _Reject("session/not-found", f'session "{session_id}" not found',
                           {"sessionId": session_id})
         session, _loop = found
-        selection = self._selection()
-        if selection["provider"] != provider or selection["model"] != model:
+        if not self._model_available(provider, model):
             raise _Reject("session/model-unavailable",
-                          f'no adapter serves provider "{provider}" model "{model}"',
+                          "Select an available model before sending a message.",
                           {"provider": provider, "model": model})
         resolved: dict[str, Any] = {"provider": provider, "model": model}
         if reasoning_effort is not None:
@@ -1103,6 +1153,9 @@ class WebApi:
         return {"selected": resolved}
 
     def model_catalog(self, payload: dict) -> dict:
+        """`session/modelCatalog`：可路由 provider 由「有 ≥1 目录模型」派生
+        （上游 catalog.ts buildModelCatalog：groups 过滤 models.length > 0，
+        routableProviders = groups.map(id)）。"""
         selection = self._selection()
         provider = selection["provider"]
         model = selection["model"]
@@ -1110,8 +1163,50 @@ class WebApi:
         if model:
             groups.append({"id": provider, "name": provider,
                            "models": [{"id": model, "name": model}]})
-        return {"default": selection, "routableProviders": [provider],
+        groups = [group for group in groups if group["models"]]
+        return {"default": selection,
+                "routableProviders": [group["id"] for group in groups],
                 "groups": groups, "failures": []}
+
+    def _has_provider_api_key(self) -> bool:
+        """配置的 API-key 凭据检查（上游 catalog.ts hasProviderApiKey）。
+
+        与服务设置/凭据面同款：部署未挂 `ctx.settings`/`ctx.credentials` 时
+        `session/provider-credentials-unavailable`（上游抛出同码）。mini 无
+        configurable provider 注册表（单适配器），检查面恒空 → False。
+        """
+        settings = self.ctx.get("settings")
+        credentials = self.ctx.get("credentials")
+        if settings is None or credentials is None:
+            raise _Reject("session/provider-credentials-unavailable",
+                          "provider credentials are unavailable", {})
+        return False
+
+    def initialize_default_model(self, payload: dict) -> None:
+        """`session/initializeDefaultModel`：登录后无 API key 时选首个可用账户模型
+        （上游 session-controller index.ts:287-303）。
+
+        上游要求 `ctx.settings` + `ctx.credentials`（`hasProviderApiKey`）与
+        `deepseek-account` provider 的目录模型；mini 单适配器无账户 provider，
+        故缺失 provider 模型时折 `session/provider-models-unavailable`
+        （`{provider:'deepseek-account'}`，如实标注无账户目录）。
+        """
+        provider = "deepseek-account"
+        if self._has_provider_api_key():
+            return
+        catalog = self.model_catalog({})
+        group = next((item for item in catalog["groups"]
+                      if item["id"] == provider), None)
+        if group is None or not group["models"]:
+            raise _Reject("session/provider-models-unavailable",
+                          f'provider "{provider}" has no available models',
+                          {"provider": provider})
+        model = group["models"][0]
+        selection: dict[str, Any] = {"provider": provider, "model": model["id"]}
+        default_effort = ((model.get("reasoning") or {}).get("defaultEffort"))
+        if default_effort is not None:
+            selection["reasoningEffort"] = default_effort
+        self._selections["__default__"] = selection
 
     # ---------- workspace 路径 ----------
 
@@ -1652,6 +1747,47 @@ class WebApi:
         """`permissionPresets/catalog`：进程级可读目录。"""
         return self._remote_call(lambda: self._permission_presets().catalog())
 
+    # ---------- schedule 域（schedule Remote namespace，dsh-v0.2.0-rc.2） ----------
+    #
+    # 上游 `packages/schedule/schedule` 的 `schedule` 命名空间 Remote 面：
+    #   list / catalog / history / delete / update（model 工具 create 不在此面上）。
+    # 读取与删除都不激活会话（权威存储 = schedule storage-domain 表）；服务本体
+    # 异步，经常驻事件循环同步驱动（同 workspace/workspaceFiles 控制器）。
+
+    def _schedule_service(self):
+        service = self.ctx.get("schedule")
+        if service is None:
+            raise _Reject("gateway/invocation-unavailable",
+                          "schedule namespace is not mounted in this deployment", {})
+        return service
+
+    def schedule_list(self, payload: dict) -> list:
+        service = self._schedule_service()
+        return self._remote_call(lambda: run_on_resident(
+            service.list({"sessionId": payload.get("sessionId")})))
+
+    def schedule_catalog(self, payload: dict) -> list:
+        service = self._schedule_service()
+        return self._remote_call(lambda: run_on_resident(service.catalog()))
+
+    def schedule_history(self, payload: dict) -> dict:
+        service = self._schedule_service()
+        return self._remote_call(lambda: run_on_resident(service.history({
+            "sessionId": payload.get("sessionId"), "id": payload.get("id"),
+            "limit": payload.get("limit"), "before": payload.get("before")})))
+
+    def schedule_delete(self, payload: dict) -> dict:
+        service = self._schedule_service()
+        return self._remote_call(lambda: run_on_resident(service.delete({
+            "sessionId": payload.get("sessionId"), "id": payload.get("id")})))
+
+    def schedule_update(self, payload: dict) -> dict:
+        service = self._schedule_service()
+        return self._remote_call(lambda: run_on_resident(service.update({
+            "sessionId": payload.get("sessionId"), "id": payload.get("id"),
+            "expected": payload.get("expected"), "change": payload.get("change"),
+            "title": payload.get("title"), "prompt": payload.get("prompt")})))
+
     def _deepseek_account(self):
         service = self.ctx.get("deepseekAccount")
         if service is None:
@@ -1660,20 +1796,82 @@ class WebApi:
         return service
 
     def account_get_state(self, payload: dict) -> dict:
-        """`account/getState`：安全账户投影（无凭据）。"""
+        """`account/getState`：安全账户投影（无凭据；无 AccountClientMetadata 入参）。"""
         return self._remote_call(lambda: self._deepseek_account().get_state())
 
     def account_get_profile(self, payload: dict):
-        """`account/getProfile`：Platform 档案（未登录/无 grant → null）。"""
+        """`account/getProfile`：Platform 档案（未登录/无 grant → null）。
+
+        dsh-v0.2.0-rc.2：RPC 增 `AccountClientMetadata{version,locale,
+        timezoneOffsetSeconds}` 入参（Host 据此派生 Platform 请求头）；mini 落空
+        实现无 Platform 载体，metadata 被接受但未消费（触发条件登记）。
+        """
+        self._account_client_metadata(payload)
         return self._remote_call(lambda: self._deepseek_account().get_profile())
 
     def account_get_balance(self, payload: dict):
         """`account/getBalance`：Platform 余额（未登录/无 grant → null）。"""
+        self._account_client_metadata(payload)
         return self._remote_call(lambda: self._deepseek_account().get_balance())
+
+    def account_get_unnotified_bonuses(self, payload: dict):
+        """`account/getUnnotifiedBonuses`：未展示的已发放 bonus（无 grant → null）。
+
+        dsh-v0.2.0-rc.2 新 RPC。mini 落空实现无 Platform/bonus 数据 → 无 grant 时
+        诚实地返回 null（上游同码：accountId + bonuses 批次或 null）。
+        """
+        self._account_client_metadata(payload)
+        service = self._deepseek_account()
+        method = getattr(service, "get_unnotified_bonuses", None)
+        if method is None:
+            return None
+        return self._remote_call(lambda: method())
+
+    def account_ack_bonus_notified(self, payload: dict) -> bool:
+        """`account/ackBonusNotified`：记录一条 bonus 已展示（无账户 → false）。"""
+        self._account_client_metadata(payload)
+        service = self._deepseek_account()
+        method = getattr(service, "ack_bonus_notified", None)
+        if method is None:
+            return False
+        return bool(self._remote_call(
+            lambda: method(payload.get("accountId"), payload.get("orderId"))))
+
+    def account_has_running_account_tasks(self, payload: dict) -> bool:
+        """`account/hasRunningAccountTasks`：是否有 running 任务在账户路由上。
+
+        对齐上游 `account-tasks.ts` `isRunningAccountTask`：status=='running'
+        且最新 request/context provider 为 `deepseek-account`。mini 以 WebApi
+        自有的 agent 集合 + `ctx.agents`（若装配）为消费面。
+        """
+        from ..deepseek_account import is_running_account_task
+
+        registry = self.ctx.get("agents")
+        agents = registry.list() if registry is not None else list(self._agents.values())
+        return any(is_running_account_task(agent) for agent in agents)
 
     def account_sign_out(self, payload: dict) -> dict:
         """`account/signOut`：移除本地 grant 并在后台向 Platform 撤销。"""
+        self._account_client_metadata(payload)
         return self._remote_call(lambda: self._deepseek_account().sign_out())
+
+    @staticmethod
+    def _account_client_metadata(payload: dict) -> dict:
+        """校验 `AccountClientMetadata`（dsh-v0.2.0-rc.2 全账户 RPC 入参）。
+
+        上游类型 `{version:string, locale:string, timezoneOffsetSeconds:number}`；
+        边界层已校验顶层类型，这里校验子字段形状并以业务码拒绝（值域不进路由层）。
+        """
+        client = payload.get("client")
+        if (not isinstance(client, dict)
+                or not isinstance(client.get("version"), str)
+                or not isinstance(client.get("locale"), str)
+                or isinstance(client.get("timezoneOffsetSeconds"), bool)
+                or not isinstance(client.get("timezoneOffsetSeconds"), int)):
+            raise _Reject(
+                "gateway/bad-request",
+                "client metadata must carry version, locale, and timezoneOffsetSeconds", {})
+        return client
 
     # ---------- wire 辅助 ----------
 

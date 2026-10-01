@@ -78,6 +78,7 @@ _SPECS: dict[str, dict[str, tuple[str, bool]]] = {
         "reasoningEffort": (STR, False),
     },
     "session/modelCatalog": {},
+    "session/initializeDefaultModel": {},
     "session/canOpenWorkspacePath": {},
     "session/openWorkspacePath": {
         "action": (STR, False),
@@ -186,10 +187,8 @@ _SPECS: dict[str, dict[str, tuple[str, bool]]] = {
     "workspace/create": {
         "path": (STR, True),
     },
-    "workspace/initializeDefault": {
-        "directoryName": (STR, True),
-        "title": (STR, True),
-    },
+    # dsh-v0.2.0-rc.2：initializeDefault 删除入参（固定目录 default-workspace）。
+    "workspace/initializeDefault": {},
     "workspace/rename": {
         "workspaceId": (STR, True),
         "title": (STR, True),
@@ -300,6 +299,17 @@ _SPECS: dict[str, dict[str, tuple[str, bool]]] = {
         "sessionId": (STR, True),
         "agentPreset": (STR, True),
     },
+    # user-questions（packages/interaction/user-questions）：answer 取 agentId +
+    # callId + answer；attachWait 流取 agentId + callId。
+    "userQuestions/answer": {
+        "agentId": (STR, True),
+        "callId": (STR, True),
+        "answer": (OBJ, True),
+    },
+    "userQuestions/attachWait": {
+        "agentId": (STR, True),
+        "callId": (STR, True),
+    },
     # feedback（command-feedback / message-feedback）：
     # sessionFeedback/record 取 sessionId + 可选 text/category；
     # messageFeedback/list 取 sessionId；put 取 sessionId + item{messageId,
@@ -325,12 +335,54 @@ _SPECS: dict[str, dict[str, tuple[str, bool]]] = {
     },
     # permission-presets：catalog 无入参。
     "permissionPresets/catalog": {},
-    # account-controller：getState/getProfile/getBalance/signOut 无入参
-    # （startSignIn/cancelSignIn 依赖浏览器 PKCE 载体，未挂载时缺席）。
+    # account-controller（packages/api/account-controller）：dsh-v0.2.0-rc.2 起
+    # getProfile/getBalance/getUnnotifiedBonuses/ackBonusNotified/signOut 均携带
+    # `client: AccountClientMetadata`；getState/hasRunningAccountTasks 无入参；
+    # watchExpiry 为无入参流。（startSignIn/cancelSignIn 依赖浏览器 PKCE 载体，缺席。）
     "account/getState": {},
-    "account/getProfile": {},
-    "account/getBalance": {},
-    "account/signOut": {},
+    "account/getProfile": {
+        "client": (OBJ, True),
+    },
+    "account/getBalance": {
+        "client": (OBJ, True),
+    },
+    "account/getUnnotifiedBonuses": {
+        "client": (OBJ, True),
+    },
+    "account/ackBonusNotified": {
+        "accountId": (STR, True),
+        "orderId": (STR, True),
+        "client": (OBJ, True),
+    },
+    "account/hasRunningAccountTasks": {},
+    "account/signOut": {
+        "client": (OBJ, True),
+    },
+    "account/watchExpiry": {},
+    # schedule（packages/schedule/schedule）：Remote namespace `schedule`，
+    # list/history/delete/update 取 sessionId（+ id 等），catalog 无入参。
+    "schedule/list": {
+        "sessionId": (STR, True),
+    },
+    "schedule/catalog": {},
+    "schedule/history": {
+        "sessionId": (STR, True),
+        "id": (STR, True),
+        "limit": (INT, True),
+        "before": (STR, False),
+    },
+    "schedule/delete": {
+        "sessionId": (STR, True),
+        "id": (STR, True),
+    },
+    "schedule/update": {
+        "sessionId": (STR, True),
+        "id": (STR, True),
+        "expected": (OBJ, True),
+        "change": (OBJ, False),
+        "title": (STR, False),
+        "prompt": (STR, False),
+    },
 }
 
 

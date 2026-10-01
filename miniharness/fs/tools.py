@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import Any, AsyncIterator, Iterable
 
+from ..core.code_language import read_lang_hint_for_path as lang_from_path
 from ..core.scope import Context
 from ..core.tools import Tool
 from .diff import fs_diff_meta
@@ -34,7 +35,9 @@ __all__ = [
     "parse_edit_args",
     "parse_read_args",
     "parse_write_args",
+    "read_presentation_meta",
     "remediate_fs_error",
+    "sandbox_permissions_description",
     "session_cwd",
     "write_presentation_meta",
 ]
@@ -182,29 +185,6 @@ def format_read_output(display_path: str, outcome: dict) -> str:
     return f"<path>{display_path}</path>\n<type>file</type>\n<content>\n{body}\n</content>"
 
 
-_LANG_BY_EXTENSION = {
-    "ts": "ts", "tsx": "tsx", "mts": "ts", "cts": "ts",
-    "js": "js", "jsx": "jsx", "mjs": "js", "cjs": "js",
-    "json": "json", "jsonc": "json",
-    "py": "py", "rb": "rb", "go": "go", "rs": "rs", "java": "java",
-    "c": "c", "h": "c", "cc": "cpp", "cpp": "cpp", "hpp": "cpp", "cxx": "cpp",
-    "cs": "cs", "kt": "kotlin", "swift": "swift", "php": "php",
-    "sh": "sh", "bash": "sh", "zsh": "sh",
-    "yaml": "yaml", "yml": "yaml", "toml": "toml", "ini": "ini",
-    "md": "md", "markdown": "md", "mdx": "mdx",
-    "html": "html", "htm": "html", "css": "css", "scss": "scss", "less": "less",
-    "sql": "sql", "xml": "xml", "lua": "lua",
-}
-
-
-def lang_from_path(path: str) -> str | None:
-    base = path.replace("\\", "/").rsplit("/", 1)[-1]
-    dot = base.rfind(".")
-    if dot <= 0:
-        return None
-    return _LANG_BY_EXTENSION.get(base[dot + 1:].lower())
-
-
 # ---------- 错误改写 / 沙箱 ----------
 
 
@@ -229,6 +209,12 @@ def escalation_hint_marker(subject: str) -> str:
     return (f"[sandbox: escalation available — retry this exact {subject} once with "
             "sandbox_permissions (the narrowest wider mode that suffices) + justification; "
             "the approval prompt asks the user]")
+
+
+def sandbox_permissions_description(subject: str) -> str:
+    """`sandbox_permissions` 参数说明（escalation.ts:95-97 逐字）。"""
+    return (f"The narrowest wider sandbox mode for a one-shot retry of the exact "
+            f"{subject} the sandbox just denied; the retry asks the user for approval.")
 
 
 def _validate_escalation_args(sandbox_permissions: Any, justification: Any) -> None:
@@ -281,11 +267,18 @@ class FsSandboxGate:
         outcome = approval.request(
             session, tool_name, getattr(exec, "call_id", None),
             f"escalate sandbox to {mode}: {args['justification']}",
-            getattr(exec, "signal", None))
+            getattr(exec, "signal", None),
+            display_reason={
+                "en": f"Allow this operation with {mode} permissions: "
+                      f"{args['justification']}",
+                "zh": f"允许本次操作使用 {mode} 权限：{args['justification']}",
+            })
         if outcome == "allowed-once":
             return {**standing, "mode": mode}
         if outcome == "rejected":
-            raise RuntimeError(f'the user rejected escalating this operation to "{mode}"')
+            raise RuntimeError(
+                f'the user rejected escalating this operation to "{mode}"; it '
+                "stays denied, so stop and explain instead of working around it")
         if outcome == "cancelled":
             raise RuntimeError(f'approval for escalating to "{mode}" was cancelled')
         raise RuntimeError(
@@ -319,14 +312,13 @@ def _escalation_schema_fields(gate: FsSandboxGate) -> dict:
     return {
         "sandbox_permissions": {
             "type": "string", "enum": list(gate.escalation_modes),
-            "description": "The wider sandbox mode this file operation needs. Only valid as a "
-                           "one-shot retry of an operation the sandbox just denied; requires "
-                           "justification and user approval.",
+            "description": sandbox_permissions_description("operation"),
         },
         "justification": {
             "type": "string",
             "description": "Required with sandbox_permissions: one sentence for the user "
-                           "explaining why this exact file operation needs the wider access.",
+                           "explaining why this exact file operation needs the wider access. "
+                           "Use the language of the user's current request.",
         },
     }
 
@@ -372,6 +364,25 @@ def format_edit_output(display_path: str, replace_all: bool) -> str:
     return f"The file {display_path} has been updated successfully."
 
 
+def read_presentation_meta(args: dict, value: dict) -> dict:
+    """read 结果投影为持久 `meta`（对齐 read.ts:124-132）：结构化行窗口 + 短 `lang`。
+
+    原始 canonical 值不上 wire，只有模型可见文本；行/语言数据必须在这里落到
+    `meta`，重放时读卡片才能复原。
+    """
+    lang = lang_from_path(value["path"])
+    meta = {
+        "path": value["path"],
+        "offset": value["offset"],
+        "lines": [{"number": line["number"], "text": line["text"]}
+                  for line in value["lines"]],
+        "totalLines": value["totalLines"],
+    }
+    if lang is not None:
+        meta["lang"] = lang
+    return meta
+
+
 def apply_read_tool(ctx: Context, *, limit: int, max_line_length: int,
                     max_bytes: int, stream_min_size: int) -> Tool:
     tool = Tool(
@@ -392,6 +403,7 @@ def apply_read_tool(ctx: Context, *, limit: int, max_line_length: int,
         render=lambda args, value: [{"type": "text", "text": format_read_output(
             value["path"], {"offset": value["offset"], "lines": value["lines"],
                             "totalLines": value["totalLines"]})}],
+        presentation_meta=read_presentation_meta,
     )
     ctx.get("tools").register(tool)
     return tool

@@ -49,6 +49,8 @@ LAYER_UNITS = [
     ("core.hmr", 0),
     ("core.schema", 0),
     ("core.tool_timeout", 0),
+    ("core.code_language", 0),
+    ("core.output_retention", 0),
     ("core.version", 0),
     ("core.home_paths", 0),
     ("loader", 0),
@@ -88,6 +90,7 @@ LAYER_UNITS = [
     ("skills", 2),
     ("web_tools", 2),
     ("telemetry", 2),
+    ("session_log_deepseek", 2),
     ("schedule", 2),
     ("session_query", 2),
     ("todo", 2),
@@ -379,6 +382,18 @@ class ImportDirectionTest(unittest.TestCase):
                     # §5 显式例外（单方向）：terminal-controller 上游依赖 dsh-subprocess
                     # 的终端 provider；mini 的 PTY seam 落在 terminal_bash/provider（P2）。
                     # terminal_bash 不得反向 import terminal_controller
+                    continue
+                if src_unit == "web" and dst_unit == "deepseek_account":
+                    # §5 显式例外（单方向）：account-controller wire 面复用
+                    # isRunningAccountTask 判据（上游 api/account-controller 直接
+                    # 依赖 dsh-deepseek-account）；deepseek_account 不得反向 import web
+                    continue
+                if src_unit == "llm" and dst_unit == "identity":
+                    # §5 显式例外（单方向）：llm-deepseek 请求头
+                    # x-deepseek-harness-user-id 复用匿名用户 id（上游
+                    # llm-deepseek/src/host.ts:7 直接 import
+                    # dsh-anonymous-user-id，package.json peerDependencies
+                    # 声明）；identity 不得反向 import llm
                     continue
                 if dst_layer >= src_layer:
                     violations.append(

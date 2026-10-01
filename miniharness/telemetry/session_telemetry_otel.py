@@ -1,19 +1,24 @@
 """OpenTelemetry 后端（对齐 packages/session/session-telemetry-otel）。
 
-组合 OTel Python SDK：`LoggerProvider` + `BatchLogRecordProcessor` + OTLP/HTTP exporter，
-把 coordinator 交来的每条记录映射为 `logger.emit()`；此后批处理/重试/队列/丢弃策略由
-SDK 承担。本包拥有采集模式（`FEEDBACK_ONLY` 按反馈 on-demand 采集；`DISABLED` 不建 SDK
-状态、仅对本地反馈告警）与一个外层 shutdown 期限。
+后端只做反馈授权 + 记录转发：把 coordinator 交来的 ledger 记录重建为完整事件，
+经共享 `ctx.otel.createSessionLogReporter` 的按字节界通道上报；资源身份与
+外层 shutdown 期限归本插件所有。
 
-**载体差异（登记）**：Node `@opentelemetry/sdk-logs` → Python `opentelemetry-sdk`；
-`getOrCreateAnonymousUserId` → mini `identity` 的匿名用户 id（缺失时省略 `user.id`）。
-测试可注入 `provider=`（真实 `LoggerProvider` + in-memory exporter），非 mock。
+**载体差异（登记）**：Node `@opentelemetry/sdk-logs` → 共享 `otel` 服务的
+自实现 OTLP/JSON 通道（按字节批处理 SDK 无对应能力）；`APP_IDENTITY` 取自
+mini `llm` 协议；`getOrCreateAnonymousUserId` → mini `identity`。
 """
 from __future__ import annotations
 
+import asyncio
 import urllib.parse
 
 from ..core.scope import Context
+from ..core.version import __version__
+from ..identity import get_or_create_anonymous_user_id
+from ..llm import APP_IDENTITY
+from .otel import SessionLogRecord
+from .otel_transport import SEVERITY_ERROR, SEVERITY_INFO, SEVERITY_WARN
 from .session_telemetry import (
     SessionTelemetryBackend,
     SessionTelemetryCoordinator,
@@ -32,13 +37,21 @@ MODE_FEEDBACK_ONLY = "FEEDBACK_ONLY"
 MODE_DISABLED = "DISABLED"
 DEFAULT_TELEMETRY_MODE = MODE_FEEDBACK_ONLY
 DEFAULT_SHUTDOWN_TIMEOUT_MILLIS = 3000
+MAX_TIMER_DELAY_MILLIS = 2_147_483_647
 
 DISABLED_FEEDBACK_WARNING = (
     "OpenTelemetry session upload is DISABLED; this feedback is not uploaded through OpenTelemetry")
 NON_CANONICAL_EVENT_WARNING = (
     "session telemetry ignored an event absent from the canonical session log")
+WITHHELD_ENVELOPE_WARNING = "Session log record withheld: redaction removed sourceEvent"
 
-_SEVERITY = {"info": (9, "INFO"), "warn": (13, "WARN"), "error": (17, "ERROR")}
+_SCOPE_NAME = "session-telemetry-otel"
+
+_SEVERITY = {
+    "info": SEVERITY_INFO,
+    "warn": SEVERITY_WARN,
+    "error": SEVERITY_ERROR,
+}
 
 
 def _is_feedback(session, event: dict) -> bool:
@@ -50,6 +63,13 @@ def _is_feedback(session, event: dict) -> bool:
     if kind in ("feedback/message-put", "feedback/message-delete"):
         return (event.get("data") or {}).get("sessionId") == session.session_id
     return False
+
+
+def _consume_task(task: asyncio.Task) -> None:
+    """外层期限到点后，后台 shutdown 任务仍会结算；消费其异常避免告警。"""
+    if task.cancelled():
+        return
+    task.exception()
 
 
 class _Sink:
@@ -68,7 +88,9 @@ class _Sink:
 class OpenTelemetrySessionBackend(SessionTelemetryBackend):
     """`sessionTelemetry` 的 OTel 后端插件。"""
 
-    def __init__(self, ctx: Context, config: dict | None = None, *, provider=None):
+    inject = ["sessions", "otel"]
+
+    def __init__(self, ctx: Context, config: dict | None = None):
         config = config or {}
         mode = config.get("mode") or DEFAULT_TELEMETRY_MODE
         if mode not in (MODE_FEEDBACK_ONLY, MODE_DISABLED):
@@ -76,18 +98,17 @@ class OpenTelemetrySessionBackend(SessionTelemetryBackend):
         super().__init__(ctx)
         self._mode = mode
         self._sharing = ("feedback-only" if mode == MODE_FEEDBACK_ONLY else "disabled")
-        self._provider = None
-        self._logger = None
+        self._reporter = None
         self._shutdown_timeout = DEFAULT_SHUTDOWN_TIMEOUT_MILLIS
 
         if mode == MODE_DISABLED:
             ctx.on("session/event", lambda payload: self._warn_disabled(payload))
             return
 
-        if provider is None:
-            provider = self._build_provider(config)
-        self._provider = provider
-        self._logger = provider.get_logger("session-telemetry-otel")
+        otel = ctx.get("otel")
+        if otel is None:
+            raise RuntimeError("session-telemetry-otel: the shared otel service is required")
+        self._reporter = self._build_reporter(otel, config)
         coordinator = SessionTelemetryCoordinator(
             ctx, _Sink(self), {"capture": "on-demand", "includeHistory": True})
         ctx.on("session/event", lambda payload: self._on_event(payload, coordinator))
@@ -96,14 +117,7 @@ class OpenTelemetrySessionBackend(SessionTelemetryBackend):
     def sharing(self) -> str:
         return self._sharing
 
-    def _build_provider(self, config: dict):
-        from opentelemetry.sdk._logs import (
-            LoggerProvider,
-            SynchronousMultiLogRecordProcessor,
-        )
-        from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
-        from opentelemetry.sdk.resources import Resource
-
+    def _build_reporter(self, otel, config: dict):
         exporter_config = config.get("exporter") or {}
         if not isinstance(exporter_config, dict):
             raise ValueError("session-telemetry-otel: exporter must be an object")
@@ -117,48 +131,59 @@ class OpenTelemetrySessionBackend(SessionTelemetryBackend):
                 f"session-telemetry-otel: exporter.url must be http(s), got {parsed.scheme!r}")
         processor_config = config.get("processor") or {}
         batch_size = processor_config.get("maxExportBatchSize")
-        if batch_size is not None and (not isinstance(batch_size, int) or batch_size < 1):
+        if batch_size is not None and (not isinstance(batch_size, int)
+                                       or isinstance(batch_size, bool) or batch_size < 1):
             raise ValueError(
                 "session-telemetry-otel: processor.maxExportBatchSize must be a positive integer")
         timeout = config.get("shutdownTimeoutMillis", DEFAULT_SHUTDOWN_TIMEOUT_MILLIS)
-        if not isinstance(timeout, (int, float)) or timeout <= 0:
+        if (not isinstance(timeout, (int, float)) or isinstance(timeout, bool)
+                or timeout <= 0 or timeout > MAX_TIMER_DELAY_MILLIS):
             raise ValueError(
-                "session-telemetry-otel: shutdownTimeoutMillis must be a positive number")
+                "session-telemetry-otel: shutdownTimeoutMillis must be a positive number no "
+                f"greater than {MAX_TIMER_DELAY_MILLIS}")
         self._shutdown_timeout = int(timeout)
 
-        from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
-        resource_attrs = {
-            "service.name": "mini-harness",
-            "service.version": "0.0.0",
+        options = {
+            "scope": {"name": _SCOPE_NAME, "version": __version__},
+            "exporter": exporter_config,
+            "resourceAttributes": {
+                "service.name": APP_IDENTITY.product,
+                "service.version": APP_IDENTITY.version,
+                "user.id": get_or_create_anonymous_user_id(),
+            },
+            "onFailure": lambda message, error=None: self._warn(message, error),
         }
-        try:
-            from ..identity import get_or_create_anonymous_user_id
-            resource_attrs["user.id"] = get_or_create_anonymous_user_id()
-        except Exception:  # noqa: BLE001 - 身份缺失时省略 user.id（载体差异）
-            pass
-        exporter = OTLPLogExporter(endpoint=url, headers=exporter_config.get("headers"))
-        multi = SynchronousMultiLogRecordProcessor()
-        multi.add_log_record_processor(BatchLogRecordProcessor(exporter))
-        return LoggerProvider(
-            resource=Resource.create(resource_attrs),
-            multi_log_record_processor=multi,
-        )
+        if processor_config:
+            options["processor"] = processor_config
+        if config.get("maxRequestBytes") is not None:
+            options["maxRequestBytes"] = config["maxRequestBytes"]
+        return otel.create_session_log_reporter(options)
+
+    def _warn(self, message: str, error: BaseException | None = None) -> None:
+        logger = self.ctx.root.logger
+        if logger is None:
+            return
+        if error is None:
+            logger.warn(message)
+        else:
+            logger.warn(message, error)
 
     # ---------- 上传路径 ----------
 
     def _enqueue(self, record: SessionTelemetryRecord) -> None:
-        if self._logger is None:
+        if self._reporter is None:
             return
-        from opentelemetry._logs import SeverityNumber
-        from opentelemetry.sdk._logs._internal import LogRecord
-        severity_number, severity_text = _SEVERITY[record.severity]
-        self._logger.emit(LogRecord(
-            timestamp=record.time * 1_000_000,
-            observed_timestamp=record.time * 1_000_000,
-            severity_number=SeverityNumber(severity_number),
-            severity_text=severity_text,
-            body=record.body,
+        source = record.source_event
+        if source is None:
+            self._warn(WITHHELD_ENVELOPE_WARNING)
+            return
+        event = dict(source["envelope"])
+        event["data"] = record.body
+        self._reporter.report_session_log(SessionLogRecord(
+            session_id=source["sessionId"],
+            event=event,
             attributes=record.attributes,
+            severity_number=_SEVERITY[record.severity],
         ))
 
     def emit(self, record: SessionTelemetryRecord) -> None:
@@ -171,9 +196,7 @@ class OpenTelemetrySessionBackend(SessionTelemetryBackend):
             return
         canonical = any(item is event for item in getattr(session, "events", []) or [])
         if not canonical:
-            logger = self.ctx.root.logger
-            if logger is not None:
-                logger.warn(NON_CANONICAL_EVENT_WARNING)
+            self._warn(NON_CANONICAL_EVENT_WARNING)
             return
         coordinator.capture_session(session, event.get("seq"))
 
@@ -182,16 +205,22 @@ class OpenTelemetrySessionBackend(SessionTelemetryBackend):
         event = payload.get("event")
         if session is None or event is None or not _is_feedback(session, event):
             return
-        logger = self.ctx.root.logger
-        if logger is not None:
-            logger.warn(DISABLED_FEEDBACK_WARNING)
+        self._warn(DISABLED_FEEDBACK_WARNING)
 
     # ---------- 拆解 ----------
 
     async def shutdown(self) -> None:
-        if self._provider is None:
+        """排空队列至部署期限；到点停止后续请求并拒绝（在途传输仍可结算）。"""
+        if self._reporter is None:
             return
+        reporter = self._reporter
+        task = asyncio.ensure_future(reporter.shutdown())
+        task.add_done_callback(_consume_task)
         try:
-            self._provider.force_flush(timeout_millis=self._shutdown_timeout)
-        finally:
-            self._provider.shutdown()
+            await asyncio.wait_for(
+                asyncio.shield(task), timeout=self._shutdown_timeout / 1000.0)
+        except asyncio.TimeoutError:
+            reporter.stop_pending()
+            raise RuntimeError(
+                "session-telemetry-otel: provider shutdown exceeded "
+                f"{self._shutdown_timeout}ms")

@@ -50,6 +50,15 @@ class EventSourceFailure(RuntimeError):
         self.details = details or {}
 
 
+def _signal_aborted(signal: Any) -> bool:
+    """中止判定：AbortSignal 形状读 `.aborted`；事件/熔合信号读 `is_set()`。"""
+    aborted = getattr(signal, "aborted", None)
+    if aborted is not None:
+        return bool(aborted)
+    is_set = getattr(signal, "is_set", None)
+    return bool(is_set()) if callable(is_set) else False
+
+
 class _ClientQueue:
     """一个客户端事件代次的缓冲队列（pull + 唤醒，同步推进、异步消费）。"""
 
@@ -131,6 +140,20 @@ def _host_home() -> str:
     return str(Path.home())
 
 
+def _forward_emit(ctx: Any, registry: "RemoteEventRegistry", event: str) -> Any:
+    """注册一个无重命名转发的 emit 源（上游 API_REMOTE_FORWARDED_EVENTS）。
+
+    payload 为 None（无参事件）→ 空 args；否则单参事件按 `[payload]` 转发
+    （credentials/record-updated 的 subject）。
+    """
+    def listener(payload: Any) -> None:
+        if payload is None:
+            registry.broadcast(event)
+        else:
+            registry.broadcast(event, payload)
+    return ctx.on(event, listener, global_=True)
+
+
 class RemoteEventRegistry:
     """`$events` 流注册表：客户端代次、挂起 waterfall、api-session/* 转发源。
 
@@ -188,7 +211,7 @@ class RemoteEventRegistry:
             self.broadcast("api-session/activity", session.session_id, event.get("time"))
 
         def on_settings_document_updated(payload: dict) -> None:
-            # 对齐上游 remote-events.ts:40 `settings/document-updated`（mode emit）：
+            # 对齐上游 remote-events.ts:45 `settings/document-updated`（mode emit）：
             # 转发 {ns, revision}。payload 由 settings 服务保证无损 JSON。
             ns = payload.get("ns")
             revision = payload.get("revision")
@@ -196,6 +219,10 @@ class RemoteEventRegistry:
                 return
             self.broadcast("settings/document-updated", ns, revision)
 
+        # dsh-v0.2.0-rc.2 remote-events.ts:29-31,46 新增的转发源：
+        #   deepseek-account/session-expired / model-sign-in-required（无 args）
+        #   credentials/record-updated / reference-updated（单 subject 参数）
+        #   schedule/changed（无 args）
         ctx = api.ctx
         self._disposers = [
             ctx.on("session/created", on_created, global_=True),
@@ -205,6 +232,19 @@ class RemoteEventRegistry:
             ctx.on("session/event", on_session_event, global_=True),
             ctx.on("settings/document-updated", on_settings_document_updated, global_=True),
         ]
+        self._disposers.append(_forward_emit(ctx, self, "deepseek-account/session-expired"))
+        self._disposers.append(_forward_emit(ctx, self, "deepseek-account/model-sign-in-required"))
+        self._disposers.append(_forward_emit(ctx, self, "credentials/record-updated"))
+        self._disposers.append(_forward_emit(ctx, self, "credentials/reference-updated"))
+        self._disposers.append(_forward_emit(ctx, self, "schedule/changed"))
+
+    def has_live_client(self) -> bool:
+        """是否存在活跃的 `$events` 客户端流（上游 gateway index.ts:284 hasLiveClient）。
+
+        仅当某条 `$events` 流的 signal 尚未中止时为 True；裸 socket（未 open
+        `$events`）不算（mini 的 `_clients` 只在流内注册，天然等价）。
+        """
+        return any(not client.closed for client in self._clients.values())
 
     # ---------- 流侧：$events open + $events/result ----------
 
@@ -309,6 +349,8 @@ class RemoteEventRegistry:
         self._pending[pending.id] = pending
         for client in list(self._clients.values()):
             self._deliver(pending, client)
+        watcher = (None if signal is None else
+                   asyncio.ensure_future(self._watch_signal(pending, signal)))
         try:
             return await pending.wait()
         except asyncio.CancelledError:
@@ -317,8 +359,24 @@ class RemoteEventRegistry:
             # 中止客户端 pending），再向上传播取消。
             self._finish(pending)
             raise
+        finally:
+            if watcher is not None:
+                watcher.cancel()
 
     # ---------- 内部 ----------
+
+    async def _watch_signal(self, pending: _PendingInvocation, signal: Any) -> None:
+        """request.signal 中止即结算挂起（等价上游 request.signal 中止客户端 pending）。
+
+        ask_timed 的 Host 截止只置位 wait 的 signal；若无人通知本挂起，
+        ask→ask_timed 会永久等待，而上游保证 deadline 后落 `{pending, callId}`。
+        客户端先结算时挂起已移除，本协程直接退出。
+        """
+        while (self._pending.get(pending.id) is pending
+               and not _signal_aborted(signal)):
+            await asyncio.sleep(0.02)
+        if self._pending.get(pending.id) is pending:
+            self._cancel(pending, getattr(signal, "reason", None))
 
     def _deliver(self, pending: _PendingInvocation, client: _ClientQueue) -> None:
         pending.deliveries.add(client)

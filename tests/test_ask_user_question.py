@@ -21,8 +21,9 @@ from miniharness.interaction import (
     DELEGATED_CALLER,
     EMPTY_QUESTIONS,
     NO_PROVIDER,
-    register_ask_user_question,
+    PENDING_NOTICE,
     install_user_questions,
+    register_ask_user_question,
 )
 
 PROVIDER_ANSWERS = {"answers": [{"id": "pkg", "selected": ["pnpm"]}]}
@@ -213,6 +214,64 @@ class StructuredErrorTest(unittest.TestCase):
                          {"name": "UserQuestionError", "code": EMPTY_QUESTIONS})
         self.assertEqual(result.error,
                          "Error: ask_user_question requires at least one question")
+
+
+class TimedToolTest(unittest.TestCase):
+    """dsh-v0.2.0-rc.2：timed ask_user_question（tool-ask-user/src/timed.ts）。"""
+
+    def _setup(self, timeout=120):
+        ctx = Context(name="timed-tool")
+        install_agents(ctx)
+        service = install_user_questions(ctx)
+        reg = ToolRegistry(ctx)
+        register_ask_user_question(reg, ctx, mode="timed", timeout=timeout)
+        return ctx, service, reg
+
+    def test_timed_schema_declares_timeout_and_oneof_output(self):
+        ctx, _service, reg = self._setup()
+        self.addCleanup(ctx.dispose)
+        tool = reg.resolve(ASK_USER_QUESTION)
+        self.assertIn("timeout", tool.parameters["properties"])
+        self.assertIn("oneOf", tool.output)
+
+    def test_timeout_pending_returns_notice(self):
+        ctx, _service, reg = self._setup()
+        self.addCleanup(ctx.dispose)
+        root = _StubAgent(ctx, "root")
+        ctx.get("agents").register(root)
+        # 无应答者且 timeout 极短 → 前台窗口关闭 → pending + notice
+        exec_ = ToolExec(agent=root, call_id="c1")
+        result = _tool_run(ctx, reg, {"questions": _question_args()["questions"],
+                                      "timeout": 1}, exec_)
+        self.assertTrue(result.ok)
+        self.assertTrue(result.value["pending"])
+        self.assertEqual(result.value["callId"], "c1")
+        self.assertEqual(result.value["message"], PENDING_NOTICE)
+
+    def test_timed_answer_within_window(self):
+        ctx, _service, reg = self._setup()
+        self.addCleanup(ctx.dispose)
+        root = _StubAgent(ctx, "root")
+        ctx.get("agents").register(root)
+
+        async def answerer(request, nxt=None):
+            return PROVIDER_ANSWERS
+
+        ctx.on("user-questions/request", answerer)
+        exec_ = ToolExec(agent=root, call_id="c2")
+        result = _tool_run(ctx, reg, {"questions": _question_args()["questions"]}, exec_)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.value, PROVIDER_ANSWERS)
+
+    def test_timed_invalid_timeout_is_error(self):
+        ctx, _service, reg = self._setup()
+        self.addCleanup(ctx.dispose)
+        root = _StubAgent(ctx, "root")
+        ctx.get("agents").register(root)
+        result = _tool_run(ctx, reg, {"questions": _question_args()["questions"],
+                                      "timeout": 0}, ToolExec(agent=root, call_id="c3"))
+        self.assertTrue(result.is_error)
+        self.assertIn("timeout must be -1 or a positive integer", result.error)
 
 
 def _question_args(header=None, **overrides):

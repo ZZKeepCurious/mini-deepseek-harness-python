@@ -7,6 +7,7 @@
 """
 
 import asyncio
+import json
 import threading
 import unittest
 from types import SimpleNamespace
@@ -18,14 +19,20 @@ from miniharness.core.session_store import install_sessions
 from miniharness.interaction import (
     ASK_ABORTED,
     ASK_CANCELLED,
+    BAD_ANSWER,
     BAD_INTENT,
+    BAD_TIMEOUT,
     CALLER_NOT_LIVE,
     DELEGATED_CALLER,
+    DUPLICATE_WAIT,
     EMPTY_QUESTIONS,
     NO_PROVIDER,
+    REPLY_QUEUED,
     UserQuestionError,
+    fold_user_questions,
     install_user_questions,
 )
+from miniharness.session_projection import install_session_projections
 
 PROVIDER = {"answers": [{"id": "q1", "selected": ["ok"]}]}
 
@@ -292,6 +299,293 @@ class InstallTest(unittest.TestCase):
         second = install_user_questions(ctx)
         self.assertIs(first, second)
         self.assertIs(ctx.get("userQuestions"), first)
+
+
+class _Inbox:
+    def __init__(self):
+        self.next_turn = []
+        self.next_step = []
+
+
+class _TimedAgent:
+    """满足 AgentRegistry + answer/steer 契约的测试 agent。"""
+
+    def __init__(self, ctx, id_, session):
+        self.id = id_
+        self.session = session
+        self.scope = ctx.create_scope(f"agent:{id_}")
+        self.ctx = self.scope
+        self._carrier = scope_target(self, self.scope.scope_key)
+        self.inbox = _Inbox()
+        self.steered = []
+
+    def steer(self, message):
+        self.steered.append(message)
+        self.inbox.next_step.append(message)
+
+
+class _TimedFixture:
+    def __init__(self, name="timed"):
+        self.ctx = Context(name=name)
+        install_agents(self.ctx)
+        self.store = install_sessions(self.ctx)
+        self.registry = install_session_projections(self.ctx)
+        self.service = install_user_questions(self.ctx)
+        self.session = self.store.create("s-timed", {"meta": {}})
+        self.agent = _TimedAgent(self.ctx, "s-timed", self.session)
+        self.ctx.get("agents").register(self.agent)
+
+    def dispose(self):
+        self.ctx.dispose()
+
+    def seed(self, *, timed=True, pending=True):
+        tools = [{"name": "ask_user_question",
+                  "parameters": {"properties": ({"timeout": {"type": "integer"}}
+                                                 if timed else {})}}]
+        self.session.append("request/header", {
+            "header": {"tools": tools}, "reason": "initial"})
+        self.session.append("tool/call", {
+            "callId": "c1", "name": "ask_user_question",
+            "arguments": json.dumps({"questions": [
+                {"id": "q1", "question": "Continue?"}]})})
+        if pending:
+            content = json.dumps({"pending": True, "callId": "c1", "message": "pending"})
+        else:
+            content = json.dumps({"answers": [{"id": "q1", "selected": ["ok"]}]})
+        self.session.append("tool/result", {"message": {
+            "role": "tool", "toolCallId": "c1",
+            "source": {"kind": "tool", "callId": "c1"},
+            "content": [{"type": "text", "text": content}], "isError": False}},
+            surfaceOp="append")
+
+
+class UserQuestionProjectionTest(unittest.TestCase):
+    def setUp(self):
+        self.fx = _TimedFixture()
+        self.addCleanup(self.fx.dispose)
+
+    def test_timed_pending_call_stays_answerable(self):
+        self.fx.seed(timed=True, pending=True)
+        view = fold_user_questions(list(self.fx.session.events))
+        self.assertEqual(len(view["active"]), 1)
+        self.assertEqual(view["active"][0]["callId"], "c1")
+        self.assertEqual(view["active"][0]["state"], "continued")
+        self.assertEqual(view["settled"], [])
+
+    def test_legacy_schema_call_is_never_tracked(self):
+        self.fx.seed(timed=False, pending=True)
+        view = fold_user_questions(list(self.fx.session.events))
+        self.assertEqual(view, {"active": [], "settled": []})
+
+    def test_answer_in_window_settles_with_batch(self):
+        self.fx.seed(timed=True, pending=False)
+        view = fold_user_questions(list(self.fx.session.events))
+        self.assertEqual(view["active"], [])
+        self.assertEqual(view["settled"],
+                         [{"callId": "c1",
+                           "answers": [{"id": "q1", "selected": ["ok"]}]}])
+
+    def test_late_reply_settles_continued_question(self):
+        self.fx.seed(timed=True, pending=True)
+        self.fx.session.append("user/message", {
+            "id": "m1", "role": "user", "source": {
+                "kind": "user-question-reply", "callId": "c1", "outcome": "answered"},
+            "content": [{"type": "text", "text": json.dumps(
+                {"answers": [{"id": "q1", "selected": ["late"]}]})}]},
+            surfaceOp="append")
+        view = fold_user_questions(list(self.fx.session.events))
+        self.assertEqual(view["active"], [])
+        self.assertEqual(view["settled"][0]["answers"],
+                         [{"id": "q1", "selected": ["late"]}])
+
+    def test_registry_state_version_two(self):
+        definition = self.fx.registry._registrations["userQuestions"]["def"]
+        self.assertEqual(definition.state_version, 2)
+
+
+class PtcQuestionProjectionTest(unittest.TestCase):
+    """上游 projection.spec.ts:171-193：PTC 子调用的 pending 提问追踪。
+
+    `tool/ptc-dispatch` 的 arguments 是已解析对象（spec:175
+    `JSON.parse(toolArguments)`），fold 必须先序列化再解析（projection.ts:284）；
+    请求头只有 run_code（timed=False）时照常追踪——ptc 分支不看 timed。
+    """
+
+    @staticmethod
+    def _dispatch(**overrides):
+        return {
+            "rootCallId": "run_1", "parentCallId": "run_1",
+            "subCallId": "run_1:ptc:1", "name": "ask_user_question",
+            "arguments": {"questions": [
+                {"id": "q1", "question": "Pick one",
+                 "options": [{"label": "A"}, {"label": "B"}]}]},
+            "isError": False,
+            "content": [{"type": "text", "text": json.dumps(
+                {"pending": True, "callId": "run_1:ptc:1"})}],
+            **overrides,
+        }
+
+    @classmethod
+    def _events(cls, *dispatches):
+        header = {"seq": 0, "type": "request/header", "data": {"header": {
+            "tools": [{"name": "run_code", "parameters": {"type": "object"}}]}}}
+        return [header] + [
+            {"seq": index + 1, "type": "tool/ptc-dispatch", "data": dispatch}
+            for index, dispatch in enumerate(dispatches or (cls._dispatch(),))]
+
+    def test_pending_ptc_subcall_is_tracked(self):
+        view = fold_user_questions(self._events())
+        self.assertEqual(view["active"], [{
+            "callId": "run_1:ptc:1",
+            "questions": [{"id": "q1", "question": "Pick one",
+                           "options": [{"label": "A"}, {"label": "B"}]}],
+            "state": "continued"}])
+        self.assertEqual(view["settled"], [])
+
+    def test_duplicate_dispatch_keeps_single_card(self):
+        view = fold_user_questions(
+            self._events(self._dispatch(), self._dispatch()))
+        self.assertEqual(len(view["active"]), 1)
+        self.assertEqual(view["active"][0]["callId"], "run_1:ptc:1")
+
+    def test_unreadable_arguments_leave_no_card(self):
+        view = fold_user_questions(self._events(
+            self._dispatch(arguments={"questions": "invalid"})))
+        self.assertEqual(view, {"active": [], "settled": []})
+
+    def test_errored_or_settled_dispatch_leaves_no_card(self):
+        view = fold_user_questions(self._events(self._dispatch(isError=True)))
+        self.assertEqual(view, {"active": [], "settled": []})
+        view = fold_user_questions(self._events(self._dispatch(content=[
+            {"type": "text", "text": json.dumps({"answers": []})}])) )
+        self.assertEqual(view, {"active": [], "settled": []})
+
+
+class UserQuestionTimedServiceTest(unittest.TestCase):
+    def setUp(self):
+        self.fx = _TimedFixture()
+        self.addCleanup(self.fx.dispose)
+
+    def test_answer_steers_reply_and_closes_question(self):
+        self.fx.seed(timed=True, pending=True)
+        accepted = self.fx.service.answer(
+            self.fx.agent, "c1", {"answers": [{"id": "q1", "selected": ["ok"]}]})
+        self.assertTrue(accepted)
+        self.assertEqual(len(self.fx.agent.steered), 1)
+        message = self.fx.agent.steered[0]
+        self.assertEqual(message["source"]["kind"], "user-question-reply")
+        self.assertEqual(message["source"]["callId"], "c1")
+
+    def test_answer_unknown_call_returns_false(self):
+        self.fx.seed(timed=True, pending=True)
+        self.assertFalse(self.fx.service.answer(
+            self.fx.agent, "ghost", {"answers": []}))
+
+    def test_answer_bad_batch_rejected(self):
+        self.fx.seed(timed=True, pending=True)
+        with self.assertRaises(UserQuestionError) as cm:
+            self.fx.service.answer(
+                self.fx.agent, "c1", {"answers": [{"id": "other", "selected": []}]})
+        self.assertEqual(cm.exception.code, BAD_ANSWER)
+
+    def test_answer_duplicate_reply_queued(self):
+        self.fx.seed(timed=True, pending=True)
+        self.fx.service.answer(
+            self.fx.agent, "c1", {"answers": [{"id": "q1", "selected": ["ok"]}]})
+        with self.assertRaises(UserQuestionError) as cm:
+            self.fx.service.answer(
+                self.fx.agent, "c1", {"answers": [{"id": "q1", "selected": ["ok"]}]})
+        self.assertEqual(cm.exception.code, REPLY_QUEUED)
+
+    def test_ask_timed_times_out_to_pending(self):
+        self.fx.seed(timed=True, pending=True)
+        result = _run(self.fx.service.ask_timed(
+            {"questions": [{"id": "q1", "question": "?"}], "agent": self.fx.agent},
+            "c1", 20))
+        self.assertEqual(result, {"pending": True, "callId": "c1"})
+
+    def test_ask_timed_returns_answer_within_window(self):
+        self.fx.seed(timed=True, pending=True)
+        _answerer(self.fx.ctx)
+        result = _run(self.fx.service.ask_timed(
+            {"questions": [{"id": "q1", "question": "?"}], "agent": self.fx.agent},
+            "c1", 1000))
+        self.assertEqual(result, PROVIDER)
+
+    def test_ask_timed_bad_timeout(self):
+        with self.assertRaises(UserQuestionError) as cm:
+            _run(self.fx.service.ask_timed(
+                {"questions": [{"id": "q1", "question": "?"}], "agent": self.fx.agent},
+                "c1", 0))
+        self.assertEqual(cm.exception.code, BAD_TIMEOUT)
+
+    def test_ask_timed_duplicate_wait(self):
+        self.fx.service._waits[self.fx.agent] = {"c1": object()}
+        with self.assertRaises(UserQuestionError) as cm:
+            _run(self.fx.service.ask_timed(
+                {"questions": [{"id": "q1", "question": "?"}], "agent": self.fx.agent},
+                "c1", 1000))
+        self.assertEqual(cm.exception.code, DUPLICATE_WAIT)
+
+
+class TimedBridgeSettlementTest(unittest.TestCase):
+    """挂 web bridge 应答者时 ask_timed 的 Host 截止结算（上游 index.ts:261）。
+
+    bridge 经 RemoteEventRegistry 把 `user-questions/request` 转给客户端；
+    客户端不答时 Host 截止只置位 wait 的 signal——该 signal 必须结算 registry
+    的挂起，否则 ask→ask_timed 永久等待，而不是按 deadline 落
+    `{pending, callId}`（无应答者路径由 NO_PROVIDER→wait_done 覆盖，此处
+    是有应答者但无人结算的路径）。
+    """
+
+    def setUp(self):
+        self.fx = _TimedFixture()
+        self.addCleanup(self.fx.dispose)
+        from miniharness.web.events import RemoteEventRegistry
+        from miniharness.web.questions import RemoteQuestionBridge
+        self.registry = RemoteEventRegistry(home="C:/Users/me")
+        self.addCleanup(self.registry.dispose)
+        bridge = RemoteQuestionBridge(
+            SimpleNamespace(events=self.registry, api=None))
+        self.addCleanup(bridge.dispose)
+        bridge.install(SimpleNamespace(session=self.fx.session, ctx=self.fx.ctx))
+
+    def test_host_deadline_lands_pending_while_client_stalls(self):
+        async def go():
+            client = self.registry.open({"args": {}}).__aiter__()
+            await client.__anext__()  # ready
+            task = asyncio.ensure_future(self.fx.service.ask_timed(
+                {"questions": [{"id": "q1", "question": "?"}],
+                 "agent": self.fx.agent}, "c1", 60))
+            frame = await client.__anext__()  # waterfall（bridge 转发）
+            result = await asyncio.wait_for(task, timeout=5)
+            cancel = await client.__anext__()
+            return frame, result, cancel
+        frame, result, cancel = _run(go())
+        self.assertEqual(frame["event"], "user-questions/request")
+        self.assertEqual(frame["request"]["questions"][0]["id"], "q1")
+        self.assertEqual(result, {"pending": True, "callId": "c1"})
+        self.assertEqual(cancel["type"], "cancel")
+
+
+class TimedToolSchemaTest(unittest.TestCase):
+    def test_timeout_parameter_present_in_timed_and_absent_in_legacy(self):
+        from miniharness.core.tools import ToolRegistry
+        from miniharness.interaction import register_ask_user_question
+        ctx = Context(name="tools")
+        self.addCleanup(ctx.dispose)
+        install_user_questions(ctx)
+        reg = ToolRegistry(ctx)
+
+        legacy = register_ask_user_question(reg, ctx)
+        legacy_tool = reg.resolve("ask_user_question")
+        self.assertNotIn("timeout", legacy_tool.parameters["properties"])
+        legacy()
+
+        timed = register_ask_user_question(reg, ctx, mode="timed", timeout=30)
+        timed_tool = reg.resolve("ask_user_question")
+        self.assertIn("timeout", timed_tool.parameters["properties"])
+        timed()
 
 
 if __name__ == "__main__":

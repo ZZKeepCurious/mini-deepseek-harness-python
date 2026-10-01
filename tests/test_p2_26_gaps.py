@@ -110,29 +110,30 @@ class TestAuthorizationCommit(unittest.TestCase):
 
 
 class TestScheduleArchiveAdmission(unittest.TestCase):
+    """归档准入读 Host 存储行（本区间从会话事件投影改为 storage-domain 表）。"""
+
     def setUp(self):
+        import tempfile
         self.ctx = Context(name="sched-archive")
         self.addCleanup(self.ctx.dispose)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
         from miniharness.core.session_store import install_sessions
         from miniharness.core.agents import install_agents
+        from miniharness.storage import install_storage
         from miniharness.schedule import install_schedule
         install_agents(self.ctx)
         install_sessions(self.ctx)
-        install_schedule(self.ctx)
+        install_storage(self.ctx, os.path.join(self.tmp.name, "storage"))
+        self.service = install_schedule(self.ctx)
         self.session = self.ctx.get("sessions").create(
-            "s1", {"meta": {"cwd": __import__("os").path.abspath(".")}})
+            "s1", {"meta": {"cwd": os.path.abspath(".")}})
 
     def _add_reminder(self):
-        import time
-        from miniharness.schedule.domain import (
-            allocate_schedule_id, create_after_schedule_record, fold_schedule_events)
-        folded = fold_schedule_events(list(self.session.events))
-        rid = allocate_schedule_id(folded)
-        record = create_after_schedule_record(rid, "remind me", 5,
-                                              int(time.time() * 1000))
-        self.session.append("schedule/change", {
-            "version": 1, "operation": "create", "schedule": record})
-        return rid
+        import asyncio
+        record = asyncio.run(self.service.create(
+            "s1", {"prompt": "remind me", "title": "remind me", "after_seconds": 60}))
+        return record["id"]
 
     def test_session_activity_reports_schedule_kind(self):
         import asyncio
@@ -150,10 +151,9 @@ class TestScheduleArchiveAdmission(unittest.TestCase):
         rid = self._add_reminder()
         asyncio.run(self.ctx.aparallel("workspace/session-stop",
                                        {"sessionId": "s1"}))
-        from miniharness.schedule.domain import fold_schedule_events
-        folded = fold_schedule_events(list(self.session.events))
-        active = [r["id"] for r in folded.get("active") or []]
-        self.assertNotIn(rid, active)
+        self.assertIsNone(self.service._table.get(rid))
+        active = asyncio.run(self.service.list({"sessionId": "s1"}))
+        self.assertEqual(active, [])
 
 
 class TestHooksSourceKind(unittest.TestCase):

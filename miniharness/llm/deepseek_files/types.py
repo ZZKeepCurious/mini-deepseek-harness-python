@@ -1,6 +1,7 @@
 """DeepSeek 协议共享的目录与请求局部依赖类型。
 
-对应 dsh 真实源码：packages/llm/llm-deepseek/src/common/types.ts。
+对应 dsh 真实源码：packages/llm/llm-deepseek/src/types.ts（dsh-v0.2.0-rc.2 起
+自 common/ 上移顶层）。
 """
 from __future__ import annotations
 
@@ -30,6 +31,7 @@ class DeepSeekCatalogModel:
     imagePixelBudget: "int | str | None" = None
     imageMaxBytes: int | None = None
     systemPromptUpdate: str | None = None
+    toolUpdate: str | None = None
 
 
 @dataclass(frozen=True)

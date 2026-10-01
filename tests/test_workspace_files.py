@@ -114,6 +114,29 @@ class WorkspaceFilesCase(unittest.TestCase):
             self.scope, os.path.join(self.root, "dir", "one.txt"))),
             "workspace-file/not-directory")
 
+    def test_list_follows_directory_symlink(self):
+        # dsh-v0.2.0-rc.2：list 跟随目录 symlink，解析到目录则列举其子项。
+        self._write("real/one.txt", b"1")
+        link = os.path.join(self.root, "link")
+        try:
+            os.symlink(os.path.join(self.root, "real"), link, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks are unavailable on this platform")
+        listing = self.controller.list(self.scope, link)
+        self.assertEqual([entry["name"] for entry in listing["entries"]], ["one.txt"])
+
+    def test_list_rejects_symlink_to_file(self):
+        target_file = self._write("plain.txt", b"x")
+        link = os.path.join(self.root, "filelink")
+        try:
+            os.symlink(target_file, link)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks are unavailable on this platform")
+        with self.assertRaises(WorkspaceFileFault) as caught:
+            self.controller.list(self.scope, link)
+        self.assertEqual(caught.exception.code, "workspace-file/not-directory")
+        self.assertEqual(caught.exception.details, {"path": link, "kind": "symlink"})
+
     def test_changes_streams_ready_then_target_observations(self):
         path = self._write("watched.txt", b"x")
         target = run_on_resident(self.fs.resolve(path))

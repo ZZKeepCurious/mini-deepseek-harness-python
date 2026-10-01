@@ -24,7 +24,10 @@ from miniharness.seams.subagent.continuation import (
     epoch_stop_reason,
     fold_consumed_work,
 )
-from miniharness.seams.subagent.descriptor import CONTINUATION_PROVIDER
+from miniharness.seams.subagent.descriptor import (
+    CONTINUATION_PROVIDER,
+    seed_descriptor_turn,
+)
 
 
 def _settlement_notices(session):
@@ -491,6 +494,114 @@ class TestActivationCapacity(unittest.TestCase):
             mgr.start_continuable(label="孙", parent=act["loop"])   # depth 1 >= 1
         self.assertEqual(cm.exception.code, "MAX_DEPTH_EXCEEDED")
         mgr._settle(child, act, force=True)
+
+
+class TestCatalogListing(unittest.TestCase):
+    """listChildren/listDescendants 递归 catalog 语义（上游 list-children.ts
+    2026-09-30：递归读各父 catalog、hasChildren、activity、分支诊断）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.persistence = JsonlPersistence(self.tmp.name)
+        self.parent, self.ctx, self.reg = _parent_loop()
+
+    def test_recursive_has_children_and_activity(self):
+        mgr = SubagentContinuationManager(self.parent, self.persistence, max_depth=2)
+        cid = mgr.start_continuable(label="子")
+        child_act = mgr._get_or_resume(cid)
+        gid = mgr.start_continuable(label="孙", parent=child_act["loop"])
+        grand_act = mgr._get_or_resume(gid, parent=child_act["loop"])
+        rows = {row["id"]: row for row in mgr.list_descendants()}
+        self.assertEqual(set(rows), {cid, gid})
+        self.assertEqual(rows[cid]["depth"], 1)
+        self.assertEqual(rows[gid]["depth"], 2)
+        self.assertEqual(rows[gid]["parent"], cid)
+        # hasChildren = child catalog 有行：子的 catalog 有孙代；孙代无
+        self.assertTrue(rows[cid]["hasChildren"])
+        self.assertFalse(rows[gid]["hasChildren"])
+        # activity = 在世会话（上游 sessions.get 非空 → running）
+        self.assertEqual(rows[cid]["activity"], "running")
+        self.assertEqual(rows[gid]["activity"], "running")
+        # 结算后重读：inactive，且 durable catalog 仍可读（hasChildren 不变）
+        mgr._settle(gid, grand_act, force=True)
+        mgr._settle(cid, child_act, force=True)
+        after = {row["id"]: row for row in mgr.list_descendants()}
+        self.assertEqual(after[gid]["activity"], "inactive")
+        self.assertEqual(after[cid]["activity"], "inactive")
+        self.assertTrue(after[cid]["hasChildren"])
+
+    def test_unknown_mode_is_unsupported_and_still_traversed(self):
+        # 子会话存在但无可折叠描述符 → catalog mode 'unknown' → unsupported
+        # 诊断；其可读 catalog 仍被遍历（孙代挂在其下，手工持久化）
+        mgr = SubagentContinuationManager(self.parent, self.persistence, max_depth=2)
+        self.persistence.declare("mystery", {
+            "parentSession": self.parent.id, "origin": "subagent", "delegationDepth": 1,
+        })
+        grand = Session("grand-x")
+        seed_descriptor_turn(grand, {
+            "mode": "continuable", "provider": CONTINUATION_PROVIDER, "label": "孙",
+        })
+        self.persistence.declare("grand-x", {
+            "parentSession": "mystery", "origin": "subagent", "delegationDepth": 2,
+        })
+        mgr._persist_delta(grand, start=0)
+        rows = {row["id"]: row for row in mgr.list_descendants()}
+        self.assertEqual(rows["mystery"]["kind"], "diagnostic")
+        self.assertEqual(rows["mystery"]["reason"], "unsupported")
+        self.assertEqual(rows["mystery"]["depth"], 1)
+        self.assertEqual(rows["mystery"]["parent"], self.parent.id)
+        # unknown 子代照常遍历其可读 catalog（孙代）
+        self.assertEqual(rows["grand-x"]["kind"], "child")
+        self.assertEqual(rows["grand-x"]["mode"], "continuable")
+        self.assertEqual(rows["grand-x"]["depth"], 2)
+
+    def test_children_scope_omits_unknown_mode(self):
+        mgr = SubagentContinuationManager(self.parent, self.persistence)
+        cid = mgr.start_continuable(label="子")
+        self.persistence.declare("mystery", {
+            "parentSession": self.parent.id, "origin": "subagent", "delegationDepth": 1,
+        })
+        self.assertEqual([row["id"] for row in mgr.list_children()], [cid])
+
+    def test_branch_read_failure_stops_only_that_branch(self):
+        # 子 catalog 读失败（子日志损坏/不可读）只在**该分支**产诊断并停枝，
+        # 兄弟分支照常产出（上游 listDescendants 的 corrupt/unavailable 语义）。
+        corrupt = SubagentContinuationManager(self.parent, self.persistence)
+        bad_id = corrupt.start_continuable(label="坏")
+        good_id = corrupt.start_continuable(label="好")
+        failing = _FailingLoadPersistence(
+            self.tmp.name,
+            {bad_id: ValueError("simulated corrupt session log")},
+        )
+        mgr = SubagentContinuationManager(self.parent, failing)
+        rows = {row["id"]: row for row in mgr.list_descendants()}
+        self.assertEqual(rows[bad_id]["kind"], "diagnostic")
+        self.assertEqual(rows[bad_id]["reason"], "corrupt")
+        self.assertTrue(rows[good_id]["kind"] == "child")
+        # 不可读（OSError）→ unavailable
+        failing_io = _FailingLoadPersistence(
+            self.tmp.name, {bad_id: OSError("simulated io failure")})
+        mgr_io = SubagentContinuationManager(self.parent, failing_io)
+        rows_io = {row["id"]: row for row in mgr_io.list_descendants()}
+        self.assertEqual(rows_io[bad_id]["reason"], "unavailable")
+
+
+class _FailingLoadPersistence(JsonlPersistence):
+    """把指定会话的 `load` 折为给定异常（损坏/不可读），其余委托真实后端。
+
+    测试替身只覆盖读失败的分支隔离路径（现有 test_web_export._BrokenPersistence
+    同款），不伪造会话内容或产出。"""
+
+    def __init__(self, root, failures):
+        super().__init__(root)
+        self._failures = failures
+
+    def load(self, session_id, cwd=None):
+        error = self._failures.get(session_id)
+        if error is not None:
+            raise error
+        return super().load(session_id, cwd)
 
 
 if __name__ == "__main__":

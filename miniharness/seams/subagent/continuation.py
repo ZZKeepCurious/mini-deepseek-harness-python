@@ -299,6 +299,37 @@ def settlement_summary(stop: str, child_id: str) -> str:
     return f"Background subagent {child_id} {phrase}"
 
 
+def _catalog_entry(child_id: str, created_at: Any, descriptor: dict | None) -> dict:
+    """子描述符 → catalog 条目（对齐上游 `SubagentCatalogEntry` 的 mode/label）。
+
+    描述符缺失/非法 → mode 'unknown'（unsupported 分支）；continuable 的 label
+    必填、one-shot 可选，其余下游 mode 视为 unknown。
+    """
+    entry: dict = {"id": child_id, "createdAt": created_at, "mode": "unknown"}
+    if descriptor is None:
+        return entry
+    mode = descriptor.get("mode")
+    if mode == "continuable":
+        entry["mode"] = "continuable"
+        entry["label"] = descriptor.get("label") or child_id
+    elif mode == "one-shot":
+        entry["mode"] = "one-shot"
+        label = descriptor.get("label")
+        if isinstance(label, str) and label:
+            entry["label"] = label
+    return entry
+
+
+def _catalog_failure_reason(error: BaseException) -> str:
+    """分支 catalog 读失败 → 诊断 reason（上游 sessionQueryCode 映射）：
+    数据损坏/格式拒读 → corrupt；其余（缺件/瞬时不可读）→ unavailable。"""
+    if isinstance(error, SubagentError) and error.code == "CORRUPT":
+        return "corrupt"
+    if isinstance(error, (ValueError, EOFError)):
+        return "corrupt"
+    return "unavailable"
+
+
 def _default_adapter_factory(provider: str, model: str,
                              reasoning_effort: str | None = None) -> LlmAdapter:
     if provider == "fake":
@@ -749,7 +780,7 @@ class SubagentContinuationManager:
         }
         # label 不入 header meta（v2 物理 header 键闭集拒绝未知键——上游
         # isHeaderLine 同款）；label 随 subagent/descriptor 事件持久化，读路径
-        # 从描述符恢复（见 _child_entry / restore descriptor fold）。
+        # 从描述符恢复（见 _catalog_entry / restore descriptor fold）。
         # 描述符对齐上游 descriptor.ts schema：{version, mode, provider, label?,
         # agentProvider?, agentModel?, agentReasoningEffort?, persona?, toolFilter?}
         # （无 kind 字段）。agentProvider/agentModel/agentReasoningEffort 取解析后
@@ -1184,77 +1215,126 @@ class SubagentContinuationManager:
     # ---------- 枚举 ----------
 
     def list_children(self) -> list[dict]:
-        """直属子代理：meta.parentSession == 本父的持久化子会话 + 激活中。
+        """直属子代理的模型投影：continuable 行 {kind,id,label,status}。
 
-        非 continuable / 描述符不可读的子不供模型选择（上游 project 省略），
-        经 `_child_entry` 折叠为 None 后过滤。"""
-        entries = (self._child_entry(cid) for cid in self._known_child_ids())
-        return [entry for entry in entries if entry is not None]
+        数据经 `_catalog_children`（catalog 读取原语）取得；非 continuable /
+        描述符不可读（unknown）行不供模型选择，按上游 list-agents project 省略。
+        """
+        return [self._project_child(entry)
+                for entry in self._catalog_children(self.parent.id)
+                if entry.get("mode") == "continuable"]
 
-    def list_descendants(self) -> list[dict]:
-        """全部后代：从本父出发沿持久化 meta.parentSession 链 BFS（嵌套续跑
-        后孙代及更深后代的 parentSession 指向各自直属父），每个 continuable
-        后代附 durable 直属父与深度。"""
-        headers = {}
-        for header in self.persistence.list_headers():
-            hid = header.get("id")
-            meta = header.get("meta")
-            if hid and isinstance(meta, dict):
-                headers[hid] = meta
-        positioned: list[tuple[str, str, int]] = []
-        frontier = [(self.parent.id, 0)]
-        seen = {self.parent.id}
-        while frontier:
-            current, depth = frontier.pop(0)
-            for cid, meta in headers.items():
-                if cid in seen or meta.get("parentSession") != current:
+    def list_descendants(self, root_id: str | None = None) -> list[dict]:
+        """从 root 起**递归读取各父 catalog** 全部后代（上游 list-children.ts
+        listDescendants，2026-09-30 语义：非全库 corpus 枚举）。
+
+        稳定前序：先读 root catalog（此读失败 → 整体抛出，上游同款），随后每个
+        条目读取其**自身 catalog**——读失败只在**该分支**产出 corrupt/unavailable
+        诊断并停枝（不遍历其子）；`mode == 'unknown'`（描述符缺失/非法）产出
+        unsupported 诊断但**照常遍历**其可读 catalog；其余产出 child 行，附 durable
+        直属父 `parent`、`depth`、`hasChildren`（child catalog 有无条目）与
+        `activity`（`_live` 有在世会话 → running，否则 inactive）。已访问 id 去重
+        （catalog 环防御）。模型面投影（status / 省略非 continuable）由
+        `_list_agents_tool` 承担，对齐上游 project。
+        """
+        root_id = root_id or self.parent.id
+        stack = [(entry, root_id, 1)
+                 for entry in reversed(self._catalog_children(root_id))]
+        visited = {root_id}
+        result: list[dict] = []
+        while stack:
+            entry, parent_id, depth = stack.pop()
+            child_id = entry["id"]
+            if child_id in visited:
+                continue
+            visited.add(child_id)
+            if entry.get("readError") is not None:
+                result.append({"kind": "diagnostic", "id": child_id,
+                               "parent": parent_id, "depth": depth,
+                               "reason": entry["readError"]})
+                continue
+            try:
+                children = self._catalog_children(child_id)
+            except Exception as error:  # noqa: BLE001 - 分支隔离：折为诊断并停该枝
+                result.append({"kind": "diagnostic", "id": child_id,
+                               "parent": parent_id, "depth": depth,
+                               "reason": _catalog_failure_reason(error)})
+                continue
+            if entry.get("mode") == "unknown":
+                result.append({"kind": "diagnostic", "id": child_id,
+                               "parent": parent_id, "depth": depth,
+                               "reason": "unsupported"})
+            else:
+                row: dict = {
+                    "kind": "child", "id": child_id, "mode": entry["mode"],
+                    "activity": ("running" if self._live.get(child_id) is not None
+                                 else "inactive"),
+                    "hasChildren": len(children) > 0,
+                    "parent": parent_id, "depth": depth,
+                }
+                if entry.get("label") is not None:
+                    row["label"] = entry["label"]
+                result.append(row)
+            # catalog 事件序定义兄弟次序；栈先访问首个（mini 以 id 序替代）。
+            for child in reversed(children):
+                stack.append((child, child_id, depth + 1))
+        return result
+
+    def _catalog_children(self, parent_id: str) -> list[dict]:
+        """读取一个父的 direct-child catalog（遍历原语，对齐上游 listChildren）。
+
+        mini 无 `subagent/catalog` 投影与 `sessionQuery.observeSession` 载体（见
+        verified-diffs §3.46 登记）：catalog 的等价物是「持久化 meta.parentSession
+        == parent_id 的子会话 + 子描述符 fold」。返回 [{id, createdAt, mode, label?,
+        readError?}]，按 id 排序（mini 无 catalog 事件序可依，沿用最近登记口径）。
+        子日志不可读（ValueError/EOFError → corrupt；OSError → unavailable）的条目
+        mode 取 'unknown' 并带 readError，由 list_descendants 折为分支诊断；描述符
+        缺失/非法 → mode 'unknown'（unsupported 分支，照常遍历其可读 catalog）。
+        """
+        entries: list[dict] = []
+        headers = [header for header in self.persistence.list_headers()
+                   if header.get("id")
+                   and isinstance(header.get("meta"), dict)
+                   and header["meta"].get("parentSession") == parent_id]
+        headers.sort(key=lambda header: header["id"])
+        for header in headers:
+            child_id = header["id"]
+            act = self._activations.get(child_id)
+            if act is not None:
+                descriptor = act.get("descriptor")
+            else:
+                try:
+                    events = self.persistence.load(child_id)
+                except (ValueError, EOFError):
+                    entries.append({"id": child_id, "createdAt": header.get("created_at"),
+                                    "mode": "unknown", "readError": "corrupt"})
                     continue
-                seen.add(cid)
-                positioned.append((cid, current, depth + 1))
-                frontier.append((cid, depth + 1))
-        positioned.sort(key=lambda item: item[0])
-        entries = (self._child_entry(cid, parent_id=parent_id, depth=depth)
-                   for cid, parent_id, depth in positioned)
-        return [entry for entry in entries if entry is not None]
+                except OSError:
+                    entries.append({"id": child_id, "createdAt": header.get("created_at"),
+                                    "mode": "unknown", "readError": "unavailable"})
+                    continue
+                descriptor = fold_subagent_descriptor(events)
+            entries.append(_catalog_entry(child_id, header.get("created_at"), descriptor))
+        return entries
 
-    def _descriptor_data(self, child_id: str) -> dict | None:
-        """从激活或持久化日志恢复子代理描述符（mode/label）。"""
-        act = self._activations.get(child_id)
-        if act is not None:
-            return act.get("descriptor")
-        try:
-            events = self.persistence.load(child_id)
-        except Exception:
-            return None
-        return fold_subagent_descriptor(events)
-
-    def _child_entry(self, child_id: str, parent_id: str | None = None,
-                     depth: int | None = None) -> dict | None:
-        """一个 continuable 子代理行：status 取自活体 loop（running/inactive），
-        非 continuable 或描述符不可读 → None（上游 project 省略同款）。
-
-        `parent_id`/`depth` 仅在后代枚举时携带（上游 descendants 位置注记）。"""
-        descriptor = self._descriptor_data(child_id)
-        if descriptor is None or descriptor.get("mode") != "continuable":
-            return None
-        label = descriptor.get("label") or child_id
-        act = self._activations.get(child_id)
-        if act is not None and act.get("label"):
-            label = act["label"]
-        status = "running" if act is not None and act["loop"].status == "running" else "inactive"
-        entry: dict = {"kind": "child", "id": child_id, "label": label, "status": status}
+    def _project_child(self, entry: dict, parent_id: str | None = None,
+                       depth: int | None = None) -> dict:
+        """一个 continuable catalog 条目的模型行（上游 list-agents project）。"""
+        row: dict = {
+            "kind": "child", "id": entry["id"],
+            "label": entry.get("label") or entry["id"],
+            "status": self._agent_status(entry["id"]),
+        }
         if parent_id is not None:
-            entry["parent"] = parent_id
-            entry["depth"] = depth if depth is not None else 0
-        return entry
+            row["parent"] = parent_id
+            row["depth"] = depth if depth is not None else 0
+        return row
 
-    def _known_child_ids(self) -> list[str]:
-        ids = set(self._activations)
-        for header in self.persistence.list_headers():
-            meta = header.get("meta")
-            if isinstance(meta, dict) and meta.get("parentSession") == self.parent.id:
-                ids.add(header.get("id"))
-        return sorted(cid for cid in ids if cid)
+    def _agent_status(self, child_id: str) -> str:
+        """模型可见 status（上游 list-agents statusOf）：活体 loop 运行中 → running，
+        否则 inactive。"""
+        loop = self._live.get(child_id)
+        return "running" if loop is not None and loop.status == "running" else "inactive"
 
     # ---------- 冷恢复与激活 ----------
 
@@ -1707,23 +1787,33 @@ def _send_message_tool(manager: SubagentContinuationManager) -> Tool:
     async def execute(args: dict, exec_: ToolExec):
         # 调用方 agent 即授权与所有权主体（上游 exec.agent → followup(parent,…)）：
         # 嵌套续跑时子代理经同一工具委托孙代
-        await manager.send_message_async(args["subagentId"], args["message"],
+        await manager.send_message_async(args["agent_id"], args["message"],
                                          parent=exec_.agent)
-        return f"Message sent to subagent {args['subagentId']}."
+        return f"Message sent to subagent {args['agent_id']}."
 
     return Tool(
         name="send_message",
+        # 逐字对齐上游 tool-subagent-control/src/index.ts:30-32（2026-09-30 精简）
         description=(
-            "Send a message to a subagent and continue its run. The subagent "
-            "settles with a report that is delivered back to you."
+            "Send a message to an agent. A working agent receives it at its next step; an idle agent "
+            "starts a new turn with it. Returns delivery confirmation, not the agent's answer."
         ),
         parameters={
             "type": "object",
             "properties": {
-                "subagentId": {"type": "string", "description": "Subagent id from list_agents."},
-                "message": {"type": "string", "description": "Message content."},
+                "agent_id": {
+                    "type": "string",
+                    "description": (
+                        "The agent id of your direct continuable child, or your direct parent when you "
+                        "are a resident continuable child."
+                    ),
+                },
+                "message": {
+                    "type": "string",
+                    "description": "The message to deliver to the agent.",
+                },
             },
-            "required": ["subagentId", "message"],
+            "required": ["agent_id", "message"],
         },
         execute=execute,
     )
@@ -1733,18 +1823,26 @@ def _interrupt_agent_tool(manager: SubagentContinuationManager) -> Tool:
     async def execute(args: dict, exec_: ToolExec):
         # 服务以 exact live caller 对照目标 recorded lineage 授权（上游
         # {kind:'ancestor', agent: caller}）；工具自身不附加任何权限
-        manager.interrupt(args["subagentId"], {"kind": "ancestor", "agent": exec_.agent})
-        return f"Interrupted subagent {args['subagentId']}."
+        manager.interrupt(args["agent_id"], {"kind": "ancestor", "agent": exec_.agent})
+        return f"Interrupted subagent {args['agent_id']}."
 
     return Tool(
         name="interrupt_agent",
-        description="Stop a running subagent.",
+        # 逐字对齐上游 tool-subagent-control/src/index.ts:76-79
+        description=(
+            "Ask a subagent to stop its current work. This call returns without waiting for it to stop. "
+            "You can continue a direct child's conversation later with send_message. "
+            "Subagents it started will keep running."
+        ),
         parameters={
             "type": "object",
             "properties": {
-                "subagentId": {"type": "string", "description": "Subagent id from list_agents."},
+                "agent_id": {
+                    "type": "string",
+                    "description": "The id of an agent created under you: your direct child or a deeper descendant.",
+                },
             },
-            "required": ["subagentId"],
+            "required": ["agent_id"],
         },
         execute=execute,
     )
@@ -1753,32 +1851,31 @@ def _interrupt_agent_tool(manager: SubagentContinuationManager) -> Tool:
 def _list_agents_tool(manager: SubagentContinuationManager) -> Tool:
     """`list_agents`：continuable 子代理枚举（上游 tool-subagent-control/list-agents.ts）。
 
-    默认 `children` 只列直属子；`descendants` 走全树并附 durable 直属父与深度。
-    status 取活体 registry（running/inactive，inactive 不描述完成/失败/等待）；
-    非 continuable 子不供模型选择，故省略。mini 无 diagnostics 面（缺读子会在
-    `_child_entry` 折为 None，不产生 diagnostic 行）。
+    默认 `children` 只列直属子；`descendants` 递归读各父 catalog 走全树，附 durable
+    直属父与深度，并把 unknown（unsupported）与读失败（corrupt/unavailable）折为
+    diagnostic 行。模型面投影（status 取活体 loop；省略非 continuable 行）逐语义对齐
+    上游 list-agents.ts 的 project。
     """
 
     async def execute(args: dict, exec_: ToolExec):
         scope = args.get("scope") or "children"
-        entries = (manager.list_descendants() if scope == "descendants"
-                   else manager.list_children())
+        if scope == "descendants":
+            entries = [row for row in
+                       (_model_descendant(manager, entry)
+                        for entry in manager.list_descendants())
+                       if row is not None]
+        else:
+            entries = manager.list_children()
         return json.dumps(entries, ensure_ascii=False, indent=2)
 
     return Tool(
         name="list_agents",
+        # 逐字对齐上游 list-agents.ts:88-92（2026-09-30 精简）
         description=(
-            "List your continuable background subagents by durable id and label. Use it to recall which "
-            "ones you started, not to poll for completion — you are told when one finishes. Status comes "
-            "from the live registry: running means the agent is working right now; inactive means no turn "
-            "is executing, whether the child is loaded or must be resumed. inactive does not describe task "
-            "completion, success, failure, or waiting for other agents. A `send_message` steers a running "
-            "child at its nearest step boundary or starts or resumes a turn for an inactive child, and a "
-            "direct child remains a `send_message` candidate in every status. The snapshot is not a "
-            "delivery promise — `send_message` performs the authoritative check and may still fail. Scope "
-            "`descendants` walks the whole tree below you, annotating each entry with its durable "
-            "direct-parent session id and depth. You may use `send_message` only for depth-1 entries; "
-            "deeper entries are candidates for `interrupt_agent` only."
+            "List subagents you started, with their ids, labels, and status. "
+            "running means it is working; inactive means it is not currently working. "
+            "You will be notified when a subagent finishes; there is no need to keep checking its status. "
+            "Use send_message to continue the conversation."
         ),
         parameters={
             "type": "object",
@@ -1786,12 +1883,29 @@ def _list_agents_tool(manager: SubagentContinuationManager) -> Tool:
                 "scope": {
                     "type": "string",
                     "enum": ["children", "descendants"],
+                    # 逐字对齐上游 list-agents.ts:97-98
                     "description": (
-                        "children (default) lists direct children only; descendants walks the complete "
-                        "tree below you."
+                        "children (default) lists direct children, which accept send_message in any "
+                        "status. descendants lists the whole tree below you with each entry's parent "
+                        "session id and depth; entries deeper than 1 accept only interrupt_agent."
                     ),
                 },
             },
         },
         execute=execute,
     )
+
+
+def _model_descendant(manager: SubagentContinuationManager, entry: dict) -> dict | None:
+    """一个 list_descendants 服务行 → 模型行（上游 list-agents project）：
+    diagnostic 原样带 reason/parent/depth；非 continuable 省略；child 行 status
+    取活体 loop，附 parent/depth（hasChildren/activity 属服务面，不入模型输出）。"""
+    if entry["kind"] == "diagnostic":
+        return {"kind": "diagnostic", "id": entry["id"], "reason": entry["reason"],
+                "parent": entry["parent"], "depth": entry["depth"]}
+    if entry.get("mode") != "continuable":
+        return None
+    return {"kind": "child", "id": entry["id"],
+            "label": entry.get("label") or entry["id"],
+            "status": manager._agent_status(entry["id"]),
+            "parent": entry["parent"], "depth": entry["depth"]}

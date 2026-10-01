@@ -284,5 +284,69 @@ class RequiredImageOffloadBase64Test(unittest.TestCase):
         self.assertGreaterEqual(count, 0)
 
 
+class RequiredImageOffloadTraversalTest(unittest.TestCase):
+    """上游 llm/tests/content.spec.ts:111-138：遍历、量子取整与 offloaded 跳过。"""
+
+    @staticmethod
+    def _request(lengths, offloaded=()):
+        blocks = []
+        for index, size in enumerate(lengths):
+            block = {"type": "image", "attachment": dict(IMAGE_REF, bytes=size,
+                                                          name=f"i{index}.png")}
+            if index in offloaded:
+                block["offloaded"] = True
+            blocks.append(block)
+        return [{"role": "user", "content": blocks}]
+
+    @staticmethod
+    def _bytes_of(block):
+        return block["attachment"]["bytes"]
+
+    def test_unbounded_budgets_and_whole_quanta_past_them(self):
+        from miniharness.llm.content import required_image_offload
+        lengths = [4, 4, 4, 4]
+        self.assertEqual(
+            required_image_offload(self._request(lengths),
+                                   LlmImageRequestBudget(), self._bytes_of), 0)
+        self.assertEqual(
+            required_image_offload(self._request(lengths),
+                                   LlmImageRequestBudget(maxBytes=16), self._bytes_of), 0)
+        self.assertEqual(
+            required_image_offload(self._request(lengths),
+                                   LlmImageRequestBudget(maxImages=4), self._bytes_of), 0)
+        # 一个超额图上取整到整个 count 量子。
+        self.assertEqual(
+            required_image_offload(self._request([*lengths, 4]),
+                                   LlmImageRequestBudget(maxImages=4, countQuantum=2),
+                                   self._bytes_of), 2)
+        # 一个超额字节移除整个 byte 量子，跨过第二个图。
+        self.assertEqual(
+            required_image_offload(self._request([*lengths, 1]),
+                                   LlmImageRequestBudget(maxBytes=16, byteQuantum=5),
+                                   self._bytes_of), 2)
+        # 129 个 1 MiB 图在 128 MiB 上限 + 64 MiB 量子下移除最老 65 个。
+        mib = 1024 * 1024
+        self.assertEqual(
+            required_image_offload(self._request([mib] * 129),
+                                   LlmImageRequestBudget(maxBytes=128 * mib,
+                                                         byteQuantum=64 * mib),
+                                   self._bytes_of), 65)
+
+    def test_skips_offloaded_occurrences_and_accounts_base64_length(self):
+        from miniharness.llm.content import required_image_offload
+        # 三个 3 字节图按 base64（各 4 字节）计 12 > 8，需再移除一个。
+        self.assertEqual(
+            required_image_offload(self._request([3, 3, 3]),
+                                   LlmImageRequestBudget(representation="base64",
+                                                         maxBytes=8),
+                                   self._bytes_of), 1)
+        # 首个已 offloaded（投影为占位文本）不占预算：余下 8 恰好合预算。
+        self.assertEqual(
+            required_image_offload(self._request([3, 3, 3], offloaded=[0]),
+                                   LlmImageRequestBudget(representation="base64",
+                                                         maxBytes=8),
+                                   self._bytes_of), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

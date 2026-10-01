@@ -357,7 +357,9 @@ def create_bash_tool(ctx, shell, config: dict | None = None) -> Tool:
         description=(
             "Execute a bash command (`bash -c`) and return its stdout/stderr. Each call runs "
             "in a fresh shell: no state persists between calls. Non-zero exits are reported "
-            "as `[exit code: N]`."),
+            "as `[exit code: N]`. Commands may run under a file sandbox; a blocked file "
+            "operation is reported as `[sandbox: file access denied under <mode> mode]`, a "
+            "policy denial: do not retry another way."),
         parameters={"type": "object", "properties": properties,
                     "required": ["command", "description"]},
         output={"schema": _output_schema()},

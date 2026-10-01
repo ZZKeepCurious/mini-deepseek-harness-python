@@ -30,15 +30,21 @@ import asyncio
 from typing import Any, AsyncIterator, Callable
 
 from ..core.session import create_message, reasoning_block
+from ..core.version import __version__
 
 __all__ = [
+    "ACCOUNT_QUOTA",
+    "ACCOUNT_SIGN_IN_REQUIRED",
+    "ACCOUNT_TOKEN_INVALID",
     "AppIdentity",
     "APP_IDENTITY",
     "AUTH",
+    "attribution_headers",
     "BlockAssembler",
     "CONTEXT_WINDOW_EXCEEDED",
     "EMPTY_RESPONSE",
     "IMAGE_OFFLOAD_REQUIRED",
+    "INVALID_CREDENTIAL",
     "ImageAttachmentAccess",
     "ImageAttachmentAccessResolver",
     "ImageBlock",
@@ -71,6 +77,7 @@ __all__ = [
     "UNSUPPORTED_REASONING_EFFORT",
     "ProviderRequestId",
     "callConfigEquals",
+    "user_agent",
 ]
 
 # ---------- 类型定义 ----------
@@ -306,9 +313,19 @@ class AppIdentity:
 
 APP_IDENTITY = AppIdentity(
     product="mini-harness",
-    version="0.0.0",
+    version=__version__,
     url="https://github.com/mini-harness/mini-deepseek-harness-python",
 )
+
+
+def user_agent(identity: AppIdentity = APP_IDENTITY) -> str:
+    """标准 User-Agent 值：``product/version (+url)``（attribution.ts:53-55）。"""
+    return f"{identity.product}/{identity.version} (+{identity.url})"
+
+
+def attribution_headers(identity: AppIdentity = APP_IDENTITY) -> dict:
+    """每个 provider 请求必带的归因头（attribution.ts:64-68；仅 user-agent）。"""
+    return {"user-agent": user_agent(identity)}
 
 
 # ---------- End of app attribution ----------
@@ -335,9 +352,14 @@ MALFORMED_RESPONSE = "MALFORMED_RESPONSE"
 REQUEST_ERROR = "REQUEST_ERROR"   # mini 教学扩展：非 4xx/5xx 归类的兜底码（上游无此常量）
 IMAGE_OFFLOAD_REQUIRED = "IMAGE_OFFLOAD_REQUIRED"
 INVALID_RESPONSE = "INVALID_RESPONSE"
+INVALID_CREDENTIAL = "INVALID_CREDENTIAL"   # 已提供但无法使用的凭据（畸形而非缺失）
 FILES_API = "FILES_API"
 MISSING_CREDENTIAL = "MISSING_CREDENTIAL"
 UNSUPPORTED_REASONING_EFFORT = "UNSUPPORTED_REASONING_EFFORT"
+# 账户 token 路由专属码（上游 llm/src/error.ts:31 ACCOUNT_QUOTA_EXCEEDED_CODE + llm-deepseek-account）。
+ACCOUNT_QUOTA = "ACCOUNT_QUOTA"                       # 账户额度耗尽，可经计费页充值（区别于供应商中立的 QUOTA）
+ACCOUNT_SIGN_IN_REQUIRED = "ACCOUNT_SIGN_IN_REQUIRED"  # 未登录 / 目标 origin 不允许账户认证
+ACCOUNT_TOKEN_INVALID = "ACCOUNT_TOKEN_INVALID"        # 账户 token 被 provider 401 拒绝
 
 
 class StreamChunk(dict):

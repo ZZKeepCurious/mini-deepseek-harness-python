@@ -39,12 +39,27 @@ from ..workspace import (
 )
 
 __all__ = [
+    "DEFAULT_WORKSPACE_DIRECTORY",
     "WorkspaceController",
     "WorkspaceFault",
     "WorkspaceFollow",
     "install_workspace_controller",
+    "workspace_display_title",
     "workspace_view",
 ]
+
+#: 首用工作区的固定叶目录名（上游 default-workspace.ts:16）。语言中立，故一次安装
+#: 跨语言切换保持同一磁盘路径；注册表从该同段派生初始标题。
+DEFAULT_WORKSPACE_DIRECTORY = "default-workspace"
+
+
+def workspace_display_title(title: str, localized_default: str) -> str:
+    """一个工作区展示标题（上游 default-workspace.ts:28 workspaceDisplayTitle）。
+
+    仍携带自动首用标题（= {@link DEFAULT_WORKSPACE_DIRECTORY}）的工作区读作调用方
+    的本地化缺省名；其余标题逐字读；用户恰好输入该常量同样按缺省展示。
+    """
+    return localized_default if title == DEFAULT_WORKSPACE_DIRECTORY else title
 
 
 class WorkspaceFault(Exception):
@@ -164,34 +179,24 @@ class WorkspaceController(Service):
                     f'cannot create a Workspace at "{path}": {error}',
                     {"path": path}) from error
 
-    def initialize_default(self, request: dict) -> dict | None:
+    def initialize_default(self) -> dict | None:
         """首用启动时初始化或复用默认工作区（对齐上游 initializeDefault）。
 
-        校验目录名与标题（空白/分隔符/冒号/NUL/首尾空白/尾点拒绝），经注册表的
-        `initialize_default` 在注册表与会话历史皆空时创建；不创建会话或消息。
-        返回 `{workspace}` 或 None（不符合自动创建条件）。
+        dsh-v0.2.0-rc.2：**请求载荷删除**（上游 `initializeDefault(signal)` 无入参）；
+        目录名固定为 {@link DEFAULT_WORKSPACE_DIRECTORY}，初始标题即同名（客户端经
+        `workspaceDisplayTitle` 本地化展示）。经注册表的 `initialize_default` 在
+        注册表与会话历史皆空时创建；不创建会话或消息。返回 `{workspace}` 或 None。
         """
-        directory_name = request.get("directoryName")
-        title = request.get("title")
-        if (not isinstance(directory_name, str) or directory_name.strip() == ""
-                or directory_name != directory_name.strip()
-                or directory_name.endswith(".")
-                or "/" in directory_name or "\\" in directory_name
-                or ":" in directory_name or "\0" in directory_name
-                or not isinstance(title, str) or title.strip() == ""):
-            raise WorkspaceFault(
-                "gateway/bad-request",
-                "default Workspace requires a directory name and non-blank title", {})
         with self._tail:
             async def resolve_directory() -> dict:
-                return self._resolve_default_directory(directory_name, title)
+                return self._resolve_default_directory()
 
             workspace = run_on_resident(
                 self._registry().initialize_default(resolve_directory))
         return None if workspace is None else {"workspace": workspace_view(workspace)}
 
-    def _resolve_default_directory(self, directory_name: str, title: str) -> dict:
-        """解析首用目录：`<documents>/deepseek-harness/<name>`（对齐上游的末段拼接）。
+    def _resolve_default_directory(self) -> dict:
+        """解析首用目录：`<documents>/deepseek-harness/default-workspace`（上游末段拼接）。
 
         载体简化：上游经原生命令查系统 Documents；mini 取配置 `documentsDirectory`
         或 `~/Documents`。
@@ -202,8 +207,9 @@ class WorkspaceController(Service):
             raise WorkspaceFault(
                 "gateway/bad-request",
                 f"Documents directory must be fully qualified: '{base}'", {})
-        return {"path": os.path.join(os.path.normpath(base), "deepseek-harness", directory_name),
-                "title": title}
+        return {"path": os.path.join(os.path.normpath(base), "deepseek-harness",
+                                     DEFAULT_WORKSPACE_DIRECTORY),
+                "title": DEFAULT_WORKSPACE_DIRECTORY}
 
     def rename(self, request: dict) -> dict:
         workspace_id = request.get("workspaceId")

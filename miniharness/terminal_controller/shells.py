@@ -82,12 +82,21 @@ def resolve_executable(command: str, env: Any = None, signal=None) -> str:
         f"subprocess: command {command!r} was not found on PATH")
 
 
+def executable_name(path: str) -> str:
+    """路径末段（上游 shells.ts:29-31 executableName）。"""
+    return path[max(path.rfind("/"), path.rfind("\\")) + 1:]
+
+
+def shell_kind(path: str) -> str:
+    """可执行名，忽略大小写并剥 `.exe`（上游 shells.ts:33-35 shellKind）。"""
+    kind = executable_name(path).lower()
+    return kind[:-4] if kind.endswith(".exe") else kind
+
+
 def profile(path: str) -> dict:
-    """由可执行路径派生交互式 profile（shells.ts:24-28）。"""
-    name = path[max(path.rfind("/"), path.rfind("\\")) + 1:]
-    kind = name.lower()
-    if kind.endswith(".exe"):
-        kind = kind[:-4]
+    """由可执行路径派生交互式 profile（shells.ts:24-27）。"""
+    name = executable_name(path)
+    kind = shell_kind(path)
     if kind == "cmd":
         args: list[str] = []
     elif kind in ("pwsh", "powershell"):
@@ -109,7 +118,12 @@ def resolve_shell(configured: dict | None, signal=None) -> dict:
 
 
 def discover_shells(configured: dict | None, candidates: list[str], signal=None) -> list[dict]:
-    """列出已验证候选，缺省或配置的 shell 在最前（shells.ts:38-57）。"""
+    """列出已验证候选，缺省或配置的 shell 在最前（shells.ts:38-64）。
+
+    dsh-v0.2.0-rc.2：按可执行名去重（忽略大小写、剥 `.exe`），保留最早出现者。
+    PATH 解析可能经另一目录命中缺省（如 merged-`/usr` 系统的 `/usr/bin/bash` 之于
+    `/bin/bash`），故同一名字只保留第一次出现的 profile。
+    """
     preferred = resolve_shell(configured, signal)
     found: list[dict | None] = []
     for candidate in candidates:
@@ -121,7 +135,7 @@ def discover_shells(configured: dict | None, candidates: list[str], signal=None)
     for shell in [preferred, *found]:
         if shell is None:
             continue
-        key = shell["path"].lower() if "\\" in shell["path"] else shell["path"]
-        if key not in shells:
-            shells[key] = shell
+        kind = shell_kind(shell["path"])
+        if kind not in shells:
+            shells[kind] = shell
     return list(shells.values())

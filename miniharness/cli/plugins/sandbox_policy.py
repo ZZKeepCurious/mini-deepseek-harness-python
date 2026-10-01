@@ -12,5 +12,5 @@ def apply(ctx, **config):
     from ...seams.sandbox_policy import SandboxPolicyService
 
     mode = os.environ.get("DSH_PERMISSION_MODE") or config.get("mode") or "workspace-write"
-    ctx.provide("sandbox", LocalSandboxProvider())
+    ctx.provide("sandbox", LocalSandboxProvider(ctx=ctx))
     SandboxPolicyService(ctx, {"mode": mode})

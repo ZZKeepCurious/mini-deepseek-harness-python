@@ -199,5 +199,78 @@ class CatalogSurfaceTest(unittest.TestCase):
         self.assertEqual(event["sourceEventSeqs"], [[0, 2]])
 
 
+class ContentGenerationTest(unittest.TestCase):
+    """上游 surface.ts applySurfacePlan 的两个计数器（agent.ts 系列断裂判定读
+    contentGeneration，压缩 overflow 恢复读 replaceGeneration）。"""
+
+    def test_image_offload_advances_content_only(self):
+        session = Session("cg1")
+        event = session.append("user/message", _user([_img(), _img()]),
+                               surfaceOp="append")
+        self.assertEqual((session.replace_generation, session.content_generation), (0, 0))
+        session.append("image/offload", {"targets": [{"seq": event["seq"],
+                                                      "imageIndexes": [0]}]})
+        # 投影事件走 kind='project'：只推进 contentGeneration
+        self.assertEqual((session.replace_generation, session.content_generation), (0, 1))
+
+    def test_positional_replace_advances_both(self):
+        session = Session("cg2")
+        event = session.append("user/message", _user([{"type": "text", "text": "a"}]),
+                               surfaceOp="append")
+        session.append("user/message", _user([{"type": "text", "text": "b"}]),
+                       surfaceOp={"op": "replace", "startSeq": event["seq"],
+                                  "endSeq": event["seq"]},
+                       sourceEventSeqs=[event["seq"]])
+        self.assertEqual((session.replace_generation, session.content_generation), (1, 1))
+
+    def test_seed_replay_rebuilds_both_counters(self):
+        session = Session("cg3")
+        first = session.append("user/message", _user([_img(), _img()]),
+                               surfaceOp="append")
+        session.append("image/offload", {"targets": [{"seq": first["seq"],
+                                                      "imageIndexes": [1]}]})
+        session.append("user/message", _user([{"type": "text", "text": "b"}]),
+                       surfaceOp={"op": "replace", "startSeq": first["seq"],
+                                  "endSeq": first["seq"]},
+                       sourceEventSeqs=[first["seq"]])
+        restored = Session("cg3", seed=[dict(ev) for ev in session.events])
+        self.assertEqual(session.replace_generation, restored.replace_generation)
+        self.assertEqual(session.content_generation, restored.content_generation)
+        self.assertEqual(restored.replace_generation, 1)
+        self.assertEqual(restored.content_generation, 2)
+
+    def test_agent_starts_series_after_image_offload(self):
+        # agent.ts:615-616 的 startsSeries 判定读 contentGeneration：图片
+        # 卸载（仅推进 contentGeneration）同样开启新消息系列。
+        from miniharness.core.agent_loop.agent import AgentLoop
+        from miniharness.core.scope import Context
+        from miniharness.core.tools import Tool, ToolRegistry
+        from miniharness.llm import FakeLlmAdapter
+
+        session = Session("cg4")
+        ctx = Context()
+        reg = ToolRegistry(ctx)
+        reg.register(Tool(name="bash", description="Run.",
+                          parameters={"type": "object", "properties": {"cmd": {"type": "string"}}},
+                          execute=lambda args, event: "stdout"))
+        loop = AgentLoop(session, FakeLlmAdapter(final_text="ok"), reg, ctx)
+        loop.followup(_user([_img(), {"type": "text", "text": "第一句"}]))
+        headers = [e for e in session.events if e["type"] == "request/header"]
+        self.assertNotIn("startsSeries", headers[0]["data"])
+        self.assertEqual(session.content_generation, 0)
+
+        user_seq = next(e for e in reversed(session.events) if e["type"] == "user/message")["seq"]
+        session.append("image/offload",
+                       {"targets": [{"seq": user_seq, "imageIndexes": [0]}]})
+        self.assertEqual(session.replace_generation, 0)
+        self.assertEqual(session.content_generation, 1)
+
+        loop.followup("第二句")
+        headers = [e for e in session.events if e["type"] == "request/header"]
+        # header 未变 + 系列边界 → reason='series'（上游 agent.ts:632-633：
+        # 该分支本身即表达系列边界，不另带 startsSeries 字段）
+        self.assertEqual(headers[1]["data"]["reason"], "series")
+
+
 if __name__ == "__main__":
     unittest.main()

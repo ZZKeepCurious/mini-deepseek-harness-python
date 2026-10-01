@@ -13,10 +13,13 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
+from importlib import resources
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -63,11 +66,13 @@ def _resolve_zone(time_zone: str) -> ZoneInfo:
     """解析一个规范 IANA 时区或 UTC；不支持即抛 TypeError。"""
     if time_zone != "UTC" and IANA_TIME_ZONE.match(time_zone) is None:
         raise TypeError(
-            f"browser time zone must be canonical UTC or IANA Area/Location: {time_zone!r}")
+            "browser time zone must be canonical UTC or IANA Area/Location: "
+            f"{json.dumps(time_zone)}")
     try:
         return ZoneInfo(time_zone)
     except Exception as error:  # noqa: BLE001 - ZoneInfoNotFoundError / tzdata 缺失
-        raise TypeError(f"browser time zone is unsupported: {time_zone!r}") from error
+        raise TypeError(
+            f"browser time zone is unsupported: {json.dumps(time_zone)}") from error
 
 
 def create_timestamp_formatter(time_zone: str | None = None) -> tuple[Any, str]:
@@ -110,17 +115,75 @@ def format_timestamp(now_ms: float, tzinfo: Any, time_zone: str) -> str:
     return f"{moment.strftime('%Y-%m-%dT%H:%M:%S')}{offset}[{time_zone}]"
 
 
+@lru_cache(maxsize=1)
+def _iana_index() -> tuple:
+    """tzdata.zi 的 Zone 名、Link 别名映射、小写索引与 UTC 族（canonical 回读数据源）。
+
+    ``Z <name> ...`` 是 canonical 位置，``L <target> <alias>`` 声明别名；
+    UTC 族 = ``Etc/UTC``/``Etc/GMT`` 及指向它们的别名（Intl 把这一族都
+    回读为 ``UTC``）。
+    """
+    text = (resources.files("tzdata") / "zoneinfo" / "tzdata.zi").read_text(
+        encoding="utf-8", errors="replace")
+    names: set = set()
+    links: dict = {}
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if parts[0] == "Z":
+            names.add(parts[1])
+        elif parts[0] == "L":
+            links[parts[2]] = parts[1]
+            names.update((parts[1], parts[2]))
+    utc_roots = {"Etc/UTC", "Etc/GMT"}
+    utc_family = set(utc_roots) | {
+        alias for alias, target in links.items() if target in utc_roots}
+    lower = {name.casefold(): name for name in sorted(names)}
+    return frozenset(names), links, lower, frozenset(utc_family)
+
+
+def _canonical_zone(time_zone: str) -> str:
+    """canonical 名回读（request-zone.ts:30-38 `canonical !== value` 的等价面）。
+
+    Intl 用 ICU 数据规范化后回读：大小写归正、UTC 族折到 ``UTC``、IANA
+    别名解析到 Link 目标；回读与输入不等即非 canonical。
+    """
+    names, links, lower, utc_family = _iana_index()
+    value = (time_zone if time_zone in names
+             else lower.get(time_zone.casefold(), time_zone))
+    if value in utc_family:
+        return "UTC"
+    return links.get(value, value)
+
+
 def _browser_time_zone(message: Any) -> str | None:
-    """从一个普通 user-rpc 消息读取 Host 规范化的浏览器时区（request-zone.ts:15-40）。"""
+    """从一个普通 user-rpc 消息读取 Host 规范化的浏览器时区（request-zone.ts:15-40）。
+
+    三步与上游逐字对应：词法（25）→ 可解析（31-35）→ canonical 回读（36-38）。
+    可解析性按大小写不敏感的名字存在性判定（对齐 Intl 的大小写宽容），随后
+    canonical 回读把非规范形态（大小写/别名/UTC 族）拒掉。
+    """
     source = message.get("source") if isinstance(message, dict) else None
     if not isinstance(source, dict):
         return None
-    if source.get("kind") != "user" or "rpcId" not in source:
+    if (source.get("kind") != "user" or "rpcId" not in source
+            or not isinstance(source.get("rpcId"), str)):
         return None
     value = source.get("clientTimeZone")
     if not isinstance(value, str):
         return None
-    _resolve_zone(value)
+    if value != "UTC" and IANA_TIME_ZONE.match(value) is None:
+        raise TypeError(
+            "browser time zone must be canonical UTC or IANA Area/Location: "
+            f"{json.dumps(value)}")
+    names, _links, lower, _utc_family = _iana_index()
+    if value not in names and value.casefold() not in lower:
+        raise TypeError(
+            f"browser time zone is unsupported: {json.dumps(value)}")
+    if _canonical_zone(value) != value:
+        raise TypeError(
+            f"browser time zone must be canonical: {json.dumps(value)}")
     return value
 
 
@@ -141,7 +204,6 @@ def render_browser_time_zone_context(context: dict) -> str:
         return (f"Browser time zone for this request: {context['timeZone']}. "
                 "Interpret otherwise-unqualified dates and times in this zone.")
     if kind == "mixed":
-        import json
         zones = json.dumps(list(context["timeZones"]), separators=(",", ":"))
         return (f"Browser time zone for this request: mixed {zones}. "
                 "Ask the user to clarify otherwise-unqualified dates and times.")
@@ -173,14 +235,17 @@ def _render_text(now_ms: float, turn: int, step: int, previous: Any, tzinfo: Any
             f"Elapsed since the preceding {baseline}: {elapsed}.")
 
 
-def _validate_config(config: dict | None) -> tuple[str | None, int | None]:
+def _validate_config(config: dict | None) -> tuple[str | None, int]:
     config = dict(config or {})
     time_zone = config.get("timeZone")
     if time_zone is not None and not isinstance(time_zone, str):
         raise TypeError(f"time-context: timeZone must be a string, got {time_zone!r}")
     refresh = config.get("refreshIntervalMs")
-    if refresh is not None and (isinstance(refresh, bool)
-                                or not isinstance(refresh, int) or refresh < 0):
+    # 缺省 10 分钟（index.ts:134 `config.refreshIntervalMs ?? 600_000`）；
+    # 0 表示每个合格 step 都注入。
+    if refresh is None:
+        refresh = 600_000
+    elif (isinstance(refresh, bool) or not isinstance(refresh, int) or refresh < 0):
         raise TypeError(
             f"time-context: refreshIntervalMs must be a non-negative safe integer, got {refresh!r}")
     return time_zone, refresh
@@ -249,7 +314,7 @@ def apply_time_context(ctx: Context, config: dict | None = None) -> None:
             return decision
         now = int(time.time() * 1000)
         state = projections.state_of(agent.session, "timeContext") or _init_projection()
-        if refresh_interval is not None and refresh_interval > 0:
+        if refresh_interval > 0:
             last = state["lastInjectionTime"]
             if last is not None and now >= last and now - last < refresh_interval:
                 return decision

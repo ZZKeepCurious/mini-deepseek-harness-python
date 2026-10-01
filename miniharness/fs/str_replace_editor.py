@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from ..core.output_retention import truncate_without_splitting_surrogate_pair
 from ..core.scope import Context
 from ..core.tools import Tool
 from .types import FsError, FsWriteIntent
@@ -94,7 +95,7 @@ async def _view(ctx: Context, fs: Any, args: dict, exec: Any) -> dict:
         offset = 1
     body = "\n".join(f"{offset + i:6}\t{text}" for i, text in enumerate(selected))
     if len(body) > 20000:
-        body = body[:20000] + TRUNCATED_MESSAGE
+        body = truncate_without_splitting_surrogate_pair(body, 20000) + TRUNCATED_MESSAGE
     return {"path": target.display_path, "output": body}
 
 

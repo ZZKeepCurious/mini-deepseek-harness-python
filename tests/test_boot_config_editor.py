@@ -64,6 +64,23 @@ class TestConfigEditor(unittest.TestCase):
         self.assertEqual(row["inherited"], {"greeting": "hi"})
         self.assertEqual(row["override"], {})
 
+    def test_configuration_own_config_key_overrides_even_when_null(self):
+        with open(self.patch_path, "w", encoding="utf-8") as h:
+            h.write("- id: greeter\n  config: null\n")
+        rows = self.editor.configuration()
+        row = next(r for r in rows if r["entry"].options.get("id") == "greeter")
+        # own config 键（即使 null）→ 走 inherited 剥离路径，inherited 仍是基底
+        self.assertEqual(row["inherited"], {"greeting": "hi"})
+        self.assertEqual(row["override"], {})
+
+    def test_configuration_returns_clones(self):
+        rows = self.editor.configuration()
+        row = next(r for r in rows if r["entry"].options.get("id") == "greeter")
+        row["inherited"]["greeting"] = "mutated"
+        again = self.editor.configuration()
+        row2 = next(r for r in again if r["entry"].options.get("id") == "greeter")
+        self.assertEqual(row2["inherited"], {"greeting": "hi"})
+
     def test_edit_persists_patch_and_applies(self):
         self.editor.edit(self._entry(),
                          lambda current, inherited: {**current, "greeting": "yo"})

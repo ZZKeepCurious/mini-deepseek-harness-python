@@ -399,6 +399,26 @@ class TestSessionSelectModel(WebApiTest):
         }))
         self.assertEqual(error["code"], "session/not-found")
 
+    def test_initialize_default_model_requires_credentials_service(self):
+        # dsh-v0.2.0-rc.2：上游 initializeDefaultModel 经 hasProviderApiKey 要求
+        # settings + credentials 服务在场；本部署未挂 → provider-credentials-unavailable。
+        error = self._error(self.api.dispatch(
+            "session.initializeDefaultModel", "rid", {}))
+        self.assertEqual(error["code"], "session/provider-credentials-unavailable")
+
+    def test_initialize_default_model_no_account_provider(self):
+        # 挂了 settings + credentials，但无账户 provider 目录 → provider-models-unavailable
+        from miniharness.settings import install_settings
+        import tempfile, os as _os
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
+        install_settings(self.ctx, path=_os.path.join(tmp, "settings.json"))
+        self.ctx.provide("credentials", object())
+        error = self._error(self.api.dispatch(
+            "session.initializeDefaultModel", "rid", {}))
+        self.assertEqual(error["code"], "session/provider-models-unavailable")
+        self.assertEqual(error["details"]["provider"], "deepseek-account")
+
 
 class TestWorkspacePath(WebApiTest):
     def test_can_open_never(self):
@@ -872,7 +892,8 @@ class TestDispatch(WebApiTest):
     def test_methods_set(self):
         self.assertEqual(self.api.methods(), frozenset({
             "session/list", "session/search", "session/create", "session/selectModel",
-            "session/modelCatalog", "session/canOpenWorkspacePath",
+            "session/modelCatalog", "session/initializeDefaultModel",
+            "session/canOpenWorkspacePath",
             "session/openWorkspacePath", "session/rename", "session/fork",
             "session/prompt", "session/attachment", "session/updateQueue",
             "session/cancel", "session/page", "session/projections",
@@ -891,11 +912,15 @@ class TestDispatch(WebApiTest):
             "credentials/describe", "credentials/set", "credentials/unset",
             "sessionReferenceResolver/candidates", "job/kill",
             "agentPresets/list", "agentPresets/read", "agentPresets/select",
+            "userQuestions/answer",
             "sessionFeedback/record",
             "messageFeedback/list", "messageFeedback/put", "messageFeedback/delete",
             "permissionPresets/catalog",
+            "schedule/list", "schedule/catalog", "schedule/history",
+            "schedule/delete", "schedule/update",
             "account/getState", "account/getProfile", "account/getBalance",
-            "account/signOut"}))
+            "account/getUnnotifiedBonuses", "account/ackBonusNotified",
+            "account/hasRunningAccountTasks", "account/signOut"}))
 
     def test_bad_payload_shape(self):
         error = self._error(self.api.dispatch("session.list", "rid", "nope"))

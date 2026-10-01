@@ -45,6 +45,7 @@ from typing import Callable
 
 from .sandbox_windows_acl import (AclWriteGrant, assert_temp_root_outside_workspace,
                                   temp_write_sid, workspace_write_sid)
+from .sandbox_windows_acl.acl_skill import install_acl_diagnosis_skill
 
 SANDBOX_UNAVAILABLE = "SANDBOX_UNAVAILABLE"
 
@@ -287,7 +288,8 @@ class LocalSandboxProvider:
     def __init__(self, internals: dict | None = None,
                  runner_command: list[str] | None = None,
                  runner_failure_signatures: list[str] | None = None,
-                 probe_timeout_ms: int = 5000):
+                 probe_timeout_ms: int = 5000,
+                 ctx: object | None = None):
         self.internals = dict(internals or {})
         runner = runner_command or []
         signatures = runner_failure_signatures or []
@@ -307,6 +309,11 @@ class LocalSandboxProvider:
         # ACL 授权缓存：sessionId → {grant, temp_dir}（上游 provider 的
         # grants/tempDirs 两张表在 mini 合一——每会话恰一把 grant）。
         self._acl_grants: dict[str, dict] = {}
+        # win32 内建 runner 注册 ACL 诊断技能（index.ts:298-303）：操作者
+        # 提供的 runnerCommand 不走 ACL 后端，故不注册；skills 服务缺席时
+        # `install_acl_diagnosis_skill` 静默 no-op（对齐上游 optional inject）。
+        if ctx is not None and os.name == "nt" and self._runner_command is None:
+            install_acl_diagnosis_skill(ctx)
 
     # ---------- 主入口 ----------
 

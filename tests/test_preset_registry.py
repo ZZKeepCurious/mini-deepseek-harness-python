@@ -120,6 +120,52 @@ class TestAgentPresetRegistry(unittest.TestCase):
         self.assertIn("broken", group)
         self.assertEqual(group["rows"], [])
 
+    def test_roster_shape_has_no_mode_selection(self):
+        registry = AgentPresetRegistry(self.ctx)
+        registry.register(PresetDefinition(id="standard", name="Standard",
+                                           plugins=[]))
+        roster = registry.roster()
+        self.assertEqual(roster, {"presets": [
+            {"id": "standard", "name": "Standard", "isDefault": True},
+        ]})
+        self.assertNotIn("modeSelectionEnabled", roster)
+
+    def test_default_id_selected_over_deployment_default(self):
+        registry = AgentPresetRegistry(
+            self.ctx, default="standard", selected_default="minimal")
+        registry.register(PresetDefinition(id="standard", plugins=[]))
+        registry.register(PresetDefinition(id="minimal", plugins=[]))
+        self.assertEqual(registry.default_id, "minimal")
+        roster = registry.roster()
+        minimal = next(r for r in roster["presets"] if r["id"] == "minimal")
+        self.assertTrue(minimal["isDefault"])
+
+    def test_default_id_falls_back_to_deployment_default(self):
+        registry = AgentPresetRegistry(self.ctx, default="standard")
+        registry.register(PresetDefinition(id="standard", plugins=[]))
+        registry.register(PresetDefinition(id="minimal", plugins=[]))
+        self.assertEqual(registry.default_id, "standard")
+
+    def test_default_id_falls_back_to_first_registered(self):
+        registry = AgentPresetRegistry(self.ctx)
+        registry.register(PresetDefinition(id="standard", plugins=[]))
+        registry.register(PresetDefinition(id="minimal", plugins=[]))
+        self.assertEqual(registry.default_id, "standard")
+
+    def test_roster_reports_broken_rows(self):
+        registry = AgentPresetRegistry(self.ctx)
+        registry.register(PresetDefinition(id="bad", plugins="nope"))
+        roster = registry.roster()
+        self.assertIn("broken", roster["presets"][0])
+        self.assertTrue(roster["presets"][0]["isDefault"])
+
+    def test_install_accepts_defaults(self):
+        bare = Context(name="with-defaults")
+        self.addCleanup(bare.dispose)
+        registry = install_agent_preset_registry(
+            bare, default="standard", selected_default="minimal")
+        self.assertEqual(registry.default_id, "minimal")
+
     def test_install_idempotent(self):
         first = install_agent_preset_registry(self.ctx)
         self.assertIs(self.ctx.get("agentPresets"), first)

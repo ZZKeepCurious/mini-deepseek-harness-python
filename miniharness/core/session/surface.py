@@ -188,7 +188,7 @@ def assert_developer_header(event: dict, events: list) -> None:
     header_data = _plain(header_event.get("data"))
     header = _plain(header_data.get("header")) if isinstance(header_data, dict) else None
     tools = header.get("tools") if isinstance(header, dict) else None
-    tools = tools if isinstance(tools, list) else []
+    tools = tools if isinstance(tools, (list, tuple)) else []
     message = _plain(data.get("message"))
     content = message.get("content") if isinstance(message, dict) else None
     for raw in content or []:

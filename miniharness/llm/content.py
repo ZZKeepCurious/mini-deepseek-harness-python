@@ -29,6 +29,7 @@ __all__ = [
     "project_files_to_text",
     "project_images_for_text_model",
     "project_offloaded_images",
+    "project_tool_updates",
     "request_image_handle_text",
     "required_image_offload",
     "resolve_image_attachment_access",
@@ -326,6 +327,10 @@ def required_image_offload(
     lengths: list = []
 
     def visit_block(block: dict) -> None:
+        # 上游 content.ts:326：已 offloaded 的 occurrence 不占预算（它已投影为
+        # 占位文本），重复计量会多报所需 offload 数。
+        if block.get("offloaded") is True:
+            return
         bytes_val = version_bytes(block)
         if representation == "base64":
             bytes_val = base64_length(bytes_val)
@@ -344,3 +349,105 @@ def visit_image_blocks(content: list, visit) -> None:
     for block in content or []:
         if block.get("type") == "image":
             visit(block)
+
+
+# ---------- 工具更新投影（上游 content.ts projectToolUpdates） ----------
+
+def without_developer_messages(messages: list) -> list:
+    """Remove every developer-role message（上游 withoutDeveloperMessages）。"""
+    retained = [message for message in messages if message.get("role") != "developer"]
+    return messages if len(retained) == len(messages) else retained
+
+
+def _tool_declarations(tools: list | None, mode: str, history: dict) -> dict:
+    """按路由模式构造 provider 声明表（上游 toolDeclarations）。"""
+    declarations: dict = {tool.get("name"): tool for tool in history.get("tools") or []}
+    for update in history.get("updates") or []:
+        for tool in update.get("additions") or []:
+            if tool.get("name") not in declarations:
+                # 后续新增在各自记录位置激活这些定义。
+                declarations[tool.get("name")] = {**tool, "deferLoading": True}
+
+    if mode == "in-history":
+        # removal 块停用工具但不丢弃其历史定义。
+        return declarations
+    if mode == "addition-only":
+        # 无 removal 支持时，声明列表必须省略非活动工具。
+        active = {tool.get("name") for tool in (tools or [])}
+        for name in list(declarations.keys()):
+            if name not in active:
+                del declarations[name]
+        return declarations
+    raise ValueError(f"unknown tool update mode {mode!r}")
+
+
+def project_tool_updates(
+    messages: list,
+    tools: list | None,
+    tool_update: str | None,
+    history: dict | None = None,
+) -> dict:
+    """按路由裁剪 developer 工具增删块与声明（上游 projectToolUpdates）。
+
+    不支持的路由与不完整历史用「当前声明、无 developer 更新」。显式延后的
+    baseline 工具在其首个保留的新增块之后才可用。
+    @returns {"messages", "tools"}：投影后的请求输入与 provider 声明。
+    """
+    if tool_update is None:
+        # 不支持的路由需要立即可用的工具，且不携带更新消息。
+        immediate = tools
+        if tools is not None and any(tool.get("deferLoading") is True for tool in tools):
+            immediate = [{k: v for k, v in tool.items() if k != "deferLoading"} for tool in tools]
+        return {"messages": without_developer_messages(messages), "tools": immediate}
+
+    if history is None:
+        # 仅有当前 schema 无法解析过去更新引用的定义。
+        return {"messages": without_developer_messages(messages), "tools": tools}
+    message_ids = {message.get("id") for message in messages if message.get("role") == "developer"}
+    if any(update.get("messageId") not in message_ids for update in history.get("updates") or []):
+        # 辅助前缀可能省略激活历史定义所需的更新。
+        return {"messages": without_developer_messages(messages), "tools": tools}
+
+    declarations = _tool_declarations(tools, tool_update, history)
+    update_ids = {update.get("messageId") for update in history.get("updates") or []}
+    # 延后的 baseline 工具仍需其首个新增块才可用。
+    offered = {tool.get("name") for tool in history.get("tools") or [] if not tool.get("deferLoading")}
+    projected: list = []
+    for message in messages:
+        if message.get("role") != "developer":
+            projected.append(message)
+            continue
+        # 更早的声明系列不支配当前工具集。
+        if message.get("id") not in update_ids:
+            continue
+        content: list = []
+        for block in message.get("content") or []:
+            btype = block.get("type")
+            if btype == "tool-addition":
+                # 只有已声明且尚未可用的工具需要激活。
+                name = block.get("toolName")
+                if name not in declarations or name in offered:
+                    continue
+                offered.add(name)
+                content.append(block)
+            elif btype == "tool-removal":
+                # addition-only 路由无法经历史停用工具。
+                if tool_update != "in-history":
+                    continue
+                if block.get("toolName") in offered:
+                    offered.discard(block.get("toolName"))
+                    content.append(block)
+            else:
+                # 其它核心/插件定义块保留内容与顺序。
+                content.append(block)
+        if not content:
+            continue
+        if len(content) == len(message.get("content") or []):
+            projected.append(message)
+        else:
+            projected.append({**message, "content": content})
+
+    unchanged = (len(projected) == len(messages)
+                 and all(projected[index] is messages[index] for index in range(len(messages))))
+    return {"messages": messages if unchanged else projected,
+            "tools": list(declarations.values())}

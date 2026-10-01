@@ -17,7 +17,9 @@
   解析（`resolveBundleDir` 双锚点 + npm 包 manifest）架构不适用；mini 的
   profile 只承载用户 patch 层 + home 层 + overlays（bundle 层为 []）。
   设计上保留 `dsh.profile.bundles` 读面，读到 bundle 名时按不可解析跳过
-  （同上游「不可读/不兼容 bundle 写 stderr 并跳过」）。
+  （同上游「不可读/不兼容 bundle 跳过」）——跳过的 bundle 记入
+  `Profile.skipped_bundles`（`{package_name, reason}`），加载期**不写 stderr**，
+  由启动器经 `report_skipped_bundles` 每次启动报告一次。
 - mini 无 pnpm 安装面（plugin-manager 的 pnpm 子进程族登记触发条件）。
 - `compose_entries` 复用 `loader/patch.py` 的 `apply_entry_patches`（空根单次
   应用，同上游 composeEntries 的 applyEntryPatches([], layers.flat())）。
@@ -26,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -34,15 +37,18 @@ from ..core.home_paths import resolve_dsh_home
 from .composition import load_document, load_patch_list
 
 __all__ = [
+    "OPTIONAL_BUNDLES",
     "PROFILES_DIR",
     "PROFILE_PATCH_FILENAME",
     "PROFILE_TEMPLATES",
     "Profile",
+    "SkippedBundle",
     "bundle_patch_files",
     "compose_entries",
     "init_profile",
     "load_profile_directory",
     "read_profile_patches",
+    "report_skipped_bundles",
     "resolve_profile_dir",
 ]
 
@@ -59,6 +65,17 @@ PROFILE_TEMPLATES: dict[str, list[str]] = {
     "headless": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-headless"],
     "web": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"],
 }
+
+#: dsh 安装随附、供人按需开关的 bundle（上游 profile.ts OPTIONAL_BUNDLES）：
+#: 每个都是安装了 dsh 的 runtime 依赖、声明 `dsh.bundle.patch`，未被任何
+#: shipped 模板选中，由 plugin-manager 以默认关闭的形态提供。mini 无
+#: plugin-manager/pnpm 载体（见模块头载体差异），此常量仅保留上游名录契约面。
+OPTIONAL_BUNDLES: list[str] = [
+    "@deepseek-ai/dsh-experimental-agent-team-profile",
+    "@deepseek-ai/dsh-experimental-voice-input-bundle",
+    "@deepseek-ai/dsh-experimental-auto-review",
+    "@deepseek-ai/dsh-experimental-schedule-bundle",
+]
 
 _PROFILE_PATCH_TEMPLATE = (
     "# Your patch layer for this dsh profile, applied after every bundle layer:\n"
@@ -82,6 +99,18 @@ class ProfileLayer:
 
 
 @dataclass(frozen=True)
+class SkippedBundle:
+    """一个被选中却未能加载的 bundle（上游 SkippedBundle）。
+
+    mini 无 npm bundle 解析载体，故 `dsh.profile.bundles` 里每个名字都会成为
+    一条 skipped 记录（reason 说明载体差异）；加载期不打印，由启动器经
+    `report_skipped_bundles` 每次启动报告一次。
+    """
+    package_name: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class Profile:
     """一个已加载的 profile（上游 Profile）：bundle 层 + 用户补丁层。"""
     name: str
@@ -89,6 +118,21 @@ class Profile:
     layers: list[ProfileLayer]
     patch_path: str
     patches: list[dict]
+    #: 选中的 bundle 里未贡献层的项（`dsh.profile.bundles` 序，含原因）。
+    skipped_bundles: list[SkippedBundle] = field(default_factory=list)
+
+
+def report_skipped_bundles(bin_name: str, profile: Profile) -> None:
+    """把每条跳过的 bundle 打印一次（上游 reportSkippedBundles）。
+
+    加载期从不打印，故启动器每次启动调用一次本函数即可（对齐上游
+    「launchers call this once per start」）。读 `Profile` 的
+    `{package_name, reason}` 子集（上游 `Pick<Profile, 'skippedBundles'>`）。
+    """
+    for skipped in profile.skipped_bundles:
+        sys.stderr.write(
+            f"{bin_name}: skipping profile bundle {json.dumps(skipped.package_name)}: "
+            f"{skipped.reason}\n")
 
 
 def resolve_profile_dir(name: str, home: str | None = None) -> str:
@@ -146,30 +190,38 @@ def load_profile_directory(
     """加载一个已初始化的 profile 目录（上游 loadProfileDirectory）。
 
     读 manifest → `dsh.profile.bundles` 逐 bundle 解析（mini 无 npm 解析，
-    读到 bundle 名即跳过并记 warn——同上游「不可解析 bundle 跳过」）→ 读
-    用户 `cordis.patch.yml`（user_layer=False 跳过）。
+    每个选中 bundle 都记入 `skipped_bundles`——同上游「不可读/不兼容 bundle
+    跳过且不打印」）→ 读用户 `cordis.patch.yml`（user_layer=False 跳过）。
 
     @param bin_name 诊断前缀。
     @param dir_path profile 目录。
     @param user_layer False 跳过用户补丁层（bundles-only 消费者不能因坏用户
         层失败）。
-    @returns 加载的 profile（用户层跳过时 patches 为空）。
+    @returns 加载的 profile（用户层跳过时 patches 为空）；未加载的 bundle 在
+        `skipped_bundles`，由启动器经 `report_skipped_bundles` 报告。
     """
     manifest = _read_manifest(bin_name, dir_path)
     bundles = (manifest.get("dsh") or {}).get("profile", {}).get("bundles", [])
     layers: list[ProfileLayer] = []
+    skipped_bundles: list[SkippedBundle] = []
     for package_name in bundles:
+        if not isinstance(package_name, str) or not package_name:
+            continue
         # mini 无 npm bundle 包载体：不可解析即跳过（同上游「unreadable bundle
-        # 写 stderr 并跳过」）。保留契约面供未来 bundle 载体。
-        if isinstance(package_name, str) and package_name:
-            layers.append(ProfileLayer(package_name=package_name,
-                                       package_dir="", patch_paths=(), patches=[]))
+        # 跳过」；上游在此 push skippedBundles，mini 无 resolveBundleDir 双锚点
+        # 解析故每个名字都记入）。保留契约面供未来 bundle 载体。
+        skipped_bundles.append(SkippedBundle(
+            package_name=package_name,
+            reason=f"cannot resolve profile bundle {json.dumps(package_name)}; "
+                   f"mini carries no npm bundle resolution",
+        ))
     patch_path = os.path.join(dir_path, PROFILE_PATCH_FILENAME)
     patches: list[dict] = []
     if user_layer and os.path.exists(patch_path):
         patches = load_patch_list(patch_path, bin_name)
     return Profile(name=os.path.basename(dir_path), dir=dir_path,
-                   layers=layers, patch_path=patch_path, patches=patches)
+                   layers=layers, patch_path=patch_path, patches=patches,
+                   skipped_bundles=skipped_bundles)
 
 
 def _read_manifest(bin_name: str, dir_path: str) -> dict:

@@ -7,8 +7,11 @@ profile 的 `cordis.patch.yml`，并经 Loader 正常路径（reconcile）应用
   * `documentPath` → profile 的 `cordis.patch.yml`（profileContext.patchPath）。
   * `entries()` → 根 Include 树下唯一 id 的活动条目（nested Include 各自独立
     配置所有权，重复 id 排除）。
-  * `configuration()` → 每条 `{entry, inherited, override}`——inherited = 去掉
-    该行自身 config 后重组合，override = patch 文件中最后一条该 id 的 config。
+  * `configuration()` → 每条 `{entry, inherited, override}`——`overridden` =
+    profile patch 里带 own `config`（无 `insert`）的 id 集合；不被覆盖的条目
+    inherited = 首个命中层的 config（`flatten(composeEntries(layers+patches))`
+    首次胜出，按调用克隆），被覆盖的条目 inherited = 去掉该行自身 config 后
+    重组合；override = patch 文件中最后一条该 id 的 config。
   * `edit(entry, change)`：filelock（锁锚 profile package.json）→ 先 reconcile
     磁盘现状 → change(current, inherited) → `internal/config` waterfall 验证 →
     注释保留改写 patch 文件（next==inherited 删 config/整行，否则 setIn）→
@@ -26,6 +29,7 @@ profile 的 `cordis.patch.yml`，并经 Loader 正常路径（reconcile）应用
 """
 from __future__ import annotations
 
+import copy
 import os
 import tempfile
 from pathlib import Path
@@ -144,13 +148,37 @@ class ConfigEditor:
         return load_profile_directory("miniharness", self._profile_dir)
 
     def configuration(self) -> list[dict]:
-        """读活动条目的继承层与显式覆盖（对齐 upstream configuration()）。"""
+        """读活动条目的继承层与显式覆盖（对齐 upstream configuration()）。
+
+        own `config` 键（即使值为 undefined/None）也会覆盖继承配置——被覆盖的
+        条目用 `_inherited`（剥离自身 config 重组合），其余条目用
+        `composeEntries(layers+patches)` 的**首个命中**行 config（克隆后返回）。
+        mini 的基础配置来自根 Include 的 config 文件（bundle 层为 []），故组合
+        基底取 include 的原始条目表（见 `_inherited` 说明）。
+        """
         loaded = self._loaded_profile()
+        entries = self.entries()
+        overridden = {
+            patch.get("id") for patch in loaded.patches
+            if "insert" not in patch and "config" in patch
+        }
+        composed: dict[str, dict] = {}
+        if any(entry.options.get("id") not in overridden for entry in entries):
+            base_rows = self._include_base_rows(self._root_include_entry())
+            layers = [layer.patches for layer in loaded.layers]
+            for row in _flatten(compose_entries([*layers, loaded.patches], base_rows)):
+                composed.setdefault(row.get("id"), row)
         out: list[dict] = []
-        for entry in self.entries():
+        for entry in entries:
+            entry_id = entry.options.get("id")
+            if entry_id in overridden:
+                inherited = self._inherited(entry, loaded)
+            else:
+                row = composed.get(entry_id)
+                inherited = copy.deepcopy((row.get("config") if row else None) or {})
             out.append({
                 "entry": entry,
-                "inherited": self._inherited(entry, loaded),
+                "inherited": inherited,
                 "override": self._override(entry, loaded),
             })
         return out
@@ -158,7 +186,7 @@ class ConfigEditor:
     def _override(self, entry: Any, loaded: Any) -> dict:
         for patch in reversed(loaded.patches):
             if patch.get("id") == entry.options.get("id") and "config" in patch:
-                return dict(patch.get("config") or {})
+                return copy.deepcopy(patch.get("config") or {})
         return {}
 
     def _inherited(self, entry: Any, loaded: Any) -> dict:
@@ -182,7 +210,7 @@ class ConfigEditor:
         layers = [layer.patches for layer in loaded.layers]
         row = next((r for r in _flatten(compose_entries([*layers, patches], base_rows))
                     if r.get("id") == entry.options.get("id")), None)
-        return dict(row.get("config") or {}) if row else {}
+        return copy.deepcopy(row.get("config") or {}) if row else {}
 
     @staticmethod
     def _include_base_rows(include: Any) -> list[dict]:
@@ -267,7 +295,8 @@ class ConfigEditor:
         # 用编辑后的文档替换 profile 层补丁做 effective 验证
         from .profile import Profile
         edited = Profile(name=loaded.name, dir=loaded.dir, layers=loaded.layers,
-                         patch_path=loaded.patch_path, patches=document)
+                         patch_path=loaded.patch_path, patches=document,
+                         skipped_bundles=loaded.skipped_bundles)
         effective_patches = read_profile_patches(
             "miniharness", edited, home=self._home, overlays=None)
         base_rows = self._include_base_rows(include)

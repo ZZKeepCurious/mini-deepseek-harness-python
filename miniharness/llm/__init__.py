@@ -16,16 +16,21 @@ from .assistant_stream import *  # noqa: F401,F403
 from .content import *  # noqa: F401,F403
 
 __all__ = [
+    "ACCOUNT_QUOTA",
+    "ACCOUNT_SIGN_IN_REQUIRED",
+    "ACCOUNT_TOKEN_INVALID",
     "AppIdentity",
     "APP_IDENTITY",
     "AssistantStreamAccumulator",
     "AUTH",
+    "attribution_headers",
     "BlockAssembler",
     "CONTEXT_WINDOW_EXCEEDED",
     "DeepSeekAdapter",
     "EMPTY_RESPONSE",
     "FakeLlmAdapter",
     "IMAGE_OFFLOAD_REQUIRED",
+    "INVALID_CREDENTIAL",
     "ImageAttachmentAccess",
     "ImageBlock",
     "LlmAdapter",
@@ -60,6 +65,7 @@ __all__ = [
     "project_files_to_text",
     "project_images_for_text_model",
     "project_offloaded_images",
+    "project_tool_updates",
     "provider_retry_after_ms",
     "request_id",
     "request_image_handle_text",
@@ -68,5 +74,6 @@ __all__ = [
     "serialize_messages",
     "serialize_messages_with_images",
     "text_only_image_text",
+    "user_agent",
     "validate_record",
 ]

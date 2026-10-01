@@ -561,8 +561,10 @@ class TestBackgroundDelegation(unittest.TestCase):
                                          {"background_mode": "continuable"})
         rendered = {s["name"]: s["text"] for s in svc.render({})}
         self.assertIn("tool:subagent", rendered)
-        self.assertIn("Use subagent in the background by default.",
-                      rendered["tool:subagent"])
+        self.assertEqual(
+            rendered["tool:subagent"],
+            "Start independent subagent delegations together in one assistant message and continue "
+            "useful work while they run.")
 
     def test_no_section_for_one_shot(self):
         parent, ctx, reg = _parent_loop()

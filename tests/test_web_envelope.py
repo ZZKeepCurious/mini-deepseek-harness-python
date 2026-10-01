@@ -44,8 +44,10 @@ class TestErrorCodeSet(unittest.TestCase):
         # agent-preset/locked；feedback 新增 note-blank/note-too-large/
         # session-not-found/target-not-found/version-conflict；
         # permission-presets 新增 permission/invalid + duplicate-auto +
-        # auto-unavailable）
-        self.assertEqual(len(RPC_ERROR_CODES), 57)
+        # auto-unavailable；
+        # dsh-v0.2.0-rc.2 session-controller 新增 provider-credentials-unavailable
+        # + provider-models-unavailable）
+        self.assertEqual(len(RPC_ERROR_CODES), 59)
 
     def test_known_codes_present(self):
         for code in ("gateway/bad-request", "session/not-found", "session/model-unavailable",

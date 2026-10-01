@@ -80,10 +80,9 @@ class WebResidualTest(unittest.TestCase):
             "workspace/archiveSession", "w4",
             {"sessionId": self.session_id, "stopActivity": True}))
         self.assertEqual(archived["archivedSessionIds"], [self.session_id])
-        # 注册表已非空 → 不触发默认创建，value 为 None
+        # dsh-v0.2.0-rc.2：initializeDefault 无入参；注册表已非空 → value 为 None
         self.assertIsNone(self._value(self.api.dispatch(
-            "workspace/initializeDefault", "w5",
-            {"directoryName": "proj", "title": "Proj"})))
+            "workspace/initializeDefault", "w5", {})))
         boundary = self._error(self.api.dispatch(
             "workspace/archiveSession", "w6",
             {"sessionId": self.session_id, "stopActivity": "yes"}))

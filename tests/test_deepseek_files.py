@@ -281,7 +281,8 @@ class UploadIndexTest(unittest.TestCase):
         self._tmp = tempfile.mkdtemp(prefix="mini-upload-index-")
         self.path = os.path.join(self._tmp, "files-v3.json")
         self.index = DeepSeekUploadIndex(self.path)
-        self.scope = deep_seek_file_scope("https://api.deepseek.com", "sk-test")
+        self.scope = deep_seek_file_scope(
+            "https://api.deepseek.com", {"x-api-key": "sk-test"})
 
     def tearDown(self):
         import shutil
@@ -298,8 +299,23 @@ class UploadIndexTest(unittest.TestCase):
         committed = self.index.commit(self._record(), now=2_000, refresh_margin_ms=0)
         self.assertTrue(committed.accepted)
         self.assertEqual(self.index.get(self.scope, "sha256:" + "a" * 64, 2_000, 0).fileId, "file-1")
-        self.index.remove(self.scope, "sha256:" + "a" * 64, "file-1")
+        self.index.remove(self.scope, [{"variantId": "sha256:" + "a" * 64,
+                                        "fileId": "file-1"}])
         self.assertIsNone(self.index.get(self.scope, "sha256:" + "a" * 64, 2_000, 0))
+
+    def test_remove_several_generations_in_one_update(self):
+        variants = ["sha256:" + c * 64 for c in ("a", "b", "c")]
+        for index, variant in enumerate(variants):
+            self.index.commit(self._record(variant=variant, file_id=f"file-{index}"),
+                              now=1_000, refresh_margin_ms=0)
+        self.index.remove(self.scope, [
+            {"variantId": variants[0], "fileId": "file-0"},
+            {"variantId": variants[1], "fileId": "file-1"},
+            {"variantId": variants[2], "fileId": "file-superseded"},
+        ])
+        self.assertIsNone(self.index.get(self.scope, variants[0], 2_000, 0))
+        self.assertIsNone(self.index.get(self.scope, variants[1], 2_000, 0))
+        self.assertEqual(self.index.get(self.scope, variants[2], 2_000, 0).fileId, "file-2")
 
     def test_expired_record_not_reusable(self):
         self.index.commit(self._record(expires=1_500), now=1_000, refresh_margin_ms=0)
@@ -331,11 +347,11 @@ class UploadIndexTest(unittest.TestCase):
 
 
 class FilesClientTest(unittest.TestCase):
-    """Messages Files API：/v1/files 路径、x-api-key 头、ISO 时间、after_id 游标。"""
+    """Messages Files API：/v1/files 路径、认证头、ISO 时间、after_id 游标。"""
 
     def _client(self, handler):
         return DeepSeekFilesClient(
-            baseURL="https://api.deepseek.com", apiKey="sk-test",
+            baseURL="https://api.deepseek.com", headers={"x-api-key": "sk-test"},
             transport=httpx.MockTransport(handler))
 
     def test_upload_list_delete_roundtrip(self):
@@ -387,6 +403,9 @@ class FilesClientTest(unittest.TestCase):
             expiresAfterSeconds=3600))
         self.assertEqual(captured["path"], "/v1/files")
         self.assertIn("x-api-key", captured["headers"])
+        # 上游 files-api.ts:148：Files 只带共享归因，不带 model 请求身份。
+        self.assertIn("user-agent", captured["headers"])
+        self.assertNotIn("x-deepseek-harness-user-id", captured["headers"])
         self.assertEqual(result.bytes, 3)
         self.assertEqual(result.expiresAt, result.createdAt + 3600)
 
@@ -432,12 +451,14 @@ class FileStoreMessagesScopeTest(unittest.TestCase):
             store = DeepSeekFileStore(
                 index=DeepSeekUploadIndex(os.path.join(tmp, "files-v3.json")),
                 now=lambda: 1_000_000, transport=httpx.MockTransport(server.handler))
-            connection = DeepSeekFileConnection("https://api.deepseek.com", "sk-test")
+            connection = DeepSeekFileConnection(
+                "https://api.deepseek.com", {"x-api-key": "sk-test"})
             policy = DeepSeekFilePolicy(3600, 0, 10)
             result = asyncio.run(store.ensure_uploaded(_version(), connection, policy))
             self.assertEqual(
                 str(result.record.scope),
-                str(deep_seek_file_scope("https://api.deepseek.com/v1", "sk-test")))
+                str(deep_seek_file_scope("https://api.deepseek.com/v1",
+                                         {"x-api-key": "sk-test"})))
         finally:
             import shutil
             shutil.rmtree(tmp, ignore_errors=True)
@@ -451,7 +472,8 @@ class FileStoreMessagesScopeTest(unittest.TestCase):
             store = DeepSeekFileStore(
                 index=DeepSeekUploadIndex(os.path.join(tmp, "files-v3.json")),
                 now=lambda: 1_000_000, transport=httpx.MockTransport(server.handler))
-            connection = DeepSeekFileConnection("https://api.deepseek.com", "sk-test")
+            connection = DeepSeekFileConnection(
+                "https://api.deepseek.com", {"x-api-key": "sk-test"})
             total = asyncio.run(store.release_all(connection))
             self.assertEqual(total, 1)
             self.assertEqual(server.files, {})
@@ -469,7 +491,7 @@ class FileStoreTest(unittest.TestCase):
         self.store = DeepSeekFileStore(index=self.index, now=lambda: 1_000_000,
                                        transport=self.transport)
         self.connection = DeepSeekFileConnection(
-            baseURL="https://api.deepseek.com", apiKey="sk-test")
+            baseURL="https://api.deepseek.com", headers={"x-api-key": "sk-test"})
         self.policy = DeepSeekFilePolicy(
             expiresAfterSeconds=3600, refreshMarginSeconds=0, quotaCleanupBatch=10)
         self.version = _version()
@@ -513,7 +535,9 @@ class FileStoreTest(unittest.TestCase):
     def test_invalidate_and_release(self):
         async def run():
             first = await self.store.ensure_uploaded(self.version, self.connection, self.policy)
-            await self.store.invalidate(self.version, first.record.fileId, self.connection)
+            await self.store.invalidate(
+                [{"variantId": str(self.version.variantId),
+                  "fileId": first.record.fileId}], self.connection)
             self.assertIsNone(self.index.get(
                 first.record.scope, str(self.version.variantId), 1_000_000, 0))
             second = await self.store.ensure_uploaded(self.version, self.connection, self.policy)
@@ -522,6 +546,37 @@ class FileStoreTest(unittest.TestCase):
             self.assertTrue(released)
 
         asyncio.run(run())
+
+    def test_scope_isolates_credential_kind_and_value_but_reuses_reordered_headers(self):
+        async def run():
+            first = await self.store.ensure_uploaded(
+                self.version, self.connection, self.policy)
+            account = await self.store.ensure_uploaded(
+                self.version,
+                DeepSeekFileConnection(baseURL="https://api.deepseek.com",
+                                       headers={"x-dsh-auth-token": "sk-test"}),
+                self.policy)
+            replacement = await self.store.ensure_uploaded(
+                self.version,
+                DeepSeekFileConnection(baseURL="https://api.deepseek.com",
+                                       headers={"x-api-key": "new-key"}),
+                self.policy)
+            self.assertEqual(len({str(first.record.scope), str(account.record.scope),
+                                  str(replacement.record.scope)}), 3)
+            combined = await self.store.ensure_uploaded(
+                self.version,
+                DeepSeekFileConnection(baseURL="https://api.deepseek.com",
+                                       headers={"a": "one", "b": "two"}),
+                self.policy)
+            reordered = await self.store.ensure_uploaded(
+                self.version,
+                DeepSeekFileConnection(baseURL="https://api.deepseek.com",
+                                       headers={"b": "two", "a": "one"}),
+                self.policy)
+            self.assertEqual(reordered.record, combined.record)
+
+        asyncio.run(run())
+        self.assertEqual(self.server.upload_count, 4)
 
     def test_oversized_image_rejected(self):
         big = _version(data=b"x" * (32 * 1024 * 1024 + 1))
@@ -556,6 +611,38 @@ class RequestFilesTest(unittest.TestCase):
         self.assertIn("message 1, image 1", text)
         self.assertIn("PNG, JPEG, WebP, and GIF", text)
 
+    def test_retry_invalidates_every_stale_mapping_in_one_update(self):
+        import shutil
+        tmp = tempfile.mkdtemp(prefix="mini-rf-retry-")
+        try:
+            index = DeepSeekUploadIndex(os.path.join(tmp, "files-v3.json"))
+            connection = DeepSeekFileConnection(
+                "https://api.deepseek.com", {"x-api-key": "sk"})
+            scope = deep_seek_file_scope(
+                "https://api.deepseek.com/v1", {"x-api-key": "sk"})
+            first = _version(variant="a")
+            second = _version(variant="b")
+            for version, file_id in ((first, "file-a"), (second, "file-b")):
+                index.commit(DeepSeekUploadRecord(
+                    scope=scope, attachmentId=str(version.attachment.attachmentId),
+                    variantId=str(version.variantId), fileId=file_id,
+                    bytes=1, createdAt=1, expiresAt=10 ** 9),
+                    now=1, refresh_margin_ms=0)
+            store = DeepSeekFileStore(
+                index=index, now=lambda: 10 ** 9,
+                transport=httpx.MockTransport(_FilesServer().handler))
+            request_files = RequestFiles(
+                store, connection, DeepSeekFilePolicy(3600, 0, 10),
+                1000, None, lambda: None)
+            asyncio.run(request_files.resolve(first, ImageWireLocation(1, 1)))
+            asyncio.run(request_files.resolve(second, ImageWireLocation(1, 2)))
+            detail = "file file-a expired; file file-b expired"
+            self.assertTrue(asyncio.run(request_files.retry(detail)))
+            self.assertIsNone(index.get(scope, str(first.variantId), 10 ** 9, 0))
+            self.assertIsNone(index.get(scope, str(second.variantId), 10 ** 9, 0))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_resolve_failure_wraps_transport_error(self):
         import shutil
         tmp = tempfile.mkdtemp(prefix="mini-rf-")
@@ -567,7 +654,8 @@ class RequestFilesTest(unittest.TestCase):
                 index=DeepSeekUploadIndex(os.path.join(tmp, "files-v3.json")),
                 now=lambda: 1_000_000,
                 transport=httpx.MockTransport(server.handler))
-            connection = DeepSeekFileConnection("https://api.deepseek.com", "sk")
+            connection = DeepSeekFileConnection(
+                "https://api.deepseek.com", {"x-api-key": "sk"})
             request_files = RequestFiles(
                 store, connection, DeepSeekFilePolicy(3600, 0, 10),
                 1000, None, lambda: None)
@@ -580,12 +668,26 @@ class RequestFilesTest(unittest.TestCase):
 
 class FileScopeTest(unittest.TestCase):
     def test_scope_is_deterministic_digest_and_normalizes_trailing_slash(self):
-        first = deep_seek_file_scope("https://api.deepseek.com/", "sk-test")
-        second = deep_seek_file_scope("https://api.deepseek.com", "sk-test")
+        headers = {"x-api-key": "sk-test"}
+        first = deep_seek_file_scope("https://api.deepseek.com/", headers)
+        second = deep_seek_file_scope("https://api.deepseek.com", headers)
         self.assertEqual(str(first), str(second))
         self.assertEqual(len(str(first)), 64)
-        self.assertNotEqual(str(first), str(deep_seek_file_scope("https://other", "sk-test")))
-        self.assertNotEqual(str(first), str(deep_seek_file_scope("https://api.deepseek.com", "sk-other")))
+        self.assertNotEqual(str(first),
+                            str(deep_seek_file_scope("https://other", headers)))
+        self.assertNotEqual(str(first),
+                            str(deep_seek_file_scope("https://api.deepseek.com",
+                                                     {"x-api-key": "sk-other"})))
+        self.assertNotEqual(str(first),
+                            str(deep_seek_file_scope("https://api.deepseek.com",
+                                                     {"x-dsh-auth-token": "sk-test"})))
+
+    def test_reordered_headers_reuse_the_same_scope(self):
+        self.assertEqual(
+            str(deep_seek_file_scope("https://api.deepseek.com",
+                                     {"b": "two", "a": "one"})),
+            str(deep_seek_file_scope("https://api.deepseek.com",
+                                     {"a": "one", "b": "two"})))
 
 
 class ModelInfoTest(unittest.TestCase):

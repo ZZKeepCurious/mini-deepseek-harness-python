@@ -40,7 +40,8 @@ class AgentPresetsRemoteTest(unittest.TestCase):
 
     def test_list_returns_roster_with_is_default(self):
         value = self._value(self.api.dispatch("agentPresets/list", "l1", {}))
-        self.assertTrue(value["modeSelectionEnabled"])
+        # dsh-v0.2.0-rc.2：roster 不再携带 modeSelectionEnabled。
+        self.assertNotIn("modeSelectionEnabled", value)
         ids = [row["id"] for row in value["presets"]]
         self.assertIn("standard", ids)
         self.assertIn("minimal", ids)

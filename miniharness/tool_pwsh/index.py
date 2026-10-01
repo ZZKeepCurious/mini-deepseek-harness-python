@@ -332,7 +332,9 @@ def create_pwsh_tool(ctx, shell, config: dict | None = None) -> Tool:
             "Each call runs in a fresh pwsh process: no state (cwd, variables, functions) "
             "persists between calls. Paths use native Windows form (`C:\\...`); read "
             "environment variables with `$env:NAME`. Non-zero exits are reported as "
-            "`[exit code: N]`."),
+            "`[exit code: N]`. Commands may run under a file sandbox; a blocked file "
+            "operation is reported as `[sandbox: file access denied under <mode> mode]`, a "
+            "policy denial: do not retry another way."),
         parameters={"type": "object", "properties": properties,
                     "required": ["command", "description"]},
         output={"schema": _output_schema()},

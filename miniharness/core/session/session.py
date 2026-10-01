@@ -20,6 +20,7 @@ from .surface import (
     validate_session_event_data,
 )
 from .types import KNOWN_TYPES, MESSAGE_PROJECTION_EVENT_TYPES, SURFACE_TYPES
+from .tool_history import ToolHistoryProjection
 
 __all__ = ["Session"]
 
@@ -94,7 +95,13 @@ class Session:
         self._mode = mode
         self._events: list[dict[str, Any]] = []
         self._replace_count = 0
+        self._content_count = 0
         self._on_append = on_append
+
+        # 工具历史折叠（上游 Session.toolHistory）：按需消费新事件，返回不可变
+        # 快照。首次访问重建继承前缀的工具历史。
+        self._tool_history_projection = ToolHistoryProjection()
+        self._tool_history_seq = 0
 
         # 对齐上游 isSeeded + inheritedEventCount 语义（rc.1）
         self._is_seeded: bool = self.meta.get("isSeeded", False)
@@ -204,6 +211,17 @@ class Session:
         """
         return self._replace_count
 
+    @property
+    def content_generation(self) -> int:
+        """已提交的替换与插件消息变更次数（上游 SurfaceManager.contentGeneration）。
+
+        = 位置替换（replaceGeneration）+ message-投影事件（`image/offload` 等
+        插件拥有的消息变更）。agent-loop 的系列断裂判定
+        （agent.ts requestSurfaceGeneration）读的是本计数器，不是
+        replaceGeneration。
+        """
+        return self._content_count
+
     def snapshot_events(self, from_: int | None = None, to_: int | None = None) -> tuple[dict[str, Any], ...]:
         """半开区间事件快照（对齐上游 Session.snapshotEvents(from?, to?)）。
 
@@ -248,6 +266,18 @@ class Session:
             if event["type"] == "request/context":
                 return dict(event["data"])
         return None
+
+    def tool_history(self) -> dict:
+        """当前工具历史快照（上游 Session.toolHistory）。
+
+        只折叠自上次读取以来的新事件并推进游标（首次访问重建继承前缀的历史）；
+        返回 {tools, updates}——初始声明 + 按序解析的新增定义，供
+        `project_tool_updates` 按路由裁剪请求。
+        """
+        for event in self._events[self._tool_history_seq:]:
+            self._tool_history_projection.apply(event)
+        self._tool_history_seq = len(self._events)
+        return self._tool_history_projection.snapshot()
 
     def surface_nodes(self) -> list[dict]:
         """当前 surface 节点（含 seq，模型可见顺序）。
@@ -301,8 +331,14 @@ class Session:
             assert_provenance(type_, sourceEventSeqs, self.seq, [])
         record = deep_freeze({"seq": self.seq, "time": now_ms(), **payload})
         self._events.append(record)
-        if surfaceOp is not None and surfaceOp != "append":
+        # 上游 surface.ts planSurfaceEvent 分支顺序：命中已注册投影的事件走
+        # kind='project'（contentGeneration +1，且先于 surfaceOp 判定）；否则
+        # 按 surfaceOp 走 append/replace（replace 两个计数器都 +1）。
+        if type_ in MESSAGE_PROJECTION_EVENT_TYPES:
+            self._content_count += 1
+        elif surfaceOp is not None and surfaceOp != "append":
             self._replace_count += 1
+            self._content_count += 1
         if self._on_append is not None:
             self._on_append(record)
         return record
@@ -365,6 +401,13 @@ class Session:
             else:
                 if surface_op is not None or source_seqs is not None:
                     raise ValueError(f"非 surface 事件 {etype} 不允许携带 surfaceOp/sourceEventSeqs")
+            # 上游 surface.ts applySurfacePlan：投影事件与位置替换都推进
+            # contentGeneration，仅位置替换推进 replaceGeneration（已在上面
+            # 的 replace 分支计过）。计数须在全部校验通过后进行。
+            if etype in MESSAGE_PROJECTION_EVENT_TYPES:
+                self._content_count += 1
+            elif etype in SURFACE_TYPES and surface_op != "append":
+                self._content_count += 1
             if not is_json_safe(thaw(ev)):
                 raise TypeError(f"seed 事件必须可无损 JSON 序列化: {ev!r}")
             # V2: assistant/message 与 assistant/attempt 内嵌 stream，须在 restore

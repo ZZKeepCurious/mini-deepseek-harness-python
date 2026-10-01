@@ -31,6 +31,7 @@ from .invariant import *  # noqa: F401,F403
 from .repair import *  # noqa: F401,F403
 from .surface import *  # noqa: F401,F403
 from .projections import *  # noqa: F401,F403
+from .tool_history import *  # noqa: F401,F403
 from .session import *  # noqa: F401,F403
 
 __all__ = [
@@ -43,6 +44,8 @@ __all__ = [
     "Session",
     "TOOL_NOT_STARTED",
     "TOOL_OUTCOME_UNKNOWN",
+    "ToolCallRecovery",
+    "ToolHistoryProjection",
     "ImageOffloadProjection",
     "MessageProjection",
     "create_message",

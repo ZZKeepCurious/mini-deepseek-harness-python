@@ -124,7 +124,7 @@ class PermissionPresetTest(unittest.TestCase):
         disposer = self.svc.register_auto(lambda: admits.append(1))
         self.assertIn(AUTO_PRESET, self.svc.names)
         self.assertEqual(self.svc.resolve(AUTO_PRESET),
-                         {"sandbox": "danger-full-access", "approval": "never"})
+                         {"sandbox": "danger-full-access", "approval": "ask"})
         # Auto 选择先 admit 再写
         session = self._session()
         self.svc.set(session, AUTO_PRESET)
@@ -133,6 +133,21 @@ class PermissionPresetTest(unittest.TestCase):
         self.assertNotIn(AUTO_PRESET, self.svc.names)
         with self.assertRaises(PermissionPresetError):
             self.svc.resolve(AUTO_PRESET)
+
+    def test_auto_matches_delegated_never(self):
+        # 委派子会话钉 `never`，仍选中的 Auto 解析回自身（index.ts:355）。
+        self.svc.register_auto(lambda: None)
+        from miniharness.interaction.approval import set_approval_policy
+        session = self._session()
+        self.svc.set(session, "danger-full-access")
+        self.svc.set(session, AUTO_PRESET)
+        self.assertEqual(self.svc.current(session), AUTO_PRESET)
+        set_approval_policy(session, "never")
+        self.assertEqual(self.svc.current(session), AUTO_PRESET)
+        # 沙箱漂移后不再匹配 → custom。
+        from miniharness.seams.sandbox_policy import set_sandbox_mode
+        set_sandbox_mode(session, "read-only")
+        self.assertEqual(self.svc.current(session), CUSTOM_PRESET)
 
     def test_duplicate_auto_rejected(self):
         self.svc.register_auto(lambda: None)

@@ -175,6 +175,8 @@ class GatewayStreams:
             "workspaceFiles/changes": "workspace_changes",
             "job/list": "job_list",
             "job/follow": "job_follow",
+            "account/watchExpiry": "account_watch_expiry",
+            "userQuestions/attachWait": "user_questions_attach_wait",
         }
 
     def uplink_codecs(self) -> dict[str, Any]:
@@ -240,6 +242,13 @@ class GatewayStreams:
         if kind == "job_follow":
             return _with_uplink(
                 self._job_follow(payload["args"], invocation), invocation)
+        if kind == "account_watch_expiry":
+            return _with_uplink(
+                self._account_watch_expiry(invocation), invocation)
+        if kind == "user_questions_attach_wait":
+            return _with_uplink(
+                self._user_questions_attach_wait(payload["args"], invocation),
+                invocation)
         return _with_uplink(self._control(invocation), invocation)
 
     # ---------- session/follow（历史跟随流） ----------
@@ -576,6 +585,57 @@ class GatewayStreams:
                 frame["lossy"] = True
             yield frame
 
+    # ---------- userQuestions/attachWait（前台提问持有流） ----------
+
+    async def _user_questions_attach_wait(self, args: dict, invocation: StreamInvocation):
+        """`userQuestions/attachWait`：持有一条 live timed 等待（上游 index.ts:216）。
+
+        产出一帧 `{remainingMs}`（客户端持有时 Host 计时暂停），等待结算或流关闭。
+        未知 callId / 非 continued → 无帧即流结束（上游 `wait === undefined` 时
+        `yield*` 空序列）。
+        """
+        service = self.ctx.get("userQuestions")
+        if service is None:
+            raise RemoteStreamError(
+                "gateway/invocation-unavailable",
+                "typert gateway: userQuestions/attachWait: userQuestions namespace "
+                "is not mounted")
+        agent = self.api.resolve_terminal_agent(args.get("agentId"))
+        async for frame in service.attach_wait(
+                agent, args.get("callId"), invocation.signal):
+            yield frame
+
+    # ---------- account/watchExpiry（凭据过期通知流） ----------
+
+    async def _account_watch_expiry(self, invocation: StreamInvocation):
+        """`account/watchExpiry`：无重放地订阅凭据过期（上游 account-controller）。
+
+        dsh-v0.2.0-rc.2 新流：订阅期间每次 `deepseek-account/session-expired`
+        产出一帧 `'session-expired'`；订阅前发生的事件不重放（README 重连语义）。
+        无 account 命名空间（`ctx.deepseekAccount` 缺席）→ invocation-unavailable。
+        """
+        if self.ctx.get("deepseekAccount") is None:
+            raise RemoteStreamError(
+                "gateway/invocation-unavailable",
+                "typert gateway: account/watchExpiry: account namespace is not mounted")
+        queue: asyncio.Queue = asyncio.Queue()
+
+        def on_expired(_payload: Any = None) -> None:
+            queue.put_nowait("session-expired")
+
+        dispose = self.ctx.on("deepseek-account/session-expired", on_expired,
+                              global_=True)
+        signal = invocation.signal
+        try:
+            while not self._is_aborted(signal):
+                try:
+                    frame = await asyncio.wait_for(queue.get(), timeout=0.05)
+                except asyncio.TimeoutError:
+                    continue
+                yield frame
+        finally:
+            dispose()
+
     # ---------- session/control（宿主级 live control） ----------
 
     def _attach_control(self) -> None:
@@ -628,6 +688,14 @@ class GatewayStreams:
             queue.put_nowait(frame)
 
     # ---------- 生命周期 ----------
+
+    def has_live_client(self) -> bool:
+        """是否有活跃的 `$events` 客户端流（上游 TypertGateway.hasLiveClient）。
+
+        裸 socket 不算——只有 open 过 `$events` 且未中止的代次才计数（mini
+        `RemoteEventRegistry._clients` 天然如此）。
+        """
+        return self.events.has_live_client()
 
     def receive_result(self, result: dict) -> None:
         """把一条 `$events/result`（词法已由 stream_protocol 校验）交给注册表结算。"""

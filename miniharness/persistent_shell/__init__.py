@@ -21,6 +21,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from ..core.output_retention import truncate_without_splitting_surrogate_pair, utf16_length
 from ..core.tools import Tool, ToolRegistry
 
 __all__ = [
@@ -162,12 +163,17 @@ def make_markers(dialect: ShellDialect) -> dict:
 
 
 def maybe_truncate(content: str, max_output_chars: int, incomplete: bool = False) -> str:
-    """按字符上限裁尾；`incomplete` 时即便未超限也追加截断标记。"""
-    if len(content) <= max_output_chars and not incomplete:
+    """按字符上限裁尾；`incomplete` 时即便未超限也追加截断标记。
+
+    超限时经 `truncate_without_splitting_surrogate_pair`（代理对安全截断，
+    对齐 tool-bash-persistent/index.ts:58-63）。
+    """
+    if utf16_length(content) <= max_output_chars and not incomplete:
         return content
-    if len(content) <= max_output_chars:
+    if utf16_length(content) <= max_output_chars:
         return content + TRUNCATED_MESSAGE
-    return content[:max_output_chars] + TRUNCATED_MESSAGE
+    return (truncate_without_splitting_surrogate_pair(content, max_output_chars)
+            + TRUNCATED_MESSAGE)
 
 
 def _trim_trailing_newline(text: str) -> str:

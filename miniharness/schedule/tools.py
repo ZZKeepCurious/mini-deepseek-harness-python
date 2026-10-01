@@ -1,43 +1,169 @@
-"""Agent 作用域 Schedule 管理工具（对齐 packages/schedule/schedule/src/tools.ts）。
+"""Agent 作用域的 Schedule 管理工具（对齐 packages/schedule/schedule/src/tools.ts）。
 
-契约：
-  * 三工具注册进精确 agent 的 ToolRegistry（agent.tools），随 agent scope 拆解
-    自动注销；render = JSON.stringify（canonical 值直接模型可见）。
-  * 每工具 FIFO 事务：cancelled 占位（等价上游 cancellationPlaceholder——
-    mini 载体为 ``exec_.signal.is_set()``，threading.Event）→ preflight flush →
-    fold → append → 第二道 barrier → notifyDurableChange。
-  * 错误并集闭集：六个输入码 + corrupt_schedule_log + persistence_uncertain +
-    internal_error；delete 未命中返回 ``{id, deleted:false, code:
-    'schedule_not_found'}``（非错误）。
+四工具注册进精确 agent 的 ToolRegistry，随 agent scope 拆解自动注销；
+render = JSON.stringify（canonical 值直接模型可见）。错误闭集为六个输入码 +
+internal_error；delete/update 未命中返回非错误的管理结果。
 """
 from __future__ import annotations
 
-import time
 from typing import Any
 
 from ..core.tools import Tool
+from . import domain as _domain
 from .domain import (
+    MAX_TITLE_LENGTH,
     MIN_EVERY_INTERVAL_SECONDS,
+    REQUIRED_TITLE_MESSAGE,
     ScheduleInputError,
-    ScheduleLogError,
     _json_stringify,
-    allocate_schedule_id,
-    create_after_schedule_record,
-    create_at_schedule_record,
-    create_every_schedule_record,
-    fold_schedule_events,
     schedule_view,
 )
-from .persistence import SchedulePersistenceError, flush_schedule_persistence
-from .transaction import run_schedule_transaction
 
 __all__ = ["register_schedule_tools"]
 
-_PERSISTENCE_MESSAGE = (
-    "Schedule persistence is uncertain; retry with schedule_list before relying on this result."
-)
-_CORRUPT_MESSAGE = "The session schedule log is corrupt."
-_INTERNAL_MESSAGE = "The schedule operation failed."
+_SELECTOR_KEYS = ("after_seconds", "at", "every_seconds", "daily", "weekly", "cron")
+
+_SHARED_VIEW_PROPERTIES = {
+    "id": {"type": "string"},
+    "title": {"type": "string"},
+    "prompt": {"type": "string"},
+    "scheduledAt": {"type": "string"},
+    "state": {"type": "string", "enum": ["scheduled", "overdue"]},
+    "deliveryMode": {"type": "string", "const": "host"},
+}
+_SHARED_REQUIRED = ["id", "title", "prompt", "scheduledAt", "state", "deliveryMode"]
+
+
+def _view_schema(kind: str, extra: dict, required_extra: list) -> dict:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {**_SHARED_VIEW_PROPERTIES, "kind": {"const": kind}, **extra},
+        "required": [*_SHARED_REQUIRED, "kind", *required_extra],
+    }
+
+
+_VIEW_SCHEMA = {"oneOf": [
+    _view_schema("after", {"afterSeconds": {"type": "integer"}}, ["afterSeconds"]),
+    _view_schema("at", {}, []),
+    _view_schema("every", {"everySeconds": {"type": "integer"}}, ["everySeconds"]),
+    _view_schema("daily", {"time": {"type": "string"}, "timeZone": {"type": "string"}},
+                 ["time", "timeZone"]),
+    _view_schema("weekly", {"time": {"type": "string"}, "timeZone": {"type": "string"},
+                            "weekdays": {"type": "array", "items": {"type": "integer"}}},
+                 ["time", "timeZone", "weekdays"]),
+    _view_schema("cron", {"expression": {"type": "string"}, "timeZone": {"type": "string"}},
+                 ["expression", "timeZone"]),
+]}
+
+
+def _error_schema(code: str) -> dict:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {"code": {"const": code}, "message": {"type": "string"}},
+        "required": ["code", "message"],
+    }
+
+
+_ERROR_SCHEMAS = [_error_schema(code) for code in (
+    "invalid_prompt", "invalid_selector", "invalid_rule", "invalid_time_zone",
+    "not_future", "time_out_of_range", "frequency_too_high", "internal_error",
+)]
+
+_CREATE_OUTPUT_SCHEMA = {"oneOf": [_VIEW_SCHEMA, *_ERROR_SCHEMAS]}
+_LIST_OUTPUT_SCHEMA = {"oneOf": [{"type": "array", "items": _VIEW_SCHEMA}, *_ERROR_SCHEMAS]}
+_DELETE_OUTPUT_SCHEMA = {"oneOf": [
+    {"type": "object", "additionalProperties": False,
+     "properties": {"id": {"type": "string"}, "deleted": {"const": True}},
+     "required": ["id", "deleted"]},
+    {"type": "object", "additionalProperties": False,
+     "properties": {"id": {"type": "string"}, "deleted": {"const": False},
+                    "code": {"const": "schedule_not_found"}},
+     "required": ["id", "deleted", "code"]},
+    *_ERROR_SCHEMAS,
+]}
+_UPDATE_OUTPUT_SCHEMA = {"oneOf": [
+    _VIEW_SCHEMA,
+    {"type": "object", "additionalProperties": False,
+     "properties": {"id": {"type": "string"}, "updated": {"const": False},
+                    "code": {"enum": ["schedule_not_found", "schedule_ended",
+                                      "schedule_conflict"]}},
+     "required": ["id", "updated", "code"]},
+    *_ERROR_SCHEMAS,
+]}
+
+_CREATE_DESCRIPTION = (
+    "Create a reminder in the current session that delivers prompt when it becomes due. "
+    "Supply exactly one timing parameter: after_seconds, at, every_seconds, daily, weekly, "
+    "or cron. Local times that do not exist in the zone are skipped; repeated local times "
+    "fire once, at the earlier instant. After downtime, a recurring reminder delivers only "
+    "its latest missed occurrence. Delivery can repeat after a crash.")
+
+_LIST_DESCRIPTION = "List the active reminders in the current session."
+
+_DELETE_DESCRIPTION = (
+    "Delete a reminder in the current session, active or inactive. Deletion does not "
+    "retract a reminder message that is already queued.")
+
+_UPDATE_DESCRIPTION = (
+    "Change a reminder in place, keeping its id. Supply a new title, prompt, or at most "
+    "one timing parameter; omitted fields keep their stored values. To change a relative "
+    "delay, create a new reminder.")
+
+_SELECTOR_PARAMETERS = {
+    "after_seconds": {"type": "number", "description": "Delay in whole seconds."},
+    "every_seconds": {
+        "type": "number",
+        "description": (
+            f"Fixed-rate interval in whole seconds, at least {MIN_EVERY_INTERVAL_SECONDS}, "
+            "aligned to the creation time; changing it with schedule_update re-aligns it "
+            "to the save time."),
+    },
+    "daily": {
+        "type": "object", "additionalProperties": False,
+        "description": "Every day at a local time.",
+        "properties": {
+            "time": {"type": "string", "description": "HH:mm:ss with optional 1-3 fractional digits, for example 23:00:00."},
+            "time_zone": {"type": "string", "description": "UTC or IANA Area/Location, for example Asia/Shanghai."},
+        },
+        "required": ["time", "time_zone"],
+    },
+    "weekly": {
+        "type": "object", "additionalProperties": False,
+        "description": "On the given weekdays at a local time.",
+        "properties": {
+            "time": {"type": "string", "description": "HH:mm:ss with optional 1-3 fractional digits, for example 09:00:00."},
+            "time_zone": {"type": "string", "description": "UTC or IANA Area/Location, for example Asia/Shanghai."},
+            "weekdays": {"type": "array", "items": {"type": "integer"},
+                         "description": "ISO weekdays, Monday 1 through Sunday 7, without repetitions."},
+        },
+        "required": ["time", "time_zone", "weekdays"],
+    },
+    "cron": {
+        "type": "object", "additionalProperties": False,
+        "description": "Five-field Vixie cron expression in a time zone.",
+        "properties": {
+            "expression": {
+                "type": "string",
+                "description": "minute hour day-of-month month day-of-week, for example "
+                               "\"*/15 9-17 * * 1-5\". When both day fields are restricted, "
+                               "a date matches if either one matches."},
+            "time_zone": {"type": "string", "description": "UTC or IANA Area/Location, for example Asia/Shanghai."},
+        },
+        "required": ["expression", "time_zone"],
+    },
+    "at": {
+        "description": "Absolute target: an RFC 3339 date-time with offset, or a local date, time, and IANA time_zone.",
+        "oneOf": [
+            {"type": "string"},
+            {"type": "object", "additionalProperties": False,
+             "properties": {"date": {"type": "string"}, "time": {"type": "string"},
+                            "time_zone": {"type": "string"}},
+             "required": ["date", "time", "time_zone"]},
+        ],
+    },
+}
 
 
 def _render(_args: Any, value: Any) -> list:
@@ -51,308 +177,229 @@ def _present(title: str, kind: str, raw_input: Any = None) -> dict:
     return card
 
 
-def _schedule_create_tool(root_ctx: Any, agent: Any, on_durable_change) -> Tool:
-    async def execute(args: dict, exec_: Any):
-        if exec_.agent is not agent:
-            return {"code": "internal_error", "message": _INTERNAL_MESSAGE}
-        invalid = _validate_create_args(args)
-        if invalid is not None:
-            return invalid
+def _internal_error() -> dict:
+    return {"code": "internal_error", "message": "The schedule operation failed."}
 
-        def operation():
-            return _create_operation(root_ctx, agent, exec_, args, on_durable_change)
 
-        return await run_schedule_transaction(agent, operation)
+def _operation_error(error: BaseException) -> dict:
+    if isinstance(error, ScheduleInputError):
+        return {"code": error.code, "message": error.message}
+    return _internal_error()
 
-    return Tool(
-        name="schedule_create",
-        description=(
-            "Create one reminder in the current session. Supply a non-empty prompt and exactly "
-            f"one selector: a positive safe-integer after_seconds delay, at as a strict offset "
-            f"date-time or local date/time object, or safe-integer every_seconds of at least "
-            f"{MIN_EVERY_INTERVAL_SECONDS}. Fixed-rate reminders stay creation-aligned, skip "
-            "missed occurrences, and batch one latest occurrence per overdue rule. Delivery is "
-            "session-local: the reminder runs on time only while this session is live and "
-            "otherwise becomes overdue until the session is resumed."
-        ),
-        parameters={
-            "type": "object",
-            "properties": {
-                "prompt": {
-                    "type": "string",
-                    "description": "Reminder content to present when the target becomes due.",
-                },
-                "after_seconds": {
-                    "type": "number",
-                    "description": "Positive safe-integer delay in seconds.",
-                },
-                "every_seconds": {
-                    "type": "number",
-                    "description": (
-                        f"Fixed-rate safe-integer interval in seconds, at least "
-                        f"{MIN_EVERY_INTERVAL_SECONDS}."
-                    ),
-                },
-                "at": {
-                    "description": (
-                        "Absolute target as strict offset RFC 3339 or local date/time with an "
-                        "explicit IANA zone."
-                    ),
-                    "oneOf": [
-                        {"type": "string"},
-                        {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "properties": {
-                                "date": {"type": "string"},
-                                "time": {"type": "string"},
-                                "time_zone": {"type": "string"},
-                            },
-                            "required": ["date", "time", "time_zone"],
-                        },
-                    ],
-                },
-            },
-            "required": ["prompt"],
-        },
-        execute=execute,
-        render=_render,
-        present_call=lambda args: _present(
-            "Create reminder", "other", args.get("prompt")),
-    )
+
+def _invalid_interval(every_seconds: Any) -> dict | None:
+    if every_seconds is None:
+        return None
+    if not _domain._safe_int(every_seconds):
+        return {"code": "invalid_rule", "message": "every_seconds must be a safe integer."}
+    if every_seconds < MIN_EVERY_INTERVAL_SECONDS:
+        return {"code": "frequency_too_high",
+                "message": f"every_seconds must be at least {MIN_EVERY_INTERVAL_SECONDS}."}
+    return None
 
 
 def _validate_create_args(args: dict) -> dict | None:
-    keys = set(args)
-    if any(key not in ("prompt", "after_seconds", "at", "every_seconds") for key in keys) \
-            or sum(key in args for key in ("after_seconds", "at", "every_seconds")) != 1:
-        return {
-            "code": "invalid_selector",
-            "message": "schedule_create accepts exactly one of after_seconds, at, or every_seconds.",
-        }
-    prompt = args.get("prompt", "")
-    if not isinstance(prompt, str) or not prompt.strip():
+    allowed = ("prompt", "title", *_SELECTOR_KEYS)
+    if (any(key not in allowed for key in args)
+            or sum(args.get(key) is not None for key in _SELECTOR_KEYS) != 1):
+        return {"code": "invalid_selector",
+                "message": "schedule_create accepts exactly one of after_seconds, at, "
+                           "every_seconds, daily, weekly, or cron."}
+    prompt = args.get("prompt")
+    if not isinstance(prompt, str) or prompt.strip() == "":
         return {"code": "invalid_prompt", "message": "prompt must be non-empty after trimming."}
+    title = args.get("title")
+    if not isinstance(title, str) or title.strip() == "":
+        return {"code": "invalid_prompt", "message": REQUIRED_TITLE_MESSAGE}
+    if len(title.strip()) > MAX_TITLE_LENGTH:
+        return {"code": "invalid_prompt",
+                "message": f"title must be at most {MAX_TITLE_LENGTH} characters."}
     after_seconds = args.get("after_seconds")
-    if after_seconds is not None and (
-            not isinstance(after_seconds, int) or isinstance(after_seconds, bool)
-            or after_seconds <= 0 or after_seconds > 2**53 - 1):
-        return {
-            "code": "invalid_rule", "message": "after_seconds must be a positive safe integer."}
-    every_seconds = args.get("every_seconds")
-    if every_seconds is not None and (
-            not isinstance(every_seconds, int) or isinstance(every_seconds, bool)
-            or every_seconds > 2**53 - 1):
-        return {"code": "invalid_rule", "message": "every_seconds must be a safe integer."}
-    if every_seconds is not None and every_seconds < MIN_EVERY_INTERVAL_SECONDS:
-        return {
-            "code": "frequency_too_high",
-            "message": f"every_seconds must be at least {MIN_EVERY_INTERVAL_SECONDS}.",
-        }
+    if (after_seconds is not None
+            and (not _domain._safe_int(after_seconds) or after_seconds <= 0)):
+        return {"code": "invalid_rule", "message": "after_seconds must be a positive safe integer."}
+    return _invalid_interval(args.get("every_seconds"))
+
+
+_UPDATE_SELECTOR_KEYS = ("at", "every_seconds", "daily", "weekly", "cron")
+
+
+def _validate_update_args(args: dict) -> dict | None:
+    allowed = ("id", "title", "prompt", *_UPDATE_SELECTOR_KEYS)
+    selectors = sum(args.get(key) is not None for key in _UPDATE_SELECTOR_KEYS)
+    if (any(key not in allowed for key in args) or selectors > 1):
+        return {"code": "invalid_selector",
+                "message": "schedule_update accepts at most one of at, every_seconds, "
+                           "daily, weekly, or cron."}
+    id_ = args.get("id")
+    if not isinstance(id_, str) or id_ == "" or id_.strip() != id_:
+        return {"code": "invalid_rule",
+                "message": "schedule_update id must be non-empty without surrounding whitespace."}
+    if selectors == 0 and args.get("title") is None and args.get("prompt") is None:
+        return {"code": "invalid_selector",
+                "message": "schedule_update needs a new title, prompt, or one of at, "
+                           "every_seconds, daily, weekly, or cron."}
+    title = args.get("title")
+    if title is not None and (not isinstance(title, str) or title.strip() == ""):
+        return {"code": "invalid_prompt", "message": REQUIRED_TITLE_MESSAGE}
+    if title is not None and len(title.strip()) > MAX_TITLE_LENGTH:
+        return {"code": "invalid_prompt",
+                "message": f"title must be at most {MAX_TITLE_LENGTH} characters."}
+    prompt = args.get("prompt")
+    if prompt is not None and (not isinstance(prompt, str) or prompt.strip() == ""):
+        return {"code": "invalid_prompt", "message": "prompt must be non-empty after trimming."}
+    return _invalid_interval(args.get("every_seconds"))
+
+
+def _timing_change(args: dict) -> dict | None:
+    if args.get("at") is not None:
+        return {"kind": "at", "at": args["at"]}
+    if args.get("every_seconds") is not None:
+        return {"kind": "every", "every_seconds": args["every_seconds"]}
+    if args.get("daily") is not None:
+        return {"kind": "daily", "daily": args["daily"]}
+    if args.get("weekly") is not None:
+        return {"kind": "weekly", "weekly": args["weekly"]}
+    if args.get("cron") is not None:
+        return {"kind": "cron", "cron": args["cron"]}
     return None
 
 
-def _create_operation(root_ctx, agent, exec_, args, on_durable_change):
-    cancelled = _cancelled(exec_)
-    if cancelled is not None:
-        return cancelled
-    uncertain = _preflight(root_ctx, agent, "create")
-    if uncertain is not None:
-        return uncertain
-    _notify(on_durable_change, root_ctx)
-    folded = _fold_for_tool(agent)
-    if _is_tool_error(folded):
-        return folded
-    id_ = allocate_schedule_id(folded)
-    try:
-        if args.get("at") is not None:
-            record = create_at_schedule_record(id_, args["prompt"], args["at"], int(time.time() * 1000))
-        elif args.get("after_seconds") is not None:
-            record = create_after_schedule_record(
-                id_, args["prompt"], args["after_seconds"], int(time.time() * 1000))
-        else:
-            record = create_every_schedule_record(
-                id_, args["prompt"], args["every_seconds"], int(time.time() * 1000))
-    except ScheduleInputError as error:
-        return {"code": error.code, "message": error.message}
-    except BaseException:
-        return {"code": "internal_error", "message": _INTERNAL_MESSAGE}
-    if _cancelled(exec_) is not None:
-        return _cancelled(exec_)
-    try:
-        agent.session.append("schedule/change", {
-            "version": 1, "operation": "create", "schedule": record})
-    except BaseException:
-        return {"code": "internal_error", "message": _INTERNAL_MESSAGE}
-    barrier = _preflight(root_ctx, agent, "create", id_)
-    if barrier is not None:
-        return barrier
-    _notify(on_durable_change, root_ctx)
-    return schedule_view(record, int(time.time() * 1000))
-
-
-def _schedule_list_tool(root_ctx: Any, agent: Any, on_durable_change) -> Tool:
-    async def execute(_args: dict, exec_: Any):
-        if exec_.agent is not agent:
-            return {"code": "internal_error", "message": _INTERNAL_MESSAGE}
-
-        def operation():
-            cancelled = _cancelled(exec_)
-            if cancelled is not None:
-                return cancelled
-            uncertain = _preflight(root_ctx, agent, "list")
-            if uncertain is not None:
-                return uncertain
-            _notify(on_durable_change, root_ctx)
-            folded = _fold_for_tool(agent)
-            if _is_tool_error(folded):
-                return folded
-            now = int(time.time() * 1000)
-            return [schedule_view(record, now) for record in folded["active"]]
-
-        return await run_schedule_transaction(agent, operation)
-
-    return Tool(
-        name="schedule_list",
-        description=(
-            "List every active reminder in the current session in creation order, including its "
-            "exact id, UTC target, scheduled or overdue state, and session-local delivery mode."
-        ),
-        parameters={"type": "object", "properties": {}},
-        execute=execute,
-        render=_render,
-        present_call=lambda _args: _present("List reminders", "read"),
-    )
-
-
-def _schedule_delete_tool(root_ctx: Any, agent: Any, on_durable_change) -> Tool:
-    async def execute(args: dict, exec_: Any):
-        raw_id = args.get("id")
-        if not isinstance(raw_id, str) or not raw_id or raw_id.strip() != raw_id:
-            return {
-                "code": "invalid_rule",
-                "message": "schedule_delete id must be non-empty without surrounding whitespace.",
-            }
-        if exec_.agent is not agent:
-            return {"code": "internal_error", "message": _INTERNAL_MESSAGE}
-
-        def operation():
-            cancelled = _cancelled(exec_)
-            if cancelled is not None:
-                return cancelled
-            uncertain = _preflight(root_ctx, agent, "delete", raw_id)
-            if uncertain is not None:
-                return uncertain
-            _notify(on_durable_change, root_ctx)
-            folded = _fold_for_tool(agent)
-            if _is_tool_error(folded):
-                return folded
-            if not any(record["id"] == raw_id for record in folded["active"]):
-                return {"id": raw_id, "deleted": False, "code": "schedule_not_found"}
-            if _cancelled(exec_) is not None:
-                return _cancelled(exec_)
-            try:
-                agent.session.append("schedule/change", {
-                    "version": 1, "operation": "delete", "id": raw_id})
-            except BaseException:
-                return {"code": "internal_error", "message": _INTERNAL_MESSAGE}
-            barrier = _preflight(root_ctx, agent, "delete", raw_id)
-            if barrier is not None:
-                return barrier
-            _notify(on_durable_change, root_ctx)
-            return {"id": raw_id, "deleted": True}
-
-        return await run_schedule_transaction(agent, operation)
-
-    return Tool(
-        name="schedule_delete",
-        description=(
-            "Delete one active reminder in the current session by the exact id returned by "
-            "schedule_create or schedule_list. Unknown or already-finished ids return deleted false."
-        ),
-        parameters={
-            "type": "object",
-            "properties": {
-                "id": {"type": "string", "description": "Exact session-local schedule id."},
-            },
-            "required": ["id"],
-        },
-        execute=execute,
-        render=_render,
-        present_call=lambda args: _present("Delete reminder", "other", args.get("id")),
-    )
-
-
-# ---------- 辅助 ----------
-
-def _fold_for_tool(agent):
-    """仅在成功 preflight 后折叠，把损坏映射为稳定值（tools.ts foldForTool）。"""
-    try:
-        return fold_schedule_events(agent.session.own_events())
-    except ScheduleLogError:
-        return {"code": "corrupt_schedule_log", "message": _CORRUPT_MESSAGE}
-    except BaseException:
-        return {"code": "internal_error", "message": _INTERNAL_MESSAGE}
-
-
-def _is_tool_error(value: Any) -> bool:
-    """fold 结果是否错误而非重放状态（tools.ts isToolError：'code' in value）。"""
-    return isinstance(value, dict) and "code" in value
-
-
-def _cancelled(exec_: Any) -> dict | None:
-    """等价上游 cancellationPlaceholder：FIFO 轮前已取消 → internal_error。"""
-    if exec_.signal.is_set():
-        return {"code": "internal_error", "message": _INTERNAL_MESSAGE}
-    return None
-
-
-def _preflight(root_ctx, agent, operation: str, id_: str | None = None) -> dict | None:
-    try:
-        flush_schedule_persistence(root_ctx, agent.session)
-        return None
-    except SchedulePersistenceError:
-        out = {
-            "code": "persistence_uncertain",
-            "message": _PERSISTENCE_MESSAGE,
-            "operation": operation,
-        }
-        if id_ is not None:
-            out["id"] = id_
-        return out
-
-
-def _notify(on_durable_change, root_ctx) -> None:
-    try:
-        on_durable_change()
-    except BaseException as error:
-        logger = getattr(root_ctx, "logger", None)
-        if logger is not None and hasattr(logger, "warn"):
-            logger.warn(
-                f"schedule: durable-change observer failed: "
-                f"{getattr(error, 'message', None) or str(error)}")
-
-
-def register_schedule_tools(root_ctx: Any, agent: Any, on_durable_change) -> Any:
-    """在精确 agent scope 注册全部三个 Schedule 工具并返回幂等 aggregate disposer。
-
-    @param root_ctx - 拥有 sessions 与持久化的全局上下文。
-    @param agent - 精确 agent；其 scope 为注册载体（agent.tools ToolRegistry）。
-    @param on_durable_change - 每次成功 preflight 再一次 create/delete barrier
-        成功后调用（对齐 index.ts registerScheduleTools 的 durable-change 通知）。
-    @returns 三个注册的 aggregate disposer。
-    """
-    reg = getattr(agent, "tools", None) or getattr(agent, "reg", None)
+def register_schedule_tools(service: Any, agent: Any) -> Any:
+    """把四个 Schedule 工具注册进精确 agent scope，返回幂等 aggregate disposer。"""
+    reg = getattr(agent, "tools", None)
     if reg is None:
         raise RuntimeError("schedule tools require agent.tools (ToolRegistry)")
 
-    def notify() -> None:
-        _notify(on_durable_change, root_ctx)
+    async def create_execute(args: dict, exec_: Any):
+        if exec_.agent is not agent:
+            return _internal_error()
+        invalid = _validate_create_args(args)
+        if invalid is not None:
+            return invalid
+        try:
+            record = await service.create(
+                agent.session.session_id, args, getattr(exec_, "signal", None))
+            return schedule_view(record, _domain.now_ms())
+        except BaseException as error:  # noqa: BLE001
+            return _operation_error(error)
+
+    async def list_execute(_args: dict, exec_: Any):
+        if exec_.agent is not agent:
+            return _internal_error()
+        try:
+            records = await service.list({"sessionId": agent.session.session_id})
+            now = _domain.now_ms()
+            return [schedule_view(record, now) for record in records]
+        except BaseException as error:  # noqa: BLE001
+            return _operation_error(error)
+
+    async def delete_execute(args: dict, exec_: Any):
+        id_ = args.get("id")
+        if not isinstance(id_, str) or id_ == "" or id_.strip() != id_:
+            return {"code": "invalid_rule",
+                    "message": "schedule_delete id must be non-empty without surrounding whitespace."}
+        if exec_.agent is not agent:
+            return _internal_error()
+        try:
+            return await service.delete(
+                {"sessionId": agent.session.session_id, "id": id_},
+                getattr(exec_, "signal", None))
+        except BaseException as error:  # noqa: BLE001
+            return _operation_error(error)
+
+    async def update_execute(args: dict, exec_: Any):
+        if exec_.agent is not agent:
+            return _internal_error()
+        invalid = _validate_update_args(args)
+        if invalid is not None:
+            return invalid
+        id_ = args["id"]
+        try:
+            session_id = agent.session.session_id
+            expected = next(
+                (record for record in await service.list({"sessionId": session_id})
+                 if record["id"] == id_), None)
+            if expected is None:
+                ended = any(entry["sessionId"] == session_id and entry["id"] == id_
+                            for entry in await service.catalog())
+                return {"id": id_, "updated": False,
+                        "code": "schedule_ended" if ended else "schedule_not_found"}
+            change = _timing_change(args)
+            request = {"sessionId": session_id, "id": id_, "expected": expected}
+            if change is not None:
+                request["change"] = change
+            if args.get("title") is not None:
+                request["title"] = args["title"]
+            if args.get("prompt") is not None:
+                request["prompt"] = args["prompt"]
+            result = await service.update(request, getattr(exec_, "signal", None))
+            return schedule_view(result["record"], _domain.now_ms()) \
+                if "record" in result else result
+        except BaseException as error:  # noqa: BLE001
+            return _operation_error(error)
 
     tools = [
-        _schedule_create_tool(root_ctx, agent, notify),
-        _schedule_list_tool(root_ctx, agent, notify),
-        _schedule_delete_tool(root_ctx, agent, notify),
+        Tool(
+            name="schedule_create",
+            description=_CREATE_DESCRIPTION,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string",
+                               "description": "Reminder content to present when the target becomes due."},
+                    "title": {"type": "string",
+                              "description": f"Task name of at most {MAX_TITLE_LENGTH} characters, shown on the task card and in task lists."},
+                    **_SELECTOR_PARAMETERS,
+                },
+                "required": ["prompt", "title"],
+            },
+            output={"schema": _CREATE_OUTPUT_SCHEMA, "render": _render},
+            execute=create_execute,
+            render=_render,
+            present_call=lambda args: _present("Create reminder", "other", args.get("prompt")),
+        ),
+        Tool(
+            name="schedule_list",
+            description=_LIST_DESCRIPTION,
+            parameters={"type": "object", "properties": {}},
+            output={"schema": _LIST_OUTPUT_SCHEMA, "render": _render},
+            execute=list_execute,
+            render=_render,
+            present_call=lambda _args: _present("List reminders", "read"),
+        ),
+        Tool(
+            name="schedule_delete",
+            description=_DELETE_DESCRIPTION,
+            parameters={"type": "object",
+                        "properties": {"id": {"type": "string",
+                                              "description": "Schedule id returned by schedule_list."}},
+                        "required": ["id"]},
+            output={"schema": _DELETE_OUTPUT_SCHEMA, "render": _render},
+            execute=delete_execute,
+            render=_render,
+            present_call=lambda args: _present("Delete reminder", "other", args.get("id")),
+        ),
+        Tool(
+            name="schedule_update",
+            description=_UPDATE_DESCRIPTION,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string",
+                           "description": "Schedule id returned by schedule_list."},
+                    "title": {"type": "string",
+                              "description": f"New task name of at most {MAX_TITLE_LENGTH} characters."},
+                    "prompt": {"type": "string", "description": "New reminder content."},
+                    **_SELECTOR_PARAMETERS,
+                },
+                "required": ["id"],
+            },
+            output={"schema": _UPDATE_OUTPUT_SCHEMA, "render": _render},
+            execute=update_execute,
+            render=_render,
+            present_call=lambda args: _present("Update reminder", "other", args.get("id")),
+        ),
     ]
     disposers = [reg.register(tool) for tool in tools]
 

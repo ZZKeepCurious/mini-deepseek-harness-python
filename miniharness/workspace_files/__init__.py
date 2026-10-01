@@ -335,8 +335,15 @@ class WorkspaceFiles(Service):
                 else ntpath.join(ntpath.dirname(absolute), relative))
 
     async def _list_async(self, scope: dict, path: str) -> dict:
+        """列出一个工作区目录的直接子项（上游 index.ts:302-328 list）。
+
+        dsh-v0.2.0-rc.2：末端链接（Windows junction 或 symlink）经其解析到的目录
+        列举（与 listDir 对该条目的子类型报告一致）；解析到的非目录 →
+        `workspace-file/not-directory`，details `{path, kind:'symlink'}`。`read`
+        仍保留自己对末端组件的 no-follow 门。
+        """
         fs, root, workspace_root, entry = await self._inspect_async(scope, path)
-        if entry.type != "directory":
+        if entry.type not in ("directory", "symlink"):
             raise WorkspaceFileFault("workspace-file/not-directory",
                                      f'"{path}" is a {entry.type}',
                                      {"path": path, "kind": entry.type})
@@ -344,6 +351,13 @@ class WorkspaceFiles(Service):
         if not fs.contains(root, target):
             raise WorkspaceFileFault("workspace-file/outside-workspace",
                                      f'"{path}" is outside the workspace', {"path": path})
+        if entry.type == "symlink":
+            info = await fs.stat(target)
+            if info is None or info.type != "directory":
+                raise WorkspaceFileFault(
+                    "workspace-file/not-directory",
+                    f'"{path}" does not resolve to a directory',
+                    {"path": path, "kind": "symlink"})
         children = await fs.list_dir(target)
         relative = _workspace_path_of(fs.process_path(root), fs.process_path(target))
         cap = self.config["maxEntries"]
