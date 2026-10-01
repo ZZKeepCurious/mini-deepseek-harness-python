@@ -478,11 +478,18 @@ class LlmAdapter:
     model: str | None = None
 
     async def stream(self, messages: list[dict], tools: list[dict],
-                     signal: Any | None = None) -> AsyncIterator[StreamChunk]:
+                     signal: Any | None = None, session_id: Any = None,
+                     purpose: str | None = None) -> AsyncIterator[StreamChunk]:
         """async 迭代器：逐 chunk 产出（对齐上游 async stream 迭代器）。
 
         signal 可选：协作式取消信号（_AbortProxy 形态，含 .aborted/.event）；
         置位后流应在下一次取块前中止（抛 StreamAborted）。迷你适配器可忽略。
+
+        session_id/purpose 对齐上游 StreamOptions（types.ts:542-552）：
+        session_id 是 loop 盖章的会话身份，adapters 可映射到模型不可见的
+        传输元数据（deepseek → `x-deepseek-harness-session-id` 头）；
+        purpose 是辅助调用的分类（'compaction' | 'session-title'），普通对话
+        请求不置。两者缺省 None = 不携带。
         """
         raise NotImplementedError
 

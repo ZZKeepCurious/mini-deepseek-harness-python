@@ -126,7 +126,7 @@ class TestHeadlessRun(unittest.TestCase):
 
     def test_error_reason_writes_stderr_exit_one(self):
         class BoomAdapter(FakeLlmAdapter):
-            async def stream(self, messages, tools, signal=None):
+            async def stream(self, messages, tools, signal=None, session_id=None, purpose=None):
                 raise LlmFailure("RATE_LIMIT", "429 Too Many Requests")
                 yield  # pragma: no cover - 使函数成为 async 生成器（首个 __anext__ 即抛）
 

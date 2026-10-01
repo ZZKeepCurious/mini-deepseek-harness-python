@@ -43,7 +43,8 @@ class FakeLlmAdapter(LlmAdapter):
     def reasoning_effort(self) -> str | None:
         return self._reasoning_effort
 
-    async def stream(self, messages, tools, signal=None):
+    async def stream(self, messages, tools, signal=None,
+                     session_id=None, purpose=None):
         self.calls += 1
         if self._tool and self.calls == 1:
             arguments = self._tool.get("arguments", {})

@@ -378,6 +378,29 @@ class TransportTest(unittest.TestCase):
         self.assertEqual([c['type'] for c in out],
                          ['block-start', 'text-delta', 'block-end', 'usage', 'finish'])
 
+    def test_session_identity_and_compaction_headers(self):
+        # 上游 adapter.ts:129-130 + runtime.spec.ts:379,383：会话身份头按
+        # options.sessionId 携带；压缩头仅 purpose='compaction' 携带；
+        # 普通请求两者均缺省。
+        seen = []
+
+        def handler(request):
+            seen.append((request.headers.get('x-deepseek-harness-session-id'),
+                         request.headers.get('x-deepseek-harness-compact')))
+            return _sse_response()
+
+        adapter = _stream(handler)
+
+        async def run():
+            for kwargs in ({"session_id": "sess-1", "purpose": "compaction"},
+                           {"session_id": "sess-1", "purpose": "session-title"},
+                           {}):
+                async for _ in adapter.stream(MESSAGES, None, **kwargs):
+                    pass
+
+        asyncio.run(run())
+        self.assertEqual(seen, [("sess-1", "1"), ("sess-1", None), (None, None)])
+
     def test_account_token_uses_auth_token_header(self):
         def handler(request):
             self.assertNotIn('x-api-key', request.headers)

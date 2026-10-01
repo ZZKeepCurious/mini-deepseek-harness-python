@@ -406,11 +406,13 @@ class GoalDriverTest(unittest.TestCase):
         adapter = FakeLlmAdapter(final_text="完成。")
         slept = []
 
-        async def slow_stream(messages, tools, signal=None):
+        async def slow_stream(messages, tools, signal=None, session_id=None,
+                              purpose=None):
             if not slept:
                 slept.append(True)
                 await asyncio.sleep(0.02)
-            async for c in FakeLlmAdapter.stream(adapter, messages, tools, signal):
+            async for c in FakeLlmAdapter.stream(adapter, messages, tools,
+                                                 signal, session_id, purpose):
                 yield c
         adapter.stream = slow_stream
         return adapter

@@ -113,7 +113,7 @@ class _DelegatingParent(FakeLlmAdapter):
         self.calls = 0
         self.tool_args = dict(tool_args)
 
-    async def stream(self, messages, tools, signal=None):
+    async def stream(self, messages, tools, signal=None, session_id=None, purpose=None):
         self.calls += 1
         if self.calls == 1:
             arguments = json.dumps(self.tool_args, ensure_ascii=False)
@@ -145,7 +145,7 @@ class _GatedChild(FakeLlmAdapter):
         self.reached = threading.Event()
         self.is_cancelled = lambda: False
 
-    async def stream(self, messages, tools, signal=None):
+    async def stream(self, messages, tools, signal=None, session_id=None, purpose=None):
         self.reached.set()
         while True:
             if _signalled(signal) or self.is_cancelled():
@@ -497,7 +497,7 @@ class TestBackgroundDelegation(unittest.TestCase):
     def test_failed_background_job_detail_carries_diagnostic(self):
         # run-settlement failureDetail：失败 outcome 的 detail 附 "; diagnostic: ..."
         class BoomChild(FakeLlmAdapter):
-            async def stream(self, messages, tools, signal=None):
+            async def stream(self, messages, tools, signal=None, session_id=None, purpose=None):
                 raise LlmFailure("RATE_LIMIT", "429 Too Many Requests")
                 yield  # noqa: unreachable —— 使本函数成为异步生成器（对齐适配器协议）
 

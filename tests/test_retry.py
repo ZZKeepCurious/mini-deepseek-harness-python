@@ -371,7 +371,7 @@ class FlakyAdapter(LlmAdapter):
             "backoff": {"initialDelayMs": 1, "maxDelayMs": 2, "jitterRatio": 0},
         })
 
-    async def stream(self, messages, tools, signal=None):
+    async def stream(self, messages, tools, signal=None, session_id=None, purpose=None):
         if self.fail_times > 0:
             self.fail_times -= 1
             raise LlmFailure(self.code, f"HTTP 429: {self.code}")
@@ -444,7 +444,7 @@ class LoopRetryTest(unittest.TestCase):
             provider = "bare"
             retry_policy = None
 
-            async def stream(self, messages, tools, signal=None):
+            async def stream(self, messages, tools, signal=None, session_id=None, purpose=None):
                 raise LlmFailure(RATE_LIMIT, "x")
                 yield  # pragma: no cover - 使函数成为 async 生成器（首个 __anext__ 即抛）
         ctx = Context(name="root")

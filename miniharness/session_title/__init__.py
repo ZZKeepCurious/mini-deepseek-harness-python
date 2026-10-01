@@ -550,7 +550,11 @@ def _generate_with_llm(ctx: Context, adapter: DeepSeekAdapter, config: dict,
 
     async def _consume() -> None:
         try:
-            stream = adapter.stream(messages, [])
+            # session-title-llm/src/index.ts:267-268：盖会话身份 +
+            # purpose='session-title'（deepseek 侧只映射 compaction 头）。
+            stream = adapter.stream(
+                messages, [], session_id=session.session_id,
+                purpose="session-title")
             async for chunk in stream:
                 assembler.push(chunk)
         except LlmFailure as error:

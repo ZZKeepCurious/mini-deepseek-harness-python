@@ -79,6 +79,45 @@ class ProfileResolutionTest(unittest.TestCase):
                          {"openai-completions", "openai-responses",
                           "anthropic-messages"})
 
+    def test_headers_parsed(self):
+        profiles = resolve_profiles({
+            "x": {"baseURL": "https://x.example.com",
+                  "headers": {"X-Company": "private",
+                              "Authorization": "Bearer alt"}}})
+        self.assertEqual(profiles["x"].headers,
+                         (("X-Company", "private"),
+                          ("Authorization", "Bearer alt")))
+
+    def test_headers_rejected_cases(self):
+        # 对齐 adapter.spec.ts:840-847：Fetch 无法表示的条目逐案拒绝。
+        for name, value in (("bad header name", "value"),
+                            ("x-company", "line\nbreak"),
+                            ("x-company", "部署")):
+            with self.subTest(name=name, value=value):
+                with self.assertRaises(ValueError) as raised:
+                    resolve_profiles({"openai": {
+                        "baseURL": "https://x.example.com",
+                        "headers": {name: value}}})
+                self.assertIn(
+                    f'provider "openai" header "{name}" is not valid for Fetch',
+                    str(raised.exception))
+
+    def test_headers_non_string_value_rejected(self):
+        # zod `z.dict(z.string())`（config.ts:337）：非字符串值响亮拒绝。
+        with self.assertRaises(ValueError) as raised:
+            resolve_profiles({"openai": {
+                "baseURL": "https://x.example.com",
+                "headers": {"x-company": 1}}})
+        self.assertIn('header "x-company" must be a string',
+                      str(raised.exception))
+
+    def test_headers_not_dict_rejected(self):
+        with self.assertRaises(ValueError) as raised:
+            resolve_profiles({"openai": {
+                "baseURL": "https://x.example.com",
+                "headers": ["x-company"]}})
+        self.assertIn("headers must be a dict", str(raised.exception))
+
 
 class PiAiAdapterTest(unittest.TestCase):
     def setUp(self):
@@ -195,10 +234,36 @@ class PiAiAdapterTest(unittest.TestCase):
     def test_request_headers_carry_attribution(self):
         # 上游 requestHeaders：每个 provider 请求带 user-agent（Harness 归因胜）。
         from miniharness.llm import user_agent
-        from miniharness.llm.pi_ai import _anthropic_headers, _openai_headers
-        self.assertEqual(_openai_headers("k")["user-agent"], user_agent())
-        self.assertEqual(_anthropic_headers("k")["user-agent"], user_agent())
-        self.assertEqual(_anthropic_headers(None)["user-agent"], user_agent())
+        from miniharness.llm.pi_ai import _anthropic_headers, _request_headers
+        headers = _request_headers(_anthropic_headers("k"), self.profiles["acme"])
+        self.assertEqual(headers["user-agent"], user_agent())
+        self.assertEqual(headers["x-api-key"], "k")
+        self.assertEqual(
+            _request_headers(_anthropic_headers(None), self.profiles["acme"])[
+                "user-agent"], user_agent())
+
+    def test_profile_headers_merge_with_attribution_winning(self):
+        # 上游 adapter.spec.ts:116-124：deployment 头透传，User-Agent 归因
+        # 按大小写不敏感胜。
+        from miniharness.llm import user_agent
+        from miniharness.llm.pi_ai import _openai_headers, _request_headers
+        profile = resolve_profiles({"deepseek": {
+            "baseURL": "https://mock.example.com",
+            "headers": {"x-company": "private", "User-Agent": "wrong"}}})[
+            "deepseek"]
+        headers = _request_headers(_openai_headers("k"), profile)
+        self.assertEqual(headers["x-company"], "private")
+        self.assertEqual(headers["user-agent"], user_agent())
+
+    def test_profile_auth_header_overrides_base(self):
+        # 上游 adapter.spec.ts:367-375：deployment Authorization 空串胜过
+        # 凭据头（归因之外的头均为 deployment 所有）。
+        from miniharness.llm.pi_ai import _openai_headers, _request_headers
+        profile = resolve_profiles({"azure": {
+            "baseURL": "https://azure.example.com",
+            "headers": {"Authorization": ""}}})["azure"]
+        headers = _request_headers(_openai_headers("k"), profile)
+        self.assertEqual(headers["Authorization"], "")
 
 
 if __name__ == "__main__":

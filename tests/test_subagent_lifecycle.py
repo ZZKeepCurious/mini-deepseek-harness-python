@@ -48,7 +48,7 @@ async def _wait_until(predicate, timeout=3.0):
 class _SilentAdapter(FakeLlmAdapter):
     """不发任何块的适配器：finish 直接 stop，无 assistant 文本。"""
 
-    async def stream(self, messages, tools, signal=None):
+    async def stream(self, messages, tools, signal=None, session_id=None, purpose=None):
         yield StreamChunk("finish", reason={"kind": "stop"})
 
 
@@ -182,7 +182,7 @@ class TestSubagentLifecycleEvents(unittest.TestCase):
 
     def test_child_error_stop_reason_and_no_output(self):
         class BoomAdapter(FakeLlmAdapter):
-            async def stream(self, messages, tools, signal=None):
+            async def stream(self, messages, tools, signal=None, session_id=None, purpose=None):
                 raise LlmFailure("RATE_LIMIT", "429")
                 yield  # pragma: no cover
 

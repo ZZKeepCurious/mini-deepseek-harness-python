@@ -70,7 +70,7 @@ class _ScriptedParent(FakeLlmAdapter):
         self.tool_args = tool_args or {}
         self.cid = None
 
-    async def stream(self, messages, tools, signal=None):
+    async def stream(self, messages, tools, signal=None, session_id=None, purpose=None):
         self.calls += 1
         if self.calls == 1:
             text = self._last_user_text(messages)
@@ -478,7 +478,7 @@ class TestContinuationManager(unittest.TestCase):
 
     def test_child_error_settles_without_raising(self):
         class BoomAdapter(FakeLlmAdapter):
-            async def stream(self, messages, tools, signal=None):
+            async def stream(self, messages, tools, signal=None, session_id=None, purpose=None):
                 raise LlmFailure("RATE_LIMIT", "429 Too Many Requests")
                 yield  # pragma: no cover - 使函数成为 async 生成器（首个 __anext__ 即抛）
 
@@ -906,7 +906,7 @@ class TestAsyncContinuation(unittest.TestCase):
     def test_async_child_error_settles(self):
         # 子回合抛 LlmFailure → error turn/end 闭合并结算 "failed before it finished"。
         class BoomAdapter(FakeLlmAdapter):
-            async def stream(self, messages, tools, signal=None):
+            async def stream(self, messages, tools, signal=None, session_id=None, purpose=None):
                 raise LlmFailure("RATE_LIMIT", "429 Too Many Requests")
                 yield  # pragma: no cover - 使函数成为 async 生成器（首个 __anext__ 即抛）
 
@@ -942,7 +942,7 @@ class TestAsyncContinuation(unittest.TestCase):
     def test_async_driver_swallows_turn_error(self):
         # driver 模式回合出错不外抛：error turn/end 仍落日志、when_idle_async 正常返回。
         class BoomAdapter(FakeLlmAdapter):
-            async def stream(self, messages, tools, signal=None):
+            async def stream(self, messages, tools, signal=None, session_id=None, purpose=None):
                 raise LlmFailure("SERVER", "500 boom")
                 yield  # pragma: no cover - 使函数成为 async 生成器（首个 __anext__ 即抛）
 

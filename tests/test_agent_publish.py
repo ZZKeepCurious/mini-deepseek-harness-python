@@ -128,7 +128,7 @@ class TestAgentEventCarrierRouting(unittest.TestCase):
         loop = _loop(mid)
 
         class Boom(FakeLlmAdapter):
-            async def stream(self, messages, tools, signal=None):
+            async def stream(self, messages, tools, signal=None, session_id=None, purpose=None):
                 raise RuntimeError("x")
                 yield  # pragma: no cover
 

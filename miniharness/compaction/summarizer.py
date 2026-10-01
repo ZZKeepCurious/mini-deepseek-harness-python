@@ -93,7 +93,11 @@ async def summarize_with_adapter(agent, config: dict, input_: dict) -> dict:
         "content": [{"type": "text", "text": COMPACTION_INSTRUCTION}],
     }))
     assembler = BlockAssembler()
-    async for chunk in adapter.stream(messages, input_.get("tools", [])):
+    # summarizer.ts:159-160：压缩摘要请求盖会话身份 + purpose='compaction'
+    # （deepseek 侧映射 x-deepseek-harness-session-id/-compact 头）。
+    async for chunk in adapter.stream(
+            messages, input_.get("tools", []),
+            session_id=agent.session.session_id, purpose="compaction"):
         assembler.push(chunk)
     _raise_on_finish_error(assembler.finish)
     summary = _summary_text(assembler.blocks())

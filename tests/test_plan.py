@@ -49,10 +49,11 @@ def _capture_adapter(tool_call=None):
             super().__init__(tool_call=tool_call, final_text="搞定。")
             self.systems = []
 
-        async def stream(self, messages, tools, signal=None):
+        async def stream(self, messages, tools, signal=None, session_id=None, purpose=None):
             system = next(m["content"][0]["text"] for m in messages if m["role"] == "system")
             self.systems.append(system)
-            async for chunk in super().stream(messages, tools, signal):
+            async for chunk in super().stream(messages, tools, signal,
+                                              session_id, purpose):
                 yield chunk
     return Capture(tool_call=tool_call)
 

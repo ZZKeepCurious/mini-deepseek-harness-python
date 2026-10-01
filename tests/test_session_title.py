@@ -38,6 +38,21 @@ def _user_message(session, text, kind="user", seq=None):
     return session.append("user/message", message, surfaceOp="append")
 
 
+class _RecordingTitleAdapter(FakeLlmAdapter):
+    """记录每次 stream 的 (session_id, purpose) 的假适配器。"""
+
+    def __init__(self):
+        super().__init__()
+        self.requests = []
+
+    async def stream(self, messages, tools, signal=None, session_id=None,
+                     purpose=None):
+        self.requests.append((session_id, purpose))
+        async for chunk in super().stream(messages, tools, signal,
+                                          session_id, purpose):
+            yield chunk
+
+
 class NormalizeTest(unittest.TestCase):
     def test_clean_strips_escape_sequences(self):
         self.assertEqual(
@@ -208,12 +223,30 @@ class FirstPromptLlmProviderTest(unittest.TestCase):
     def tearDown(self):
         self.ctx.dispose()
 
-    def _install_provider(self):
-        return register_first_prompt_llm_provider(self.ctx, FakeLlmAdapter(), {
-            "targetWords": 5, "targetCjkCharacters": 10,
-            "maxInputBytes": 1000, "maxOutputTokens": 32, "timeoutMs": 1000,
-            "provider": "title-route", "model": "title-model",
-        })
+    def _install_provider(self, adapter=None):
+        return register_first_prompt_llm_provider(
+            self.ctx, adapter if adapter is not None else FakeLlmAdapter(), {
+                "targetWords": 5, "targetCjkCharacters": 10,
+                "maxInputBytes": 1000, "maxOutputTokens": 32, "timeoutMs": 1000,
+                "provider": "title-route", "model": "title-model",
+            })
+
+    def test_first_prompt_llm_call_carries_session_identity(self):
+        # session-title-llm/src/index.ts:267-268：请求盖 sessionId +
+        # purpose='session-title'（deepseek 侧仅 compaction 映射压缩头）。
+        adapter = _RecordingTitleAdapter()
+        disposer = self._install_provider(adapter)
+        _user_message(self.session, "first input")
+        self.session.append("request/header", {
+            "header": {"config": {"provider": "deepseek-official",
+                                  "model": "deepseek-flash"},
+                       "tools": None, "adapterDefaults": None},
+            "reason": "initial"})
+        title = self.service.get(self.session)
+        self.assertEqual(title["source"]["kind"], "provider")
+        self.assertEqual(adapter.requests,
+                         [(self.session.session_id, "session-title")])
+        disposer()
 
     def test_first_prompt_selects_only_first_message(self):
         disposer = self._install_provider()

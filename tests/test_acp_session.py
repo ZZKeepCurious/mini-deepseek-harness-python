@@ -88,7 +88,7 @@ class _DefaultEffortAdapter(FakeLlmAdapter):
 class _ThoughtAdapter(FakeLlmAdapter):
     """首回合流式产出 reasoning 块 + 文本块（测试 agent_thought_chunk 投影）。"""
 
-    async def stream(self, messages, tools, signal=None):
+    async def stream(self, messages, tools, signal=None, session_id=None, purpose=None):
         yield StreamChunk("block-start", index=0, blockType="reasoning")
         yield StreamChunk("reasoning-delta", index=0, text="think hard")
         yield StreamChunk("block-end", index=0,
@@ -105,7 +105,7 @@ class _UsageAdapter(FakeLlmAdapter):
 
     context_window = 64_000
 
-    async def stream(self, messages, tools, signal=None):
+    async def stream(self, messages, tools, signal=None, session_id=None, purpose=None):
         yield StreamChunk("block-start", index=0, blockType="text")
         yield StreamChunk("text-delta", index=0, text="answer")
         yield StreamChunk("block-end", index=0,

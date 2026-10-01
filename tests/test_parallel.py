@@ -322,7 +322,7 @@ class MultiToolAdapter(LlmAdapter):
         self._text = final_text
         self.calls = 0
 
-    async def stream(self, messages, tools, signal=None):
+    async def stream(self, messages, tools, signal=None, session_id=None, purpose=None):
         self.calls += 1
         if self._calls and self.calls == 1:
             for i, tc in enumerate(self._calls):
@@ -416,7 +416,7 @@ class TestLoopAsync(unittest.TestCase):
         class InfiniteToolAdapter(LlmAdapter):
             provider = "fake"
 
-            async def stream(self, messages, tools, signal=None):
+            async def stream(self, messages, tools, signal=None, session_id=None, purpose=None):
                 yield StreamChunk("block-start", index=0, blockType="tool-call")
                 yield StreamChunk("tool-call-delta", index=0, id="call_0",
                                   name="s1", argumentsDelta="{}")

@@ -373,19 +373,24 @@ class DeepSeekAdapter(LlmAdapter):
         """按模型目录解析能力（上游 adapter.ts resolveModelInfo → modelInfo）。"""
         return model_info(self._connection, self.provider, self._model)
 
-    async def stream(self, messages, tools, signal=None):
+    async def stream(self, messages, tools, signal=None,
+                     session_id=None, purpose=None):
         """async 迭代器（对齐上游 async stream）：httpx 异步传输 + Messages SSE。
 
         含图片且模型目录宣称 image 输入时走 image-capable 序列化（Files API
         file-id 优先、解析失败整请求回退 inline base64），否则走文本路径。
+        session_id/purpose 映射为 x-deepseek-harness-session-id/-compact 头
+        （adapter.ts:129-130）。
         """
         abort_event = getattr(signal, "event", None) if signal is not None else None
         if not any(content_has_image(message.get("content") or []) for message in messages):
             body = self._build_body(messages, tools)
-            async for chunk in self._iter_request_chunks(body, abort_event):
+            async for chunk in self._iter_request_chunks(
+                    body, abort_event, session_id=session_id, purpose=purpose):
                 yield chunk
             return
-        async for chunk in self._stream_images_impl(messages, tools, abort_event, signal):
+        async for chunk in self._stream_images_impl(
+                messages, tools, abort_event, signal, session_id, purpose):
             yield chunk
 
     async def _iter_request_chunks(self, *args, **kwargs):
@@ -402,7 +407,8 @@ class DeepSeekAdapter(LlmAdapter):
                 raise
             raise mapped from error
 
-    async def _stream_images_impl(self, messages, tools, abort_event, signal):
+    async def _stream_images_impl(self, messages, tools, abort_event, signal,
+                                  session_id=None, purpose=None):
         model = next((entry for entry in self._models if entry.id == self._model), None)
         if model is None or "image" not in (model.inputModalities or ()):
             raise LlmFailure(
@@ -457,7 +463,8 @@ class DeepSeekAdapter(LlmAdapter):
             retry_state = {"retry": False}
             async for chunk in self._iter_request_chunks(
                     body, abort_event, request_files, retry_state,
-                    files_beta=representation["kind"] == "file"):
+                    files_beta=representation["kind"] == "file",
+                    session_id=session_id, purpose=purpose):
                 yield chunk
             if retry_state["retry"]:
                 continue
@@ -494,7 +501,8 @@ class DeepSeekAdapter(LlmAdapter):
 
     async def _iter_chunks(self, body: dict, abort_event=None,
                            request_files=None, retry_state=None,
-                           files_beta: bool = False):
+                           files_beta: bool = False,
+                           session_id=None, purpose=None):
         """httpx 异步传输：POST /messages + 错误映射，逐行喂给 SSE 解析器。
 
         错误映射对齐上游 transport.ts；abort 置位经 _aiter_raced 抛
@@ -511,6 +519,11 @@ class DeepSeekAdapter(LlmAdapter):
             "anthropic-version": "2023-06-01",
             **self._auth_headers(),
         }
+        # adapter.ts:129-130：会话身份头 + 压缩目的头（仅 compaction 映射）。
+        if session_id is not None:
+            headers["x-deepseek-harness-session-id"] = str(session_id)
+        if purpose == "compaction":
+            headers["x-deepseek-harness-compact"] = "1"
         betas = []
         if files_beta:
             betas.append(MESSAGES_FILES_BETA)

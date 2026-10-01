@@ -183,9 +183,11 @@ class _SummaryAdapter(LlmAdapter):
         self.fail_times = fail_times
         self.fail_code = fail_code
         self.calls = 0
+        self.requests = []
 
-    async def stream(self, messages, tools, signal=None):
+    async def stream(self, messages, tools, signal=None, session_id=None, purpose=None):
         self.calls += 1
+        self.requests.append((session_id, purpose))
         if self.fail_times > 0:
             self.fail_times -= 1
             raise LlmFailure(self.fail_code, f"HTTP 400: {self.fail_code}")
@@ -261,6 +263,8 @@ class CompactSurfaceRegionTest(unittest.TestCase):
         start, end = nodes[0]["seq"], nodes[-2]["seq"]  # 保留最后一段
         result = asyncio.run(compact_surface_region(session, TokenMeter(), agent,
                                                     resolve_config(), start, end))
+        # summarizer.ts:159-160：摘要请求盖会话身份 + purpose='compaction'。
+        self.assertEqual(adapter.requests, [(session.session_id, "compaction")])
 
         types = [e["type"] for e in session.events]
         self.assertIn("compaction/start", types)

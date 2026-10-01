@@ -9,7 +9,8 @@
     apiKeyEnv / models），`stream()` 按**本次调用的 provider+model** 决议到对应
     profile 与协议（anthropic-messages / openai-completions / openai-responses），
     httpx 异步传输。
-  * profile 配置 + 校验（api 闭集、baseURL 非空、apiKeyEnv 成对、模型容量）。
+  * profile 配置 + 校验（api 闭集、baseURL 非空、apiKeyEnv 成对、模型容量、
+    deployment headers 按 Fetch 规则拒绝不可表示条目）。
   * `resolve_model_info()` 按 provider+model 返回能力（provider/model/容量/
     input_modalities）。
 
@@ -25,7 +26,8 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
+import re
+from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
 from ..core.scope import Context
@@ -84,6 +86,32 @@ def _require_positive_finite(name: str, value: Any) -> float:
     return float(value)
 
 
+#: Fetch 无法表示的条目拒绝（config.ts:388-400，消息逐字对齐）。
+_INVALID_HEADER = ('llm-pi-ai: provider "{route}" header "{name}" is not valid '
+                   'for Fetch; use a valid HTTP field name and a single-line '
+                   'value representable as bytes')
+
+#: HTTP 字段名 token（RFC 7230；Fetch 字段名同规则）。
+_HEADER_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+
+
+def _parse_headers(route: str, raw: Any) -> tuple:
+    """profile deployment 头解析 + Fetch 校验（config.ts:337,388-400,428）。"""
+    if not isinstance(raw, dict):
+        raise ValueError(f'llm-pi-ai: provider "{route}" headers must be a dict')
+    entries = []
+    for name, value in raw.items():
+        if not isinstance(name, str) or _HEADER_NAME.fullmatch(name) is None:
+            raise ValueError(_INVALID_HEADER.format(route=route, name=name))
+        if not isinstance(value, str):
+            raise ValueError(
+                f'llm-pi-ai: provider "{route}" header "{name}" must be a string')
+        if any(ch in value for ch in "\r\n\x00") or any(ord(ch) > 0xFF for ch in value):
+            raise ValueError(_INVALID_HEADER.format(route=route, name=name))
+        entries.append((name, value))
+    return tuple(entries)
+
+
 @dataclass(frozen=True)
 class PiAiProviderProfile:
     """一个 provider 路由的解析后 profile（config.ts:186-219 的 mini 子集）。"""
@@ -94,6 +122,7 @@ class PiAiProviderProfile:
     base_url: str
     api_key_env: str | None = None
     models: tuple = ()          # 显式模型表（替代内置目录）
+    headers: tuple = ()         # deployment 头 ((name, value),...)（config.ts:151-152）
     default_context_window: int = DEFAULT_CONTEXT_WINDOW
     default_max_tokens: int = DEFAULT_MAX_TOKENS
     default_input: tuple = DEFAULT_INPUT
@@ -169,6 +198,8 @@ def _resolve_provider(route: str, value: Any) -> PiAiProviderProfile:
     api_key_env = value.get("apiKeyEnv")
     if api_key_env is not None and (not isinstance(api_key_env, str) or api_key_env == ""):
         raise ValueError(f"llm-pi-ai: provider {route!r} apiKeyEnv must be a string")
+    raw_headers = value.get("headers")
+    headers = () if raw_headers is None else _parse_headers(route, raw_headers)
     models = ()
     raw_models = value.get("models")
     if raw_models is not None:
@@ -181,7 +212,7 @@ def _resolve_provider(route: str, value: Any) -> PiAiProviderProfile:
     retry = value.get("retryPolicy")
     return PiAiProviderProfile(
         id=route, display_name=display_name, api=api, base_url=base_url,
-        api_key_env=api_key_env, models=models,
+        api_key_env=api_key_env, models=models, headers=headers,
         default_context_window=_require_int("defaultContextWindow", default_context),
         default_max_tokens=_require_int("defaultMaxTokens", default_max),
         default_input=default_input,
@@ -300,8 +331,15 @@ class PiAiAdapter(LlmAdapter):
     # ---------- 流式 ----------
 
     async def stream(self, messages: list[dict], tools: list[dict],
-                     signal: Any | None = None) -> AsyncIterator[StreamChunk]:
-        """按实例路由（provider/model）决议 profile 并走对应协议流。"""
+                     signal: Any | None = None, session_id: Any = None,
+                     purpose: str | None = None) -> AsyncIterator[StreamChunk]:
+        """按实例路由（provider/model）决议 profile 并走对应协议流。
+
+        session_id/purpose 为协议面参数：上游 pi-ai 把 sessionId 交外部
+        pi-ai SDK 作传输元数据（对 wire 的可断言效果为空，adapter.spec.ts:
+        151-152 只断言不注入 body 字段），purpose 不映射——mini 无该 SDK
+        载体，两者均不落 wire。
+        """
         import asyncio
 
         provider = self.provider
@@ -314,15 +352,15 @@ class PiAiAdapter(LlmAdapter):
         if profile.api == "anthropic-messages":
             url = _join_url(profile.base_url, "/v1/messages")
             body = _build_anthropic_body(profile, model, messages, tools)
-            headers = _anthropic_headers(api_key)
+            headers = _request_headers(_anthropic_headers(api_key), profile)
         elif profile.api == "openai-completions":
             url = _join_url(profile.base_url, "/v1/chat/completions")
             body = _build_openai_body(profile, model, messages, tools)
-            headers = _openai_headers(api_key)
+            headers = _request_headers(_openai_headers(api_key), profile)
         else:
             url = _join_url(profile.base_url, "/v1/responses")
             body = _build_openai_responses_body(profile, model, messages, tools)
-            headers = _openai_headers(api_key)
+            headers = _request_headers(_openai_headers(api_key), profile)
 
         # httpx 异步传输：asyncio.ensure_future 在调用方循环内驱动，chunk 经
         # asyncio 队列桥回。
@@ -384,8 +422,7 @@ def _openai_headers(api_key: str | None) -> dict:
     headers = {"Content-Type": "application/json"}
     if api_key is not None:
         headers["Authorization"] = f"Bearer {api_key}"
-    # attribution 后置覆盖 reserved 名（对齐 requestHeaders：Harness 归因胜）。
-    return {**headers, **attribution_headers()}
+    return headers
 
 
 def _anthropic_headers(api_key: str | None) -> dict:
@@ -393,7 +430,18 @@ def _anthropic_headers(api_key: str | None) -> dict:
                "anthropic-version": "2023-06-01"}
     if api_key is not None:
         headers["x-api-key"] = api_key
-    return {**headers, **attribution_headers()}
+    return headers
+
+
+def _request_headers(base: dict, profile: PiAiProviderProfile) -> dict:
+    """合并 deployment 头，归因名按大小写不敏感 reserved 胜（adapter.ts:204-212）。"""
+    attribution = attribution_headers()
+    reserved = {name.lower() for name in attribution}
+    merged = dict(base)
+    merged.update((name, value) for name, value in profile.headers
+                  if name.lower() not in reserved)
+    merged.update(attribution)
+    return merged
 
 
 def _build_anthropic_body(profile, model, messages, tools) -> dict:

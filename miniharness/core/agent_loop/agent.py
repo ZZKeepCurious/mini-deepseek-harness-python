@@ -1210,7 +1210,9 @@ class AgentLoop:
             self._assistant_attempt_counter += 1
             settled = False
             try:
-                stream = self.adapter.stream(messages, tools, self._abort_proxy)
+                stream = self.adapter.stream(
+                    messages, tools, self._abort_proxy,
+                    session_id=self.session.session_id)
                 live.start()
                 async for chunk in stream:
                     live.push(chunk)

@@ -290,7 +290,7 @@ class _RepeatToolAdapter(LlmAdapter):
     def resolve_model_info(self):
         return {"provider": "fake", "model": "fake", "input_modalities": ["text"]}
 
-    async def stream(self, messages, tools, signal=None):
+    async def stream(self, messages, tools, signal=None, session_id=None, purpose=None):
         self.calls += 1
         if self.calls <= self._n:
             yield StreamChunk("block-start", index=0, blockType="tool-call")

@@ -58,7 +58,7 @@ class ScriptedAdapter(FakeLlmAdapter):
         self._steps = list(steps)
         self.calls = 0
 
-    async def stream(self, messages, tools, signal=None):
+    async def stream(self, messages, tools, signal=None, session_id=None, purpose=None):
         self.calls += 1
         step = self._steps.pop(0) if self._steps else {"text": "（脚本结束）"}
         if "text" in step:

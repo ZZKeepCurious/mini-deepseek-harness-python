@@ -28,7 +28,7 @@
 | 工具注册表 + 执行管线（schema 校验、pre/execute/post、timeout） | `packages/core/tools` |
 | 文件系统域（`ctx.fs` seam + 本地/沙箱后端 + `read`/`write`/`edit`/`str_replace_editor`/`glob`/`grep` 模型侧工具；观测态写/编辑守卫 + 沙箱围栏 + watchdog `watch`） | `packages/fs/{fs,fs-local,fs-sandbox,fs-observation-policy,tool-fs,tool-str-replace-editor,tool-fs-search}` |
 | Agent Loop（async 驱动 turn/step 状态机 + 同步门面经常驻单事件循环驱动、pre-step 拒绝、工具回灌续跑） | `core/agent-loop` |
-| LLM 扩展口（async `stream(messages, tools, signal)` 接口约定、假模型、DeepSeek 官方 SSE 适配器（httpx 异步流式）、reasoning_effort 四档） | `llm/llm` + `llm/llm-deepseek` |
+| LLM 扩展口（async `stream(messages, tools, signal, session_id, purpose)` 接口约定、假模型、DeepSeek 官方 SSE 适配器（httpx 异步流式）、reasoning_effort 四档） | `llm/llm` + `llm/llm-deepseek` |
 | 图片输入请求（catalog 能力解析、`ImageRequestTarget` 投影几何、provider vision-token 定价、Files API 上传复用 + durable 索引、inline base64 回退、有界 stale-id 重试、规范化图片诊断；`image/offload` durable 卸载 + `IMAGE_OFFLOAD_REQUIRED` 恢复） | `llm/llm-deepseek`（`common/*`）+ `attachment/attachment-local` + `compaction/compaction-image-offload` |
 | 会话检查点策略（模型请求前 / 顶层工具体前 / 每步边界三种语义持久化屏障；经 `SessionStore.checkpoint` fail-closed） | `packages/session/session-checkpoint-policy` |
 | PTC 运行时 seam + Python 后端（`PtcRuntime` Service Definition + 全新 CPython 子进程内 `run`，支持顶层 await/return、行 JSON 绑定桥、墙钟/中止/输出上限、正交失败分类） | `packages/ptc-runtime/{ptc-runtime,ptc-runtime-node}` + `packages/experimental/ptc-runtime-python` |

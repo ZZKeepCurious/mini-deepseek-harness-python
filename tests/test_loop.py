@@ -183,7 +183,7 @@ class TestLoop(unittest.TestCase):
 
     def test_adapter_error_closes_turn_in_finally(self):
         class BoomAdapter(FakeLlmAdapter):
-            async def stream(self, messages, tools, signal=None):
+            async def stream(self, messages, tools, signal=None, session_id=None, purpose=None):
                 raise LlmFailure("RATE_LIMIT", "429 Too Many Requests")
                 yield  # pragma: no cover - 使函数成为 async 生成器（首个 __anext__ 即抛）
 
@@ -204,7 +204,7 @@ class TestLoop(unittest.TestCase):
     def test_max_steps_guard(self):
         # 模型永远调用工具 → 死循环守卫；回合以 error 闭合
         class AlwaysToolAdapter(FakeLlmAdapter):
-            async def stream(self, messages, tools, signal=None):
+            async def stream(self, messages, tools, signal=None, session_id=None, purpose=None):
                 yield StreamChunk("block-start", index=0, blockType="tool-call")
                 yield StreamChunk("tool-call-delta", index=0, id="call_0", name="loop", argumentsDelta="{}")
                 yield StreamChunk("block-end", index=0, block={
@@ -493,11 +493,13 @@ class _ScriptedAdapter(LlmAdapter):
         self._hang = hang
         self.calls = 0
         self.loop = None
+        self.requests = []
 
     def resolve_model_info(self):
         return {"provider": "fake", "model": "fake", "input_modalities": ["text"]}
 
-    async def stream(self, messages, tools, signal=None):
+    async def stream(self, messages, tools, signal=None, session_id=None, purpose=None):
+        self.requests.append((session_id, purpose))
         script = self._scripts[min(self.calls, len(self._scripts) - 1)]
         self.calls += 1
         stopped = False
@@ -533,6 +535,14 @@ class CancelPrefixFinalizeTest(unittest.TestCase):
     @staticmethod
     def _payload(event):
         return thaw(event["data"])
+
+    def test_loop_stamps_session_identity_on_requests(self):
+        # 上游 agent.ts:683 + invariant.ts:24：loop 构造的模型请求必带会话
+        # 身份（purpose 仅辅助调用置，对话请求不置）。
+        adapter = _ScriptedAdapter([_text_script("你好")])
+        session, loop = self._make(adapter)
+        loop.followup("写点什么")
+        self.assertEqual(adapter.requests, [(session.session_id, None)])
 
     def test_mid_stream_text_prefix_finalized_with_usage(self):
         # 中途取消：已交付的 text 前缀 + usage 定稿为 interrupted assistant/message
