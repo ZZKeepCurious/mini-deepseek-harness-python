@@ -1,19 +1,17 @@
-﻿# 第 6 章：进阶扩展口（选做，任选其一深入）
+﻿# 第 6 章：进阶扩展口
 
 > 对应 dsh 真实源码：`docs/capability-seams.md` + 各子系统页（sandbox / credentials / subagent）
 > 前置：第 1~5 章。产出文件：`miniharness/seams/subagent/`（基础三件套）+ `seams/sandbox_local.py`、`seams/credentials_local.py`（真后端）+ `tests/test_seams.py`、`tests/test_stage6.py`
 
 ## 6.1 这一章要做什么
 
-前面几章反复出现一个模式：接口 + 可替换实现 + 只依赖接口的消费方。这一章把这个模式正式化——"能力扩展口三角色"，并且亲手实现三遍，每一遍都在验证同一句话：
+前面几章反复出现一个模式：接口 + 可替换实现 + 只依赖接口的消费方。这一章把这个模式正式化——"能力扩展口三角色"，并围绕同一性质实现三个扩展口：换掉 Provider，Consumer 代码不动，行为就跟着变。
 
-> **换一个 Provider，不改 Consumer，即换行为。**
-
-三个扩展口，任选其一做深（各自 2~3 天工作量）：
+三个扩展口：
 
 1. **沙箱**：`Sandbox` 接口 + `wrap(argv)`——把 argv 包裹进受限执行环境
 2. **凭据**：`CredentialProvider` 接口 + `resolve(key)`——配置只存引用，每次操作解析
-3. **子 agent**：`SubAgentProvider` 工厂接口 + `spawn(name, prompt)`
+3. **子 agent**：`SubAgentProvider` 工厂接口 + `spawn(name, system_prompt)`
 
 ## 6.2 概念：扩展口三角色
 
@@ -178,9 +176,9 @@ await service.spawn_teammate_async(...)          # 事件循环内（驱动载�
 
 ## 6.7 延伸：会话检查点策略（语义持久化屏障）
 
-前面几章把"什么事实该落盘"交给了宿主：turn/step 括号、工具结果、压缩都在事件层保证。但**什么时候落盘**、落到哪个粒度，是另一个独立决策——这就是检查点策略（上游 `packages/session/session-checkpoint-policy`，mini `seams/session_checkpoint.py`）。
+前面几章把"什么事实该落盘"交给了宿主：turn/step 括号、工具结果、压缩都在事件层保证。但**什么时候落盘**、以什么为界，是另一个独立决策——这就是检查点策略（上游 `packages/session/session-checkpoint-policy`，mini `seams/session_checkpoint.py`）。
 
-它的职责一句话：**在副作用发生前，把"将要发生的承诺"先写进磁盘**，崩了不丢已承诺事实。实现是"三屏障"：
+它的职责只有一条：**在副作用发生前，把"将要发生的承诺"先写进磁盘**，崩了不丢已承诺事实。实现是"三屏障"：
 
 | 屏障 | 挂点 | 时机 |
 |---|---|---|
@@ -226,25 +224,29 @@ python -m unittest tests.test_seams -v
 |---|---|---|---|
 | 沙箱 | `Sandbox.wrap(argv)` | `SandboxProvider.confine(argv): ConfinedArgv`（含 runner/profile/分离符 + `allowedExitCodes`/`fatalSignatures`/`denialSignatures`） | `SandboxMode`：`read-only` / `workspace-write` / `danger-full-access`；"失败即拒"约定一致 |
 | 凭据 | `CredentialProvider.resolve(key)` | `resolve(ref): ResolvedCredential`（值 + 来源层）+ `describe(ref)`；本地 provider 层：`env` / `file` / `project-env` / `user-env` | 引用是带 brand 的 POSIX 环境变量名语法；每次操作重新解析 |
-| 子 agent | `SubAgentProvider.spawn(name, prompt)` | `SubagentProvider.start(...)` + `prepareContinuable`（可继续对话）+ `SubagentCapabilities` 能力门（不支持则 `UNSUPPORTED_CAPABILITY` 拒绝） | 六个真实 Provider：in-process / fork / ACP / Codex / Claude Code / dsh-sdk |
+| 子 agent | `SubAgentProvider.spawn(name, system_prompt)` | `SubagentProvider.start(...)` + `prepareContinuable`（可继续对话）+ `SubagentCapabilities` 能力门（不支持则 `UNSUPPORTED_CAPABILITY` 拒绝） | 六个真实 Provider：in-process / fork / ACP / Codex / Claude Code / dsh-sdk |
 
 ## 6.11 进阶实现：真后端 / 四层凭据 / 远程三通道 / PTC 运行时
 
-基础三件套讲清"换 Provider 不改 Consumer"；进阶三件把每个接缝推向与 dsh 一致的形态（产出：`miniharness/seams/sandbox_local.py` + `credentials_local.py` + `subagent/providers.py` + `subagent/worker.py`，验收测试在 `tests/test_stage6.py`）。
+基础三件套讲清"换 Provider 不改 Consumer"；进阶实现把每个接缝推到与 dsh 一致的形态。产出模块：`seams/sandbox_local.py`、`seams/credentials_local.py`、`subagent/providers.py`、`subagent/worker.py`、`ptc_runtime/`；验收在 `tests/test_stage6.py`。
 
-**沙箱真后端**（`sandbox_local.py` + `landlock_run.py`，对应上游 `sandbox/sandbox-local` 与 `native/landlock-run`）：按平台选链（linux `bwrap → landlock`、darwin `seatbelt`、win32 `windows-acl`），多候选由功能探测仲裁、单候选免探测；候选全不可用 → `SandboxUnavailableError`（`SANDBOX_UNAVAILABLE`）fail closed，命令绝不裸跑。`confine(argv, policy)` 返回 `ConfinedArgv`：包裹后的 argv + `enforcement`（full/partial）+ 该后端专属的 denial 方言与 runner 失败规则——"命令没跑起来"与"被沙箱拦住"可区分。三个 profile 生成器与上游 `profiles.ts` 逐条一致（bwrap 挂载、landlock grant、seatbelt SBPL 剖面，可写根与进程内 fs fence 共用 `writable_roots` 同一推导）。landlock 梯队由 `seams/landlock_run.py` ctypes 自限制执行器真执行：上游 `native/landlock-run` 是 C11 launcher 二进制，mini 以 `python -m miniharness.seams.landlock_run` 复刻同一 CLI 约定（`--ro/--rw/--/--probe`、launcher 失败 exit 125 绝不 exec、probe 报告行逐字一致），内核侧走 Landlock UAPI（ABI 协商 → PATH_BENEATH 规则 → `PR_SET_NO_NEW_PRIVS` → `restrict_self` → `execvp`；full ⟺ 内核 ABI ≥ 5，否则 partial 但仍受限；非 Linux 宿主干净退出 125）。
+### 沙箱真后端
 
-**windows-acl 真后端**（`seams/sandbox_windows_acl/`，对应上游 `sandbox/sandbox-windows-acl` 的进程内 koffi FFI）：ctypes 直调 Win32 三件——`CreateRestrictedToken` 铸 `WRITE_RESTRICTED` 受限令牌，`SetEntriesInAclW` + `SetNamedSecurityInfoW` 把能力 SID 的可写 ACE 物化到授权目录（workspace 常驻、会话私有 temp 可撤销），`CreateProcessAsUserW` 在该令牌下 spawn 子进程。runner 以 `python -m miniharness.seams.sandbox_windows_acl.runner --workspace <dir> --temp <dir> --mode <m> [--write-sid … --temp-write-sid …] -- <argv>` 包裹命令，自身任何失败打印 `windows-acl-run: <detail>` 并 exit 127——消费者靠「127 + fatal 行」双条件区分"没跑起来"与"跑起来后被拒"。约定测试经 `internals` 注入钩子验证链选择与包裹形状；真内核行为由门控 e2e（`MINIHARNESS_INTEGRATION_WINDOWS_ACL=1`）覆盖。
+`seams/sandbox_local.py` + `seams/landlock_run.py`（对应上游 `sandbox/sandbox-local` 与 `native/landlock-run`）按平台选链：Linux `bwrap → landlock`、macOS `seatbelt`、Windows `windows-acl`。多候选由功能探测仲裁，单候选免探测；候选全不可用抛 `SandboxUnavailableError`（`SANDBOX_UNAVAILABLE`），命令绝不裸跑。`confine(argv, policy)` 返回 `ConfinedArgv`：包裹后的 argv、`enforcement`（full/partial）、该后端专属的 denial 方言与 runner 失败规则，从而把"命令没跑起来"与"被沙箱拦住"分开。三个 profile 生成器与上游 `profiles.ts` 逐条一致（bwrap 挂载、landlock grant、seatbelt SBPL 剖面），可写根与进程内 fs fence 共用 `writable_roots` 同一推导。
 
-理解这个后端只需要一块内核知识：**受限令牌的两遍求值**。
+landlock 梯队由 `seams/landlock_run.py` 的 ctypes 自限制执行器真执行：上游 `native/landlock-run` 是 C11 launcher 二进制，mini 以 `python -m miniharness.seams.landlock_run` 复刻同一 CLI 约定（`--ro/--rw/--/--probe`，launcher 失败 exit 125 绝不 exec，probe 报告行逐字一致）。内核侧走 Landlock UAPI：ABI 协商 → PATH_BENEATH 规则 → `PR_SET_NO_NEW_PRIVS` → `restrict_self` → `execvp`；内核 ABI ≥ 5 才 full，否则 partial 但仍受限；非 Linux 宿主干净退出 125。
 
-1. `CreateRestrictedToken(..., WRITE_RESTRICTED)` 产生一个派生令牌：常规组保持原样，额外携带一张**限制列表**。mini 放进三个 SID：本次登录会话的 logon SID、Everyone、以及一个凭空合成的能力 SID（形如 `S-1-4-<hash>`，不对应任何账号）。
-2. 内核对每次访问对同一 DACL 做两遍求值：第一遍以常规组为主体，第二遍以限制列表为主体。**写类访问必须两遍全部放行**；读/执行类只看第一遍。这就是"WRITE_RESTRICTED 只限写"的全部原理。
-3. 能力 SID 的唯一用途就是在第二遍求值中匹配我们授予的 allow ACE——"给目录授能力 SID 写 ACE"即"把目录加入该子进程的白名单"，撤销 ACE 即收回授权。合成 SID 在第二遍完全有效，不需要是真实的组或账号。
-4. 反直觉推论一：**OWNER RIGHTS ACE（S-1-3-4）对受限进程无效**。文件属主自己的非受限令牌能借它拿到全权，但两遍求值都不会把它算给受限主体。
-5. 反直觉推论二：**目录怎么生出来，与授什么 ACE 同等重要**。DACL 里若没有任何一条能让"常规组"过第一遍的 ACE，第二遍再完美也白搭。
+`seams/sandbox_windows_acl/`（对应上游 `sandbox/sandbox-windows-acl` 的进程内 koffi FFI）用 ctypes 直调 Win32：`CreateRestrictedToken` 铸 `WRITE_RESTRICTED` 受限令牌，`SetEntriesInAclW` + `SetNamedSecurityInfoW` 把能力 SID 的可写 ACE 物化到授权目录（workspace 常驻、会话私有 temp 可撤销），`CreateProcessAsUserW` 在该令牌下 spawn 子进程。runner 以 `python -m miniharness.seams.sandbox_windows_acl.runner --workspace <dir> --temp <dir> --mode <m> [--write-sid … --temp-write-sid …] -- <argv>` 包裹命令，自身任何失败打印 `windows-acl-run: <detail>` 并 exit 127——消费者靠「127 + fatal 行」区分"没跑起来"与"跑起来后被拒"（非 win32 上 `import` 即抛 `OSError`）。链选择与包裹形状由经 `internals` 注入钩子的约定测试覆盖，真内核行为由门控 e2e（`MINIHARNESS_INTEGRATION_WINDOWS_ACL=1`）覆盖。
 
-用同一受限令牌对不同 DACL 跑 `AccessCheck`，矩阵一目了然（目标位 `FILE_GENERIC_WRITE`，限制列表 `[logon, Everyone, CAP_B]`）：
+理解这个后端靠一块内核知识——**受限令牌的两遍求值**：
+
+1. `CreateRestrictedToken(..., WRITE_RESTRICTED)` 产生派生令牌：常规组保持原样，额外携带一张限制列表（mini 放本次登录的 logon SID、Everyone、一个凭空合成的能力 SID `S-1-4-<hash>`）。
+2. 内核对每次访问的同一 DACL 做两遍求值：第一遍以常规组为主体，第二遍以限制列表为主体。**写类访问必须两遍全部放行**，读/执行类只看第一遍——这就是"WRITE_RESTRICTED 只限写"的全部原理。
+3. 能力 SID 只在第二遍求值里匹配我们授予的 allow ACE："给目录授能力 SID 写 ACE"即"把目录加入该子进程的白名单"，撤销 ACE 即收回授权；合成 SID 不需要对应真实账号。
+4. **OWNER RIGHTS ACE（S-1-3-4）对受限进程无效**：两遍求值都不会把它算给受限主体。
+5. **目录怎么生出来与授什么 ACE 同等重要**：DACL 里若没有一条能让常规组过第一遍的 ACE，第二遍再完美也白搭。
+
+用同一受限令牌对不同 DACL 跑 `AccessCheck`（目标位 `FILE_GENERIC_WRITE`，限制列表 `[logon, Everyone, CAP_B]`）：
 
 | 目录 DACL | 非受限令牌 | 受限令牌 |
 |---|---|---|
@@ -253,39 +255,41 @@ python -m unittest tests.test_seams -v
 | `CAP_B` + Everyone `:(F)` | 过 | 过 |
 | `CAP_B` + OwnerRights `:(F)` | 过 | **拒** |
 
-"仅 CAP_B 连非受限都被拒"正是第 5 条：这个 DACL 里没有用户侧的第一遍通路。而 CPython 恰好有个坑踩在这里——`tempfile.mkdtemp(0o700)` 会显式构造安全描述符（SYSTEM/Administrators/**OWNER RIGHTS** 三条，唯独没有用户自己的 ACE），于是用它创建的沙箱目录永远过不了第一遍；上游 node 的 `fs.mkdtempSync` 不构造描述符、纯继承父目录 DACL，%TEMP% 链路自带的 `user:(I)(F)` 天然喂饱第一遍。所以 mini 的 runner 私有 temp 与 provider 会话 temp 都用继承式 `os.mkdir` 创建。Everyone 与 logon SID 同时出现在两个列表里，一条 `Everyone:(F)` 能同时喂饱两遍——这正是上游文档标注 enforcement=partial（Everyone 边界）的由来。这条经验超出本例：在 Windows 上做沙箱或临时目录，先问"DACL 从哪继承"，再谈授什么 ACE。
+"仅 CAP_B 连非受限都被拒"正是第 5 条。CPython 的 `tempfile.mkdtemp(0o700)` 恰踩这里：它显式构造安全描述符（SYSTEM/Administrators/OWNER RIGHTS，没有用户自己的 ACE），用它建的沙箱目录永远过不了第一遍；上游 node 的 `fs.mkdtempSync` 纯继承父目录 DACL，`%TEMP%` 链路自带的 `user:(I)(F)` 天然喂饱第一遍。所以 mini 的 runner 私有 temp 与 provider 会话 temp 都用继承式 `os.mkdir` 创建。Everyone 与 logon SID 同时在两个列表里，一条 `Everyone:(F)` 能同时喂饱两遍——这正是上游标注 enforcement=partial（Everyone 边界）的由来。
 
-**沙箱策略服务 + bash 消费者**（`seams/sandbox_policy.py` + `shell/`，对应上游 `sandbox/sandbox-policy`、`session-mode.ts` 与 `shell/bash-sandbox`）：策略与强制分属两个服务——ctx.sandboxPolicy 是唯一的共享策略家（Config `{mode: 缺省 read-only, workspaceRoot}` fail-loud 校验；`resolve()` 决议完整策略：显式 mode > 会话日志最后一条 `sandbox/mode` > 部署缺省；workspace 根先 canonical 后词法规范化，会话 cwd 即 workspace-write 边界），ctx.sandbox 把模式物化为 runner argv。会话覆盖以会话日志为存储：`set_sandbox_mode` 追加恰一条 `sandbox/mode` log-only 事件，`effective_sandbox_mode` 纯 fold 逆序取最后——切换即事件本身，重放即状态。三档策略文案经 systemPrompt `.context('sandbox:policy', order=110)` 进模型可见上下文（loop 侧投影在上下文变化时把快照铸成 durable user 消息注入对话流，见 `core/agent_loop/runtime_context.py`）。消费者在 `shell/` 层：`bash_local.py` 是 ctx.shell 缺省 provider（`execute(spec) -> ShellExecution`：`bash -c` 直跑句柄，带 `observed` 非消耗偏移读、消费式 `read_output()`、`kill()` 与 memoized `result()`；`resolve` 补齐 `onExpiry`(kill\|none) 与输出预算），`bash_sandbox.py` 子类每次调用把精确 argv 经 confine 包裹后 spawn 并报告 `{mode, denied, enforcement}`；三路归因同上游 helpers.ts——runner 启动失败（ENOENT/EACCES 且错误路径恰为 argv[0]、cwd 可用性独立校验）与 runner 失败规则命中抛 `SandboxUnavailableError` 且优先于 denial，denial = 非零退出 + stderr 大小写不敏感签名命中（普通非零退出仍是正常结算）；danger-full-access 直通不包裹。工具面（`tool_bash/`，经 `cli/default_tools.py` 装配）检测到 ctx.shell 时把教学 stub 换成真执行器，逐调用以调用方会话决议策略；jobs 在场时前台超时提升为后台作业、`run_in_background` 直接开作业，`ctx.shellEnv` 注入托管 `DSH_*`；headless 入口 `run_headless(..., sandbox=配置)` 一键装配全栈。载体差异：无 `ctx.subprocess` 托管范围/spill（Popen + 读线程 + 内存增长缓冲）；pwsh 变体（M16）未复现。
+### 沙箱策略与 fail-closed
 
-**沙箱发布/部署平台矩阵与 fail-closed 约定（release/ops 视角）**：上面按平台选链只讲了"怎么选"，这里把它收敛成操作用（release/ops）视角的矩阵：
+`seams/sandbox_policy.py` + `shell/`（对应上游 `sandbox/sandbox-policy`、`session-mode.ts`、`shell/bash-sandbox`）把策略与强制拆成两个服务。`ctx.sandboxPolicy` 是唯一的共享策略家：Config `{mode: 缺省 read-only, workspaceRoot}` fail-loud 校验；`resolve()` 的优先级是显式 mode > 会话日志最后一条 `sandbox/mode` > 部署缺省；workspace 根先 canonical 后词法规范化，会话 cwd 即 workspace-write 边界。`ctx.sandbox` 把模式物化为 runner argv。会话覆盖以会话日志为存储：`set_sandbox_mode` 追加恰一条 `sandbox/mode` log-only 事件，`effective_sandbox_mode` 纯 fold 逆序取最后——切换即事件本身，重放即状态。三档策略文案经 systemPrompt `.context('sandbox:policy', order=110)` 进模型可见上下文（loop 侧在上下文变化时把快照铸成 durable user 消息注入对话流，见 `core/agent_loop/runtime_context.py`）。
 
-| 平台 | 候选后端（链序） | 真实强制门槛 | enforcement |
-|---|---|---|---|
-| Linux | `bwrap` → `landlock` | landlock 需内核 ABI ≥ 5 才 full（否则 partial 但仍受限）；非 Linux 宿主 `landlock_run` 干净退出 125 | full / partial |
-| macOS (darwin) | `seatbelt` | 真 SBPL 剖面 | full |
-| Windows (win32) | `windows-acl` | 真内核写法受扫描由门控 e2e 覆盖（`MINIHARNESS_INTEGRATION_WINDOWS_ACL=1`），非 win32 `import` 即抛 OSError | partial（Everyone 边界） |
+消费者在 `shell/` 层：`bash_local.py` 是 `ctx.shell` 缺省 provider（`execute(spec) -> ShellExecution`，`bash -c` 直跑句柄，带 `observed` 非消耗偏移读、消费式 `read_output()`、`kill()` 与 memoized `result()`；`resolve` 补齐 `onExpiry`(kill|none) 与输出预算），`bash_sandbox.py` 子类每次调用把精确 argv 经 confine 包裹后 spawn 并报告 `{mode, denied, enforcement}`。工具面（`tool_bash/`，经 `cli/default_tools.py` 装配）检测到 `ctx.shell` 时把教学 stub 换成真执行器，逐调用以调用方会话决议策略；jobs 在场时前台超时提升为后台作业、`run_in_background` 直接开作业，`ctx.shellEnv` 注入托管 `DSH_*`；headless 入口 `run_headless(..., sandbox=配置)` 一键装配全栈。载体差异：无 `ctx.subprocess` 托管范围/spill（Popen + 读线程 + 内存增长缓冲）；pwsh 变体（M16）未复现。
 
-**fail-closed 约定**（沙箱下"命令绝不裸跑"）：
+沙箱层"命令绝不裸跑"的 fail-closed 约定：
 
 1. **无候选**：当前平台没有可用后端 → `SandboxUnavailableError`（`SANDBOX_UNAVAILABLE`），不降级为裸跑。
 2. **runner 起不来**：可真后端启动失败（ENOENT/EACCES 且错误路径恰为 argv[0]、cwd 不可用）→ 同样 `SandboxUnavailableError`，且优先于 denial。
-3. **跑起来后被拒**：non-zero 退出 + stderr 大小写不敏感签名命中 → denial（普通非零退出仍是正常结算）。
-4. **windows-acl 方言**：runner 自身失败打印 `windows-acl-run: <detail>` 并 exit 127——靠「127 + fatal 行」双条件区分"没跑起来"与"跑起来后被拒"。
+3. **跑起来后被拒**：non-zero 退出 + stderr 大小写不敏感签名命中 → denial；普通非零退出仍是正常结算。
+4. **windows-acl 方言**：runner 自身失败打印 `windows-acl-run: <detail>` 并 exit 127。
 5. **唯一直通**：`danger-full-access` 直通不包裹——这是操作者的显式决策，不是后端缺省；除此之外沙箱层 fail-closed 绝不静默放行。
 
-纯 sdk/profile 教学形态不受影响（不走真沙箱装配）。
+平台 enforcement：Linux landlock 需内核 ABI ≥ 5 才 full（否则 partial 但仍受限），macOS seatbelt full，Windows windows-acl partial（Everyone 边界）。纯 sdk/profile 教学形态不走真沙箱装配。
 
-**凭据四层**（`credentials_local.py`，对应上游 `credentials-local`）：`env > file > project-env > user-env` 按信任度排序——继承环境只读胜出（CI secret / `-e` 是显式意图且进程内不可编辑）、管理文件层可写（`set`/`unset` 读-改-写补丁单键，外部编辑合并、删掉的条目不残留）、project `.env` 优先于 user `.env`。文档解析严格：非映射根 / 非 POSIX 标识符 key / 非字符串 / 空串值整体拒绝，绝不静默跳过；`describe` 报告 `{configured, source, writable}`（只有 env 层不可写）；env 已提供时 `set`/`unset` 拒绝（写了也被遮蔽成无效果）；POSIX 上组/其他可读的文档读前直接拒绝（Windows 无 mode 可查则跳过）。载体简化/决策：文档用 JSON 替代 YAML（解析语义不变；JSON 重复键 fail-closed 更稳，为受评审设计决策）；跨进程写锁用 `filelock` 实现（同 `withFileLock`，`credentials_local.py:553`，写入等待 30s——`DOCUMENT_LOCK_WAIT_SECONDS` 覆盖 atomic-write 2s 默认）。凭据变更感知双通道：**① 读侧热重载（缺省 pull 兜底）**——`resolve`/`describe`/`read_record` 等读入口先 `_refresh_if_changed()`——`os.stat` 比对 mtime/size，变了才重解析整表（外部编辑/删除即时生效），写路径 `_reconcile_from_disk` 折叠不变；无撕裂（atomic write os.replace），读侧不需锁。**② 可选文件 watch（显式开启）**——`LocalCredentialProvider(watch=True)`（或 `CredentialsService` 装配）以 watchdog 主动监听外部编辑（同上游 chokidar watch + reconcileFromDisk 文本比对 + 逐 entry fan-out），缺省关闭（与 ACP 持久化同构，避免默认起线程）；watch 事件去抖单飞折叠，逐 entry 发 `credentials/reference-updated`/`credentials/record-updated`（经 `CredentialsService` 转发 ctx 事件），自写 echo 由文本比对抑制。`credentials_local.py` 还实现记录（record）服务侧五件套：`read_record`/`describe_record`/`list_records`/`modify_record`/`delete_record`（modify_record 是唯一写路径：持锁内 reconcile 折叠外部编辑 → mutate 收到当前记录返回替换/拒绝 → 写前准入与读路径同一套 → 原子写入磁盘；`<scope>/<id>` 键语法 `[a-z][a-z0-9-]*`，段非法逐字 TypeError）。
+### 凭据四层
 
-**子 agent 远程三通道**（`subagent/providers.py` + `subagent/worker.py`，对应上游 `subagent-fork-in-process` / `subagent-acp` / `subagent-dsh-sdk`）：
+`credentials_local.py`（对应上游 `credentials-local`）：`env > file > project-env > user-env` 按信任度排序——继承环境只读胜出（CI secret / `-e` 是显式意图且进程内不可编辑）、管理文件层可写（`set`/`unset` 读-改-写补丁单键，外部编辑合并、删掉的条目不残留）、project `.env` 优先于 user `.env`。文档解析严格：非映射根 / 非 POSIX 标识符 key / 非字符串 / 空串值整体拒绝，绝不静默跳过；`describe` 报告 `{configured, source, writable}`（只有 env 层不可写）；env 已提供时 `set`/`unset` 拒绝（写了也被遮蔽成无效果）；POSIX 上组/其他可读的文档读前直接拒绝（Windows 无 mode 可查则跳过）。载体简化/决策：文档用 JSON 替代 YAML（解析语义不变；JSON 重复键 fail-closed 更稳，为受评审设计决策）；跨进程写锁用 `filelock` 实现（同 `withFileLock`，`credentials_local.py:553`，写入等待 30s——`DOCUMENT_LOCK_WAIT_SECONDS` 覆盖 atomic-write 2s 默认）。凭据变更感知双通道：**① 读侧热重载（缺省 pull 兜底）**——`resolve`/`describe`/`read_record` 等读入口先 `_refresh_if_changed()`——`os.stat` 比对 mtime/size，变了才重解析整表（外部编辑/删除即时生效），写路径 `_reconcile_from_disk` 折叠不变；无撕裂（atomic write os.replace），读侧不需锁。**② 可选文件 watch（显式开启）**——`LocalCredentialProvider(watch=True)`（或 `CredentialsService` 装配）以 watchdog 主动监听外部编辑（同上游 chokidar watch + reconcileFromDisk 文本比对 + 逐 entry fan-out），缺省关闭（与 ACP 持久化同构，避免默认起线程）；watch 事件去抖单飞折叠，逐 entry 发 `credentials/reference-updated`/`credentials/record-updated`（经 `CredentialsService` 转发 ctx 事件），自写 echo 由文本比对抑制。`credentials_local.py` 还实现记录（record）服务侧五件套：`read_record`/`describe_record`/`list_records`/`modify_record`/`delete_record`（modify_record 是唯一写路径：持锁内 reconcile 折叠外部编辑 → mutate 收到当前记录返回替换/拒绝 → 写前准入与读路径同一套 → 原子写入磁盘；`<scope>/<id>` 键语法 `[a-z][a-z0-9-]*`，段非法逐字 TypeError）。
+
+### 子 agent 远程三通道
+
+`subagent/providers.py` + `subagent/worker.py`（对应上游 `subagent-fork-in-process` / `subagent-acp` / `subagent-dsh-sdk`）：
 
 - **fork**（进程内）：子 agent 以父会话日志的 completed-turn 前缀作 seed（到最后一个 `turn/end` 为止，in-flight 工具回合不平衡不能重放），`Session(seed=...)` 回放 + 自动补 `session/end-seed` 标记（fork 切点恒 `{inherited:true}`，`inherited_cut` 由 marker 派生）——子会话直接继承父上下文。
 - **ACP**（真子进程）：`python -m miniharness.seams.subagent.worker acp` 起独立进程，newline-delimited JSON-RPC over stdio（与上游 `ndJsonStream` 同帧形状）；`initialize → newSession → prompt → cancel → shutdown`；唯一从父读的是 workspace cwd；permission 策略自动应答（reject 默认 / allow），不上报人；`session/update` 经 update_sink 在回合执行期间逐事件并发流式写通知、先于响应帧（同上游 notify 并发流）。
 - **SDK**（真子进程）：`subagent_worker sdk` 承载 `SdkRuntime`，`initialize → session/prompt`（懒创建会话）→ `shutdown`；回合级透传 `session.event`（本次回合新增的 inbox 回执、assistant/message、turn/end 逐条，`_event_boundary` 边界保证会话复用不重发历史事件）+ 末尾 `session.status idle` 通知，可被官方 Python SDK 客户端直接驱动（见第 7 章 7.6.4）。
 
-三者保持同一 Consumer 接口 `spawn(name, prompt) -> SubAgent`：换通道只改 Provider 构造，消费方代码不动。
+三者保持同一 Consumer 接口 `spawn(name, system_prompt) -> SubAgent`：换通道只改 Provider 构造，消费方代码不动。
 
-**PTC 运行时**（`miniharness/ptc_runtime/`，对应上游 `packages/ptc-runtime/{ptc-runtime,ptc-runtime-node}` + `packages/experimental/ptc-runtime-python`）：第 3 章延伸讲了 `run_code` 工具怎么把程序交进来；这里补执行侧。PTC（programmatic tool calls，程序化工具调用）的编排单元是**程序**而非单条工具调用，所以 `PtcRuntime` 是一条 Service Definition（`ctx.ptcRuntime`）：
+### PTC 运行时
+
+`miniharness/ptc_runtime/`（对应上游 `packages/ptc-runtime/{ptc-runtime,ptc-runtime-node}` + `packages/experimental/ptc-runtime-python`）：第 3 章延伸讲了 `run_code` 工具怎么把程序交进来，这里补执行侧。PTC（programmatic tool calls，程序化工具调用）的编排单元是**程序**而非单条工具调用，所以 `PtcRuntime` 是一条 Service Definition（`ctx.ptcRuntime`）：
 
 - `run(request) -> {result, failure?}`：拿模型写的程序 + 绑定表，执行并返回结果。绑定表里是可调用的工具（`tools.<name>`），程序 `await` 它。
 - **保留名与绑定校验**：`RESERVED_BINDING_GLOBALS` / `RESERVED_ERROR_MEMBERS` / `PORTABLE_RESERVED_WORDS` / `DUNDER_MEMBER`——程序不能碰宿主保留名，绑定不能撞 `__dunder__` 私有面（失败分类 `binding-conflict`）。这是安全边界的**第一道**：程序能调什么由绑定表显式枚举，不是宿主进程全局。

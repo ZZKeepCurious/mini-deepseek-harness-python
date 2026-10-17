@@ -1,158 +1,126 @@
-﻿# 第 2 章：插件上下文 + 事件总线（Cordis 的核心思想）
+﻿# 第 2 章：插件上下文与事件总线
 
-> 对应 dsh 真实源码：`vendor/cordis`（`docs/cordis-primer.md`）+ `packages/core/scope`
-> 前置：第 1 章。产出文件：`miniharness/core/scope.py` + `tests/test_bus.py`
+> 对应 dsh 真实源码：`vendor/cordis`（见 `docs/cordis-primer.md`）+ `packages/core/scope`
+> 前置：第 1 章。本章产出：`miniharness/core/scope.py`；测试 `tests/test_bus.py`、`tests/test_fiber.py`
 
 ## 2.1 这一章要做什么
 
-第 1 章解决了"事实怎么存"，这一章解决"功能怎么插"。dsh 的插件体系基于 Cordis——一个被 vendored（直接放进仓库、可审计）的框架。它要回答的问题，任何插件系统都绕不开：
+第 1 章解决"事实怎么存"——一条只追加的事件日志。这一章解决"功能怎么插"。
 
-1. 插件之间怎么互相找到对方提供的服务？（服务仓库 `Context`）
-2. 插件怎么在"不互相知道"的前提下协作？（事件总线）
-3. 插件卸载、热重载、故障清理时，副作用怎么可靠地撤销？（可逆副作用）
+一个可扩展的 agent 运行时，绕不开三个问题。任何一个没答好，"一切皆插件"就立不住：
 
-常规的插件系统有两种解法：全局注册表（谁都能注册，谁也管不住谁），或者手工写启动顺序（顺序错了就崩）。dsh 两样都不用，两个核心思想先记住：
+1. **插件之间怎么互相取用，而不互相 import。**
+   工具插件要用文件系统能力。如果它 `import` 某个具体的本地实现，那么把文件系统换成沙箱实现时，所有工具插件都得改。正确的做法是让插件只认一个稳定的名字，实现放在名字背后。
+2. **插件做过的改动怎么撤销。**
+   插件会注册工具、挂监听器、提供服务。卸载或热重载时，这些改动必须精确回滚——不能留下半截注册，也不能误删别人的东西。
+3. **插件怎么否决一个决策，而不只是旁听。**
+   权限插件需要在工具调用之前把它拦下来，这就要求事件总线既能广播，也能把控制权和返回值一路传下去。
 
-> **(1) 注册 = 可逆副作用**：一切贡献经 `ctx.effect()` 登记，`dispose()` 时按注册逆序回滚。这是热重载、插件卸载、故障清理能可靠工作的根基。相比之下，常规的"直接往全局表里塞"没有回滚能力。
->
-> **(2) waterfall 短路即决策**：流水线事件（`agent/pre-step`、`agent/request-error`、`tools/pre-execute|ask|guards|post-execute`）必须 `next()` 委派；不调 `next` 就短路，返回值就是最终决策。这就是策略插件能行使否决权的原因——普通事件广播做不到否决，它没有返回值通道。
+本章按这三条线索实现四件东西：
 
-## 2.2 概念：四种派发模式
+- `Context`——按名字存取服务的仓库；
+- 事件总线——四种派发模式，其中 `waterfall` 能行使否决权；
+- `Fiber`——承载一个上下文全部副作用的栈与生命周期；
+- `RegistryService`——按依赖关系激活插件，而不是靠手写启动顺序。
 
-```mermaid
-flowchart LR
-  subgraph EM["emit · 观察式"]
-    e1["emit(event)"] --> e2["监听器按注册序同步观察&lt;br/&gt;不等待 · 无返回值"]
-  end
-  subgraph WF["waterfall · 流水线（短路即决策）"]
-    w1["waterfall(event, next)"] --> w2["监听器 m1"]
-    w2 -->|"调用 next()"| w3["监听器 m2"]
-    w2 -->|"不调 next → 短路"| w4["立即返回 m1 的决策值"]
-  end
-  subgraph PA["parallel · 并行"]
-    p1["parallel(event)"] --> p2["等待全部完成"]
-  end
-  subgraph SE["serial · 串行"]
-    s1["serial(event)"] --> s2["按序执行有返回值"]
-  end
-```
+先把后面反复出现的词定下来：
+
+| 术语 | 含义 |
+|---|---|
+| 服务（service） | 挂在上下文上的一个对象，按字符串 key 存取，如 `ctx.get("fs")` |
+| 插件（plugin） | 一段 `apply(ctx, config)` 代码；装载时它注册服务、挂监听器 |
+| 副作用（effect） | 插件登记的一处可撤销改动；每处都附带逆操作 |
+| fiber | 承载"一个上下文名下全部副作用 + 生命周期状态"的单元 |
+| waterfall | 一条监听器链；每个监听器可以调 `next()` 继续，或直接返回从而短路 |
+| 隔离标签（isolate label） | 服务存储的命名空间；同一个 key 换标签就是另一份服务 |
+
+## 2.2 概念：服务仓库与四种派发
+
+### 服务仓库
+
+`Context` 是一个服务仓库：`provide(key, value)` 把实现挂上去，`get(key)` 按名字取回来。两边都不提具体类型，只认 key。
+
+存储本身是一张按**隔离标签**键控的全局表（上游 `reflect.ts` 的 `ctx[isolate][name]`）。一个上下文提供 `key` 时，真正写入的键是"这个 key 在当前隔离标签下"的位置。默认标签是根标签，所以根上提供的服务（`fs`、`tools`、`jobs` 等进程级服务）对所有作用域可见；某个 agent 想用自己那一套 `tools`，就换一个隔离标签，两者互不冲撞。
+
+这里有一条反直觉但重要的规定：**同一标签下重复提供同一个 key 直接报错**，而不是"后者覆盖前者"。覆盖看着方便，实际会让"到底谁生效"变成难查的谜。要多个实例，用 `isolate()` 换标签，而不是指望覆盖。
+
+### 四种派发
+
+事件总线有四种模式，选哪种取决于"这次要的是通知、决策、还是变换"：
 
 | 模式 | 语义 | 典型用途 |
 |---|---|---|
-| `emit` | 同步广播，不等待，无返回值 | 通知类：`session/event`、`agent/status` |
-| `waterfall` | around-middleware，`next()` 委派，短路即决策 | `agent/pre-step`、`tools/pre-execute`、`llm/stream` |
-| `parallel` | 全部并行执行并收集 | 横切动作必须全部生效 |
-| `serial` | 按序执行，可带返回值 | 依赖前序结果的变换 |
+| `emit` | 同步广播；不等待返回值，谁都能看 | 通知类：`session/event`、`agent/status` |
+| `waterfall` | 监听器链；调 `next()` 继续，不调就短路，返回值即决策 | 决策类：`agent/pre-step`、`tools/pre-execute` |
+| `parallel` | 全部执行并收集结果，彼此独立 | 横切动作，每一条都必须跑 |
+| `serial` | 依次执行并收集结果，顺序有意义 | 后一步依赖前一步结果的变换 |
 
-选哪种模式取决于"这个事件要不要否决权"：通知用 `emit`，审批/决策用 `waterfall`，横切用 `parallel`，有前后依赖的变换用 `serial`。本章教学主体是同步近似：`parallel` 用列表推导模拟；实现另提供 `aemit`/`awaterfall`/`aparallel`/`aserial` 异步变体（第 4 章的 `agent/pre-step`、`agent/request-error` 已走 async 变体），真实 Cordis 是异步的，但短路语义不变。
+```mermaid
+flowchart LR
+  subgraph EM["emit · 通知"]
+    e1["emit(event)"] --> e2["按注册序同步观察&lt;br/&gt;不等待 · 无返回值"]
+  end
+  subgraph WF["waterfall · 决策（短路即否决）"]
+    w1["waterfall(event)"] --> w2["监听器 m1"]
+    w2 -->|"调 next()"| w3["监听器 m2"]
+    w2 -->|"不调 next → 短路"| w4["返回 m1 的值作为最终决策"]
+  end
+  subgraph PA["parallel / serial"]
+    p1["按注册序逐个调用"] --> p2["收集结果列表"]
+  end
+```
 
-**逐分支走读**（对应上图四条链）：
+`waterfall` 是这里唯一能"否决"的模式。权限插件拿到 `(payload, next)` 后，如果认为该拒绝，就不调 `next()`、直接返回 `{kind:'deny'}`——链条到此为止，这个返回值就是最终决策。普通广播没有返回通道，做不到这件事。
 
-- `emit`：`emit(event)` → 监听器按注册序同步观察，`emit` 不等待任何监听器返回值，立即返回 `None`。适合"通知"，如 `session/event`。
-- `waterfall`：这是唯一有"否决权"的分支。`waterfall(event)` 把处理权沿链传递：先唤 m1，m1 **调用 `next()`** 才把控制权交给 m2；若 m1 **不调 `next()` 就直接 return**，则链条在此短路，`waterfall` 立即把 m1 的返回值当作最终决策向上返回。这就是"决策点插件"（如 `tools/pre-execute`）只关心"我要不要拦下"的原因——不调 `next` 即拦截。
-- `parallel`：`parallel(event)` 并发唤醒所有监听器并等待全部完成，再收集结果。适合"横切动作必须全部生效"。
-- `serial`：`serial(event)` 严格按注册序逐个执行可带返回值的监听器，适合"前序结果影响后续"的变换。
-
-短路语义（图里 `w2 -->|"不调 next → 短路"| w4` 这条边）是本章最需要记住的：它把"权限决策"从"线性广播"中区分出来，第 3 章的 `tools/pre-execute` 就靠它实现 deny。
+!!! warning "同步实现里 parallel 与 serial 是同一个东西"
+    Cordis 本体的 `parallel` 和 `serial` 是异步的：`parallel` 用 `Promise.all` 并发，`serial` 逐个 `await`，两者行为不同。mini 的教学实现是同步的——同步代码无法真正并发，所以 `parallel` 与 `serial` 都退化成"按注册序逐个调用、收集结果"，代码完全相同。并发与顺序的区别只体现在异步变体上——`aparallel`（`asyncio.gather`）与 `aserial`（逐个 `await`）语义不同；`aemit` / `awaterfall` 则是 `emit` / `waterfall` 的 async 版。仓库实现同时提供四套异步变体，`agent/pre-step` 等流水线走的是异步那套。
 
 ## 2.3 代码 step-by-step
 
-### 步骤 1：Context 骨架 —— 服务仓库 + 作用域链
+### 步骤 1：Context 骨架与服务仓库
 
 ```python
 class Context:
     def __init__(self, parent=None, name="root", *, _fiber=None):
         self.parent = parent                 # 作用域链：子找父
         self.name = name
-        self._services = {}                  # 服务仓库
-        self._listeners = {}                 # 事件 → 监听器列表
-        self._scope_key = None               # create_scope 打标的身份键
-        # fiber 承载副作用栈（2.2 的 effect/dispose 都在它上面）
-        if _fiber is not None:
-            self.fiber = _fiber
-        elif parent is None:
-            self.fiber = Fiber(0, self, name, is_root=True)
-        else:
-            self.fiber = parent.fiber
+        self._services = {}                  # 本上下文自己的服务视图（教学简化）
+        self._listeners = {}                 # event -> 监听器列表
+        # 每根 fiber 承载一个上下文的副作用栈
+        self.fiber = _fiber or Fiber(parent, name=name, is_root=parent is None)
 
-    def provide(self, key, value):
-        """提供服务，返回 disposer。同一隔离标签下重复提供 = 冲突（fail loud）。"""
+    def provide(self, key, value, check=None):
+        """提供服务，返回 disposer。同一隔离标签下重复提供 = 冲突。"""
         self._assert_alive()
-        label = self._label_of(key)          # 解析 name 的隔离标签
-        if label in self.root._reflect_store:
-            raise RuntimeError(f"服务 {key} 已在该标签提供")
-        self.root._reflect_store[label] = value
-        return self.effect(
-            lambda: (lambda: self.root._reflect_store.pop(label, None)),
-            f"ctx.provide({key})",
-        )
+        label = self._label_of(key)          # 解析该 key 的隔离标签
+        root = self.root
+        if label in root._reflect_store:
+            owner = root._reflect_store[label]["fiber"].name
+            raise RuntimeError(f'service "{key}" has been registered at <{owner}>')
+        root._reflect_store[label] = {
+            "name": key, "value": value, "fiber": self.fiber, "check": check,
+        }
+        if self.fiber.state == FiberState.ACTIVE:
+            root._notify([(key, label)])     # 通知依赖这个服务的待激活插件
+        return self.effect(lambda: (
+            lambda: root._reflect_store.pop(label, None)
+        ), f"ctx.provide({key})")
 
     def get(self, key, strict=True):
-        """按 key 查找：按隔离标签读全局 store；strict 只返回提供者 ACTIVE 的实现，
-        未提供 → None（不再抛 KeyError）。"""
+        """按 key 取服务。strict 只返回提供者已 ACTIVE 的实现；未提供 → None。"""
         impl = self._find_impl(key)
         if impl is None:
             return None
-        if strict and not impl["fiber"].active:
+        if strict and impl["fiber"].state != FiberState.ACTIVE:
             return None
         return impl["value"]
 ```
 
-为什么服务按 **key** 查找而不是直接 import 具体实现？因为插件要依赖的是"接口约定"（Service Definition），不是某个具体类。第 6 章的沙箱、凭据、子 agent 全部是这种模式：消费方只认识 key，具体实现可以替换。
+写法上，`provide` 返回的是一个 disposer：调用它就把服务摘掉。这个 disposer 通过 `self.effect(...)` 登记进 fiber；下一节会讲 `effect` 为什么这么设计。
 
-实现存一根**全局 store**，按"name 的隔离标签"键控（同上游 `reflect.ts` 的 `ctx[symbols.isolate][name]`）。`_label_of(key)` 沿祖先链找最近的 `isolate(name)` 遮蔽，否则用根默认标签——所以进程级服务（jobs/skills/tools）提供在根上，所有作用域都看得到；per-agent 的 tools/systemPrompt 在各自作用域 `isolate()` 换标签，互不冲撞（第 3 章工具隔离、continuation 子代理都用它）。
+`get(..., strict=True)` 默认只认"提供者已经激活"的服务。服务还在装载中或已卸载时，取到 `None` 而不是拿到一个半成品。这条规则让"依赖还没就绪"和"依赖已消失"变成同一种可观察状态，调用方只需处理 `None`。
 
-注意 `provide` 对同一标签下的重复提供直接抛错（fail loud）。常规的做法是"后注册的覆盖先注册的"，看起来方便，实际会让"谁覆盖了谁"变成谜。dsh 选择直接报错，冲突必须在启动时解决；真需要"每 agent 一套"就用 `isolate()` 换标签，而不是指望覆盖。
-
-### 步骤 2：可逆副作用 —— `effect` 与 `dispose`（fiber 承载）
-
-```python
-# 上游语义：execute 立即执行，返回值按形态收集为 disposer
-def effect(self, execute, label="anonymous"):
-    self._assert_alive()
-    return self.fiber.effect(execute, label)
-```
-
-这里有个值得停下来看的约定：`effect` 的第一个参数是**执行体**（execute）而不是 disposer。注册的瞬间执行体就被调用，它的返回值决定收集什么：
-
-- 返回 `None` → 无 disposer（什么都不用清理）
-- 返回可调用对象 → 该对象就是 disposer，拆解时逆序调用
-- 返回 awaitable / 同步生成器 / 异步生成器 → 异步 setup，拆解时先等它完成再清理（setup barrier）
-- 返回其它 → `TypeError: Invalid effect`（fail loud）
-
-所以 `provide`、`on` 的写法是"外面包一层 lambda，里面返回真正的清理函数"：
-
-```python
-def provide(self, key, value):
-    self._services[key] = value
-    return self.effect(
-        lambda: (lambda: self._services.pop(key, None)),
-        f"ctx.provide({key})",
-    )
-```
-
-为什么 execute 立即执行？因为 setup 本身可能注册更多东西（嵌套 effect、监听器），它们必须在这一步就可见——拆解发生在很久以后，只有把"装了什么"完整记下，卸载时才能原样拆出来。而且**注册先于执行**：wrapper 先进入 fiber 的登记表，再跑执行体，所以执行体中途触发拆解时，拆解器能看到这个"尚未完成 setup"的 effect，先挂一个 setup barrier 等它 setup 结束再清理（同上游 `disposeAfter(waitForSetup())` 的重入保护，见测试 `test_registration_before_execute_reentrant_unload`）。
-
-`effect` 返回的 disposer 有两个性质：
-
-1. **单发**：调用一次即进入结算，二次调用 no-op，且返回同一个完成对象；
-2. **可 await**：`await disposer()` 会触发（若未触发）并等待结算结束——异步拆解完整落在调用方视线内。
-
-整套做法由一个 **fiber** 承载（上游 `vendor/cordis/src/fiber.ts`）。每个上下文对应一根 fiber，`fiber._disposables` 是它名下的 effect 列表，`fiber.dispose()` 逆序回滚全部：
-
-```python
-class FiberState:
-    PENDING / LOADING / ACTIVE / FAILED / UNLOADING / DISPOSED
-```
-
-- `create_scope` 铸新 fiber：`pending → loading → active`；
-- `fiber.dispose()`：`active → unloading → disposed`；
-- 每次状态转换派发 `internal/status`（payload `{"fiber", "old"}`）；
-- 处于 `unloading`/`disposed` 的 fiber 拒绝一切注册（`INACTIVE_EFFECT`）——"销毁后拒绝注册"是被测试固定的硬性规定。
-
-`fiber.dispose()` 幂等：重复调用 join 在途的拆解（`inertia` = 在途转换，竞态共享同一完成）。拆解时全部同步 disposer 立即逆序执行（既有同步调用方零破坏）；含异步 disposer 则返回完成对象，需要时 `await`。异步拆解产生的错误被 contained——记入 fiber 的错误表并记日志，既不静默吞掉也不炸掉拆解本身。
-
-### 步骤 3：事件监听 + 四种派发
+### 步骤 2：事件监听与四种派发
 
 ```python
 def on(self, event, fn):
@@ -162,7 +130,7 @@ def on(self, event, fn):
         lst = self._listeners.get(event)
         if lst and fn in lst:
             lst.remove(fn)
-    return self.effect(disposer)
+    return self.effect(lambda: disposer, f"ctx.on({event})")
 
 def _listeners_for(self, event):
     """收集自身 + 祖先链的监听器（子先于父，各层保持注册序）。"""
@@ -177,17 +145,16 @@ def emit(self, event, payload=None):
     for fn in self._listeners_for(event):
         fn(payload)
 
-def waterfall(self, event, payload=None):
-    """around-middleware：fn(payload, next)。不调 next 即短路。"""
+def waterfall(self, event, payload=None, *, base=None):
     listeners = self._listeners_for(event)
     idx = 0
     def step(cur):
         nonlocal idx
         if idx >= len(listeners):
-            return cur
+            return base(cur) if base is not None else cur
         fn = listeners[idx]
         idx += 1
-        return fn(cur, lambda new=cur: step(new))
+        return fn(cur, lambda new=cur: step(new))   # 传入 next：调它才继续
     return step(payload)
 
 def parallel(self, event, payload=None):
@@ -197,81 +164,116 @@ def serial(self, event, payload=None):
     return [fn(payload) for fn in self._listeners_for(event)]
 ```
 
-`waterfall` 的实现值得停下来看，核心是这一行：
+`waterfall` 的全部机关就是这一行：
 
 ```python
 return fn(cur, lambda new=cur: step(new))
 ```
 
-- 监听器签名是 `fn(payload, next)`。
-- 若监听器调用 `next(new)` → 递归进入下一位，`new` 成为新的 payload。
-- 若监听器直接 `return 决策值`（不调 next）→ 整个 waterfall 返回该值，**短路**。
-- 若监听器全部调用 next → 返回最后一位的结果。
+它把"继续"做成了一个回调 `next` 交给监听器。监听器调 `next(new)`，就用 `new` 作为新的 payload 递归进入下一位；不调 `next`，`fn` 就直接返回，`step` 原样把这个返回值交回调用方——链条短路。所谓"否决权"，不过是"拿到了 `next` 却选择不用"。
 
-为什么"短路即决策"？回到 2.1 的问题：普通事件广播没有否决通道，监听器只能看不能拦。waterfall 给每个监听器一个 `next`，不调用它就意味着"到此为止，我的返回值就是结论"。测试里的例子：
+测试里能看到这个语义：
 
 ```python
-ctx.on("w", lambda p, nxt: "DENY")          # 不调 next → 短路
-ctx.on("w", lambda p, nxt: nxt("ALLOW"))
-assert ctx.waterfall("w", {}) == "DENY"     # 第一位的 DENY 就是决策
+ctx.on("w", lambda p, nxt: {"kind": "deny"})       # 不调 next → 短路
+ctx.on("w", lambda p, nxt: nxt({"kind": "allow"}))
+assert ctx.waterfall("w", {}) == {"kind": "deny"}   # 第一位的 deny 就是决策
 ```
 
-> 真实 dsh 中 `agent/pre-step` 的"拒绝一次请求"、`tools/pre-execute` 的"拒绝一个工具调用"，都是这个模式：策略插件不调 `next()`，直接返回决策。
-
-### 步骤 4：作用域 —— `create_scope`
+`parallel` 与 `serial` 的同步版按前面 warning 说的，是同一段代码；真正的区分在异步变体：
 
 ```python
-def create_scope(self, name):
-    """fiber-backed 作用域子上下文：独立身份键 + 独立 fiber。"""
-    fiber = Fiber(next_uid, name=name)          # pending
-    child = Context(parent=self, name=name, _fiber=fiber)
-    child._scope_key = object()                 # 身份键
-    fiber.context = child
-    fiber._set_state(LOADING)                    # loading
-    fiber._set_state(ACTIVE)                     # active
-    self.fiber.effect(
-        lambda: (lambda: fiber.dispose()),       # 父拆解时收回该作用域
-        f"create_scope({name})",
-    )
-    return child
+async def aparallel(self, event, payload=None):
+    coros = [fn(payload) for fn in self._listeners_for(event)]
+    return await asyncio.gather(*coros)      # 同时启动，全部跑完
+
+async def aserial(self, event, payload=None):
+    results = []
+    for fn in self._listeners_for(event):
+        results.append(await fn(payload))    # 逐个等待，顺序有意义
+    return results
 ```
 
-作用域 = 父子链 + 独立 fiber。服务可见性走隔离标签：根上提供的进程级服务所有作用域可见，`isolate(name)` 换标签后 per-agent 各自一套（第 3 章 per-agent 工具隔离、continuation 子代理、会话 owner scope 路由都用它）；拆解该作用域逆序回滚它自己名下的注册，父拆解时经注册的 effect 按序收回全部子作用域。
+### 步骤 3：可逆副作用与 fiber
 
-### 步骤 5：依赖驱动的插件激活（RegistryService）
-
-mini 的真实实现是 `RegistryService`（`ctx.plugin(...)` 装载 fiber）：依赖在 `inject` 声明，apply 期间用 `provide` **动态**登记服务。声明 `inject` 的插件在依赖缺失时保持 `PENDING`（不激活、不报错），提供方一装载就触发 `_notify` → 依赖者 `_check_impl` + `_refresh`（epoch 重载：卸载→重装）。加载顺序由依赖关系本身表达，而不是 boot 脚本里的手写顺序：
+`effect(execute)` 的参数是**执行体**，不是 disposer——注册的那一瞬间执行体就被调用：
 
 ```python
-# 核心：注册是声明，激活靠依赖满足
+def effect(self, execute, label="anonymous"):
+    self._assert_alive()
+    return self.fiber.effect(execute, label)
+```
+
+执行体的返回值决定收集什么：
+
+- 返回 `None` → 没有需要清理的东西；
+- 返回可调用对象 → 它就是 disposer，拆解时逆序调用；
+- 返回 awaitable / 生成器 → 异步 setup；拆解时先等 setup 结束再清理（setup barrier）；
+- 返回其它 → `TypeError: Invalid effect`（响亮失败）。
+
+所以 `provide`、`on` 的写法都是"包一层 lambda，里面返回真正的清理函数"——lambda 立刻执行，它返回的那个内层函数被收集为 disposer。
+
+为什么执行体要立即执行，而不是等到某个统一时机？因为执行体自己可能继续登记别的东西（再挂监听器、再开一个 effect）。这些登记必须当场生效，拆解时才能"装了什么就拆什么"。配套的规则是**注册先于执行**：登记表先记下这条 effect，再跑执行体。这样即使执行体跑到一半触发拆解，拆解器也能看到这条"还没 setup 完"的记录，先挂一个 barrier 等它结束再清理。
+
+承载这些的是 **fiber**（上游 `vendor/cordis/src/fiber.ts`）。每个上下文对应一根 fiber，`fiber._disposables` 就是它名下的 effect 列表，`fiber.dispose()` 逆序回滚全部：
+
+```
+FiberState: PENDING → LOADING → ACTIVE → UNLOADING → DISPOSED
+```
+
+- 新作用域的 fiber 走 `pending → loading → active`；
+- `dispose()` 走 `active → unloading → disposed`；
+- 每次状态转换派发 `internal/status` 事件，携带新旧状态；
+- 处于 `unloading` / `disposed` 的 fiber 拒绝一切新注册（抛 `INACTIVE_EFFECT`）。
+
+`dispose()` 幂等：重复调用会 join 已经在跑的拆解（fiber 的 `inertia` 记录在途转换，竞态调用共享同一完成）。拆解时全部同步 disposer 先逆序执行；遇到异步 disposer 就并发卸载，并返回一个可 `await` 的完成对象。异步拆解里冒出的错误被记为 fiber 的错误并记日志，既不会静默吞掉，也不会把拆解本身炸停。
+
+### 步骤 4：作用域与依赖驱动激活
+
+作用域是"带独立 fiber 的子上下文"。中间件为每个 agent 开一个作用域，per-agent 的服务与监听器就各归各家：
+
+```python
+def create_scope(self, name="scope", parent=None):
+    key = ScopeKey()
+    if parent is None:
+        parent = scope_of(self)
+    return _dsh_create_scope(self, key, parent=parent, name=name)
+```
+
+它返回一个 `Scope` 包装（代理到子上下文），底层经 `ctx.plugin(noop)` 铸一枚独立 fiber，并自动成为父 fiber 的一条 effect——父拆解时按序收回全部子作用域。默认 `parent` 取最近的 enclosing scope，所以嵌套 `create_scope` 自然形成祖先链。
+
+最后一块是插件的激活顺序。mini 的真实装载器是 `RegistryService`（`ctx.plugin(...)`）。插件把需要的服务写进 `inject`，装载器在依赖就绪时才调 `apply`：
+
+```python
 fiber = root.plugin({"name": "consumer", "inject": ["svc"],
                      "apply": lambda ctx, cfg: ...})
-assert fiber.state == FiberState.PENDING      # 依赖缺失 → 静默等待
+assert fiber.state == FiberState.PENDING      # 依赖缺失 → 挂起等待，不报错
+
 provider = root.plugin({"name": "provider",
                         "apply": lambda ctx, cfg: ctx.provide("svc", 42)})
 assert fiber.state == FiberState.ACTIVE       # 提供方装载 → 依赖者被唤醒
 ```
 
-常规插件系统靠手工排启动顺序，依赖关系复杂时极易出错。dsh 反过来：依赖满足才 apply，依赖变化触发 epoch 重载（测试 `test_dependency_wakes_pending_fiber` 固定了顺序：provider 先于 consumer）。
+提供方一挂上服务，装载器就通知所有 `inject` 了它的插件（`_notify` → 依赖者 `_check_impl` + `_refresh`）：重估依赖、满足则激活。依赖变化（服务被卸载或替换）会触发重新装载（epoch 重载：卸载旧版 → 装载新版）。这样一来，加载顺序由依赖关系本身决定，不再依赖启动脚本里手工排列的行序。
 
-两个细节：
+两个边界要记住：
 
-- 卸载 = 回滚该插件 apply 期间登记的全部副作用（fiber disposer 栈逆序）；卸载时服务随之消失，strict `get` 回 `None`，依赖者据此重估。
-- 环依赖 / 缺失依赖 → 依赖者保持 `PENDING`（静默），不会半激活；boot 层负责在装配结束时检查所有 fiber 都到了终态并明确报错。
+- 卸载 = 回滚该插件 `apply` 期间登记的全部副作用（fiber disposer 栈逆序）。服务随之消失，依赖者据 `strict get` 的 `None` 重新挂起。
+- 环依赖或依赖永远不出现 → 插件保持 `PENDING`（静默等待，不会半激活）。装配结束时检查所有 fiber 是否到达终态、并点名未激活者，是启动层（第 5、8 章）的责任，不是注册表的。
 
-## 2.4 验收：硬性规定 + 测试
+## 2.4 验收：硬性规定
 
-这一章的硬性规定，`tests/test_bus.py` 与 `tests/test_fiber.py` 每个都有对应测试：
+以下规定各有对应测试，集中在 `tests/test_bus.py` 与 `tests/test_fiber.py`：
 
-1. 服务按隔离标签提供/查找：同一标签重复提供 = 冲突（fail loud）；缺省返回 `None`；strict 过滤非 ACTIVE 提供者
-2. `waterfall` 短路语义：不调 `next` 的监听器返回值就是最终决策
-3. 监听器按注册序执行；作用域内子先于父
-4. `effect` 调用约定：execute 立即执行，返回值收集为 disposer；返回 `None` 无 disposer
-5. `dispose` 逆序回滚全部副作用；销毁后拒绝注册（fiber 置 `INACTIVE_EFFECT`）
-6. disposer 单发、可 await；异步拆解逆序 + 并发（fiber 级 `Promise.all` 等价物）
-7. fiber 状态机 `pending/loading/active/unloading/disposed` + `internal/status` 派发
-8. setup barrier：body 执行中途触发拆解不丢 disposer；body 抛错回滚已收集项后重抛
-9. 插件激活顺序由依赖驱动；无法满足时明确报错
+1. 服务按隔离标签提供/查找；同一标签重复提供 = 冲突；未提供返回 `None`；`strict` 过滤非 ACTIVE 提供者。
+2. `waterfall` 短路语义：不调 `next` 的监听器，其返回值就是最终决策。
+3. 监听器按注册序执行；作用域内子先于父。
+4. `effect` 约定：执行体立即执行，返回值按形态收集为 disposer；返回 `None` 则无 disposer；返回非法值响亮失败。
+5. `dispose` 逆序回滚全部副作用；销毁后拒绝注册（`INACTIVE_EFFECT`）。
+6. disposer 单发、可 `await`；异步拆解逆序 + 并发。
+7. fiber 状态机与 `internal/status` 派发。
+8. setup barrier：执行体跑到一半触发拆解不丢 disposer；执行体抛错则回滚已收集项后重抛。
+9. 插件激活由依赖驱动；依赖始终缺失时保持 `PENDING`。
 
 ```bash
 python -m unittest tests.test_bus tests.test_fiber -v
@@ -279,19 +281,19 @@ python -m unittest tests.test_bus tests.test_fiber -v
 
 ## 2.5 检查点练习
 
-1. **写一个"权限策略"插件**：挂到 `tools/pre-execute`（waterfall），对 `name == "rm"` 的工具直接返回 `{"verdict": "deny"}`，其余调用 `next`。写测试断言拒绝路径。
-2. **作用域与隔离**：创建 root → scopeA → scopeB，在 root 提供 `svc`，断言 A、B 都看得到；再对 A `isolate("local")` 提供 `local`，断言 B 仍看 root 的 `local`（同一标签共享）、A 的隔离标签互不影响。
-3. **热重载模拟**：activate 一个插件 → 记录服务存在 → dispose → 断言服务消失且再次 activate 同名插件不冲突。
+1. **写一个权限插件**：挂到 `tools/pre-execute`（waterfall），对 `name == "rm"` 的调用返回 `{"kind": "deny", "reason": "blocked"}`（不调 `next`），其余调 `next`。写测试断言拒绝路径。
+2. **验证隔离**：root → scopeA → scopeB；在 root 提供 `svc`，断言 A、B 都取得到；再让 A 用另一个隔离标签提供同名 `svc`，断言 B 仍取到 root 的那份、A 取到自己的那份。
+3. **模拟热重载**：装载一个插件 → 确认服务在场 → dispose → 断言服务消失，且重新装载同名插件不发生冲突。
 
 ## 2.6 回到 dsh：真实源码对照
 
 打开 `deepseek-harness/vendor/cordis/src`：
 
-- `context.ts` + `reflect.ts`：`provide`/`get`/`set`/`isolate`/`effect`/`dispose` 的完整实现——`effect` 的 execute 形态、注册先于执行、`disposeAfter(waitForSetup())` 重入保护、按隔离标签键控的全局 store、`notify` 的标签过滤，我们逐条复现
-- `fiber.ts`：fiber 状态机、`internal/status`、`internal/plugin`、`_setEpoch` 依赖重载、`inertia` 在途转换、`_unload` 的 `Promise.all` 并发拆解——2.2 的 fiber 语义都从这里来（mini 复现了装载半边与依赖驱动注册表，epoch 热重载走 hmr 与 `watch_user_patches` 路径；SessionStore 与上游同构，是 `Service` 子类——构造 `super(ctx, "sessions")` 即经 ctx.provide 自动登记、随拥有 fiber 注销）
-- `events.ts`：四种派发模式的异步版本
-- `vendor/README.md`：18 项本地加固清单——挑 3 项读，体会"框架被 vendored 且可审计"意味着什么：不依赖 npm 供应链，代码就躺在仓库里，任何人都能审计每一行。
+- `context.ts` + `reflect.ts`：`provide`/`get`/`set`/`isolate`/`effect`/`dispose` 的完整实现。重点是 `effect` 的 execute 形态、注册先于执行、`disposeAfter(waitForSetup())` 重入保护、按隔离标签键控的全局 store、`notify` 的标签过滤。
+- `fiber.ts`：fiber 状态机、`internal/status`、`internal/plugin`、`_setEpoch` 依赖重载、`inertia` 在途转换、`_unload` 的并发拆解。mini 复现了装载半边与依赖驱动注册表；epoch 热重载在 mini 走 HMR 与 `watch_user_patches` 路径（第 13 章）。
+- `events.ts`：四种派发模式的异步版本——`parallel`/`serial` 的并发与顺序差异在这里才成立。
+- `vendor/README.md`：18 项本地加固清单。挑 3 项对照测试读一遍，就能看清"框架被 vendored 且可审计"到底意味着什么。
 
 ## 2.7 收尾
 
-这一章的四个字可以带走：**一切皆回滚**。Context 既是服务仓库又是事件总线又是副作用栈，插件装进去的东西都能原样拆出来。下一章的工具管线就是在这个基础上建起来的——你会看到 `pre-execute` 的否决权就是 2.2 的 waterfall 短路。
+Context 同时是三样东西：服务仓库、事件总线、副作用栈。插件装进去的每样贡献都能被精确拆出来；装的时间点由依赖关系决定，不由启动脚本决定。下一章的工具管线就建在这个底座上——你会看到 `tools/pre-execute` 的否决权，正是这里 `waterfall` 的短路语义。

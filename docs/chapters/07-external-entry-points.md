@@ -1,12 +1,13 @@
-# 07 外部入口：两个产品表面与三个协议入口
+# 第 7 章：外部入口——两个产品表面与三个协议入口
 
-> 本章回答一个问题：使用者怎么把 dsh 跑起来？前六章讲的是内核（会话、总线、工具、loop、持久化、扩展口），这一章讲的是外壳——所有能"启动一个 dsh 进程"的路径，以及它们各自把什么约定暴露给外部。
->
-> 对应 dsh 真实源码：`apps/cli` + `packages/boot/app-boot` + `packages/bundle/{headless,web-app}` + `packages/{acp,sdk,hooks}`。mini 复现了 headless（`miniharness/cli/headless.py`）、web 传输层（`miniharness/web/`，§7.5）、官方 SDK 协议最小子集与互操作（§7.6）与 ACP（§7.7）及 hooks 桥（§7.8），各入口现状以对应小节为准。
+> 对应 dsh 真实源码：`apps/cli` + `packages/boot/app-boot` + `packages/bundle/{headless,web-app,acp-app,sdk-app,sdk-minimal}` + `packages/{acp,sdk,hooks}`。
+> 前置：第 4~6 章。本章产出：`miniharness/cli/headless.py`、`miniharness/web/`、`miniharness/protocol/{sdk,acp,hooks}.py`。
 
-## 7.1 总览：一切入口都是 profile
+## 7.1 这一章要做什么：一切入口都是 profile
 
-先纠正一个常见误解：dsh 没有"web 模式"和"headless 模式"两个程序。它只有一个启动器 `dsh`（`apps/cli/src/args.ts`），启动器只解析自己的标志，然后把剩余参数原样交给"被启动的 profile"。profile 是 `$DSH_HOME/profiles/<name>` 下的一个目录，里面有一个 `package.json`（声明有序的 bundle 层列表）和一个用户自己的 `cordis.patch.yml`。换句话说，**每种入口 = 一份不同的插件组合树**，入口之间的差异全在组合层，内核一行不改。
+前六章讲内核：会话、总线、工具、loop、持久化、扩展口。这一章讲外壳——所有能"启动一个 dsh 进程"的路径，以及它们各自把什么约定暴露给外部。
+
+dsh 没有"web 模式"和"headless 模式"两个程序。它只有一个启动器 `dsh`（`apps/cli/src/args.ts`），启动器只解析自己的标志，然后把剩余参数原样交给"被启动的 profile"。profile 是 `$DSH_HOME/profiles/<name>` 下的一个目录，里面有一个 `package.json`（声明有序的 bundle 层列表）和一个用户自己的 `cordis.patch.yml`。**每种入口 = 一份不同的插件组合树**，入口之间的差异全在组合层，内核一行不改。
 
 启动器自己拥有的东西只有四类（`apps/cli/src/args.ts:48`）：
 
@@ -17,25 +18,28 @@
 
 被启动的应用自己解析自己的标志（`--host`、`--port`、任务文本、`--help`），所以 `dsh --profile web --help` 打印的是 web 应用的帮助，不是启动器的。这个"启动器只做薄壳"的分层是理解一切入口的前提。
 
-出厂自带的 profile 模板只有两个（`packages/boot/app-boot/src/profile.ts:114`）：
+出厂自带的 profile 模板有五个（`packages/boot/app-boot/src/profile.ts:183-203`）：
 
 | profile | bundle 层 | 形态 |
 |---|---|---|
 | `web` | `dsh-base` + `dsh-web-app` | 浏览器表面，有 Host/HTTP/浏览器插件 |
 | `headless` | `dsh-base` + `dsh-headless` | 一次性任务，无任何 Host 层 |
+| `acp` | `dsh-base` + `dsh-acp-app` | ACP stdio 服务器 |
+| `sdk` | `dsh-base` + `dsh-sdk-app` | SDK JSON-RPC 服务器 |
+| `sdk-minimal` | `dsh-sdk-minimal` | 最小 SDK 组合（不叠 base） |
 
-其它名字的 profile 首次使用不会自动初始化，必须先经 `dsh plugin` 路径显式创建（`initProfile`），否则 fail loud。`dsh-base` 是共享的内核底座（persona、工具模式、PTC——programmatic tool calls，程序化工具调用——worker 等），两个表面都叠在它上面。
+前四个都叠在 `dsh-base` 上；`sdk-minimal` 只带自己的 bundle。`dsh-base` 是共享的内核底座（persona、工具模式、PTC——programmatic tool calls，程序化工具调用——worker 等）。其它名字的 profile 首次使用不会自动初始化，必须先经 `dsh plugin` 路径显式创建（`initProfile`），否则 fail loud。
 
-### mini 复现现状（launcher 层）
+### mini 启动器（`miniharness/cli/main.py`）
 
 `miniharness/cli/main.py` 复现了启动器的选项语义（同 `apps/cli/src/args.ts`）：
 
 - `--profile headless "task"`：一次性任务（§7.2 全部语义）；`--profile web`：启动 FastAPI 服务表层（§7.5，需 fastapi/uvicorn 的 `[web]` extra）；未知 profile fail loud。
-- 无任何参数（无 `--profile`/`--config`/`--patch`）时回退运行 `demo_main()`（无 key 端到端演示，main.py:191-195）。
+- 无任何参数（无 `--profile`/`--config`/`--patch`）时回退运行 `demo_main()`（无 key 端到端演示，main.py:279-283）。
 - `--patch <path>`（可重复）：YAML/JSON overlay 补丁，参与组合层叠与 dump。
 - `--dump-config`：只读打印最终组合（boot-free，不启动任何应用）；`--dump-default-config`：只打印内置默认组合。两者互斥（`program.error` 同语义）；dump 不接受任务参数；`--dump-default-config` 不接受 `--patch`/`--config`。输出带行级 `# == <label>` 来源注释、`!!js` 表达式原样未求值、skipped patch warn 不失败、单文档可再加载（同 `renderConfigDump`）。
-- mini 教学扩展（上游没有，须标注）：`--config <path>` 指定组合文件（上游用 profile 目录）；`miniharness sessions` 子命令（会话列表 / 恢复 / 删除 —— 上游会话管理在 web 表层，见 `miniharness/cli/session_cmds.py`）。
-- mini 内置默认组合为空（headless 不走插件树，见 cli/headless.py 简化标注）；组合层与 headless 运行时解耦：带 `--config/--patch` 跑任务时先 boot 验证（fail loud），headless 运行时仍为内置 adapter。
+- 教学扩展（上游没有）：`--config <path>` 指定组合文件（上游用 profile 目录）；`miniharness sessions` 子命令（会话列表 / 恢复 / 删除 —— 上游会话管理在 web 表层，见 `miniharness/cli/session_cmds.py`）。
+- headless 路径的内置默认组合为空（`cli/headless.py` 有简化标注）；组合层与 headless 运行时解耦：带 `--config/--patch` 跑任务时先 boot 验证（fail loud），headless 运行时仍为内置 adapter。
 
 ## 7.2 headless：任务文本即命令行
 
@@ -47,14 +51,14 @@ dsh --profile headless "run the tests"
 
 进程语义（`packages/bundle/headless/README.md` 全文就是这几句话）：
 
-1. 任务文本就是这个应用的命令行：位置参数按空格 join，缺失或纯空白 → usage error，进程退出 1。
-2. 启动后创建**一个全新的持久化 Agent**（session id 随机），把任务作为普通用户消息提交。
+1. 任务文本就是这个应用的命令行：位置参数按空格 join；缺失或纯空白 → usage error，进程退出 1；位置参数为 `-` 时改读 stdin。
+2. 启动后创建一个全新的持久化 Agent（session id 随机），把任务作为普通用户消息提交；给出 `--session <id>` 时改为恢复该会话（先校验身份与 cwd 可采纳）。
 3. 等它完全停稳（quiescence），先 flush 会话，再汇总本次运行的事件区间。
-4. 把**最后一条非空 assistant 文本**写到 stdout（带换行）。
+4. 把最后一条非空 assistant 文本写到 stdout（带换行）；`--json` 时改为输出逐行 JSON 运行投影。
 5. 按最终 `turn/end` 的 reason 决定退出码：`completed` → 0，其它（`error`、`blocked`、`max-tokens`……）→ 1；`error` 时 stderr 再写一行 `dsh: <code>: <message>`。
 6. 进程不开任何监听端口。
 
-这个入口把前四章的所有约定变成了可观测的进程级约定：你能在 stdout 上直接检验"模型说了什么"，用退出码检验"回合是否正常结束"。`headless` 的"h"不是 headless browser 的意思，是"没有交互、跑完即退"。
+这个入口把前四章的所有约定变成了可观测的进程级约定：你能在 stdout 上直接检验"模型说了什么"，用退出码检验"回合是否正常结束"。`headless` 的"h"是"没有交互、跑完即退"，不是 headless browser。
 
 ### 源码解剖：runner 与 startup
 
@@ -63,21 +67,24 @@ dsh --profile headless "run the tests"
 - `headless-startup`（`src/startup.ts`）：解析命令行，把任务作为普通 Cordis 服务 `headlessStartup` 发布。空任务在这里被拒绝：`program.error('error: a task is required, ...')`，拒绝时不发布服务，下游 runner 也就不会激活。
 - `headless-runner`（`src/index.ts`）：注入 `headlessStartup`，从 lazy config 读任务，然后执行上面那 6 步。
 
-runner 的 `run()` 函数（`src/index.ts:96`）值得逐行看一遍，因为它把前几章的约定串了起来：
+runner 的 `run()` 函数（`src/index.ts:304-380`）值得逐行看一遍，因为它把前几章的约定串了起来：
 
 ```ts
 await ctx.get('loader')?.await()          // 等整棵插件树装完，避免半组合状态
 const selection = defaultModel.currentSelection()
-const { agent } = await agents.create({   // 全新持久化 Agent，随机 session id
-  sessionId: SessionId(`session-${randomUUID()}`),
-  agentOptions: { provider: selection.provider, model: selection.model },
-})
+const agentOptions = { provider: selection.provider, model: selection.model }
+const agent = config.sessionId === undefined
+  ? (await agents.create({                 // 全新持久化 Agent，随机 session id
+      sessionId: SessionId(`session-${randomUUID()}`),
+      meta: { cwd }, agentOptions, setup,
+    })).agent
+  : await resolveAgent(ctx, agents, sessionId, agentOptions, setup, cwd)
 await agent.whenIdle()                    // 首次停稳（没有任何输入）
 const firstSeq = agent.session.seq        // 记住区间起点
 agent.followup(createUserMessage({ content: [{ type: 'text', text: task }] }))
 await agent.whenIdle()                    // 任务回合完成
 await sessions.flush(agent.session)       // 先写入磁盘，再汇总
-const outcome = summarize(agent.session.events, firstSeq)
+const outcome = summarize(agent.session, firstSeq)
 io.stdout.write(outcome.text + '\n')
 if (outcome.reason?.kind === 'error') {
   io.stderr.write(`dsh: ${outcome.reason.error.code}: ${outcome.reason.error.message}\n`)
@@ -85,19 +92,20 @@ if (outcome.reason?.kind === 'error') {
 io.exit(outcome.reason?.kind === 'completed' ? 0 : 1)
 ```
 
-几个值得注意的细节：
+几个实现细节：
 
 - **`firstSeq` 之后才算数**：summarize 只汇总本次运行产生的事件，会话打开前的历史（恢复场景）不影响输出。这对应第 5 章的恢复语义。
-- **summarize 只拼 text 块**（`src/index.ts:61`）：reasoning 块、tool-call 块都被过滤，空文本不覆盖已有结果，所以"最后一条**非空** assistant 文本"是精确语义。
+- **summarize 只拼 text 块**（`src/index.ts:72-99`）：reasoning 块、tool-call 块都被过滤，空文本不覆盖已有结果，所以"最后一条非空 assistant 文本"是精确语义。
 - **错误有两条不同的 stderr 路径**：回合正常结束但 reason 是 error（如模型层带内失败）→ `dsh: code: message`；runner 自身抛异常 → `run().catch(fail)` 只写 `dsh: <message>`（不写 code）。两条都退出 1。
-- **`ctx.appExit` 由启动器持有**（`src/index.ts:144`）：runner 不在启动器外运行，没有 appExit 就在激活时报错。进程退出请求是宿主注入的能力，runner 自己不开 exit 后门。
+- **`ctx.appExit` 由启动器持有**（`src/index.ts:392-398`）：runner 不在启动器外运行，没有 appExit 就在激活时报错。进程退出请求是宿主注入的能力，runner 自己不开 exit 后门。
 
 ### mini 复现对照
 
-mini 的 `miniharness/cli/headless.py` 复现了上面全部语义，载体差异有两处（诚实标注）：
+mini 的 `miniharness/cli/headless.py` 复现了任务文本、停稳后汇总、stdout 与退出码这几条进程语义，载体差异有三处：
 
-1. 上游经 Cordis 服务（`agents` / `sessions` / `agentDefaultModel`）创建 Agent；mini 直接构造 `Session + AgentLoop`（stdlib 同步简化，约定不变）。
-2. 上游错误经 `finish {kind:'error'}` 带内失败或异常两条路；mini 的 `LlmFailure` 一律以异常抛出（`llm.py` 已声明该简化），所以 `dsh: code: message` 分支目前不可达，保留是为了与上游格式一致。
+1. 上游经 Cordis 服务（`agents` / `sessions` / `agentDefaultModel`）创建 Agent；mini 直接构造 `Session + AgentLoop`，再经 `publish()` 进入会话店（约定不变）。
+2. 上游错误经 `finish {kind:'error'}` 带内失败或异常两条路；mini 的 `LlmFailure` 一律以异常抛出（`llm.py` 已声明该简化），所以 `dsh: code: message` 分支通常走不到，保留是为了与上游格式一致。
+3. 上游的 `--json` 逐行投影与 `--session <id>` 恢复选项，mini 的 CLI 未暴露；`run_headless(..., session_id=...)` 在 API 层支持恢复。
 
 运行方式：
 
@@ -107,26 +115,26 @@ python -m miniharness.cli --profile headless "task"     # 走启动器（同 dsh
 miniharness --profile headless "run the tests"          # 安装后（pyproject scripts）
 ```
 
-CLI 解析与上游一致：`--profile headless` 之后的位置参数 join 空格、空任务 usage error 退出 1、未知 profile fail loud。`--profile web` 不再报错，而是启动服务表层（不接受任务参数）。
+CLI 解析与上游一致：`--profile headless` 之后的位置参数 join 空格、空任务 usage error 退出 1、未知 profile fail loud。`--profile web` 启动服务表层，不接受任务参数。
 
 ## 7.3 web：同一个 base 上的浏览器表面
 
 `dsh-web-app` bundle（`packages/bundle/web-app/README.md`）在 `dsh-base` 之上叠了 Web Host 层：webserver、API 网关、workspace、投影缓存、存储，以及浏览器插件名录。它自带的 `web-startup` 提供方解析 `--host` / `--port` / `--trusted-host` 和应用自己的 `--help`，**参数解析完成前不会绑定任何端口**——所以 `dsh --profile web --help` 只是打印帮助。
 
-web 与 headless 是同一 base 的"同级表面"（README 原文 sibling surface）：内核、工具、会话全部共享，只有 Host 层不同。这个"表面 = 组合层差异"的视角正是第 5 章 boot/patch 的用武之地。
+web 与 headless 是同一 base 的"同级表面"（README 原文 sibling surface）：内核、工具、会话全部共享，只有 Host 层不同。web 与 headless 的差别只在组合层，第 5 章的 boot/patch 就是干这个的。
 
-web 的宿主侧分两半，mini 两半都已实现：
+web 的宿主侧分两半，mini 对应如下：
 
 | 半 | 上游 | 内容 | mini |
 |---|---|---|---|
-| HTTP + WS 载体与约定 | `packages/client/connection` + `packages/api/gateway` + `packages/api/session-controller` + `packages/api/remotes` | 两信封 RPC + unary 会话服务（`/api/<endpoint>` POST `{args}`）+ WS `/api/remote.mux` 承载 Remote 流（open/cancel/item/end/error）+ `$events` 注册表 + follow/control + 审批 waterfall 桥 + `frontend-static` 静态载体 | `miniharness/web/`（§7.5，已实现） |
-| 浏览器前端 | `packages/client`（39 包）| React shell、对象层、Trajectory、审批面板等 | `web/static/` vanilla SPA（§7.5.4；React monorepo 复现标注教学简化） |
+| HTTP + WS 载体与约定 | `packages/client/connection` + `packages/api/gateway` + `packages/api/session-controller` + `packages/api/remotes` | 两信封 RPC + unary 会话服务（`/api/<endpoint>` POST `{args}`）+ WS `/api/remote.mux` 承载 Remote 流（open/cancel/item/end/error）+ `$events` 注册表 + follow/control + 审批 waterfall 桥 + `frontend-static` 静态载体 | `miniharness/web/`（§7.5） |
+| 浏览器前端 | `packages/client`（React 客户端包族） | React shell、对象层、Trajectory、审批面板等 | 产品面为顶层 `webui/`（React+TS+Vite，§7.5.4）；`web/static/` vanilla SPA 是旧 wire 的教学参照 |
 
-web 的 HTTP/WS 传输层 + 静态约定 + 浏览器 SPA 都在 §7.5 实现，`--profile web` 启动它并监听地址/端口，优先级：`--host`/`--port`（`cli/main.py` 透传）> env `MINIHARNESS_WEB_HOST`/`MINIHARNESS_WEB_PORT`（缺省 `127.0.0.1` / `0`=OS 分配）。
+web 的 HTTP/WS 传输层、静态约定与前端都在 §7.5 讲解，`--profile web` 启动它并监听地址/端口，优先级：`--host`/`--port`（`cli/main.py` 透传）> env `MINIHARNESS_WEB_HOST`/`MINIHARNESS_WEB_PORT`（缺省 `127.0.0.1` / `0`=OS 分配）。
 
 ## 7.4 三个协议入口
 
-除了两个产品表面，dsh 还有三个"对机器说话"的入口。它们不经过 profile 模板，是独立的协议服务器或桥接层。
+除了两个产品表面，dsh 还有三个"对机器说话"的入口。ACP 与 SDK 各自是一个 profile（`acp` / `sdk`，§7.1 表），hooks 是挂在既有拦截点上的桥接层，不单独起进程。
 
 ### ACP：自动化专用协议
 
@@ -148,13 +156,13 @@ hooks 的价值在于迁移成本：已经写好 Claude Code 钩子（安全策�
 
 ## 7.5 复现：web 传输层（`miniharness/web/`）
 
-> 对应 dsh 真实源码：`packages/client/connection`（两信封 RPC + HTTP 载体）+ `packages/api/gateway`（`stream-protocol.ts` + `stream-server.ts`：WS `/api/remote.mux` + `$events` 注册表）+ `packages/api/session-controller`（Typert Remote `session/*`）+ `packages/api/remotes`（Remote 事件瀑布 + `$events/result`）+ `packages/host/frontend-static`（SPA 静态载体）。web 面在 alpha.1 重组为「typert 一元 RPC + 单 WebSocket mux」，mini 跟随这一形态。前端（`packages/bundle/web-app` + `packages/client`）mini 以独立 React 工程 `webui/` 承载产品面、vanilla SPA 作教学参照（§7.5.4）。
+> 对应 dsh 真实源码：`packages/client/connection`（两信封 RPC + HTTP 载体）+ `packages/api/gateway`（`stream-protocol.ts` + `stream-server.ts`：WS `/api/remote.mux` + `$events` 注册表）+ `packages/api/session-controller`（Typert Remote `session/*`）+ `packages/api/remotes`（Remote 事件瀑布 + `$events/result`）+ `packages/host/frontend-static`（SPA 静态载体）。上游把 web 面收拢为「typert 一元 RPC + 单 WebSocket mux」，mini 跟随这一形态。前端（`packages/bundle/web-app` + `packages/client`）mini 以独立 React 工程 `webui/` 承载产品面、vanilla SPA 作教学参照（§7.5.4）。
 >
-> 分层：`web/stream_protocol.py`（§7.5.1）→ `web/api.py`（§7.5.2）→ `web/uplink.py` + `web/mux.py` + `web/events.py` + `web/streams.py`（§7.5.3）→ `web/server.py` + `web/downloads.py` + `web/launcher.py`（§7.5.4）→ `web/approvals.py` + `web/frontend.py` + `web/static/`（§7.5.4）。
+> 分层：`web/stream_protocol.py`（§7.5.1）→ `web/api.py`（§7.5.2）→ `web/uplink.py` + `web/mux.py` + `web/events.py` + `web/streams.py`（§7.5.3）→ `web/server.py` + `web/attachments.py` + `web/downloads.py` + `web/launcher.py`（§7.5.4）→ `web/approvals.py` + `web/frontend.py` + `web/static/`（§7.5.4）。
 
 ### 7.5.1 信封：两信封 RPC + Remote 流 wire 语法（`web/stream_protocol.py`）
 
-alpha.1 把通信收拢为**单一两信封协议**（同 `packages/client/connection`）：
+上游把通信收拢为**单一两信封协议**（同 `packages/client/connection`）：
 
 | 方向 | 形状 | 语义 |
 |---|---|---|
@@ -171,7 +179,7 @@ alpha.1 把通信收拢为**单一两信封协议**（同 `packages/client/conne
 
 ### 7.5.2 会话服务：unary 方法（`web/api.py`）
 
-`WebApi(ctx, adapter, tools)` 持有会话注册表（`_agents`：sessionId → AgentLoop，create 时 attach 一个常驻 AgentLoop）。alpha.1 会话操作全为 **Typert Remote**（`packages/api/session-controller/src/index.ts`）：
+`WebApi(ctx, adapter, tools)` 持有会话注册表（`_agents`：sessionId → AgentLoop，create 时 attach 一个常驻 AgentLoop）。会话操作全为 **Typert Remote**（`packages/api/session-controller/src/index.ts`）：
 
 | 方法 | 语义 |
 |---|---|
@@ -193,18 +201,17 @@ alpha.1 把通信收拢为**单一两信封协议**（同 `packages/client/conne
 - **`web/uplink.py`（`UplinkInbox` + `UplinkItems`）**：每条 open 建一条**有界单消费者上行 inbox**（同 `stream-server.ts` UplinkInbox），按整帧 UTF-8 字节记账，上限 262144 字节（`create_app(stream_inbox_bytes=...)` 可调，同 `streamInboxBytes`）。`end` 是半关（缓冲里的 `item` 仍读得尽），`end` 后的 `item` → 该流以 `gateway/protocol` 中止，缓冲超限 → `gateway/uplink-overflow`（`details:{endpoint}`）；违例只杀本流并以终态 `error` 帧落地，socket 不关。`fail` 先到先得（流提前结束遮蔽缓冲），`release` 后一律丢帧。宿主已结束的流 id 收到的 `item`/`end`/`cancel` 直接丢弃（上游 mux `push` 对 closed 流早退），只有重复 `open` 关 socket。
   方法侧是 `UplinkItems`（同 `GatewayInvocation.uplink()` 的 `UplinkDecoder`，index.ts:1214-1285）：每项先过该 endpoint 声明的 codec，未声明则走无损 JSON 校验（`NaN`/Infinity、`-0`、循环、Date、函数、symbol、不可枚举属性等拒），解码结果再校验一次；被拒项以 `gateway/input-invalid`（`details:{endpoint, field:'uplink'}`）中止整条逻辑流。每次调用只能取一次迭代器；方法停止读时 `close()` 丢弃未读项。
 - **`web/events.py`（`EventStreamRegistry`）**：`$events` 注册表——`ready` 首帧 + `api-session/*` 事件线转发 + `$events/result` 结算对拍。**跨堆线程安全唤醒**：TestClient/uvicorn 把 app 跑在 portal 线程，主线程 `ctx.emit` 广播不能直接调 `asyncio.Event.set()`，`_ClientQueue._wake` 捕获运行 loop 用 `loop.call_soon_threadsafe(waiter)`（含 `loop.is_closed()` 守卫）。
-- **`web/streams.py`（`GatewayStreams`）**：`open_stream(endpoint, payload, uplink=..., signal=...)` 按 endpoint 分发，并**负责释放上行**——`$events` 这类网关自有流 open 即释放（其 `item` 帧被丢弃而不缓冲），其余流在整个流结束（含失败/取消/断连）时释放。每个流方法收到一个 `StreamInvocation`（同 `ctx.invocation`）：`uplink()` 取本调用的上行项迭代器（一次），`close()` 随下行结束释放；取消句柄在 `invocation.signal`。声明的 codec 走 `GatewayStreams.uplink_codecs()`（出厂空表——rc.1 全部 Remote 方法 `In` 皆为 `never`）：
+- **`web/streams.py`（`GatewayStreams`）**：`open_stream(endpoint, payload, uplink=..., signal=...)` 按 endpoint 分发，并**负责释放上行**——`$events` 这类网关自有流 open 即释放（其 `item` 帧被丢弃而不缓冲），其余流在整个流结束（含失败/取消/断连）时释放。每个流方法收到一个 `StreamInvocation`（同 `ctx.invocation`）：`uplink()` 取本调用的上行项迭代器（一次），`close()` 随下行结束释放；取消句柄在 `invocation.signal`。endpoint 声明了 codec 时走 `GatewayStreams.uplink_codecs()`（出厂空表——全部 Remote 方法 `In` 皆为 `never`），未声明则走无损 JSON 校验：
   - `$events`：open 即 `ready`，随后事件帧转发。
   - `session/follow`：首帧 snapshot `{header, cursor, records, hasMore, projections}`，之后逐 event 帧（snapshot 后重投 cursor+1..end，同 `history.ts:92-149`）。lazy async 生成器错误时机——体部 `RemoteStreamError`（session/not-found/gateway/arguments-invalid）在首个 `await gen.__anext__()` 处抛、非调用时，测试须迭代驱动。
-  - `session/control`：首帧 baseline `{projections}`（rc.1 已去 queues/jobs），之后 projection 替换帧（同 `control.ts`）。
+  - `session/control`：首帧 baseline `{projections}`（上游已去 queues/jobs），之后 projection 替换帧（同 `control.ts`）。
   - `terminal/retain`：一帧 `{type:'retained'}` 后无帧保持到取消或该身份被关闭（不激活 Agent；mini 无空闲回收调度器，持有不改变清理时机）。逐帧契约见 `docs/interface-wire.md` §4.5。
   - `terminal/follow`：首帧 `snapshot`（整屏文本 + `info`），随后有序 `output`/`state` 帧；进程终态 `state` 帧投完后流才 `end`；超 `maxBufferedBytes` 的慢消费者以 `gateway/internal` 中止，重连从新 `snapshot` 恢复（逐帧契约见 `docs/interface-wire.md` §4.5）。
   - `workspace/follow`：首帧完整 baseline（`items`/`archivedSessionIds`/`pinnedSessionIds`），随后有序 upsert/remove/order/archived/pinned 增量（重连重发 baseline；逐帧契约见 `docs/interface-wire.md` §4.6）。
   - `workspaceFiles/changes`：见 `docs/interface-wire.md` §4（ready + change 帧）。
   - 未知 endpoint → 抛 `RemoteStreamError`（`gateway/invocation-unavailable`）。
 
-**会话队列数据（rc.1）**：退役前的 `session/control` queue 帧（placement 三态快照）已随
-rc.1 移除；队列经 `inbox` 投影单元暴露——`agent/inbox/spliced` 事件 fold 出 `{next-turn,
+**会话队列数据**：`session/control` 的 queue 帧（placement 三态快照）已在上游退役；队列改经 `inbox` 投影单元暴露——`agent/inbox/spliced` 事件 fold 出 `{next-turn,
 next-step}` 双队列（`core/agent_loop/projections.py` `inbox_projection`），经 control 的
 projection 替换帧（`web/api.py:295`）或 follow snapshot 的 projections 块广播给客户端。
 
@@ -224,10 +231,10 @@ projection 替换帧（`web/api.py:295`）或 follow snapshot 的 projections �
 **二进制附件（`web/attachments.py`，同 gateway `encodeRpcResult` + Connection `fullResponse`）**：JSON 装不下 `bytes`，故运行期把结果里的字节叶子投影为 `null` 占位，并在响应顶层登记附件描述 `{path, codec:'bytes', part}`（`path` 段是对象键或数组下标，按发现顺序编号）。`result_response` 分帧：失败与纯 JSON 结果仍是 `200` + `application/json`；有附件则出 `multipart/form-data`——`metadata` 文本 part 装 `{type, rpcId, result, attachments}`，第 `i` 个二进制 part 名 `bytes-<i>`，流式出体（不整份复制）。结果值出现循环引用 → `200` + `gateway/internal`（`gateway: circular RPC result`）。客户端一侧在 `webui/src/wire/rpc.ts` 的 `parseBinaryResponse`：`content-type` 是 `multipart/form-data` 就重组——按 `path` 把 part 写回 `Uint8Array`，part 名重复 / 非 `bytes` codec / 路径走不通 / 槽位不是 `null` 占位 / 有 part 未被声明，一律 `TypeError`。这样 `workspaceFiles/readBytes` 在 wire 上是原生字节，与上游 `WorkspaceFileBytes.data: Uint8Array` 同型（`session/attachment` 的 `data` 例外，仍是 base64 字符串，同上游）。
 
 **浏览器前端**：两个形态，都只依赖本层 wire 约定。
-**产品化前端（`webui/`，仓库顶层独立 React+TS+Vite 工程，推荐）**：会话列表/新建（`session/list`/`session/create`）、Trajectory 折叠（选中会话 `session/follow` 拉 snapshot + 按 seq 去重增量）、审批面板（`$events` waterfall → Allow once / Reject → `$events/result` 结算，outcome∈APPROVAL_OUTCOMES 之外 fail-closed）、队列/作业面板（rc.1 换源：队列 = `session/control` 投影帧折叠出的 `inbox` 投影，作业 = `job/list` roster 流）。开发期 Vite dev server 把 `/api` 与 `/api/remote.mux` 代理到本地 Python 后端（`vite.config.ts`）；生产期 `vite build` → `MINIHARNESS_WEBUI_DIST=webui/dist` 让后端静态服务承载。`src/wire/` 是纯 TS 约定客户端（无 UI 依赖，vitest 单测 mock fetch/WS），`src/app/` 是 React 编排，`src/ui/` 是无状态展示组件。
-**教学参照（`web/static/`）**：vanilla SPA（index.html + app.js + style.css，无构建步），消费的是 alpha.1 之前的旧 SSE wire（`events.mux`/`respond`/`host.describe`），对新后端不工作——仅作历史/教学说明，不实跑。
+**产品化前端（`webui/`，仓库顶层独立 React+TS+Vite 工程）**：会话列表/新建（`session/list`/`session/create`）、Trajectory 折叠（选中会话 `session/follow` 拉 snapshot + 按 seq 去重增量）、审批面板（`$events` waterfall → Allow once / Reject → `$events/result` 结算，outcome∈APPROVAL_OUTCOMES 之外 fail-closed）、队列/作业面板（队列 = `session/control` 投影帧折叠出的 `inbox` 投影，作业 = `job/list` roster 流）。开发期 Vite dev server 把 `/api` 与 `/api/remote.mux` 代理到本地 Python 后端（`vite.config.ts`）；生产期 `vite build` → `MINIHARNESS_WEBUI_DIST=webui/dist` 让后端静态服务承载。`src/wire/` 是纯 TS 约定客户端（无 UI 依赖，vitest 单测 mock fetch/WS），`src/app/` 是 React 编排，`src/ui/` 是无状态展示组件。
+**教学参照（`web/static/`）**：vanilla SPA（index.html + app.js + style.css，无构建步），消费的是上游重组前的旧 SSE wire（`events.mux`/`respond`/`host.describe`），对新后端不工作，仅作教学说明。
 
-**教学简化（须标注）**：心跳 = transport 级（`ws_ping_interval=2 / ws_ping_timeout=4`，同上游 gateway heartbeat：缺省 2s Ping + 连续 2 周期无 Pong terminate，`web/launcher.py` `uvicorn_options`）；认证门 = 可选 token（配置 `MINIHARNESS_WEB_TOKEN` 后 `/api/*` 全域强制、WS 升级拒绝写 HTTP 401 同上游 `rejectRemoteStreamUpgrade`，监听 `0.0.0.0` 无 token 启动即拒绝；接口约定见 interface-wire §1.1）；`$events`/`follow`/`control` 无 `since` 恢复游标（重连重拉全量）；载荷 schema 校验在 `WebApi` 内做（上游先过 zod）；session 日志事件是 mappingproxy/tuple 冻结形态（`core/session/json.py` `deep_freeze`），序列化前经 `thaw` 还原；前端产品化工程 `webui/` 走新 wire 但不整体移植上游 `packages/client` 40 个 UI 模块——无 slot 组合；Overview 时间线/虚拟化/搜索已按上游概念补入 webui Trajectory（Overview 折叠跳转 + 虚拟化窗口 + 全文搜索），`since` 游标则与后端 wire 一致（上游 alpha.1 无该字段）；`web/static/` vanilla SPA 是旧 wire 教学参照（不实跑）。回归测试：`tests/test_web_{stream_protocol,uplink,events,mux,streams,approvals,server,attachments,export,frontend,auth}.py`（真实 uvicorn + httpx/websockets）+ `webui/` 的 vitest（wire 层含 multipart 重组 + trajectory 模型/搜索/组件，`pnpm test` / `pnpm typecheck` / `pnpm build`）。
+**教学简化**：心跳 = transport 级（`ws_ping_interval=2 / ws_ping_timeout=4`，同上游 gateway heartbeat：缺省 2s Ping + 连续 2 周期无 Pong terminate，`web/launcher.py` `uvicorn_options`）；认证门 = 可选 token（配置 `MINIHARNESS_WEB_TOKEN` 后 `/api/*` 全域强制、WS 升级拒绝写 HTTP 401 同上游 `rejectRemoteStreamUpgrade`，监听 `0.0.0.0` 无 token 启动即拒绝；接口约定见 interface-wire §1.1）；`$events`/`follow`/`control` 无 `since` 恢复游标（重连重拉全量）；载荷 schema 校验在 `WebApi` 内做（上游先过 zod）；session 日志事件是 mappingproxy/tuple 冻结形态（`core/session/json.py` `deep_freeze`），序列化前经 `thaw` 还原；前端产品化工程 `webui/` 走新 wire 但不整体移植上游 `packages/client` 的 UI 模块——无 slot 组合；webui Trajectory 按上游概念提供 Overview 时间线、虚拟化窗口与全文搜索，`since` 游标则与后端 wire 一致（上游 wire 无该字段）；`web/static/` vanilla SPA 是旧 wire 教学参照。测试覆盖：`tests/test_web_{stream_protocol,uplink,events,mux,streams,approvals,server,attachments,export,frontend,auth}.py`（真实 uvicorn + httpx/websockets）+ `webui/` 的 vitest（wire 层含 multipart 重组 + trajectory 模型/搜索/组件，`pnpm test` / `pnpm typecheck` / `pnpm build`）。
 
 运行方式：
 
@@ -265,7 +272,9 @@ mini 的同步近似：上游是字节流 + async，mini 是"行馈送 + 内存�
 | `session/prompt` | 未知 sessionId **懒创建** agent+session；返回 durable enqueue 回执 `messageId` | 懒创建 `AgentLoop`，同步跑完一个回合，返回真实消息 id |
 | `shutdown` | → `{}` | `{}` |
 
-`messageId` 只标识入队的 user 消息，不标识任何后续 assistant 消息或回合结束（上游 README 明确）。mini 的 `messageId` 是 `create_message` 签发的真实 id，与会话日志中 `agent/inbox/spliced` 的 `inserted` 消息 id 一致——官方 SDK 客户端 `Session.run` 依赖这条回执确认投递（`python/sdk api.py _is_inbox_receipt`），已由互操作测试验证（见 7.6.4）。通知（`session.event` / `session.status` / `subagent.*`）在 mini 中经 worker 回合级透传（inbox 回执、assistant/message、turn/end 逐条 + 末尾 status idle），上游为逐块流式，属简化标注。
+`messageId` 只标识入队的 user 消息，不标识任何后续 assistant 消息或回合结束（上游 README 明确）。mini 的 `messageId` 是 `create_message` 签发的真实 id，与会话日志中 `agent/inbox/spliced` 的 `inserted` 消息 id 一致——官方 SDK 客户端 `Session.run` 依赖这条回执确认投递（`python/sdk api.py _is_inbox_receipt`，互操作测试见 §7.6.4）。
+
+通知（`session.event` / `session.status` / `subagent.*`）在 mini 中按回合透传：一次跑完后逐条发 inbox 回执、assistant/message、turn/end，末尾发 status idle。上游是逐块流式，mini 是回合级，属简化标注。
 
 ### 7.6.3 硬性规定
 
@@ -277,18 +286,18 @@ mini 的同步近似：上游是字节流 + async，mini 是"行馈送 + 内存�
 
 验证：`python -m unittest tests.test_sdk_protocol -v`（含端到端 stdio 行仿真）。
 
-### 7.6.4 官方 Python SDK 互操作（`tests/test_upstream_sdk_interop.py`）
+### 7.6.4 互操作验证：官方 Python SDK 驱动 mini worker
 
-用上游官方 `python/sdk` 的 `DeepSeekHarness` 客户端通过私有 `_launch_args` 关键字驱动 mini worker 子进程（`python -m miniharness.seams.subagent.worker sdk`），验证 wire 约定双向互通：
+互操作测试用上游官方 `python/sdk` 的 `DeepSeekHarness` 客户端，经私有 `_launch_args` 关键字把 mini worker 起成子进程（`python -m miniharness.seams.subagent.worker sdk`）。它回答的是"wire 约定是否双向成立"，而不是"mini 自己能不能跑"。
 
-- `Session.run` 全流程：`session/prompt` 响应 → 等 inbox 回执（`agent/inbox/spliced` inserted 含 messageId）→ 收集 `assistant/message` / `turn/end` → 等 `session.status == idle` → 结算 `final_response` / `finish_reason`；
-- `final_response` 取最后一条 assistant/message 的文本（返回"任务完成。"），`finish_reason` 归一为 `completed`；
-- 会话复用：同一 session 第二次 run 的 turn 编号递增（第二个回合 turn/end 的 turn == 2）；mini 以 `_event_boundary` 记录上次透传边界，**只透传本次投递后的新事件**，会话复用不重发历史回合（与上游服务端行为一致，避免客户端 `received` 门控侥幸遮蔽）。
-- 通知序列（worker `_SdkWorkerRuntime`）：prompt 同步跑完整回合后，逐条发 `session.event`（本次回合新增的 agent/inbox/spliced 回执 → assistant/message → turn/end），末尾 `session.status == idle`，全部**先于响应帧**写出。
+- **客户端不把响应当答案**：`Session.run` 发出 `session/prompt` 后，先等 `agent/inbox/spliced` 的 `inserted` 里出现回执的 `messageId`，再收集 `assistant/message` 与 `turn/end`，直到 `session.status` 变成 `idle` 才结算 `final_response` / `finish_reason`。这验证了两条约定：回执 id 是真实入队消息 id；回合结束以 status 通知为准。
+- **会话复用只推新事件**：同一会话第二次 run 时，mini worker 用 `_event_boundary` 记住上次透传的边界，只发本次投递后的事件。若重发历史回合，客户端会拿到重复消息，测试会因客户端 `received` 门控侥幸遮蔽而假通过（上游服务端同样只推新增事件）。第二个回合的 `turn/end` 里 turn == 2，证明会话状态被复用而不是重建。
+- **通知先于响应帧**：worker 的 `_SdkWorkerRuntime` 先同步跑完整个回合，再逐条写 `session.event`（inbox 回执 → assistant/message → turn/end），末尾写 `session.status == idle`，最后才写 `session/prompt` 的响应。客户端依赖这个顺序在响应到达前收齐事件。
 
-两个可选前提（缺任一即 skip，不进默认 CI 门禁）：本机装 `pydantic>=2.12`；上游 SDK 源码可达（`MINIHARNESS_UPSTREAM_SDK` 环境变量指向 `python/sdk/src`，缺省探测 `../deepseek-harness/python/sdk/src`——不能假设测试环境与工作区布局一致，找不到就 skip）。
+两个可选前提缺一即 skip：本机装 `pydantic>=2.12`；上游 SDK 源码可达（`MINIHARNESS_UPSTREAM_SDK` 指向 `python/sdk/src`，缺省探测 `../deepseek-harness/python/sdk/src`）。测试不假设工作区布局，找不到就跳过，不进入默认 CI。
 
 验证：`python tests/test_upstream_sdk_interop.py`（需环境变量 + pydantic）。
+
 ## 7.7 复现：ACP 最小子集（`miniharness/protocol/acp.py`）
 
 > 对应 dsh 真实源码：`packages/acp/acp`（`apply()` + `codec.ts`）。自动化专用约定完全一致，跑在假模型上。
@@ -319,7 +328,7 @@ mini 的同步近似：上游是字节流 + async，mini 是"行馈送 + 内存�
 3. prompt：未知 session / inflight / 空 prompt / 非 text·resource_link 内容 → 拒绝；回合真实跑完（turn/start + turn/end 落日志）。
 4. stopReason 映射表逐项与上游一致。
 5. 审批桥：callId 缺失委派；allow-once/reject-once/cancelled 三态映射；默认 answerer 允许（测试注入可换）。
-6. close 后一切请求 → internal error（-32603，文案 "the ACP bridge has been disposed"，acp.py:226）。
+6. close 后一切请求 → internal error（-32603，文案 "the ACP bridge has been disposed"，acp.py:1302）。
 
 验证：`python -m unittest tests.test_acp -v`。
 
@@ -414,4 +423,4 @@ matches_matcher(None, "Bash", "codex")                # True：match-all 哨兵
 | JSON-RPC SDK | 编程客户端（官方 Python SDK 的线） | stdio JSON-RPC | `miniharness/protocol/sdk.py`（信封子集 + 三方法） |
 | hooks 桥 | 用户既有 CC/Codex 钩子 | 子进程 | `miniharness/protocol/hooks.py`（CC 配置 → 四类拦截决策 + 审计配对） |
 
-价值排序建议：headless → JSON-RPC 信封最小子集（复用 `miniharness.cli` 的进程壳，价值最高）→ ACP 最小子集 → hooks 桥。真正的取舍在第 4 行：自定义 profile 是"组合层的事"，它不需要新的协议，只需要 `boot()` 已经支持的 patch 层叠——第 5 章的 `apply_patch` 就是干这个的。
+自定义 profile 是组合层的事情，不需要新的协议，只需要 `boot()` 已经支持的 patch 层叠——第 5 章的 `apply_patch` 承担这件事。

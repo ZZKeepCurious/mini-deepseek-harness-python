@@ -3,14 +3,6 @@
 > 对应 dsh 真实源码：`packages/core/tools`（`docs/subsystems/tools.md`、`docs/tool-execution-pipeline.md`）
 > 前置：第 1、2 章。产出文件：`miniharness/core/tools.py` + `tests/test_tools.py`
 
-!!! warning "早期简化形态"
-    本章代码为**教学简化形态**，与当前实现存在以下差异（学习时以当前实现为准，见 00-setup §0.6 简化表）：
-
-    - **管线拆分**：本章把整条管线写成单一 `run_pipeline`；当前实现拆成两段——`pipeline_policy`（schema 校验 → `tools/pre-execute` → `tools/ask` → `tools/guards`，返回拒绝结果或 `None`）与 `pipeline_body`（execute 超时 + post-execute）再加外层规范化两层（`miniharness/core/tools.py:255` `pipeline_policy`、`:331` `pipeline_body`、`:367` `run_pipeline`），并各有 async 变体（`pipeline_policy_async` / `run_pipeline_async`，供第 12 章并行调度器"pre 有序、body 重叠"使用）。
-    - **决策字段名**：本章演示与下文 `PreToolDecision` 均用 `verdict`；实际与上游一致为 **`kind`**（`{kind:'allow'|'deny'|'ask'}`，`core/tools.py:266`）。
-    - **错误规范化文本**：本章为 `f"{type(e).__name__}: {e}"`；实际为统一 `Error: {e}` 前缀（同上游 `toolErrorResult` 的 `Error:` 文案，不暴露 Python 类型名），`core/tools.py:390`。
-    - **领域对象字段**：当前 `ToolResult` 另有 `_aborted` / `error_info` / `concludes_turn`（`core/tools.py:138-153`，`concludes_turn` 直接决定 loop 是否续步）、`ToolExec` 含 `agent`、`Tool` 含 `render`（canonical 值 → 模型可见 content）。
-
 ## 3.1 这一章要做什么
 
 工具是 agent 与世界的接口，执行管线则是这个接口上的全部把关。常规的 agent 框架里，"调用工具"往往就是一行 `tool(args)`：没有参数校验、没有权限检查、超时靠进程级兜底、出错直接抛异常打断回合。dsh 的 `packages/core/tools` 把这一行扩成了一条八段管线，每一段解决一个常规做法留下的问题：
@@ -163,7 +155,7 @@ def run_pipeline(ctx, tool, args, exec_=None):
 
     # 3. pre-execute waterfall（allow | deny | ask）
     decision = ctx.waterfall("tools/pre-execute", {"tool": tool.name, "args": frozen_args})
-    verdict = decision.get("verdict", "allow") if isinstance(decision, dict) else "allow"
+    verdict = decision.get("kind", "allow") if isinstance(decision, dict) else "allow"
     if verdict == "deny":
         return ToolResult(ok=False, is_error=True, error="denied by tools/pre-execute")
     if verdict == "ask":
@@ -173,7 +165,7 @@ def run_pipeline(ctx, tool, args, exec_=None):
 
     # 4. 单调守卫（只减权）
     guard = ctx.waterfall("tools/guards", {"tool": tool.name, "args": frozen_args})
-    guard_verdict = guard.get("verdict", "allow") if isinstance(guard, dict) else "allow"
+    guard_verdict = guard.get("kind", "allow") if isinstance(guard, dict) else "allow"
     if guard_verdict == "deny":
         return ToolResult(ok=False, is_error=True, error="denied by monotonic guard")
 
@@ -273,6 +265,16 @@ python -m unittest tests.test_tools -v
 - `finalizeContent`：最后一个内容只读硬性规定——`Tool.finalize_content` 钩子于结算时收口模型可见内容（`core/tools.py` `finalize_tool_result`），成功与错误结果都执行；job_output/job_kill 用它按 `outputLimitBytes` 做可见输出二次封顶（见第 12 章 jobs，`jobs/tools.py` `finalize_job_task_content`）
 
 一个语义差异需要明说：上游 `tools/post-execute` 是"无损物化前的 content 替换钩子"——返回 `undefined` 即保留原内容，返回其他值替换 content。mini 在保留上游 `PostToolDecision` 决策词汇（`{kind:'accept'|'block', feedback?, additionalContexts?}`，`core/tools.py` 读取 `kind`）的同时，把阻塞语义做成 accept/block 门（拒绝时返回 `{kind: "block", feedback}`；block 的 `feedback` 是 `ContentBlock[]` 文本块；`guard/` 的重复调用提醒经决策的 `additionalContexts` 注入下游消息）。方向不同，但落点相同：模型最终只能看到规范化的结果。
+
+### 本章教学代码与仓库实现的差异
+
+本章把整条管线写成一个 `run_pipeline`，只保留跑通所需的字段。仓库实现（`miniharness/core/tools.py`）的对应形态（决策字段与上游一致为 `kind`：`{kind:'allow'|'deny'|'ask'}`，对齐上游 `PreToolDecision`）：
+
+| 本章教学形态 | 仓库实现 |
+|---|---|
+| 单函数 `run_pipeline` 走完整条管线 | 拆成 `pipeline_policy`（schema 校验 → `tools/pre-execute` → `tools/ask` → `tools/guards`，返回拒绝结果或 `None`）与 `pipeline_body`（execute 超时 + post-execute）两段，外层再套规范化；两段各有 async 变体（`pipeline_policy_async` / `run_pipeline_async`），供第 12 章并行调度器做"pre 有序、body 重叠" |
+| 异常文本 `f"{type(e).__name__}: {e}"` | 统一 `Error: {e}` 前缀（同上游 `toolErrorResult` 的 `Error:` 文案，不暴露 Python 类型名） |
+| `ToolResult` 只有 `ok`/`content`/`is_error`/`error`/`meta`，`ToolExec` 只有 `signal` | `ToolResult` 另有 `_aborted` / `error_info` / `concludes_turn`（`concludes_turn` 直接决定 loop 是否续步）；`ToolExec` 含 `agent` / `name` / `arguments` / `call_id` / `root_call_id`；`Tool` 含 `render`（canonical 值 → 模型可见 content） |
 
 ## 3.7 收尾
 

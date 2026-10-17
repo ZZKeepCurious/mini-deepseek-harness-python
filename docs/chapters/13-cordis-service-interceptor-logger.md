@@ -14,11 +14,9 @@
 
 这些约定如果每个服务自己手写一遍，既重复又容易漂移。Cordis 用两样东西把它们收口：
 
-> **(1) `Service` 基类**：服务的"构造即注册、可调用、可配置"模板，同 `vendor/cordis/src/service.ts`。子类几乎只填 `_invoke` / `_check` / `_init`，其余由基类兜底。
+> **(1) `Service` 基类**：服务的"构造即注册、可调用、可配置"模板，同 `vendor/cordis/src/service.ts`。子类几乎只填 `_invoke` / `_check` / `_init`，其余由基类处理。
 >
-> **(2) `intercept` / `extend` / `isolate` 三兄弟**：不改父上下文、只给孩子上下文叠一层"额外配置 / 自有属性 / 隔离标签"的子上下文工厂（同 `vendor/cordis/src/context.ts`）。其中 `intercept` 专门给服务注入 per-plugin 配置，是 2.4 讲的"`_resolve_config` 沿祖先链合并"那套约定的入口。
-
-本章把这三块讲透。它们已经在 mini 里全量实现，但此前只在 `architecture.md` 的映射行登记，没有像第 2 章那样逐项解读——本章补上。
+> **(2) `intercept` / `extend` / `isolate` 三兄弟**：不改父上下文、只给孩子上下文叠一层"额外配置 / 自有属性 / 隔离标签"的子上下文工厂（同 `vendor/cordis/src/context.ts`）。其中 `intercept` 专门给服务注入 per-plugin 配置，是步骤 2 讲的 `_resolve_config` 沿祖先链合并那套约定的入口。
 
 ## 13.2 概念：服务为什么需要基类
 
@@ -31,7 +29,7 @@
 | 可用性谓词（条件存在） | 无 | 定义 `_check`，透传给 `provide` |
 | 每插件可覆写配置 | 无 | `intercept` 注入 + `_resolve_config` 合并 |
 
-核心洞察：**服务是"带生命周期的对象"，不是"一个值"**。`Service` 基类把"生命周期"从每个服务里抽出来，统一交给 fiber——你写服务只关心行为，注册/注销交给 `super().__init__`。
+`Service` 基类把"生命周期"从每个服务里抽出来，统一交给 fiber：你写服务只关心行为，注册与注销交给 `super().__init__`。服务因此是带生命周期的对象；把它当成一个值，会漏掉注册与注销这条线。
 
 ## 13.3 代码 step-by-step
 
@@ -71,7 +69,7 @@ def __call__(self, *args, **kwargs):
 
 - **`_init`**：构造后运行（上游 `symbols.init`，类插件场景）。mini 在 `__init__` 末尾 `init()` 调用，同"构造后"语义。
 
-为什么"构造即注册"而不是"调用方负责注册"？因为服务实例一旦被创建，它的存在就该立刻对依赖它的 fiber 可见（触发 epoch 重载，见 2.5 步骤 5）。如果交给调用方手动 `provide`，很容易漏注册或重复注册——基类把这条路径焊死。
+为什么"构造即注册"而不是"调用方负责注册"？因为服务实例一旦被创建，它的存在就该立刻对依赖它的 fiber 可见（触发 epoch 重载，见第 2 章 §2.3 步骤 4）。如果交给调用方手动 `provide`，很容易漏注册或重复注册，基类把这条路径固定下来。
 
 ### 步骤 2：`_resolve_config` —— 沿 intercept 链合并配置
 
@@ -140,7 +138,7 @@ class LoggerService(Service):
 
 1. **可调用**：`ctx.get("logger")("agent")` 经 `_invoke` 铸一个具名 `Logger`；`ctx.get("logger").warn(...)` 则 `_invoke` 用当前 fiber 名（hyphenate）铸 Logger 后调 `.warn`。
 2. **配置来自 intercept**：`name` / `level` 不在服务上写死，而是从 `_resolve_config(ctx=ctx)` 解析——所以不同作用域下 `ctx.logger("x")` 能读出不同级别（上游 `logger.ts:251-261` 同款）。
-3. **exporter 注册即 effect**：`exporter()` 经 `ctx.effect` 登记，随 fiber 注销自动移除（同 `logger.ts:232-237`）。默认导出器把消息压进 `buffer`（环形，超 `buffer_size` 截断），这是其它导出器（文件、stdout、测试捕获器）之外的兜底。
+3. **exporter 注册即 effect**：`exporter()` 经 `ctx.effect` 登记，随 fiber 注销自动移除（同 `logger.ts:232-237`）。默认导出器把消息压进 `buffer`（环形，超 `buffer_size` 截断）；其余导出器（文件、stdout、测试捕获器）按需另挂。
 
 `Logger` 门面本身把 `error/info/warn/debug` 铸成方法，内部构造一条 `Message`（`sn`/`ts`/`name`/`type`/`level`/`args`/`fiber`），遍历所有 exporter，按 `exporter.levels[name] ?? levels.default ?? self.level ?? INFO` 过滤后 `export`（同 `logger.ts:141-161`）。格式化走 printf 风格占位符 `%s %d %f %o %c %%`（上游 `defaultFormatters`），`%o` 走 `JSON.stringify`，Error 自动展开栈、AggregateError 递归展开 `errors`——这些在 mini 里以等价 Python 实现。
 
@@ -156,7 +154,7 @@ class _LoggerView:
         self().warn(*a)
 ```
 
-这解释了为什么第 9 章"Agent 干预面"里 `agent.ctx.logger("steer")` 记出的名字是 `agent` 作用域的，而不是根——配置解析跟着"谁在调用"走。
+这也解释了 `agent.ctx.logger("steer")` 记出的名字会跟随该 agent 作用域而不是根：`_LoggerView` 记住的是访问方 ctx，配置解析跟着"谁在调用"走。
 
 ### 步骤 4：`extend` / `isolate` / `intercept` 三兄弟
 
@@ -177,7 +175,7 @@ mini 的 `extend` 是父链近似（非 JS 原型链），`isolate`/`intercept` 
 ```python
 class Greeter(Service):
     provide = "greeter"
-    def _check(self):                       # 可用性谓词：config 缺 name 时不提供
+    def _check(self):                       # 可用性谓词：实例始终可用（真实场景常按 intercept 配置返回布尔）
         return True
     def _invoke(self, who="world"):
         cfg = self._resolve_config()        # 缺省 ctx = self.ctx（构造上下文）
@@ -195,7 +193,14 @@ assert root.get("greeter")("x") == "hi x"        # 根作用域默认 prefix
 assert child.get("greeter")("x") == "hello x"    # 子作用域 intercept 覆盖
 ```
 
-`child` 下的 `greeter` 调用读到 `prefix=hello`，根下读到 `hi`——同一服务、不同标签/作用域、不同配置，不靠任何全局变量。注意两点（容易踩坑）：**bare Service 只有被构造进某 ctx 才会 `provide` 登记**（`Service.__init__` 调 `ctx.provide(name, self)`，`scope.py:966-975`），不构造直接 `get` 是 `None`；且 `_find_impl` 按**隔离标签**读全局表（`scope.py:1220-1222`），`provide` 对同一标签二次登记 = **fail loud 抛 `RuntimeError`**（`scope.py:1288-1291`）——所以"每个作用域各自不同配置"不能只靠 `intercept`，必须先 `isolate` 换标签、再给该标签构造一个实例（第 3 章的 per-agent 工具隔离、continuation 子代理正是这套）。这也是步骤 4 里 `ctx.logger` 需要 `_LoggerView` 以**访问方** ctx 解析的原因：日志门面场景里多个子作用域共享同一 `logger` 标签，只能让 `_resolve_config` 跟随访问方而非构造方。
+`child` 下的 `greeter` 调用读到 `prefix=hello`，根下读到 `hi`：同一服务、不同标签、不同配置，不靠全局变量。
+
+两个容易踩坑的边界：
+
+1. **服务要构造才登记**。`Service.__init__` 调 `ctx.provide(name, self)`（`scope.py:966-975`），不构造就 `get` 只会得到 `None`。
+2. **同一标签不能重复提供**。`_find_impl` 按隔离标签读全局表（`scope.py:1219-1223`），`provide` 对同一标签二次登记 fail loud 抛 `RuntimeError`（`scope.py:1288-1291`）。所以"每个作用域各自不同配置"不能只靠 `intercept`，必须先 `isolate` 换标签、再给该标签构造一个实例——第 3 章的 per-agent 工具隔离、continuation 子代理正是这套。
+
+这也解释了步骤 4 里 `ctx.logger` 为什么要用 `_LoggerView` 以访问方 ctx 解析：日志门面场景里多个子作用域共享同一 `logger` 标签，只能让 `_resolve_config` 跟随访问方而非构造方。
 
 ## 13.4 验收：硬性规定
 
@@ -204,7 +209,7 @@ assert child.get("greeter")("x") == "hello x"    # 子作用域 intercept 覆盖
 1. `Service` 子类构造即 `provide`，同名在已注册标签下冲突（fail loud）；fiber 卸载自动收回（不再可见）。
 2. 定义 `_invoke` 的服务实例可调用；未定义则 `__call__` 抛 `TypeError`。
 3. `_resolve_config` 沿祖先链合并，近根优先、`base` 前置、`head` 后置；`_resolve_intercept` 只收集命中 `name` 的条目。
-4. `LoggerService`：`ctx.logger(name)` 铸具名 Logger；`ctx.logger.warn(...)` 以当前 fiber 名记录；exporter 注册即 effect、随 fiber 注销；默认缓冲导出器兜底。
+4. `LoggerService`：`ctx.logger(name)` 铸具名 Logger；`ctx.logger.warn(...)` 以当前 fiber 名记录；exporter 注册即 effect、随 fiber 注销；默认缓冲导出器始终在场。
 5. `_LoggerView`：`ctx.logger` 以访问方 ctx 解析 intercept（不是服务构造时的根 ctx）。
 6. `extend` / `isolate` / `intercept` 都不修改父上下文；`isolate` 同 label 两调用共享作用域。
 
@@ -229,4 +234,4 @@ python -m unittest tests.test_bus -v
 
 ## 13.7 收尾
 
-这一章的一句话可以带走：**服务即对象**。Service 把"构造即注册、可调用、可配置"从每个服务里抽出来焊死，`intercept`/`isolate`/`extend` 提供"不改父、只改子"的组合手段。下一章（14）把作用域从"隔离标签"再推进一层：dsh 专属的 `scope_key` 身份键与 `scopeTarget` 载波派发模型——它用一条 parent 关系同时驱动"注册向下继承"和"事件向上接纳"两个方向，是 agent 组合、会话 owner 路由、agent/* 事件隔离的根基。
+`Service` 把"构造即注册、可调用、可配置"从每个服务里抽出来，交给基类统一处理；`intercept` / `isolate` / `extend` 提供"不改父、只改子"的组合手段。下一章把作用域从"隔离标签"再推进一步：dsh 的 `scope_key` 身份键与 `scopeTarget` 载波派发模型，用一条 parent 关系同时驱动"注册向下继承"和"事件向上接纳"两个方向。

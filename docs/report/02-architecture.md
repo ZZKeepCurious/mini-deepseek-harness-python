@@ -105,7 +105,7 @@ flowchart LR
 | **Agent 事件**（携带活体 `Agent`） | `agent/inbox/*`、`agent/status`、`agent/pre-step`、`agent/request`、`agent/request-error`、`agent/turn-stopping` | 观察/拦截进行中的工作 |
 | **能力事件**（附着策略与适配器） | `fs/*`、`tools/*`、`telemetry/*` | 不改 loop 即可给扩展口挂策略 |
 
-**四种派发模式**（Cordis 语义，报告的公共约定）。流水线事件（`agent/pre-step`、`agent/request`、`llm/stream`、三个 `tools/*`）全部用 waterfall：
+**四种派发模式**（Cordis 语义）。流水线事件（`agent/pre-step`、`agent/request`、`llm/stream`、三个 `tools/*`）全部用 waterfall：
 
 1. `emit`——同步广播，不等待、无返回值、按注册序观察。通知类事件专用。
 2. `waterfall`——around-middleware，监听器必须 `next()` 委派；不调 `next` 即短路，返回值就是唯一决策。
@@ -138,7 +138,7 @@ flowchart LR
 
 ### 3.4 外围接入面（Web GUI、远程 RPC、外部协议与数据面）
 
-报告的上面几节聚焦"技术核心"；但仓库约三分之二的包属于接入面。它们全部消费同一核心脊柱，因此值得建立一张地图：
+上面几节聚焦"技术核心"；但仓库约三分之二的包属于接入面，它们全部消费同一核心脊柱，因此值得建立一张地图：
 
 | 面 | 包组（包数） | 职责 |
 |---|---|---|
@@ -157,14 +157,14 @@ flowchart LR
 
 ## 4. 技术核心
 
-### 4.1 Cordis 插件模型——"一切皆插件"的地基
+### 4.1 Cordis 插件模型
 
-通常的插件框架只解决"注册与发现"；Cordis 更进一步，把"装载什么、何时装载、如何卸载"全部形式化。四个核心要点：
+大多数插件框架只解决"注册与发现"；Cordis 更进一步，把"装载什么、何时装载、如何卸载"全部形式化。四个核心要点：
 
 1. **插件是实现了 Service 的对象**：函数插件形如 `{ name, inject, Config, apply(ctx) }`；Service 子类插件由 Cordis 挂载进当前上下文。
 2. **Context 是服务仓库**：服务声明稳定的 `ctx.<key>`（如 `ctx.tools`），插件按 key 查找而非 import 具体实现。
-3. **依赖用 `inject` 声明**：命名所需服务，Cordis 等待其出现后再激活插件 → 加载顺序由依赖关系表达，而非手工 boot 排序。常规的"启动脚本按行排列"在这里被依赖图取代。
-4. **注册 = 可逆副作用（effects）**：一切贡献经 `ctx.effect()` / `ctx.on()` / `ctx.waterfall()` 安装，`register()` 返回 disposer，插件卸载时按序回滚。这是 HMR 与热重载能可靠工作的根基——常规做法里"卸载"往往只能靠重启进程。
+3. **依赖用 `inject` 声明**：命名所需服务，Cordis 等待其出现后再激活插件，加载顺序完全由依赖关系表达，取代手工排列的启动脚本。
+4. **注册 = 可逆副作用（effects）**：一切贡献经 `ctx.effect()` / `ctx.on()` / `ctx.waterfall()` 安装，`register()` 返回 disposer，插件卸载时按序回滚。这套机制让 HMR 与热重载能可靠工作：任何贡献都能被精确撤销，不必靠重启进程清理。
 
 另外一条：**作用域化事件派发**——事件携带 subject 载体，监听器可以只收到指定 agent / 作用域的事件（`@deepseek-ai/dsh-scope`）。
 
@@ -183,32 +183,20 @@ flowchart LR
   ROLL --> REAPPLY["热重载：重新 apply"]
 ```
 
-<p class="mermaid-note">"注册 = 可逆副作用"是热重载与故障清理能可靠工作的根基：任何贡献都能被 disposer 精确撤销。</p>
+<p class="mermaid-note">"注册 = 可逆副作用"让热重载与故障清理能可靠工作：任何贡献都能被 disposer 精确撤销。</p>
 
-**图 5 逐节点走读（插件完整生命周期）**：
+### 4.2 事件溯源会话日志
 
-1. **register(插件)**：注册一个函数插件或 Service 插件，声明 `name` / `inject` / `Config` / `apply(ctx)`。
-2. **inject 服务就绪?**：检查插件 `inject` 声明的服务是否已在该上下文出现——这是依赖图的仲裁点。
-3. **否 → 挂起等待**：服务未就绪时 Cordis 挂起插件，等服务被其它插件提供后再回来检查（等待边 `WAIT → INJ` 回环）；加载顺序因此由依赖关系决定，而非手工 boot 排序。
-4. **是 → apply(ctx)**：服务齐备后执行插件体，插件在此安装它的一切贡献。
-5. **安装可逆副作用**：贡献经 `ctx.effect` / `ctx.on` / `ctx.waterfall` / `ctx.provide` 安装——每条副作用都登记了逆操作。
-6. **返回 disposer**：`register` 返回一个可调用对象，作为撤销该插件全部副作用的句柄。
-7. **卸载 / HMR 热重载**：调用 disposer 或触发热重载，进入卸载路径。
-8. **按注册逆序回滚**：副作用按后进先出顺序（后装先卸）逆序撤销，保证不留残余注册。
-9. **热重载 → 重新 apply**：HMR 场景下回滚完成后立刻对新版本插件重新执行第 4 步，实现免重启换插件。
-
-### 4.2 事件溯源会话日志（整个框架的地基）
-
-通常的会话实现是保存一份聊天记录，需要上下文时直接读它。dsh 恰好反过来：`Session` 只记录"发生了什么"，模型历史是每次现算的投影——这个结构在 `packages/core/session` 的 `SessionEvent` + `deriveMessages()` 组织方式里一目了然。它的六条约定拆开讲：
+dsh 的选择是：`Session` 只记录"发生了什么"，模型历史是每次现算的投影——这个结构在 `packages/core/session` 的 `SessionEvent` + `deriveMessages()` 组织方式里一目了然。它的六条约定拆开讲：
 
 <div class="card" markdown>
 
-1. **唯一数据源。**`Session` 是一条只追加、不修改的 `SessionEvent` 日志。模型的消息历史不是另外存出来的，而是每次用 `deriveMessages()` 从日志现算——回放也等于重新派生一遍。相比"内存一份、磁盘一份"的常规做法，没有第二份副本，就没有两份数据对不上的问题。
+1. **唯一数据源。**`Session` 是一条只追加、不修改的 `SessionEvent` 日志。模型的消息历史每次用 `deriveMessages()` 从日志现算，不另存一份——回放也等于重新派生一遍。内存与磁盘都不留第二份副本，两份数据对不上的问题也就不存在。
 2. **模型可见 ⟺ 已记录。**这是唯一数据源的直接推论：历史是派生视图，那么模型能看到的任何内容，都必须能从日志重建。反过来，想给模型加一种新输入，就必须先加一种新的 session 事件（扩展 `SessionEventMap`，再写"从日志渲染它"的代码）。
-3. **可合并扩展。**常规框架加事件类型往往要改核心包；dsh 用 TypeScript 的 `declare module` 声明合并，插件就能把新类型直接"塞"进 `SessionEventMap`——类型系统本身成了扩展点，这是相当少见的设计。
+3. **可合并扩展。**加一种新事件类型往往要改核心包；dsh 用 TypeScript 的 `declare module` 声明合并，插件就能把新类型直接"塞"进 `SessionEventMap`——类型系统本身成了扩展点，这是相当少见的设计。
 4. **表面（surface）。**四种"产生消息"的事件（`system/message`、`user/message`、`assistant/message`、`tool/result`）都带 `surfaceOp`，取值 `append` 或 `{op:'replace', startSeq, endSeq}`（区间遮蔽）。投影时 `append` 按序排列，`replace` 整体替换旧的那一段。后面 5.2 节会看到，上下文压缩就靠 `replace` 实现——压缩不改日志，只追加一条替换事件（检查点载体是 `user/message`，不是被替换的 assistant 消息）。
 5. **无损 JSON 强制。**`append()` 在写入源头做深度校验并冻结，序列化不了的东西（包括非有限浮点数）当场抛错。坏事件在源头就被拦住，进不了日志——日志里永远只有合法的数据。
-6. **崩溃恢复。**重载时发现 turn 没闭合（进程半路崩了），常规做法是截断或回滚；dsh 不这么做——大 turn 可能非常巨大，截断会丢内容。做法是合成一条 `turn/end { reason: {kind:'interrupted'} }` 把括号补平衡：宁可标记"这次被打断了"，也不能悄悄丢掉已经发生过的事实。
+6. **崩溃恢复。**重载时发现 turn 没闭合（进程半路崩了），dsh 不截断也不回滚——大 turn 可能非常巨大，截断会丢内容。做法是合成一条 `turn/end { reason: {kind:'interrupted'} }` 把括号补平衡：宁可标记"这次被打断了"，也不能悄悄丢掉已经发生过的事实。
 
 </div>
 
@@ -232,7 +220,7 @@ flowchart LR
   PERS -.重启后重新加载.-> LOG
 ```
 
-<p class="mermaid-note">读图顺序：日志永远是起点，投影和持久化都是它的下游，两者互不直接打交道。建议拿支笔，沿一条 user/message → assistant/message → tool/result 的路径把 seq 编号手推一遍，比盯着图看十遍有用。</p>
+<p class="mermaid-note">日志永远是起点，投影和持久化都是它的下游，两者互不直接打交道。</p>
 
 !!! example "示例走查（surfaceOp=replace）"
     常见的疑问是"replace 之后历史还完整吗"。走一遍就清楚了：上下文压力触发压缩后，日志会追加一条压缩检查点 `user/message`，其 `surfaceOp: {op:'replace', startSeq, endSeq}` 指向被摘要替换的消息区间——投影时它整体遮蔽该区间并替换为摘要，但日志本身只做追加，`seq` 依然连续。于是模型下一次请求看到的历史，永远是"从完整日志实时派生"的版本，绝不会读到过期快照。这也是"不另存"的用意所在：只要派生是纯函数，持久化和恢复就永远不用操心一致性问题。
@@ -242,7 +230,7 @@ flowchart LR
 一个**扩展口（seam）** = 三种角色：**Service Definition**（声明接口）、**Service Provider**（实现）、**Consumer**（使用者，通常是模型面向工具）。一个角色单独不构成扩展口；新增能力 = 同时设计三个角色。Provider 之间通过"共享执行世界"联动——例如 FS 与 subprocess 的 Provider 指向远程沙箱后，Bash/PTY/LSP 全部跟随迁移。
 
 !!! note "与普通插件框架的区别"
-    插件框架通常只解决"注册/发现"，而 dsh 的扩展口还解决了**语义一致替换**——接口覆盖完整的生命周期、错误码、取消、回滚约定，使一次 Provider 替换不留下行为死角。
+    插件框架通常只解决"注册/发现"，dsh 的扩展口还要保证**语义一致替换**——接口覆盖完整的生命周期、错误码、取消、回滚约定，使一次 Provider 替换不留下行为死角。
 
 <p class="fig-cap">图 7：能力扩展口三角色——接口、实现、使用者的关系</p>
 
@@ -261,9 +249,9 @@ flowchart LR
 
 ### 4.4 类型技术（TypeScript 层）
 
-常规 TS 项目的扩展靠"给接口留可选字段"；dsh 把类型系统本身做成扩展方式，三件套：
+TS 项目的扩展通常靠"给接口留可选字段"；dsh 把类型系统本身做成扩展方式，三件套：
 
-1. **`…Map → derived-union` 模式**：接口按判别标签键控，`keyof` 派生联合类型，插件用声明合并扩展。五个规范 map：`ContentBlockMap`、`MessageSourceMap`、`FinishReasonMap`、`TurnEndReasonMap`、`SessionEventMap`（前两者在 `llm/llm/src/types.ts`，后两者在 `core/session/src/types.ts:200,269`）。合并可扩展的联合在 `switch` 后落到文档化 default——联合随时可能被插件追加新键，穷尽性的 `assertNever` 断言在这里不成立。注意：turn/start 的 `trigger` **不是**规范 map，而是内联判别对象（`{kind:'message', source:{kind:'user'}}`），只在单个 turn 内静态使用，不参与插件声明合并。
+1. **`…Map → derived-union` 模式**：接口按判别标签键控，`keyof` 派生联合类型，插件用声明合并扩展。五个规范 map：`ContentBlockMap`、`MessageSourceMap`、`FinishReasonMap`、`TurnEndReasonMap`、`SessionEventMap`（前两者在 `llm/llm/src/types.ts`，后两者在 `core/session/src/types.ts:200,269`）。合并可扩展的联合在 `switch` 后落到文档化 default——联合随时可能被插件追加新键，穷尽性的 `assertNever` 断言在这里不成立。注意：turn/start 的 `trigger` 是内联判别对象（`{kind:'message', source:{kind:'user'}}`），不在五个规范 map 之列，只在单个 turn 内静态使用，不参与插件声明合并。
 2. **品牌化 ID（`Branded<B>`）**：跨包 ID 结构上是 string、类型上不可互换（`SessionId` ≠ `CallId`）。纯类型包 `util/brand` 零运行时依赖。
 3. **严格类型纪律**：`strict` + `noImplicitAny`；跨边界强制运行时校验（parser、wire、worker、持久化），同进程类型边界信任 TS 不重复校验。
 
@@ -310,20 +298,11 @@ flowchart TD
 
 <p class="mermaid-note">工具目录 / 配置目录 / 持久化日志目录 / 模块图 / Cordis API 参考均由生成器产出，作用域原语（`core/scope`）本身是零依赖纯库。</p>
 
-**图 9 逐节点走读（作用域化注册与可见性解析）**：
-
-- **ROOT 全局 ctx（全局层注册）**：能力层的"全局层"，注册对所有 agent 作用域都可见的全局服务（如全局工具、持久化背板）。
-- **A / B agent 作用域 ctx**：每个 agent 拥有独立 ctx，`createScope` 派生；作用域内注册只对自身（含后代）可见。
-- **SUB agent A 的子作用域**：A 之下可再派生子作用域（如子代理），继承 A 的可见性。
-- **VIS 工具可见性解析**：解析一个 agent 实际能看到哪些工具 = **自身注册 + 祖先作用域链 + 全局层** 三者的并集（`ROOT/A/SUB → VIS` 三条边）。这是 dsh 与"全进程共享一张工具表"的常规做法的本质区别。
-- **REST ToolRestriction（allow / deny 继承过滤）**：可见性算出的候选集还要过一层 allow/deny 过滤，且该限制沿作用域链**继承**（父作用域的 deny，子作用域同样被约束）。
-- **ROLL dispose：注册回滚**：作用域卸载时回滚其全部注册，之后拒绝再注册（`B -.卸载→ ROLL`）——配合"注册 = 可逆副作用"保证隔离可精确撤销。
-
 > **mini 对照**：`miniharness/core/scope.py` —— 作用域原语（`createScope/scopeOf/scopeTarget/intercept`）与可见性解析；`miniharness/core/agent_loop/agent.py:46,131` 用 `scope_target` 给 agent 事件派发绑定作用域载体；工具注册表的"全局层 + 祖先链 + 自身"解析实现在 `miniharness/core/tools.py`。
 
 ### 4.6 生成器驱动 + 门禁文化
 
-常规项目的文档靠人手同步，改一次源码往往要手动改三处文档，漂移是常态。dsh 用生成器把"文档落后于源码"从概率事件变成不可能事件：工具目录、配置目录、持久化日志目录、模块图、Cordis API 参考全部由 `scripts/gen-*.ts` 从源码生成，并经 `doc-sync` 新鲜度门禁校验。另有每文件 100% 覆盖率门禁（`test:coverage`）、`verify-export-jsdoc`、`verify-type-equiv`（文档内类型与源码逐字漂移检测）等数十个验证脚本。
+dsh 把工具目录、配置目录、持久化日志目录、模块图、Cordis API 参考全部交给 `scripts/gen-*.ts` 从源码生成，并经 `doc-sync` 新鲜度门禁校验，生成物与源码的任何脱节在 CI 就会失败。另有每文件 100% 覆盖率门禁（`test:coverage`）、`verify-export-jsdoc`、`verify-type-equiv`（文档内类型与源码逐字漂移检测）等数十个验证脚本。
 
 <p class="fig-cap">图 10：生成器 + 门禁文化——"源码即唯一真相"</p>
 
@@ -341,4 +320,4 @@ flowchart LR
   SRC --> JSDOC["verify-export-jsdoc"]
 ```
 
-<p class="mermaid-note">门禁不是事后检查，而是"提交前必须通过"的纪律：生成产物与源码的任何漂移都会在 CI 显式失败。</p>
+<p class="mermaid-note">门禁要求提交前必须通过：生成产物与源码的漂移会在 CI 显式失败。</p>

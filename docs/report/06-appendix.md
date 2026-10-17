@@ -15,7 +15,7 @@
 
 ### 9.1 SDK 与 dsh 的关系和区别
 
-**一句话关系**：Python SDK 是 **dsh 的进程级客户端**，不是替代品或另一个实现——它把内置的 dsh 运行时（单文件可执行 `dsh-jsonrpc-agent`）作为子进程启动，通过 stdio 上的换行分隔 JSON-RPC 协议驱动它。SDK 能做什么，取决于其组合里挂了哪些插件；它并不重新实现 harness。
+**一句话关系**：Python SDK 是 **dsh 的进程级客户端**，它把内置的 dsh 运行时（单文件可执行 `dsh-jsonrpc-agent`）作为子进程启动，通过 stdio 上的换行分隔 JSON-RPC 协议驱动它。SDK 能做什么，取决于其组合里挂了哪些插件；它并不重新实现 harness。
 
 | 方面 | dsh（产品本体） | deepseek-harness-sdk（Python 客户端） |
 |---|---|---|
@@ -77,7 +77,7 @@
 
 5. **理解返回值**：`RunResult` 含 `session_id`、`final_response`（该区间根会话最后提交的助手文本）、`finish_reason`（最后一个 `turn/end` 的 `kind`，如 `completed`/`max-tokens`/`error`）、`events`（根会话事件）、`notifications`（根会话 + 全部已知后代）、`session_root`。
 
-6. **session id 复用语义**：复用同一 harness + 同一 `session_id` 会**保留该会话的 Bash 进程**（工作目录、已导出的变量、shell 函数）。独立任务用新 id；只有需要延续同一段持久化对话才复用。
+6. **session id 复用语义**：复用同一 harness + 同一 `session_id` 会**保留该会话的 Bash 进程**（工作目录、已导出的变量、shell 函数）。独立任务用新 id；只有需要延续同一段持久化会话才复用。
 
 !!! warning "安全边界"
     内置组合（`sdk-runtime/.../cordis.yml`）不含 permission 层——bash 与编辑器可改任何路径，且上下文压缩关闭。行为等价于 `danger-full-access`（**学习归纳**：该名仅见于上游 `app-boot.spec.ts:130` 的 `.env` 拒绝名单 `DSH_PERMISSION_MODE=danger-full-access`，非正式组合名）。只应在可丢弃的 checkout 或容器内运行。仓库内置示例：`python examples/jsonrpc-agent/minimal.py --workspace <dir> --session-root <dir> --session-id example-001 "task"`。
@@ -198,7 +198,7 @@ UI 专用格式（fenced console、diff、相对路径）留在卡片投影里�
 
 ## 12. 结语
 
-DeepSeek Harness 的本质可以用一句话概括：
+DeepSeek Harness 可以用一段话概括：
 
 <div class="card" style="font-size:16px; text-align:center;" markdown>
 
@@ -206,4 +206,10 @@ DeepSeek Harness 的本质可以用一句话概括：
 
 </div>
 
-对想用 Python 深刻掌握并复现的你，最有价值的三件事依次是：**(1) 事件溯源日志作为唯一数据源；** **(2) "注册 = 可逆副作用 + waterfall 短路"的插件语义；** **(3) 能力扩展口三角色带来的整体可替换性。** 把这三件事用 Python 亲手实现一遍，对 dsh 的理解会超过大多数读过一遍文档的人。
+对想用 Python 深刻掌握并复现的你，最有价值的三件事依次是：
+
+1. 事件溯源日志作为唯一数据源；
+2. "注册 = 可逆副作用 + waterfall 短路"的插件语义；
+3. 能力扩展口三角色带来的整体可替换性。
+
+把这三件事用 Python 亲手实现一遍，对 dsh 的理解会超过大多数读过一遍文档的人。

@@ -26,7 +26,7 @@
 | **P6 动手写插件 + 横向扩展口** | 从读者变成作者 | docs/cookbook/adding-a-tool.md、adding-a-package.md、adding-an-llm-adapter.md | 写一个最小工具插件并在 preset 中挂载；用 `agent/pre-step` 拦截一次请求；用 `tools/pre-execute` 加权限策略 | 插件能被 `--dump-config` 显示且行为可测 |
 
 !!! success "学习顺序建议"
-    不要一上来读所有子系统页。按 **P1 → P3 → P4 → P5 → P2 → P6** 的顺序最有收益：先懂循环与日志（系统的"骨头"），再懂框架（"关节"），再动手跑（"肌肉"）。能力扩展口逐个横向扫读放在 P6 之后。
+    不要一上来读所有子系统页。按 **P1 → P3 → P4 → P5 → P2 → P6** 的顺序最有收益：先懂循环与日志，再懂框架，再动手跑。能力扩展口逐个横向扫读放在 P6 之后。
 
 ## 7. 用 Python 深刻掌握与复现技术核心
 
@@ -35,7 +35,7 @@
 <div class="card" markdown>
 
 1. **黑盒路线（官方 SDK，最省力）**：直接安装 `deepseek-harness-sdk`（PyPI，import `deepseek_harness`），用 Python 驱动真实 harness 子进程（stdio JSON-RPC），观察它如何编排 turn/step、工具、持久化。**这是理解"运行时约定"最便宜的方式。**
-2. **白盒路线（读 TS，翻译成 Python）**：把第 6 章的阅读路径走完，对每个核心概念写一份"Python 对照笔记"（见 7.2 映射表）。目的不是照抄代码，而是**用 Python 重述约定**。
+2. **白盒路线（读 TS，翻译成 Python）**：把第 6 章的阅读路径走完，对每个核心概念写一份"Python 对照笔记"（见 7.2 映射表）。目的是**用 Python 重述约定**：读懂 TS 语义后，用 Python 重新表达这些约定，不必逐行照抄。
 3. **复现路线（迷你 harness）**：用纯 Python 从零实现一个"最小可用的核心子集"（见 7.3）。这是唯一能证明你真正掌握的方式。
 
 </div>
@@ -59,15 +59,15 @@
 | 组合层（bundle / patch） | YAML 配置 + 按 id 的整段覆盖 + insert 列表 | 补丁算法单一实现，导出纯函数，禁止复制粘贴 |
 | DeepSeek Files API 执行簇（图像输入请求路由） | `httpx` 异步 + `deepseek_files/` 十二模块 + `ImageRequestTarget`（request-image v6） | 路由目标（token 网格 / 像素预算 + 4096 单边封顶）→ 定价 → file-id 上传/复用（durable `files-v3.json` 索引 + filelock 30s + os.replace 原子发布）→ 含图请求 image-capable 路径：file-id 优先 → base64 回退 → stale-id 有界重试；wire 为 Anthropic 兼容 Messages（Chat Completions 已上游删除） |
 | 图像卸载 message 投影 | `core/session/projections.py` + `compaction/image_offload.py` | 投影=按事件序折叠覆盖表（fold_projections）；`image/offload` durable 事件记录要卸载的图片 occurrence（严格递增拆分校验 fail-closed）；`offload_oldest_images` + `agent/request-error` 上的 `IMAGE_OFFLOAD_REQUIRED` 修复（不耗重试预算） |
-| 会话格式目录（released 迁移链收口） | `core/session/released/catalog.py` | `read_released_header`（物理头分类 + 旧版相邻头迁移）/ `encode_current_header` / `encode_current_event`；dispositions + `image/offload` |
+| 会话格式目录（released 迁移链收口） | `core/session/released/catalog.py` | 要点：读侧用 `read_released_header` 先按物理头分类、再沿相邻版本迁移链逐级收口，避免跨版本一次性跳读；写侧用 `encode_current_header` / `encode_current_event` 统一编码；本模块同时登记 dispositions 与 `image/offload` 新事件 |
 | 会话检查点策略（语义持久化屏障） | `seams/session_checkpoint.py` + `SessionStore.checkpoint` | 三屏障（模型请求前 / 顶层工具体前 / 每步边界），经 `agent/checkpoint` / `tools/pre-execute` / `agent/pre-step`；取消折叠为 canonical `ABORTED_BEFORE_DISPATCH`；fail-closed 无参与者抛 `SessionCheckpointError` |
 | PTC 运行时 seam（programmatic tool calls） | `ptc_runtime/`（types + service + runtime） | 模型写一段程序、程序内经绑定调用工具；`PythonPtcRuntime` = 全新 CPython 子进程 + 行 JSON 绑定桥 + 墙钟/中止/输出上限 + 正交失败分类（exception/timeout/abort/worker-exit/invalid-output/output-limit/protocol/sandbox-unavailable） |
 | PTC `run_code` 工具 | `ptc/run_code.py` + `core/tools.py`（`ToolExec.call_id/root_call_id`） | 模型交付程序 → 绑定枚举 agent 可见工具（剔除 run_code 自身）→ 子派发落 `tool/ptc-dispatch-start` / `tool/ptc-dispatch`（subCallId=`<parent>:ptc:<n>`）；外层结果 canonical `{logs, result?, sandbox?}` |
 
 ### 7.3 迷你复现项目清单（MiniHarness，用 Python）
 
-!!! success "升级说明"
-    本节已升级为独立的引导式手册：从 0 到 1 实现核心系统的完整 step-by-step 教程（每章 = 概念讲解 → 最小可运行 Python 代码 → 逐段解释 → 硬性规定/测试 → 检查点练习）位于仓库的 <span class="path">docs/chapters/</span>（索引见 <span class="path">docs/index.md</span> 首页章节表），配套可运行代码包 <span class="path">miniharness/</span>。本表是手册的骨架索引。
+!!! note "与手册的关系"
+    从 0 到 1 实现核心系统的完整 step-by-step 教程（每章 = 概念讲解 → 最小可运行 Python 代码 → 逐段解释 → 硬性规定/测试 → 检查点练习）位于仓库的 <span class="path">docs/chapters/</span>（索引见 <span class="path">docs/index.md</span> 首页章节表），配套可运行代码包 <span class="path">miniharness/</span>。本表是手册的骨架索引。
 
 建议用 6 个递进的项目把核心吃透。每个项目都要**配测试 + 配 README**，最后能跑通一个"文本 + 一个工具 + 会话持久化"的端到端 demo。
 
@@ -136,7 +136,7 @@
 
 - JSONL 单后端（zstd 帧 + generation 文件名）；`flush` 批量写 + 崩溃合成 `interrupted` turn。
 - YAML 配置 → 按 id 覆盖补丁 → 组装工具集与 Prompt 分节。
-- 回放：重启后从日志重建历史并继续对话（resume）。
+- 回放：重启后从日志重建历史并继续会话（resume）。
 
 <p class="toc-hint">验收：kill 一个进行中的回合再重启，日志平衡、可继续。</p>
 
@@ -159,10 +159,10 @@
 
 </div>
 
-### 7.4 基线已落地扩展能力速览
+### 7.4 核心之外的扩展能力
 
 !!! note "本节定位"
-    六步迷你复现（§7.3）覆盖"技术核心"；下述能力已在 `miniharness/` 按上游契约落地（对照 `docs/architecture.md` 映射表），是**从核心走向产品化**的增量面。每项一句话说明做什么、落在哪。
+    六步迷你复现（§7.3）覆盖"技术核心"；下列能力按上游契约实现于 `miniharness/`（对照 `docs/architecture.md` 映射表），是**从核心走向产品化**的增量面。每项一句话说明做什么、落在哪。
 
 | 能力 | 一句话功能描述 | 所在 |
 |---|---|---|

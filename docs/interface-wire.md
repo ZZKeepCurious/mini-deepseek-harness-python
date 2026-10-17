@@ -3,8 +3,12 @@
 > 定位：这是 `mini-deepseek-harness` 前后端的**唯一耦合面**——`miniharness/web/` 传输层对
 > 前端发布的所有接口约定（信封、帧、错误语义）。产品化前端（仓库顶层 `webui/`）与任何第三方
 > 客户端只依赖本约定，禁止 import Python 内部。正文与当前实现逐条对应，接口约定与上游
-> `dsh-v0.1.5-alpha.1` 一致（`packages/client/connection` + `packages/api/gateway` +
-> `packages/api/session-controller` + `packages/api/remotes` + `host/frontend-static`）。
+> `dsh-v0.2.0-rc.2` 一致（`packages/client/connection` + `packages/api/gateway` +
+> `packages/api/session-controller` + `packages/api/remotes` + `packages/api/job-controller` +
+> `packages/api/terminal-controller` + `packages/api/workspace-controller` +
+> `packages/credentials/deepseek-account` + `packages/schedule/schedule` +
+> `packages/interaction/user-questions` + `packages/preset/agent-preset-registry` +
+> `packages/host/frontend-static`）。
 > mini 侧保留的简化差异另见项目状态记录。
 >
 > 载体实现：`web/server.py`（FastAPI）；语法层：`web/envelope.py` + `web/stream_protocol.py`；
@@ -16,8 +20,8 @@
 
 | 通道 | 载体 | 覆盖范围 | 载体状态码 |
 |---|---|---|---|
-| unary RPC | `POST /api/<endpoint>` | `session/*` 14 个 unary 端点 + `$events/result` 特判 | 401* / 404 / 415 / 400 / 500 / 200 |
-| Remote 流 | `WS /api/remote.mux` | `$events` + `session/follow` + `session/control` 全部长期流 | HTTP 401*（升级拒绝）/ WS 关闭码 1003 / 1008 / 1011 |
+| unary RPC | `POST /api/<endpoint>` | `WebApi.ROUTES` 全部 71 个 unary 端点（`session/*` 17 个 + `terminal`/`workspace`/`workspaceFiles`/`settings`/`credentials`/`schedule`/`account`/`agentPresets` 等各域端点）+ `$events/result` 特判 | 401* / 404 / 415 / 400 / 500 / 200 |
+| Remote 流 | `WS /api/remote.mux` | `GatewayStreams.stream_kinds` 全部 11 条流：`$events` + `session/follow`/`session/control` + `terminal/retain`/`terminal/follow` + `workspace/follow` + `workspaceFiles/changes` + `job/list`/`job/follow` + `account/watchExpiry` + `userQuestions/attachWait` | HTTP 401*（升级拒绝）/ WS 关闭码 1003 / 1008 / 1011 |
 | 会话导出 | `GET /api/session.export` | 会话日志 zip 下载 | 401* / 200 / 400 / 404 / 501 / 500 |
 | SPA 静态 | `GET`/`HEAD /{path}`（非 `/api/`） | `webui/dist/` 或 `web/static/` 产物承载 | 403 / 200 / 404 / 405 |
 
@@ -67,7 +71,7 @@
 
 ## 2. 信封层（`web/envelope.py`）
 
-判别联合只有两型，判别字段 = `type`（`server-request`/`client-response` 四象限在 alpha.1 中不存在）：
+判别联合只有两型，判别字段 = `type`（`server-request`/`client-response` 四象限在当前基线 wire 中不存在）：
 
 - **`client-request`** `{type, rpcId, method, payload}` —— wire 载体 = `POST /api/<endpoint>` 的 body。
 - **`server-response`** `{type, rpcId, result}` —— wire 载体 = 该 POST 的响应体；`rpcId` 必回显请求方，从不重铸。
@@ -84,30 +88,36 @@
 
 **RpcError 的 `code` 是命名空间闭集**（统一为 `<namespace>/<name>` 形式，键集与 typert
 `RemoteErrorDetailsMap` 一致：基础设施 `gateway/*` 加各域可扩展注册；`web/envelope.py`
-`RPC_ERROR_CODES` 收 47 码，下块列本 web 载体直接签发的 33 个，其余由各自域 handler 签发；
+`RPC_ERROR_CODES` 收 59 码（`rpc_error` 对越界码 fail loud），下方全量枚举——其中 29 码在
+`miniharness/web/` 模块内直接构造，其余 30 码为各域注册的码；
 路由层边界校验收 `gateway/input-invalid`，未知端点折算为 `gateway/invocation-unavailable`）：
 
 ```
-gateway/bad-request       gateway/cancelled         gateway/internal
-gateway/arguments-invalid gateway/input-invalid     gateway/invocation-unavailable
-gateway/protocol          gateway/uplink-overflow
-session/not-found
-session/model-unavailable session/conflict          session/invalid-time-zone
-session/provider-credentials-unavailable session/provider-models-unavailable
-session/workspace-attach-failed workspace/not-found agent-preset/conflict
-agent-preset/not-found    agent-preset/invalid      agent-preset/locked
-session/agent-busy
-session/attachment-invalid session/queue-item-not-found session/steer-unavailable
-session/title-invalid     session/fork-unavailable  subagent/not-found
-subagent/catalog-diagnostic subagent/unauthorized
-workspace-file/not-found   workspace-file/not-directory workspace-file/not-regular-file
-workspace-file/not-text    workspace-file/outside-workspace workspace-file/too-large
+gateway/arguments-invalid    gateway/bad-request            gateway/cancelled
+gateway/input-invalid        gateway/internal               gateway/invocation-unavailable
+gateway/lookup-not-found     gateway/protocol               gateway/uplink-overflow
+session/not-found            session/conflict               session/agent-busy
+session/attachment-invalid   session/queue-item-not-found   session/steer-unavailable
+session/title-invalid        session/fork-unavailable       session/invalid-time-zone
+session/model-unavailable    session/provider-credentials-unavailable
+session/provider-models-unavailable    session/projections-unavailable
+session/workspace-attach-failed        session/writer-held
+workspace/not-found          workspace/session-active       workspace/invalid-path
+workspace/move-invalid       workspace/name-conflict
+workspace-file/not-found     workspace-file/not-directory   workspace-file/not-regular-file
+workspace-file/not-text      workspace-file/outside-workspace  workspace-file/too-large
 workspace-file/watch-unsupported
-workspace/session-active
-job/not-found
+subagent/not-found           subagent/catalog-diagnostic    subagent/unauthorized
+agent-preset/conflict        agent-preset/not-found         agent-preset/invalid
+agent-preset/locked          agent-preset/read-only         permission/auto-unavailable
+permission/duplicate-auto    permission/invalid             terminal/unavailable
+terminal/control-unavailable terminal/limit-reached         settings/conflict
+settings/rejected            job/not-found                  credential/rejected
+note-blank                   note-too-large                 session-not-found
+target-not-found             version-conflict
 ```
 
-> dsh-v0.2.0-rc.2 新增码：`session/model-unavailable` 由 `session/selectModel`
+> 部分码带具体签发点：`session/model-unavailable` 由 `session/selectModel`
 > 的模型可用性门（`buildModelCatalog` 派生的可路由 provider）签发；
 > `session/provider-credentials-unavailable` / `session/provider-models-unavailable`
 > 由 `session/initializeDefaultModel` 签发（见 §3）。
@@ -138,6 +148,8 @@ client `connection/src/client/rpc.ts` 按 `/` 切两段）；`web/args.canonical
 | `session/updateQueue` | 队列编辑（edit/remove/steer 三类） | gateway/bad-request / session/attachment-invalid / session/queue-item-not-found / session/steer-unavailable |
 | `session/cancel` | 取消当前回合 | session/not-found / session/agent-busy |
 | `session/page` | 分页历史（throughSeq/beforeSeq/maxMessages） | gateway/bad-request / session/not-found / gateway/internal |
+| `session/projections` | 一次非激活的会话投影读（`{asOfSeq, values}`；会话不存在 → null） | gateway/bad-request / session/projections-unavailable |
+| `session/workspacePathApplications` | 路径的桌面打开候选（无原生打开器 → 空数组） | gateway/bad-request（`path` 缺失） |
 
 > 各端点 `args` 先在路由层经 `web/args.py` 做**统一 `{args}` 边界校验**（同 gateway
 > `assertExactArguments`/`decode`）：字段集合精确匹配——缺 required / 多 unexpected →
@@ -166,8 +178,12 @@ client `connection/src/client/rpc.ts` 按 `/` 切两段）；`web/args.canonical
 
 ## 4. Remote 流（`WS /api/remote.mux`，`web/mux.py` + `web/stream_protocol.py` + `web/uplink.py`）
 
-单一路径承载**全部** Remote 流；每条 open 后的 value 序列经 `item` 帧吐出。客户端 `streamId`
-自编号（非空字符串即可）。
+单一路径承载**全部** Remote 流：一条连接上可并行多条逻辑流，每条由客户端自编的 `streamId`
+标识（非空字符串即可），彼此隔离——单流失败只发该流的 `error` 帧，不关连接、不波及其它流。
+帧分两个方向：浏览器上行四型（`open`/`item`/`end`/`cancel`），宿主下行三型（`item`/`end`/
+`error`），两向都要求字段集合精确匹配（客户端帧违例关 WS 1008）。三条长期流——会话历史流
+`session/follow`、宿主控制流 `session/control`、远程事件流 `$events`——共用「重连即重投完整
+快照」的收敛语义（§4.4）；终端、工作区、文件、作业、账户、提问端点流在 §4.5–§4.11 逐一展开。
 
 **浏览器 → 宿主**（文本帧四型；每型字段集合精确匹配，多一个键或缺一个键都拒并关 WS 1008）：
 
@@ -201,7 +217,7 @@ client `connection/src/client/rpc.ts` 按 `/` 切两段）；`web/args.canonical
   被拒项 → 该流以 `gateway/input-invalid` 中止，终态 `error` 帧消息
   `typert gateway: <endpoint>: wire field "uplink" failed boundary validation`，
   `details` 为 `{endpoint, field: "uplink"}`。每次调用 `uplink()` 只能取一次（第二次抛错）；
-  rc.1 出厂的全部 Remote 方法都是 `In = never`，故 `GatewayStreams.uplink_codecs()` 出厂为空表
+  出厂的全部 Remote 方法都是 `In = never`，故 `GatewayStreams.uplink_codecs()` 出厂为空表
   ——声明点即 typert 生成的描述符 `uplink.codec`（`packages/typert/protocol/src/types.ts:355-357`）。
 - `endpoint` 全集（`GatewayStreams.stream_kinds`，十一条）：`$events`、`session/follow`、
   `session/control`、`terminal/retain`、`terminal/follow`、`workspace/follow`、
@@ -267,11 +283,11 @@ client `connection/src/client/rpc.ts` 按 `/` 切两段）；`web/args.canonical
 
   control baseline 的 projections 覆盖**全部 live 会话**（空会话也各放一条空块）；
   projections.values 与 follow 同源（`telemetry.projection_values` 现场折叠 + 注册表快照，
-  见 4.1）。**rc.1 已移除 queues/jobs 帧**（退役前的 `queue`/`jobs` 替换帧与 baseline
+  见 4.1）。**已移除 queues/jobs 帧**（`queue`/`jobs` 替换帧与 baseline
   queues/jobs 块均不再发）；队列数据经 `inbox` 投影单元（`{next-turn, next-step}` 待处理
   消息）暴露，作业经 job-controller 的 `job/list` 流（§4.7）暴露。
 
-- 续帧（替换语义，rc.1）：`{"type":"projection", "sessionId": "...", "key": "inbox",
+- 续帧（替换语义）：`{"type":"projection", "sessionId": "...", "key": "inbox",
   "value": {...}, "seq": <int>}`——投影单元整体替换（`sessionProjections.onChanged`
   广播），会话 dispose → 不再有对应投影帧。
 - `inbox` 投影值：`{next-turn: PendingMessage[], next-step: PendingMessage[]}`（上游
@@ -485,15 +501,15 @@ unary `POST /api/account/<method>`；除 `getState`/`hasRunningAccountTasks` 外
 `agentPresets` namespace（上游 `packages/preset/agent-preset-registry`，web-app 默认挂载）。
 三个 unary `POST /api/<endpoint>`：
 
-- `agentPresets.list`（`{args:{}}`）→ `AgentPresetRoster`：
+- `agentPresets/list`（`{args:{}}`）→ `AgentPresetRoster`：
   `{presets: [{id, isDefault, name?, description?, broken?}]}`。dsh-v0.2.0-rc.2 删除了
   `modeSelectionEnabled` 字段（roster 形状收窄）。未知端点集合不固定——roster
   是当前部署的声明列表。
-- `agentPresets.read`（`{args:{agentPreset}}`）→ `AgentPresetDocument`：
+- `agentPresets/read`（`{args:{agentPreset}}`）→ `AgentPresetDocument`：
   `{agentPreset, content, name?, description?}`；`content` 是声明行/组合的 entry-list YAML
   （mini JSON 载体 → `rows: []`）。未知 id → `agent-preset/not-found`（details
   `{agentPreset, available}`）。
-- `agentPresets.select`（`{args:{sessionId, agentPreset}}`）→ 提交的 preset id（字符串）。
+- `agentPresets/select`（`{args:{sessionId, agentPreset}}`）→ 提交的 preset id（字符串）。
   **首回合前锁**：`turnBoundary` 投影判定 `openTurnStartSeq !== null || lastTurn > 0` →
   `agent-preset/locked`（details `{sessionId, agentPreset}`，消息 "This session has already
   started"）；合法则解析（未知 → `agent-preset/not-found`）并 append durable
@@ -580,7 +596,7 @@ outcome 归一（`APPROVAL_OUTCOMES = {allowed-once, rejected, cancelled, unavai
 | `json-value.ts` | §4 上行项无损 JSON 校验（`isRemoteUplinkItem`，同上游 typert `isRemoteUplinkItem`） |
 | `events.ts` | §4.3 `$events` ready/emit/waterfall/cancel + §5 结算（settled 集合 fail-closed） |
 | `follow.ts` | §4.1 snapshot/event 帧 + seq 去重（`TrajectoryBuffer`） |
-| `control.ts` | §4.2 的 baseline/projection 帧（rc.1）——`applyControlFrame` 折叠成逐会话投影 map（baseline 全量替换 / projection 逐键替换），队列经 `inboxQueue()` 从 `inbox` 投影展开（next-turn + next-step） |
+| `control.ts` | §4.2 的 baseline/projection 帧——`applyControlFrame` 折叠成逐会话投影 map（baseline 全量替换 / projection 逐键替换），队列经 `inboxQueue()` 从 `inbox` 投影展开（next-turn + next-step） |
 | `jobs.ts` | §4.7 `job/list` roster 流（`{type:'rows', jobs:[JobView]}` 整集替换）+ `JobView` 形状（`isJobListFrame`） |
 | `types.ts` | §2 信封 + §3.1 附件描述符 + 事件/消息/会话类型（镜像 core 模型） |
 

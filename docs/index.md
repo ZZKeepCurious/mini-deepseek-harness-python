@@ -5,7 +5,7 @@
 
 ## 这是什么
 
-本手册用 **Python（成熟开源库优先：SSE 传输 `httpx`、凭据跨进程写锁 `filelock`、文件监视 `watchdog`；YAML 配置 `pyyaml`）** 从零实现一个 `MiniHarness`：一个最小可用的 Agent 运行时核心子集，逐条复现 DeepSeek Harness（`dsh`）的**约定与硬性规定**。
+本手册用 Python（成熟开源库优先：SSE 传输 `httpx`、凭据跨进程写锁 `filelock`、文件监视 `watchdog`、YAML 配置 `pyyaml`）逐层实现一个 `MiniHarness`：一个以清晰复现为核心、面向生产就绪的 Agent 运行时，逐条复现 DeepSeek Harness（`dsh`）的**约定与硬性规定**。
 
 复现的目标是掌握约定，不逐行移植 TypeScript：
 
@@ -66,7 +66,7 @@ flowchart LR
 | [02 插件上下文 + 事件总线](chapters/02-plugin-context-and-event-bus.md) | `Context` 服务仓库、四种派发（emit/waterfall/parallel/serial）、可逆副作用、作用域、依赖驱动激活 | `vendor/cordis` + `core/scope` | 2 天 |
 | [03 工具执行管线](chapters/03-tool-execution-pipeline.md) | 作用域化注册表、schema 校验、pre/execute/post waterfall、超时、规范化 | `packages/core/tools` | 2 天 |
 | [04 Agent Loop + LLM 流式](chapters/04-agent-loop-and-llm-streaming.md) | turn/step 状态机、inbox、StreamChunk 协议、DeepSeek Messages（Anthropic 兼容）SSE 适配器、模型请求重试/退避（§4.9：retry-policy + llm-retry + agent/request-error） | `core/agent-loop` + `llm/llm` + `llm/llm-deepseek` + `llm/llm-retry` | 3 天 |
-| [05 持久化 + 崩溃恢复 + 组合](chapters/05-persistence-recovery-composition.md) | JSONL/SQLite 双后端、flush 栅栏、fail-closed、interrupted 修复、boot + patch | `session/session-persistence` + `boot` | 2 天 |
+| [05 持久化 + 崩溃恢复 + 组合](chapters/05-persistence-recovery-composition.md) | JSONL 后端（对齐上游）、SQLite 教学扩展、flush 栅栏、fail-closed、interrupted 修复、boot + patch | `session/session-persistence` + `boot` | 2 天 |
 | [06 进阶扩展口](chapters/06-advanced-seams.md) | 沙箱 / 凭据 / 子 agent —— "换 Provider 不改 Consumer"；§6.9 进阶实现（真沙箱后端 / 凭据四层 / 远程三通道） | `capability-seams` 各页 | 2-3 天 |
 | [07 外部入口](chapters/07-external-entry-points.md) | 两个产品表面（web/headless）+ 三个协议入口（ACP/SDK/hooks）、headless 深读与复现、web 传输层复现（§7.5：两信封 RPC + `/api/remote.mux` WebSocket 承载 Remote 流 + `$events`/`$events/result` + follow/control + 审批 waterfall 桥 + 静态服务 + vanilla SPA）、JSON-RPC 信封子集（§7.6）、ACP 最小子集（§7.7）与 hooks 桥（§7.8）复现 | `apps/cli` + `bundle/{headless,web-app}` + `api/gateway` + `api/session-controller` + `host/frontend-static` + `{acp,sdk,hooks}` | 2-3 天 |
 | [08 组合层深读](chapters/08-composition-layer.md) | vendor/cordis loader、host/agent plane、isolate realm、配置树三层归属、preset 四模式；mini：loader 活树（`miniharness/loader/`）+ preset roster + 挂载视图 | `vendor/{cordis,loader,include}` + `packages/preset` + `apps/cli/config/agent-presets` | 3-4 天 |
@@ -90,11 +90,11 @@ python -m unittest discover -s tests -t .
 python -m miniharness.demo
 ```
 
-> 每章开头都有"先动手再读解释"的最小代码；读完一章就运行一次该章测试，体会硬性规定如何被测试固定下来。
+> 每章开头都有"先动手再读解释"的最小代码；读完一章就运行一次该章测试，用断言验证硬性规定。
 
 ## 手册与报告的关系
 
-- **报告**（Markdown 体系，站点已统一为 MkDocs）回答"系统长什么样、为什么这样设计"：分层架构、ctx 服务地图、技术核心、关键流程、**产品面九大议题**（模式/preset、外部入口、Trajectory、干预面、审批、自我修改、resume、plan/goal、压缩与后台）——全部配 Mermaid 图，按主题分页。
+- **报告**（Markdown 体系，站点已统一为 MkDocs）回答"系统长什么样、为什么这样设计"：分层架构、ctx 服务地图、技术核心、关键流程、**产品面十大议题**（模式/preset、外部入口、Trajectory、干预面、审批、自我修改、resume、plan/goal、压缩与后台、skills）——全部配 Mermaid 图，按主题分页。
 - **本手册**回答"系统怎么从零长出来"：一章一个主题，代码逐步构建，测试即硬性规定。
 - 报告 `index.md` 的四维对照表（上游包 ↔ mini 模块 ↔ 手册章节 ↔ 报告页面）是定位各主题的索引。
 - 报告第二部分 §7.3 的 6 个复现项目清单，就是本手册 01~05 章的骨架索引。

@@ -4,7 +4,7 @@
 
 ## 0.1 前置知识
 
-- Python 3.10+。核心实现以标准库为骨架：`unittest`、`json`、`sqlite3`、`threading`、`dataclasses`、`asyncio`；成熟开源库优先补齐关键能力——`httpx`（SSE 传输 + Web 出站）、`filelock`（跨进程锁）、`watchdog`（文件观察）、`zstandard`（持久化帧容器）、`pillow`（附件图片管线），无语义等价库处才手写。
+- Python 3.10+。核心实现以标准库为骨架：`unittest`、`json`、`sqlite3`、`threading`、`dataclasses`、`asyncio`；成熟开源库优先补齐关键能力——`httpx`（SSE 传输 + Web 出站）、`filelock`（跨进程锁）、`watchdog`（文件观察）、`pyyaml`（YAML 配置）、`zstandard`（持久化帧容器）、`pillow`（附件图片管线），无语义等价库处才手写。
 - 基本的事件 / 回调 / 上下文概念。
 - 了解一个 Agent 回合的 wire 形状：`user message → assistant（可能带 tool call）→ tool result → assistant`。
 
@@ -89,15 +89,15 @@ MiniHarness 是清晰的 Python 复现（以可复现、可学习为核心），
 | 服务按隔离标签键控的全局 store（`ctx.get` 缺省返回 `None`；`ctx.isolate(name)` 换标签实现 per-agent 隔离；不再使用 declarative `provides` 字段，改为 apply 期 `provide` 动态登记） | 反射 `reflect` 全量协议（`inject`/`provide`/`get`/`set`/`isolate`/`intercept` + `ctx.<name>` 属性代理） |
 | 工具体执行体直接 `await`（async 约定）；同步工具函数经 `_maybe_await` 解包；阻塞调用以 `asyncio.to_thread` 显式放行（第 12 章） | `isConcurrencySafe` 并行池 + 串行屏障 |
 | LLM 流式 async 约定 + httpx 异步 SSE 传输（abort 置位即关闭连接，真取消；per-read idle 300s 同上游） | `fetch` + AbortSignal 原生异步流 |
- | 同步门面经进程级常驻单事件循环驱动（`core/agent_loop/resident_loop.py` 懒加载单例；主线程 Ctrl+C 协作取消） | 常驻单事件循环（Node 进程固有） |
+| 同步门面经进程级常驻单事件循环驱动（`core/agent_loop/resident_loop.py` 懒加载单例；主线程 Ctrl+C 协作取消） | 常驻单事件循环（Node 进程固有） |
 | JSON/YAML 配置 + 补丁（pyyaml 硬依赖承载 YAML；`!!js` 仅 `process.env.<NAME>` 子集） | YAML cordis.yml（同样的 id/insert/replace 语义） |
 | LLM 失败以异常抛出（finish 带内 `{kind:'error'|'aborted'}` 与异常同走 `agent/request-error` waterfall） | `LlmError` 编码 `CONTEXT_WINDOW_EXCEEDED` / `EMPTY_RESPONSE`（可重试）等 |
-| `agent/turn-stopping`、`system-prompt/assemble` waterfall 已实现（turn-stopping 为串行终点检查点，见第 4/13 章） | 上游都有 |
-| JSONL 载体与上游一致（zstd 拼接帧 + 一行一事件 + format.ts 目录布局，明文模式可配；教学章节用简化明文形态）；SQLite 列 `(session_id, seq, type, data)` | JSONL 默认 checksum+Zstandard 帧容器；SQLite 列 `(session_id, seq, type, time, data, source_event_seqs, surface_op)` |
+| `agent/turn-stopping`（串行终点检查点，见第 4/13 章）、`system-prompt/assemble` 两个 waterfall 都在 mini 中提供 | 上游都有 |
+| JSONL 载体与上游一致（zstd 拼接帧容器 + 一行一事件 + format.ts 目录布局，明文模式可配；教学章节用简化明文形态）；另有一个仅用于演示「扩展口可换实现」的 SQLite 教学后端（上游无对应实现，第 5 章） | JSONL 默认 checksum + Zstandard 帧容器（`session-persistence-jsonl`）；无 SQLite 持久化后端（SQLite 仅用于 `session-query` 检索域） |
 | `assistant/message` source 带 `{kind, provider, model}` | 消息 `{id, role, content, source}` 全字段 |
 
 ## 检查点
 
-- [ ] `python -m unittest discover -s tests -t .` 全部通过
-- [ ] `python -m miniharness.demo` 输出一次完整的回合日志
-- [ ] 能说出 `core/session`、`core/scope`、`core/tools`、`llm/`、`core/agent_loop`、`core/session/persistence`、`boot/` 各自管什么
+1. `python -m unittest discover -s tests -t .` 全部通过
+2. `python -m miniharness.demo` 输出一次完整的回合日志
+3. 能说出 `core/session`、`core/scope`、`core/tools`、`llm/`、`core/agent_loop`、`core/session/persistence`、`boot/` 各自管什么

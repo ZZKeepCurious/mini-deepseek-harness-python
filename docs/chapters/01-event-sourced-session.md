@@ -3,19 +3,9 @@
 > 对应 dsh 真实源码：`packages/core/session`（`docs/subsystems/session.md`）
 > 前置：第 00 章。产出文件：`miniharness/core/session/`（包）+ `tests/test_session.py`
 
-!!! warning "早期简化形态"
-    本章代码为**教学简化形态**，与当前实现存在以下差异（学习时以当前实现为准，见 00-setup §0.6 简化表）：
-
-    - **产出位置**：本章演示的单文件 `session.py` 实为 `core/session/` 包（`session.py` + `invariant.py` + `types.py` + `surface.py` + `repair.py`）。
-    - **`Session.append` 签名**：本章为 `append(event: dict)`；实现为 `append(type_, data=None, surfaceOp=None, sourceEventSeqs=None)`（`core/session/session.py:201`），信封 `{type, seq, time, data}` 由 `seq == len(log)` 自动编号。
-    - **事件词汇表**：本章只讲 8 个核心类型；实现 `KNOWN_TYPES` 共 **39 个**（`core/session/types.py`）：核心 9 类（`user/message`、`assistant/message`（V3 内嵌 `stream`）、`assistant/attempt`（失败/中止 attempt）、`turn/start|end`、`step/start|end`、`tool/call`）+ `tool/result`、`request/header`、`request/context`、`session/end-seed`、`agent/inbox/spliced`、`approval/asked|decided|policy`、`hook/invoked|result`、`llm/retry|retry-started`、`compaction/start|summary|end|prune`、`plan/mode`、`command/run|done`、`goal/change`、`subagent/descriptor`、`sandbox/mode`、`system/message`、`feedback/message-put|delete`、`team/member`、`team/message/queued|delivered`、`team/task`、`tool/ptc-dispatch{,-start}`（上游 alpha.1.5 全集 **54 类**，来自生成式 `KNOWN_SESSION_EVENT_TYPES`，不含 `assistant/chunk`；读真实上游日志遇超集类型时 fail-closed 拒读）。
-    - **`derive_messages`**：本章是"扁平字符串消息 + 按 role 替换"；实现是 `ContentBlock` 消息对象 + `surfaceOp: {op:'replace', startSeq, endSeq}` 区间遮蔽（`core/session/surface.py:181` `_surface_nodes` 折叠），replace 遮蔽被替换区间为一个新节点。
-    - **`repair_interrupted_turn`**：本章只补 `turn/end` 字符串 reason；实现先为未匹配 tool call 合成 error 结果（`TOOL_NOT_STARTED` / `TOOL_OUTCOME_UNKNOWN`），再补 `step/end` + `turn/end {kind:'interrupted'}`，时间戳复用最后真实事件（`core/session/repair.py:27`）。
-    - **"五个硬性规定"**：replace 遮蔽、`session/end-seed` 标记、repair 合成（`{kind:'interrupted'}`）等已由 `tests/test_session.py` 固定，以测试为最终验收。
-
 ## 1.1 这一章要做什么，以及为什么它是整个框架的地基
 
-这一章是整个手册的地基，值得你认真读完。
+这一章是整个手册的地基。
 
 一个聊天框架的"会话"通常被实现为一个消息数组：把用户消息、模型回复 append 进去，需要上下文时直接读这个数组。dsh 不这么做。看 `packages/core/session` 的源码，第一印象就会非常不同：它没有"消息数组"，只有一个 `SessionEvent` 追加式日志，外加一个 `deriveMessages()` 投影函数。
 
@@ -29,13 +19,13 @@
 2. 实现 `derive_messages()`：从日志派生模型历史的纯函数。历史只从这里来，绝不另存副本。
 3. 实现 turn 的"括号平衡"硬性规定，以及崩溃后的修复。
 
-全程就一个核心信念，先记在这里：
+全章围绕一条约束：
 
 > **模型可见 ⟺ 已记录**。任何进入模型请求的内容，必须能从日志重建；想新增任何模型可见的输入，就必须新增一种 session 事件。
 
 ## 1.2 概念：为什么是"事件日志"，而不是"消息数组"
 
-先看常规做法的问题，再看 dsh 的选择，对比着理解会清楚得多。
+先看常规做法的问题，再看 dsh 的选择。
 
 **常规做法**：维护一个 `messages: list[Message]`，每次对话往里面 append。简单、直接，多数场景够用。但它有三个固有短板：
 
@@ -64,18 +54,9 @@ flowchart LR
 
 注意图里日志是唯一的起点，投影和持久化都是它的下游，两者互不直接打交道。这个结构后面会反复出现。
 
-**逐节点走读**（对应上图从上到下）：
-
-1. `Session`（追加式事件日志）是唯一数据源——每个事实都 append 成一条事件，绝不维护一个独立的"消息数组"副本。
-2. `deriveMessages()` 是纯函数投影：每次调用都从日志现算模型历史，无缓存副本、不修改日志。
-3. `模型历史` 只是投影的结果视图，永远可以从日志重建——这就是上一节"模型可见 ⟺ 已记录"的图表示。
-4. `持久化` 同样是日志的下游：按 seq 顺序追加写盘、启动时按序回放重建日志；它只认日志，不认投影出来的消息。
-5. 关键约束：投影与持久化**互不直接打交道**——它们各自消费同一份日志，彼此不调用，因此谁改谁都不会破坏另一条链路（解耦）。
-6. 崩溃后的恢复闭合了回路：持久化把已写入磁盘的事件回灌回 `Session`，日志恢复后再重新投影出完整历史。
-
 ## 1.3 代码 step-by-step
 
-每一步都先说"为什么这么写"，再给代码，然后讨论容易踩的坑。建议边读边敲，而不是复制粘贴。
+每一步都先说"为什么这么写"，再给代码，然后讨论容易踩的坑。建议边读边敲。
 
 ### 步骤 1：先定事件类型集合
 
@@ -118,7 +99,7 @@ def deep_freeze(value):
 两个细节值得展开：
 
 - `allow_nan=False`：Python 的 `json.dumps` 默认允许输出 `NaN`，但 `NaN` 不是合法 JSON，别的语言读不了。关掉它，序列化不了的一律抛错。很多 JSON 相关的隐性 bug 都是从这漏出去的。
-- `MappingProxyType`：返回的是"只读视图"而不是拷贝。调用方以为能改，一改就抛 `TypeError`。日志一旦写入就不可变，这条后面会被测试固定。
+- `MappingProxyType`：返回的是"只读视图"而不是拷贝。调用方以为能改，一改就抛 `TypeError`。日志一旦写入就不可变。
 
 > 真实 dsh 在 `append()` 源头做同样的深度校验和冻结——坏事件永远进不了日志，这是"日志即真相"的硬保证。
 
@@ -155,7 +136,7 @@ class Session:
         return record
 ```
 
-三个校验对应三个硬性规定，缺一不可：
+三个校验缺一不可：
 
 - **类型在册**（`KNOWN_TYPES`）→ 拒绝未知类型，保证日志内容永远可被理解。
 - **surface 事件必须带合法 `surfaceOp`** → 保证投影永远有据可依。试想一条 `user/message` 没带 `surfaceOp` 进了日志，投影时是 append 还是 replace？没法判断，所以源头就拦下。
@@ -246,7 +227,7 @@ def repair_interrupted_turn(events) -> list[dict]:
 
 `turn_balance` 是朴素的计数器：`start` 加一，`end` 减一。减到负数就说明日志被破坏了（`end` 比 `start` 多）。
 
-崩溃修复的做法值得单独讨论：**常规做法是截断或回滚**，dsh 选择**绝不截断**。原因：大 turn 可能非常巨大（一次长会话里可能跑了几十轮工具调用），截断等于把已经发生过的事实悄悄丢掉。dsh 的做法是合成 `turn/end { reason: "interrupted" }` 把括号补平衡。历史保留完整，只是多了一条诚实的标记："这次回合是被打断的，不是正常结束的"。这个 `interrupted` 标记在 04 章讲 agent loop 时还会再见到。
+崩溃修复的做法值得单独讨论：**常规做法是截断或回滚**，dsh 选择**绝不截断**。原因：大 turn 可能非常巨大（一次长会话里可能跑了几十轮工具调用），截断等于把已经发生过的事实悄悄丢掉。dsh 的做法是合成 `turn/end {kind:'interrupted'}` 把括号补平衡。历史保留完整，只是多了一条诚实的标记："这次回合是被打断的，不是正常结束的"。这个 `interrupted` 标记在 04 章讲 agent loop 时还会再见到。
 
 > 上游 `packages/core/session` 的崩溃恢复同样是合成 `interrupted`、绝不截断，连标记名都一致。
 
@@ -268,7 +249,7 @@ python -m unittest tests.test_session -v
 
 全绿的话，你已经有了一个可以放心喂给模型的事件日志。
 
-## 1.5 检查点练习（做了才算真的会）
+## 1.5 检查点练习
 
 1. **加一种新事件**：仿照 `tool/result` 加 `feedback/rate`（人类反馈，`surfaceOp=replace`，替换最近一条 assistant 消息）。需要改 `KNOWN_TYPES` 和 `derive_messages`，再给 `tests/test_session.py` 加一个测试。做完会体会到"新增模型可见输入 = 新增事件类型"这句话的实际操作。
 2. **证明投影是纯函数**：写一个测试，连续调用 `derive_messages` 两次，断言结果相等，且 `session.events` 没有被改动。
@@ -278,8 +259,24 @@ python -m unittest tests.test_session -v
 
 现在打开 `deepseek-harness/packages/core/session/src` 对照。建议的读法：先看 `SessionEventMap`（对应本章的 `KNOWN_TYPES`，但它是 TypeScript 接口，靠声明合并扩展），再看 `append()` 的校验（真实实现还有 event 版本字段），最后看 `deriveMessages()`（真实实现按"surface 节点"序列投影，语义和我们一致，但组织方式更正式）。
 
-不用全读，读 50 行就够。目标不在读完，而在体会一件事：**约定一样，实现更严格**。简化版抓住了设计精髓，真实版在细节上更严密——比如事件版本这类简化版没碰的东西，都是为真实世界的运维场景准备的。
+读 50 行就够，重点是体会一件事：约定一样，实现更严格。简化版抓住了设计精髓，真实版在细节上更严密——比如事件版本这类简化版没碰的东西，都是为真实世界的运维场景准备的。
+
+### 本章教学代码与仓库实现的差异
+
+本章为了在一屏内讲清骨架，把 `Session` 写成单文件 `session.py`，字段与校验也做了精简。仓库实现（`miniharness/core/session/`）与之对应的形态如下：
+
+| 本章教学形态 | 仓库实现 |
+|---|---|
+| 单文件 `session.py`；`Session.append` 在 `core/session/session.py` 落地 | `core/session/` 包（`core/session/types.py` 等）：`session.py` + `invariant.py` + `types.py` + `surface.py` + `repair.py` |
+| `append(event: dict)`，调用方自己带 `type` | `append(type_, data=None, surfaceOp=None, sourceEventSeqs=None)`；信封 `{type, seq, time, data}` 由 `seq == len(log) - 1` 自动编号 |
+| `KNOWN_TYPES` 9 类，只够跑通本章 | 收录 54 类，见下 |
+| `derive_messages` 产"扁平字符串消息"，`replace` 按同 role 替换 | `ContentBlock` 消息对象 + `surfaceOp: {op:'replace', startSeq, endSeq}` 区间遮蔽：replace 经 `_surface_nodes` 折叠，把被替换区间压成一个新节点 |
+| `repair_interrupted_turn` 只补字符串 reason | 先为未匹配 tool call 合成 error 结果（`TOOL_NOT_STARTED` / `TOOL_OUTCOME_UNKNOWN`），再补 `step/end` + `turn/end {kind:'interrupted'}`，时间戳复用最后真实事件 |
+
+仓库 `KNOWN_TYPES` 收录的 54 类，是上游 `KNOWN_SESSION_EVENT_TYPES` 的同名全集（不含 `assistant/chunk`）。除本章的 9 类（`turn/start|end`、`step/start|end`、`tool/call`、`tool/result`、`user/message`、`assistant/message`——自 V3 起把模型流内嵌为 `stream`、`assistant/attempt` 记失败或中止的 attempt）之外，还登记：`request/header`、`request/context`；`session/end-seed`、`session/title`、`session/title-llm-request`；`system/message`、`developer/message`、`workspace/changes`；`agent/inbox/spliced`、`agent-preset/selected`；`approval/asked|decided|policy`、`permission/preset`；`hook/invoked|result`；`llm/retry|retry-started`；`compaction/start|summary|end|prune`、`image/offload`；`plan/mode`；`command/run|done`；`goal/change`；`subagent/descriptor`；`sandbox/mode`；`tool/ptc-dispatch{,-start}`；`feedback/message-put|delete`、`feedback/record`；`team/member`、`team/task`、`team/message/queued|delivered`；`schedule/change`；`todo/write`；`tool-workflow/run-start|run-end|agent-start|agent-end`；`session-log-deepseek/delivery-accepted`。读真实上游日志遇到这些类型之外的事件时 fail-closed 拒读。
+
+replace 遮蔽、`session/end-seed` 标记、repair 合成 `{kind:'interrupted'}` 等行为由 `tests/test_session.py` 固定，测试是最终验收依据。
 
 ## 1.7 收尾
 
-这一章立起了整座大厦的地基：一条只追加的日志，一个纯投影函数，一组不可违背的硬性规定。下一章在它上面叠第二层——插件上下文与事件总线。到时候会看到，"日志即真相"这个决定让很多东西都变得简单：插件想观察会话？订阅事件即可。插件想改变会话？照常追加事件。没有例外，没有后门。
+这一章立起了整个框架的地基：一条只追加的日志，一个纯投影函数，一组不可违背的硬性规定。下一章在它上面叠第二层——插件上下文与事件总线。到时候会看到，"日志即真相"这个决定让很多东西都变得简单：插件想观察会话？订阅事件即可。插件想改变会话？照常追加事件。没有例外，没有后门。

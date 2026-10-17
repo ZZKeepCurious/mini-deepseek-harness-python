@@ -7,15 +7,14 @@
 
 第 2 章的 `isolate` 解决"同一个服务名在不同作用域解析到不同实现"。但事件派发还想要一种**更精细的路由**：一个监听器只接收"某个具体身份（agent / session / tool）"相关的事件，而不是整个作用域树。
 
-dsh 用一个极小的原语解决这个问题：**不透明的 scope 键（`ScopeKey`）+ 一条 parent 关系 + 一个"仅用于路由"的事件载波（`scopeTarget`）**。这套做法叫 dsh_scope（上游 `@deepseek-ai/dsh-scope`），它已经在 mini 全量实现，但此前只在 `architecture.md` 映射行登记，没有逐项解读——本章补上。
+dsh 用一个极小的原语解决这个问题：**不透明的 scope 键（`ScopeKey`）+ 一条 parent 关系 + 一个"仅用于路由"的事件载波（`scopeTarget`）**。这套做法叫 dsh_scope（上游 `@deepseek-ai/dsh-scope`）。
 
-核心洞察（也是整章的题眼）：
+`scopeParents` 这条 parent 关系同时驱动两个方向：
 
-> **一条 `scopeParents` 关系同时驱动两个方向**：
-> - **注册视图向下继承**——子 scope 经 `ScopedLayers` 看到祖先的层（`chainLayers` / `merge`，越近的 scope 条目越晚叠加、胜出）；
-> - **事件接纳向上延伸**——挂了祖先 scope 标号的监听器，会收到派发到后裔 key 的事件（`scopeTarget`）。事件只沿链**向上**流，绝不向下。
+- **注册视图向下继承**：子 scope 经 `ScopedLayers` 看到祖先的层（`chainLayers` / `merge`，越近的 scope 条目越晚叠加、胜出）；
+- **事件接纳向上延伸**：挂了祖先 scope 标号的监听器，会收到派发到后裔 key 的事件（`scopeTarget`）。事件只沿链向上流，绝不向下。
 
-一句话：**注册往子树看，事件往祖先看。**
+两个方向不对称，这正是整套模型的关键：注册往子树看，事件往祖先看。
 
 ## 14.2 概念：ScopeKey 与载波
 
@@ -68,7 +67,7 @@ def scope_chain_of(key):               # nearest-first: [key, parent, ...]
     return chain
 ```
 
-对照上游 `index.ts:39-102`：`scopeParents` 是 `WeakMap<ScopeKey, ScopeKey>`；`linkScopeParent` 从 `parent` 沿父链走到根，撞上 `key` 即拒绝（每条链都走到根，确保无环）；`bindScopeParent` 已绑定键抛错，仅返回的 `ScopeParentBinding` 能 `rebind`——blank-session 重组约定由持有者保证。mini 用 `WeakKeyDictionary` 承载弱引用语义，`ScopeKey` 用最小类（裸 `object()` 不可弱引用）。
+对照上游 `index.ts:39-102`：`scopeParents` 是 `WeakMap<ScopeKey, ScopeKey>`；`linkScopeParent` 从 `parent` 沿父链走到根，撞上 `key` 即拒绝（每条链都走到根，确保无环）；`bindScopeParent` 已绑定键抛错，仅返回的 `ScopeParentBinding` 能 `rebind`——blank-session 重组（在新会话里按新根重建 scope 树）时，只有原绑定持有者能改父链接。mini 用 `WeakKeyDictionary` 承载弱引用语义，`ScopeKey` 用最小类（裸 `object()` 不可弱引用）。
 
 ### 步骤 2：`create_scope` —— 铸一枚带身份的作用域
 
@@ -82,7 +81,7 @@ def create_scope(ctx, key, parent=None, name="scope"):
     return Scope(scoped, fiber)
 ```
 
-作用域上下文继承铸造方 fiber 的依赖 API，并**拥有**经它做出的每笔注册（fiber 拆解即逆序回滚，见第 2 章）。`Scope.dispose()` 记忆化 `quiesce_fiber`：先 `fiber.dispose()`，再跟随 `fiber.inertia` 排空（同上游 `quiesceFiber`：拆解后继续等异步拆解惯性，mini 按"每个新惯性对象各消费一次"逼近上游"完成后置 undefined"的语义）。
+作用域上下文继承铸造方 fiber 的依赖 API，并**拥有**经它做出的每笔注册（fiber 拆解即逆序回滚，见第 2 章）。`Scope.dispose()` 记忆化 `quiesce_fiber`：先 `fiber.dispose()`，再跟随 `fiber.inertia` 排空。`inertia` 是 fiber 拆解期间在途的异步转换（第 2 章 §2.3），拆解后要等它到达静止点才能继续（同上游 `quiesceFiber`；mini 按"每个新惯性对象各消费一次"逼近上游"完成后置 undefined"的语义）。
 
 ### 步骤 3：`scope_of` —— 读最近的身份标号
 
@@ -129,7 +128,7 @@ def scope_target(base, key):
 
 同上游 `index.ts:170-185`：`scopeTarget(base, key)` 保留 `base` 自身 Cordis filter，再按 scope 图接纳——**未打标 → 全局；打标 → 键或键的祖先命中才接纳**。注释写得很直白："事件沿 scope 链向上流、绝不向下（a tag BELOW the dispatch key stays excluded）"。
 
-这正是"注册向下、事件向上"的另一半：一个 standing 组合（如宿主 root）挂了祖先 scope 的监听器，就能收到其下每个 agent 的事件，而不必每个 agent 单独注册——这也是第 7/9 章里"一个会话店观察每个被组合 agent"的根基。
+这正是"注册向下、事件向上"的另一半：一个常驻组合（standing composition，进程启动时挂上、一直存在的宿主 root 就是这种）挂了祖先 scope 的监听器，就能收到其下每个 agent 的事件，而不必每个 agent 单独注册——这也是第 7、9 章里"一个会话店观察每个被组合 agent"的根基。
 
 ### 步骤 5：`ScopedLayers` —— 注册表的 scope 感知存储
 
@@ -155,17 +154,49 @@ class ScopedLayers:
         return merged
     def effect(self, ctx, action, label, notify=True):
         scope = scope_of(ctx)                 # 可见性 + effect 归属都来自注册上下文
-        ...
+
+        def body():
+            if scope is None:
+                layer = self.global_layer
+                created = False
+            else:
+                existing = self._scoped.get(scope)
+                if existing is None:
+                    layer = self._create_layer(scope)
+                    self._scoped[scope] = layer
+                    created = True
+                else:
+                    layer = existing
+                    created = False
+
+            try:
+                undo = action(layer)
+            except Exception:
+                if scope is not None and created and layer.isEmpty():
+                    self._scoped.pop(scope, None)   # 变更抛错且层是新建的空层 → 回收
+                raise
+
+            def disposer():
+                undo()
+                if scope is not None and layer.isEmpty():
+                    self._scoped.pop(scope, None)
+                if notify:
+                    self._on_change()
+
+            yield disposer
+            if notify:
+                self._on_change()
+
         return ctx.effect(body, label)
 ```
 
-`NamedEntries`（插入序、命名、重复诊断、幂等撤销）与 `AnonymousEntries`（插入序、匿名、独立注册身份）是两层的具体存储。关键设计：**读从不创建 scope 层**（`peek` 链盲，只寻址某 scope 自身贡献；需要继承用 `chain_layers`）；注册把一次同步层变更挂到注册上下文（scope 可见性 + effect 归属），层空了才回收。第 3 章工具注册表（`core/tools.py`）正是用它实现"per-agent 工具隔离 + 全局工具兜底"。
+`NamedEntries`（插入序、命名、重复诊断、幂等撤销）与 `AnonymousEntries`（插入序、匿名、独立注册身份）是两层的具体存储。关键设计：**读从不创建 scope 层**（`peek` 链盲，只寻址某 scope 自身贡献；需要继承用 `chain_layers`）；注册把一次同步层变更挂到注册上下文（scope 可见性 + effect 归属），层空了才回收。第 3 章工具注册表（`core/tools.py`）正是用它实现"per-agent 工具隔离 + 全局工具作为后备"。
 
 ## 14.4 mini 怎么用它：三处真实消费
 
 1. **agent/* 事件载波路由**（`core/scope.py` 派发）：所有 `agent/*` 派发点带 `this_arg=scope_target(loop 自身 scope 键)`，未打标 root 监听器全收、打标监听器按"载波键或其祖先"接纳、兄弟作用域隔离。
 2. **会话 owner 路由**（`core/session_store.py`）：`session/created|disposed|event|flush` 经 `scope_target(session, scope_of(owner_ctx or self.ctx))` 派发——owner 及其祖先收到、兄弟/后代隔离（同上游 `scopeTarget(session, scopeOf(store.ctx))`）。
-3. **工具注册表 scope 视图**（`core/tools.py`）：`ScopedLayers` 让 `resolve`/缺省视角 = 注册表 root 的 scope 键，显式 scope 沿父链最近者胜 + 全局层兜底。
+3. **工具注册表 scope 视图**（`core/tools.py`）：`ScopedLayers` 让 `resolve`/缺省视角 = 注册表 root 的 scope 键，显式 scope 沿父链最近者胜，全局层作为后备。
 
 ## 14.5 验收：硬性规定
 
@@ -175,7 +206,7 @@ class ScopedLayers:
 2. `create_scope` 铸出带 `_scope_key` 的上下文；`dispose` 记忆化且逆序回滚注册；`scope_of` 沿父链取最近标号、无标号返回 `None`。
 3. `scope_target` 载波：`admit` 对未打标监听器全局接纳；对打标监听器仅在载波键或其祖先命中时接纳；低于派发键的标号排除（事件不向下）。
 4. `is_scope_carrier` / `carrier_key_of` 正确识别载波与读键。
-5. `ScopedLayers.merge` 近 scope 同名胜出；`effect` 注销回收空层；注册随 fiber 拆解自动移除（HMR 约定）。
+5. `ScopedLayers.merge` 近 scope 同名胜出；`effect` 注销回收空层；注册随 fiber 拆解自动移除（HMR，热模块替换：文件改动触发插件重载时，旧注册随拆解一起消失）。
 
 ```bash
 python -m unittest tests.test_dsh_scope -v
@@ -196,4 +227,4 @@ python -m unittest tests.test_dsh_scope -v
 
 ## 14.8 收尾
 
-这一章的一句话可以带走：**身份即路由**。dsh_scope 用一条 parent 关系把"服务隔离标签"升级成"事件身份路由"：注册往子树看、事件往祖先看。它与第 2 章的 `isolate`、第 13 章的 `Service`/`intercept` 合在一起，构成了 dsh 插件体系的三层骨架——服务怎么找（reflect + isolate）、插件怎么协作（事件总线 + 载波）、服务怎么长（Service 基类 + intercept 配置）。到这里，Cordis 的核心架构在 mini 里已经全量实现，且本教程第 2/13/14 章给出了逐项解读。
+dsh_scope 用一条 parent 关系把服务隔离标签升级成事件身份路由：注册往子树看，事件往祖先看。它与第 2 章的 `isolate`、第 13 章的 `Service` 合起来，构成 dsh 插件体系的三层骨架：服务怎么找（reflect 加 isolate）、事件怎么路由（事件总线加载波）、服务怎么长（Service 基类加 intercept 配置）。

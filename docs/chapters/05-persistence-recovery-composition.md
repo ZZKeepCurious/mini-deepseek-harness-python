@@ -4,24 +4,14 @@
 >（`docs/subsystems/persistence.md`、`docs/subsystems/session-projection.md`）
 > 前置：第 1~4 章。产出文件：`miniharness/core/session/persistence.py`、`miniharness/boot/boot.py`、`example_plugins.py` + `tests/test_persistence_boot.py`
 
-!!! warning "早期简化形态"
-    本章代码为**教学简化形态**，与当前实现存在以下差异（学习时以当前实现为准，见 00-setup §0.6 简化表）：
-
-    - **JSONL 片段**：实现每文件 header 行 + 事件行，`SESSION_FORMAT_VERSION = 4` 不符即拒读（fail-closed）；torn 尾部的**截断发生在读路径**——`read_prepared` / `_load_checked` 识别 torn 后即调 `_truncate_to` 截断磁盘文件（`core/session/persistence.py:846,874`），随后 `commit_repair` 只**追加** recovered 事件 + closers 并 fsync（`core/session/persistence.py:965`，同上游 commitRepair）。
-    - **`repair_and_replay`**：本章为逐条 `append` 重放；实现为 seed 回放——从 `session/end-seed` 标记重放，且修复合成的 closers 经 `commit_repair` 写入磁盘（`core/session/persistence.py`，基类接口 + JSONL 后端实现）。
-    - **`turn/end` reason**：本章差异表写 `reason = "interrupted"` 字符串；实现为对象 `{kind:'interrupted'}`（配合 `repair_interrupted_turn` 合成 closers，见第 1 章横幅）。
-    - **崩溃演示**：本章 §5.2"kill 进程"实为手动构造未闭合回合来模拟崩溃尾部，非真实 kill（`tests/test_persistence_boot.py` 可复核）。
-    - **简化载体**：配置为 YAML（pyyaml 硬依赖承载）+ `!!js` 仅 `process.env.<NAME>` 子集。JSONL 载体**与上游默认形态一致**：zstd 拼接帧容器 + 一行一事件（V4 事件格式——模型流内嵌 `assistant/message` + tool 角色平铺结果 + `developer/message`）+ format.ts 目录布局（`root/--<projectKey(cwd)>--/<encodeSegment(id)>/session.v4.jsonl[.zstd]`——generation 版本化文件名，v0 旧名 `session.jsonl` 保留拒读；编码互斥、遗留布局直接拒绝），见 `zstd_frames.py` 与 `tests/test_persistence_zstd.py`。
-    - **组合装载（§5.4）**：本章的 `boot()` 为早期静态数组形态（`json.load` + 逐条 `root.plugin()` + `_drain`）；当前实现是 **Loader 活树 + 根 Include 条目**（`miniharness/loader/`：EntryTree + Entry + Group + Loader + Include；`boot()` 经 `mount_root_include` 装载、补丁展开由 `loader.patch.apply_entry_patches` 承担、启动三态审计）。完整语义见第 08 章 §8.3.1 与 `docs/architecture.md` §2 的 `loader/` 行。
-
 ## 5.1 这一章要做什么
 
 前四章的 `Session` 都在内存里，进程一退什么都没了。这一章解决两件事：
 
-1. **持久化**：`SessionPersistence` 扩展口 + 一整套纪律：`flush` 栅栏、fail-closed 加载、`interrupted` 崩溃修复。上游当前基线（alpha.1）的持久化后端只有 JSONL 一种（`session-persistence-jsonl`）；本章为演示「扩展口可换实现」，教学 artifact 额外给了一个 SQLite 第二后端（教学扩展，上游没有对应实现——上游的 SQLite 只在 `session-query` 检索域使用）。
+1. **持久化**：`SessionPersistence` 扩展口 + 一整套纪律：`flush` 栅栏、fail-closed 加载、`interrupted` 崩溃修复。上游（当前基线 `dsh-v0.2.0-rc.2`）的持久化后端只有 JSONL 一种（`session-persistence-jsonl`）；本章为演示「扩展口可换实现」，教学 artifact 额外给了一个 SQLite 第二后端（教学扩展，上游没有对应实现——上游的 SQLite 只在 `session-query` 检索域使用）。
 2. **组合加载**：`boot()` 把配置、补丁、插件串成一次启动：加载配置 → 按 id 打补丁 → 依赖驱动激活 → 断言全部就绪。
 
-本章的验收是端到端的：**kill 一个进行中的回合再重启，日志平衡、可继续对话**。`python -m miniharness.demo` 演示的就是这个。
+本章的验收是端到端的：**在一个回合中途崩溃再重启，日志平衡、可继续对话**。`python -m miniharness.demo` 演示的就是这个。
 
 ## 5.2 概念：持久化扩展口
 
@@ -50,27 +40,9 @@ flowchart LR
 1. **append 先复制事件、异步成批写入**；`flush` 是"等待的栅栏"——认领下一个普通 turn 之前，所有事件必须写入磁盘。
 2. **格式拒绝，不迁移**：版本落后 = 升级 harness；版本超前 = 用更新的 harness 打开。
 3. **fail-closed（带 ignorable 豁免）**：未知事件类型**除非带 `ignorable: true` 标记否则拒绝加载**（alpha.2 回滚）——不认识的、又未被写方标 `ignorable` 的事件宁可不打开也不能静默丢事件改变解读；被标 `ignorable`（纯信息记录，丢失不影响重建）的放行保留。
-4. **崩溃恢复只合成，不截断**：`turn/end { reason: interrupted }` 保持括号平衡。
+4. **崩溃修正只合成，不截断已提交事实**：回合未闭合（事件都完整，只缺 `turn/end`）时，合成 `turn/end {kind:'interrupted'}` 补平括号，绝不删已写事件。日志尾部若留着写入中途崩掉的半截帧或半行（torn tail），那是**未提交**的字节，读路径把它们截掉，再由 `commit_repair` 追加恢复出的完整事件与 closers。两件事分开：前者补事件，后者丢未提交字节。
 
 为什么是"扩展口"而不是直接写在 Session 里？因为存储策略（文件、数据库、未来可能的对象存储）不该和会话语义耦合。第 6 章会看到同样的思路在沙箱、凭据、子 agent 上重复出现。
-
-**逐节点走读**（对应上图两条链）：
-
-写路径（上排 `S → EVT → P → Q → J/QL → F → NEXT`）：
-
-1. `Session 内存日志` append 一条新事件，同步触发 `session/event` 广播（发布/订阅，Session 自己不碰存储）。
-2. 持久化插件 `P` 监听该广播，先把事件**复制**进自己的内部写入队列 `Q`——绝不直接修改 Session。
-3. `Q` 异步成批写入后端：JSONL 后端 `J`（每会话一个文件按 seq 追加）或 SQLite 后端 `QL`（多会话一库、`SCHEMA_VERSION` 单调）。
-4. `F`（flush 并行栅栏）是"等待点"：认领下一个普通 turn 前，`flush` 等待所有已入队事件真正写入磁盘——这是崩溃恢复的前提。
-5. 写入磁盘完成才 `NEXT` 进入下一 turn。
-
-读路径（下排 `LOAD → INT`）：
-
-6. `load()`：读取日志，**未知事件类型除非带 `ignorable: true` 否则拒绝**（fail-closed，带豁免）——宁可不打开，不能静默丢事件改变解读；`ignorable` 纯信息记录跳过保留。
-7. `INT` 崩溃恢复：发现未闭合回合时只**合成** `turn/end {kind:'interrupted'}`，保持括号平衡，绝不截断已写事件。
-8. （torn 尾部）：若读到残帧/残行，读路径先截断 torn tail，`commit_repair` 再把恢复事件 + closers 追加写入磁盘。
-
-两条链相加：写入永远平衡、读取永远 fail-closed、恢复永远只合成不截断。
 
 ## 5.3 代码 step-by-step（persistence.py）
 
@@ -126,7 +98,7 @@ class JsonlPersistence(SessionPersistence):
 
 #### 多代 generation 与相邻迁移（`generation.py` + `released/`，教学代码之外的实现）
 
-实现层的目录布局是**分代**的：每会话目录下是 `session.v4.jsonl[.zstd]`（v2 = 当前代；v0 保留旧名 `session.jsonl`；canonical 名以外的临时/大写/前导零名不是代）。这带来两个读侧做法，都对着上游 `session-persistence-jsonl/src/generation.ts`：
+实现层的目录布局是**分代**的：每会话目录下是 `session.v4.jsonl[.zstd]`（v4 = 当前代；v0 保留旧名 `session.jsonl`；canonical 名以外的临时/大写/前导零名不是代）。这带来两个读侧做法，都对着上游 `session-persistence-jsonl/src/generation.ts`：
 
 1. **选最高代**（`resolveGenerationInDirectory` 语义）：目录里同时存在多代制品时，读侧选数值最高的 canonical 代；发现对立编码的 canonical 名直接拒绝（编码互斥，绝不静默迁移编码）。
 2. **migrate-on-open**（`ensureJsonlGenerationCurrent` 语义）：选中的代 ≠ 当前代时，先解码 → 走**相邻迁移链**（v0→v1→v2→v3→v4，`released/` 包）→ 编码 → 校验 staged → 原子发布后继 `session.v4.jsonl[.zstd]`；**不可变源文件原样保留**（迁移永不改写历史）。三个失败面各自有名有姓：未来版本（`JsonlGenerationNewerVersionError`——"升级 harness"）、格式边拒绝内容（`JsonlGenerationUnsupportedMigrationError`——源制品不动）、目标冲突（`JsonlGenerationTargetConflictError`——当前代文件名已被别的字节占用）。
@@ -136,7 +108,7 @@ class JsonlPersistence(SessionPersistence):
 - **v0→v1（legacy 归一化）**：flat 消息包装（`legacy-message:<sid>:<seq>` 合成 id）、`steering/message` 并入 `user/message`、`turn/end` reason 转换表（aborted 补 `reason:{kind:'legacy'}`、disposed→aborted、error.failure→error 记录）、`turn/start.trigger` 与 `request/header.messagePrefix` 丢弃、retired 类型（`request/header-delta`/`mode/set`/`reason:"fallback"`）拒迁。
 - **v1→v2（chunk 流内嵌）**：`assistant/chunk` 事件流按 `turn:step` 切成一次次 attempt（六种封口边界：finish 自封 / message 认领 / step-end / llm-retry / llm-retry-started / turn-end）——被 message 认领的流压成内嵌 `stream` 记录、未认领的以最后一条 chunk 的 seq/time 落成 `assistant/attempt`；fork 切点从 header 数值（`seedLength`）重导出为 end-seed marker（`{inherited:true}`，需要时合成），切进一个 attempt 中间直接拒绝；密集重映射只改声明字段，指向已消费 chunk 的引用拒绝且**绝不重定向**。
 
-与上游的载体差异（教学可读性优先）：压缩后缀 `.zstd`（上游 `.zst`）；发布用临时文件 + `os.replace`（单进程写手，上游为 link 独占 + win32 原生助手）。**深度校验层按上游整件移植**：`payload_validation.py` 做 54 类型逐字段 payload 语义，`relationships.py` 做跨事件关系状态机（含 v2 `assistant/attempt` step 门），`validate.py`/`validate_v2.py`/`validate_v3.py` 做 artifact 编排——迁移链切换成真实校验器：v0→v1 先逐事件过词表/disposition 门、落底再过终态 artifact 双重门，v1→v2 出参直接走 v2 目标校验（内嵌流三事实 cross-check——content/usage/replayState 与发出的 blocks 逐一对照、marker/cut 双向核对、restore＝信封级装载），v2→v3 出参走 v3 全量校验（system head 三保护 + canonical envelope + 投影关系）。
+与上游的载体差异（教学可读性优先）：压缩后缀 `.zstd`（上游 `.zst`）；发布用临时文件 + `os.replace`（单进程写手，上游为 link 独占 + win32 原生助手）。**深度校验层按上游整件移植**：`payload_validation.py` 做 51 类型逐字段 payload 语义，`relationships.py` 做跨事件关系状态机（含 v2 `assistant/attempt` step 门），`validate.py`/`validate_v2.py`/`validate_v3.py`/`validate_v4.py` 做 artifact 编排——迁移链切换成真实校验器：v0→v1 先逐事件过词表/disposition 门、落底再过终态 artifact 双重门，v1→v2 出参直接走 v2 目标校验（内嵌流三事实 cross-check——content/usage/replayState 与发出的 blocks 逐一对照、marker/cut 双向核对、restore＝信封级装载），v2→v3 出参走 v3 全量校验（system head 三保护 + canonical envelope + 投影关系），v3→v4 出参走 v4 全量校验（tool/result 平铺与命名 source kind）。
 
 **会话格式目录收口**（`released/catalog.py` + `released/dispositions.py`，对应上游 `session-format-catalog`）：迁移链要能"读旧头 → 迁旧事件"、"写新头 → 写新事件"，这两个方向的编码协议收敛成**目录三函数**——`read_released_header`（物理头分类：新发版本直读、旧发相邻迁移、未知/错格 fail-closed）、`encode_current_header` / `encode_current_event`（当前发布版本的主写路径）。新事件类型（含 `image/offload`、PTC `tool/ptc-dispatch*`，见第 4 章延伸）登记进目录后，迁移与校验就自动认识它们——这正是 §5.1 说的"格式是演进来的，不是重新发明的"：加类型 = 在目录里登记，而不是改三四个分支。
 
@@ -261,7 +233,7 @@ def boot(config_path, *patch_paths, env=None):
     _assert_entries_activated(fibers, entries)     # 终态断言（同上游）
 ```
 
-> 当前实现：`boot()` 不再自己 `json.load` + 逐条 `root.plugin()`，而是先 `root.plugin(Loader, {"baseUrl": …})`，再经 `mount_root_include(root, abspath(config_path))` 挂根 `cordis:include` 条目——该条目读文件、用 `apply_entry_patches` 应用补丁层、把条目挂成 `EntryTree` 里的 live fiber，最后 `_assert_loader_activated` 审计未激活条目（ACTIVE 通过 / FAILED 重抛 / PENDING 点名缺失服务）。`group: true` 的条目成为嵌套子树，`!!js` 在各自条目激活期求值。装载树完整语义见第 08 章 §8.3.1。
+> 仓库的 `boot()` 先 `root.plugin(Loader, {"baseUrl": …})`，再经 `mount_root_include(root, abspath(config_path))` 挂根 `cordis:include` 条目——该条目读文件、用 `apply_entry_patches` 应用补丁层、把条目挂成 `EntryTree` 里的 live fiber，最后 `_assert_loader_activated` 审计未激活条目（ACTIVE 通过 / FAILED 重抛 / PENDING 点名缺失服务）。`group: true` 的条目成为嵌套子树，`!!js` 在各自条目激活期求值。装载树完整语义见第 08 章 §8.3.1。
 
 插件不再声明 `provides`：服务在 apply 期用 `ctx.provide()` 动态登记（与真实 Cordis 一致）。依赖 `inject` 缺失的插件保持 `PENDING`，boot 结束时 `_assert_entries_activated` 点名缺失的注入服务并明确报错——"插件没生效"绝不会是运行期谜题。
 
@@ -291,7 +263,7 @@ python -m unittest tests.test_persistence_boot -v
 2. 双后端可互换：同一扩展口接口，同样的 seq 单调性
 3. SQLite 版本不符 → 拒绝加载
 4. 未知事件类型 → fail-closed，除非带 `ignorable: true`（豁免放行）
-5. 崩溃后 `turn_balance == 0` 且最后事件是 `turn/end reason=interrupted`
+5. 崩溃后 `turn_balance == 0`，最后事件是 `turn/end`（reason `{kind:'interrupted'}`）
 6. 补丁算法纯函数：replace 整段替换 / insert 追加 / 目标缺失报错
 7. boot 结束所有条目已激活，否则报错
 
@@ -305,7 +277,7 @@ python -m unittest tests.test_persistence_boot -v
 
 打开 `deepseek-harness/packages/session/session-persistence`：
 
-- 双后端真实实现（JSONL zstd 帧容器一行一事件、SQLite SCHEMA_VERSION 单调演进）
+- JSONL 后端（zstd 帧容器一行一事件、generation 版本化文件名；上游没有 SQLite 持久化后端）
 - `session/flush` 事件的真实语义：等待的并行栅栏
 - `docs/subsystems/persistence.md` 的"格式拒绝，不迁移"原则
 
@@ -314,12 +286,21 @@ python -m unittest tests.test_persistence_boot -v
 | 细节 | 真实 dsh | 我们的简化 |
 |---|---|---|
 | JSONL 存储 | 默认 checksum + Zstandard 拼接帧容器（可选原始行） | **与上游一致**：默认 zstd 帧容器 + 一行一事件，明文模式可配（本章教学代码仍为明文逐行） |
-| SQLite 后端 | 上游 alpha.1 **无 SQLite 持久化后端**（唯一后端是 JSONL；SQLite 仅用于 session-query 检索域） | 教学扩展：本章 SQLite 第二后端仅演示扩展口可换实现，上游没有对应实现 |
+| SQLite 后端 | 上游（当前基线 `dsh-v0.2.0-rc.2`）**无 SQLite 持久化后端**（唯一后端是 JSONL；SQLite 仅用于 session-query 检索域） | 教学扩展：本章 SQLite 第二后端仅演示扩展口可换实现，上游没有对应实现 |
 | `time` 字段 | 每个事件 epoch 毫秒 | 教学 SQLite 后端无（JSONL 后端与上游一致） |
 | `sourceEventSeqs` | `assistant/message` 内嵌流且不能携带 `sourceEventSeqs`（fail-closed 拒绝）；其余 surface 事件可带非空引用 | 无（教学投影为扁平字符串） |
 | 可回放起点 | `session/end-seed` marker：fork 子会话恒 `{inherited:true}`、restore/普通 seed 补 `{}`；`inherited_cut` 由最后一个 marker 的 seq 派生（seeded 无 marker / unseeded 有 marker 双向 corrupt） | **与上游一致**（`persistence.py inherited_cut`） |
 | 活会话 load | 等权威内存快照持久化后才允许加载 | 未实现（检查点练习 1 的方向） |
 | `locate(meta)` | 多会话按元数据定位 | 无 |
+
+### 本章教学代码与仓库实现的差异
+
+- **版本常量**：仓库 `SESSION_FORMAT_VERSION = 4`（`core/session/types.py`），每个 JSONL 文件一个 header 行 + 事件行；版本不符按方向给出升级指引并整体拒读。
+- **`repair_and_replay`**：本章为逐条 `append` 重放；仓库走 seed 回放——以 `session/end-seed` 标记重建，修复合成的 closers 经 `commit_repair` 写回磁盘。torn 尾的截断在读路径完成（`core/session/persistence.py` 的 `read_prepared` / `_load_checked` 识别 torn 后调 `_truncate_to`），`commit_repair` 只追加恢复出的完整事件与 closers 并 fsync。
+- **`turn/end` 的 reason**：对象 `{kind:'interrupted'}`（本章教学代码写作字符串）。
+- **JSONL 载体与上游默认形态一致**：zstd 拼接帧容器 + 一行一事件（V4 事件格式：模型流内嵌 `assistant/message`、tool 角色平铺结果、`developer/message`）+ format.ts 目录布局 `root/--<projectKey(cwd)>--/<encodeSegment(id)>/session.v4.jsonl[.zstd]`；generation 版本化文件名，v0 旧名 `session.jsonl` 保留拒读，编码互斥、遗留布局直接拒绝；帧容器见 `zstd_frames.py` 与 `tests/test_persistence_zstd.py`。
+- **组合装载**：本章 `boot()` 是静态数组形态（`json.load` + 逐条 `root.plugin()` + `_drain`）；仓库是 Loader 活树 + 根 Include 条目（`miniharness/loader/`），经 `mount_root_include` 装载，补丁展开由 `loader.patch.apply_entry_patches` 承担，启动三态审计。完整语义见第 08 章 §8.3.1 与 `docs/architecture.md` §2 的 `loader/` 行。
+- **崩溃演示**：`python -m miniharness.demo` 以"手动构造未闭合回合"（只写 `turn/start` 不写 `turn/end`）模拟崩溃尾部，不是真实 kill 进程。
 
 ## 5.9 收尾
 
