@@ -157,12 +157,19 @@ class AgentPresetRegistry:
 
     def __init__(self, ctx: Context | None = None, *,
                  default: str | None = None,
-                 selected_default: str | None = None):
+                 selected_default: str | None = None,
+                 roster: Any = None):
         self.ctx = ctx
         self._definitions: dict[str, PresetDefinition] = {}
         self._default_id: str | None = None
         self._configured_default = default
         self._selected_default = selected_default
+        self._roster = roster
+
+    @property
+    def roster(self) -> Any:
+        """目录发现 roster（提供工具清单 + persona 的活组合面）；未接线 → None。"""
+        return self._roster
 
     @property
     def default_id(self) -> str | None:
@@ -255,12 +262,37 @@ class AgentPresetRegistry:
             for row in self.list_presets()
         ]}
 
+    def resolve_composition(self, preset_id: str) -> dict | None:
+        """解析一个 preset 的**活组合**（工具清单 + persona），供子代理挂载。
+
+        对齐上游 `AgentPresetRegistry.mount(ctx, id)` 的组合产出面；mini 无 live
+        fiber 常驻挂载，故只产出组合数据，由调用方（子代理物化）应用到子作用域。
+        目录 roster 在场时以其活组合为准（唯一工具/persona 解析面）；仅持声明注
+        册表时回退为空组合（声明行无工具/persona 可解析）。带 `broken` 的组合表示
+        该 preset 不可挂载（上游 resolveMountable → PresetMountError 同向）。
+        未知 id → None。
+        """
+        if self._roster is not None:
+            if preset_id not in self._roster.ids():
+                return None
+            preset = self._roster.resolve(preset_id)
+            broken = getattr(preset, "broken", None)
+            if broken is not None:
+                return {"id": preset.id, "tools": [], "persona": None,
+                        "broken": broken}
+            return {"id": preset.id, "tools": list(preset.tools),
+                    "persona": preset.persona}
+        if preset_id in self._definitions:
+            return {"id": preset_id, "tools": [], "persona": None}
+        return None
+
 
 def install_agent_preset_registry(
     ctx: Context,
     *,
     default: str | None = None,
     selected_default: str | None = None,
+    roster: Any = None,
 ) -> AgentPresetRegistry:
     """幂等装配 `ctx.agentPresets` 声明式注册表。
 
@@ -268,11 +300,13 @@ def install_agent_preset_registry(
     的 roster 是目录发现）；本注册表是声明式补充。已装返回既有实例。
     `default` / `selected_default` 配置缺省 id（对齐上游 Config 的
     `default` / `selectedDefault`；后者为 Settings 写入的用户选择）。
+    `roster` 提供活组合（工具清单 + persona）解析面，供子代理挂载。
     """
     existing = ctx.get("agentPresets")
     if isinstance(existing, AgentPresetRegistry):
+        existing._roster = roster if roster is not None else existing._roster
         return existing
     registry = AgentPresetRegistry(
-        ctx, default=default, selected_default=selected_default)
+        ctx, default=default, selected_default=selected_default, roster=roster)
     ctx.provide("agentPresets", registry)
     return registry

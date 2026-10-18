@@ -15,6 +15,7 @@ from typing import Any, AsyncIterator, Iterable
 from ..core.code_language import read_lang_hint_for_path as lang_from_path
 from ..core.scope import Context
 from ..core.tools import Tool
+from ..core.working_cwd import working_directory_of
 from .diff import fs_diff_meta
 from .types import FsEditRequest, FsError, FsObservation
 
@@ -55,11 +56,15 @@ ESCALATION_TARGETS = ("workspace-write", "danger-full-access")
 
 
 def session_cwd(exec: Any) -> str | None:
-    """调用方 agent 会话工作区（`exec.agent.session.meta.cwd`）；无 agent → None。"""
+    """调用方 agent 会话当前工作目录（有效投影值）；无 agent → None。
+
+    对齐上游：`workingDirectory.get(agent.session)`（相对路径基准随
+    `working_directory` 工具的 cd 变更；服务未装时回退 `session.meta['cwd']`）。
+    """
     agent = getattr(exec, "agent", None)
-    session = getattr(agent, "session", None)
-    meta = getattr(session, "meta", None)
-    return meta.get("cwd") if isinstance(meta, dict) else None
+    if agent is None:
+        return None
+    return working_directory_of(agent)
 
 
 def _session_resolve_options(exec: Any, workspace_root: str | None = None) -> dict:

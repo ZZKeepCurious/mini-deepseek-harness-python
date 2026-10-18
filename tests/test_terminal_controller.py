@@ -50,6 +50,13 @@ class FakeSandbox:
         return {"argv": ["sandbox-runner", *argv]}
 
 
+class _StubWorkingDirectory:
+    """最小 workingDirectory 服务替身：`get(session)` 对齐上游契约。"""
+
+    def get(self, session):
+        return (getattr(session, "meta", {}) or {}).get("cwd") or "/default"
+
+
 class TestTerminalController(unittest.TestCase):
     def setUp(self):
         self.ctx = Context(name="terminal-controller-test")
@@ -85,14 +92,15 @@ class TestTerminalController(unittest.TestCase):
     def test_environment_prefers_the_session_cwd_and_keeps_the_limits(self):
         controller = self.controller()
         agent = self.agent()
-        # index.ts:121 `session.header.cwd ?? sandboxPolicy.workspaceRoot`
+        # index.ts:122 `cwd: workingDirectory.get(agent.session)`（无服务时回退会话头部 cwd）
         self.assertEqual(controller.environment(agent), {"cwd": "/workspace",
                                                          "maxInputBytes": 1000,
+                                                         "maxBufferedBytes": 2 * 1024 * 1024,
                                                          "maxCols": 200, "maxRows": 100,
                                                          "scrollback": 100})
         headless = self.agent(cwd=None)
-        self.assertEqual(controller.environment(headless)["cwd"],
-                         self.policy.resolve({"session": headless.session})["workspaceRoot"])
+        self.ctx.provide("workingDirectory", _StubWorkingDirectory())
+        self.assertEqual(controller.environment(headless)["cwd"], "/default")
 
     def test_creates_the_shell_and_keeps_an_existing_identity(self):
         controller = self.controller()
@@ -113,10 +121,10 @@ class TestTerminalController(unittest.TestCase):
         controller.create(agent, {"id": "terminal-1", "cols": 80, "rows": 24})
         self.assertEqual(controller.list("other"), [])
         with self.assertRaisesRegex(TerminalUnavailable, "no longer exists"):
-            controller.follow(self.agent("other"), "terminal-1", "writer")
-        follow = controller.follow(agent, "terminal-1", "writer")
-        self.assertEqual(follow.baseline["type"], "snapshot")
-        follow.detach()
+            controller.attach(self.agent("other"), "terminal-1")
+        attachment = controller.attach(agent, "terminal-1")
+        self.assertEqual(attachment.baseline["type"], "snapshot")
+        attachment.detach()
         controller.close(agent, "terminal-1")
         self.assertEqual(controller.list("session-a"), [])
 
@@ -149,16 +157,15 @@ class TestTerminalController(unittest.TestCase):
                 controller.create(agent, {"id": "terminal-1", "cols": cols, "rows": rows})
         self.assertEqual(self.spawn_specs, [])
         controller.create(agent, {"id": "terminal-1", "cols": 80, "rows": 24})
+        attachment = controller.attach(agent, "terminal-1")
         with self.assertRaisesRegex(RuntimeError, "dimensions"):
-            controller.resize(agent, "terminal-1", "writer", 201, 24)
+            attachment.submit({"type": "resize", "sequence": 1, "cols": 201, "rows": 24})
 
     def test_rejects_invalid_wire_identities_and_names(self):
         controller = self.controller()
         agent = self.agent()
         with self.assertRaisesRegex(ValueError, "Invalid terminal identity"):
             controller.create(agent, {"id": "../terminal", "cols": 80, "rows": 24})
-        with self.assertRaisesRegex(ValueError, "attachment identity"):
-            controller.follow(agent, "terminal-1", "")
         with self.assertRaisesRegex(RuntimeError, "1–120"):
             controller.rename(agent, "terminal-1", "  ")
         with self.assertRaisesRegex(RuntimeError, "1–120"):
@@ -168,16 +175,16 @@ class TestTerminalController(unittest.TestCase):
         controller = self.controller(config={"maxInputBytes": 6})
         agent = self.agent()
         controller.create(agent, {"id": "terminal-1", "cols": 80, "rows": 24})
-        follow = controller.follow(agent, "terminal-1", "writer")
-        controller.write(agent, "terminal-1", "writer", "终端")
+        attachment = controller.attach(agent, "terminal-1")
+        attachment.submit({"type": "write", "sequence": 1, "data": "终端"})
         self.assertEqual(self.handle.written, ["终端"])
         with self.assertRaisesRegex(RuntimeError, "input exceeds"):
-            controller.write(agent, "terminal-1", "writer", "终端!")
-        controller.resize(agent, "terminal-1", "writer", 200, 100)
+            attachment.submit({"type": "write", "sequence": 2, "data": "终端!"})
+        attachment.submit({"type": "resize", "sequence": 3, "cols": 200, "rows": 100})
         self.assertEqual(self.handle.resized, [(200, 100)])
         controller.rename(agent, "terminal-1", "  server logs  ")
         self.assertEqual(controller.list("session-a")[0]["title"], "server logs")
-        follow.detach()
+        attachment.detach()
 
     def test_does_not_confine_the_shell_with_the_session_policy(self):
         # rc.1 index.ts:151：用户终端以执行环境的系统用户权限运行，不套 Agent

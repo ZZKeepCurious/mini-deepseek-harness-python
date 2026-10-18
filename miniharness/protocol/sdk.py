@@ -248,9 +248,24 @@ class SdkRuntime:
                 install_system_prompt(ctx)
                 install_sessions(ctx)
                 install_agents(ctx)
+                # 会话当前工作目录服务（对齐上游 dsh-working-directory）：装配
+                # fs / sessionProjections 前置；工具随注册表收编。
+                from ..fs import install_local_fs
+                from ..session_projection import install_session_projections
+                from ..working_directory import (
+                    install_working_directory,
+                    register_working_directory_tool,
+                )
+
+                if ctx.get("fs") is None:
+                    install_local_fs(ctx, {"cwd": os.getcwd()})
+                if ctx.get("sessionProjections") is None:
+                    install_session_projections(ctx)
+                install_working_directory(ctx)
                 reg = ToolRegistry(Context(name="sdk"))
                 register_job_tools(reg, ctx.get("jobs"))
                 register_skill_tools(reg, ctx.get("skills"))
+                register_working_directory_tool(ctx, reg)
                 # P2-25（对齐上游 sdk-app 门控装配）：DSH_PRIMARY_RUNTIME /
                 # DSH_BUNDLED_PRIMARY_RUNTIME 在场才挂 office 技能与
                 # load_workspace_dependencies（上游 sdk-app/cordis.patch.yml:29-41

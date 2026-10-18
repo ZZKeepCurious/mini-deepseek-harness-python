@@ -41,6 +41,7 @@ def _zero_projection():
             "cacheReadTokens": 0, "cacheWriteTokens": 0,
         },
         "inbox": {"next-turn": [], "next-step": []},
+        "workingDirectory": os.getcwd(),
     }
 
 
@@ -227,9 +228,10 @@ class TestControl(GatewayStreamsTest):
             # baseline 对齐上游 control.ts：全部 live 会话每会话一条（空也放）
             self.assertIn(sid, value["projections"])
             # projections 真实视图：全部 wire 单元（sessionStats/tokenUsage +
-            # inbox），上游 snapshot.values 同形
+            # inbox + workingDirectory），上游 snapshot.values 同形
             pvalues = value["projections"][sid]["values"]
-            self.assertEqual(set(pvalues), {"sessionStats", "tokenUsage", "inbox"})
+            self.assertEqual(set(pvalues),
+                             {"sessionStats", "tokenUsage", "inbox", "workingDirectory"})
             self.assertEqual(
                 set(pvalues["sessionStats"]),
                 {"turns", "steps", "llmMs", "toolMs", "ttftMs",
@@ -252,12 +254,12 @@ class TestControl(GatewayStreamsTest):
 
 
 class TestTerminalStreams(GatewayStreamsTest):
-    """`terminal/retain` + `terminal/follow` 的 wire 帧契约。
+    """`terminal/retain` + `terminal/attach` 的 wire 帧契约。
 
     对齐上游 `packages/api/terminal-controller`：`retain`（index.ts:191-205 →
-    retention.ts `retain`）一帧 `retained` 后保持到取消或身份关闭；`follow`
-    （index.ts:206-217 → types.ts `TerminalFrame`）一帧 `snapshot` 后跟有序
-    `output`/`state`。
+    retention.ts `retain`）一帧 `retained` 后保持到取消或身份关闭；`attach`
+    （index.ts:208-220 → types.ts `TerminalFrame`）一帧 `snapshot` 后跟有序
+    `output`/`state`/`ack`（上行 `TerminalInput`）。
     """
 
     def setUp(self):
@@ -326,16 +328,17 @@ class TestTerminalStreams(GatewayStreamsTest):
         self.controller.close(agent, "terminal-1")
         self.assertEqual(_run(go(session_id)), "terminal/unavailable")
 
-    def test_follow_streams_snapshot_then_ordered_frames(self):
+    def test_attach_streams_snapshot_then_ordered_frames(self):
         async def go():
             agent, session_id = self._terminal()
-            gen = self.gateway.open_stream("terminal/follow", {"args": {
-                "agentId": session_id, "id": "terminal-1", "attachmentId": "w1"}})
+            gen = self.gateway.open_stream("terminal/attach", {"args": {
+                "agentId": session_id, "id": "terminal-1"}})
             snapshot = await gen.__anext__()
             self.assertEqual(snapshot["type"], "snapshot")
             self.assertEqual(snapshot["sequence"], 0)
             self.assertIn("screen", snapshot)
-            self.assertEqual(snapshot["info"]["controllerId"], "w1")
+            self.assertTrue(snapshot["writable"])
+            self.assertNotIn("controllerId", snapshot["info"])
             pending = asyncio.ensure_future(gen.__anext__())
             await asyncio.sleep(0)
             self.handles[0].output.emit_data(b"hi\r\n")
@@ -504,11 +507,15 @@ class TestReconnectResilience(GatewayStreamsTest):
 class StreamInvocationTest(unittest.TestCase):
     """方法侧调用上下文（上游 `ctx.invocation`：`uplink()` 一次 + `close()` 释放）。"""
 
-    def test_no_endpoint_declares_an_uplink_codec(self):
+    def test_only_terminal_attach_declares_an_uplink_codec(self):
         ctx = Context(name="test")
         api = WebApi(ctx, _fake())
         try:
-            self.assertEqual(api.gateway.uplink_codecs(), {})
+            codecs = api.gateway.uplink_codecs()
+            self.assertEqual(set(codecs), {"terminal/attach"})
+            self.assertEqual(codecs["terminal/attach"](
+                {"type": "write", "sequence": 1, "data": "hi"}),
+                {"type": "write", "sequence": 1, "data": "hi"})
         finally:
             api.gateway.dispose()
             ctx.dispose()

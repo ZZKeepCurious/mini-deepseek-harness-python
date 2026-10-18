@@ -12,7 +12,7 @@ import json
 from typing import Any
 
 from ..core.tools import Tool, ToolExec
-from ..jobs import JobDoneBox
+from ..jobs import JobDoneBox, job_tool_call
 from ..workflow import WorkflowError, is_fatal_workflow_error
 
 __all__ = [
@@ -221,7 +221,7 @@ def create_workflow_tool(ctx, config: dict | None = None) -> Tool:
         _record_agents(session, run, run.id)
         if run_in_background:
             job = _start_background_job(ctx, args, parent, run, records_run, session,
-                                        cfg["maxResultChars"])
+                                        cfg["maxResultChars"], job_tool_call(exec_))
             return {"kind": "background", "jobId": job["id"], "runId": run.id}
         try:
             result = await asyncio.to_thread(run.result)
@@ -236,7 +236,8 @@ def create_workflow_tool(ctx, config: dict | None = None) -> Tool:
                 "agentsStarted": result.get("agentsStarted", 0),
                 "result": result.get("value")}
 
-    def _start_background_job(ctx, args, parent, run, records_run, session, max_chars):
+    def _start_background_job(ctx, args, parent, run, records_run, session, max_chars,
+                              tool_call):
         box = JobDoneBox()
 
         def work(_job):
@@ -262,14 +263,17 @@ def create_workflow_tool(ctx, config: dict | None = None) -> Tool:
 
         worker = __import__("threading").Thread(
             target=work, name=f"workflow-{run.id}", daemon=True)
-        job_id = jobs.start({
+        spec: dict = {
             "kind": "workflow",
             "label": args["meta"]["name"],
             "owner": parent.id,
             "run": lambda _job: {"done": box,
                                  "cancel": lambda reason=None: run.cancel(
                                      reason or "background workflow job killed")},
-        })
+        }
+        if tool_call is not None:
+            spec["toolCall"] = tool_call
+        job_id = jobs.start(spec)
         worker.start()
         return {"id": job_id}
 

@@ -14,6 +14,8 @@ from .fake import *  # noqa: F401,F403
 from .deepseek import *  # noqa: F401,F403
 from .assistant_stream import *  # noqa: F401,F403
 from .content import *  # noqa: F401,F403
+from .deepseek_extensions import *  # noqa: F401,F403
+from .plugin_package_inventory_deepseek import *  # noqa: F401,F403
 
 __all__ = [
     "ACCOUNT_QUOTA",
@@ -25,9 +27,11 @@ __all__ = [
     "AUTH",
     "attribution_headers",
     "BlockAssembler",
+    "CLIENT_UPGRADE_REQUIRED",
     "CONTEXT_WINDOW_EXCEEDED",
     "DeepSeekAdapter",
     "EMPTY_RESPONSE",
+    "ExtensionRegistry",
     "FakeLlmAdapter",
     "IMAGE_OFFLOAD_REQUIRED",
     "INVALID_CREDENTIAL",
@@ -41,6 +45,8 @@ __all__ = [
     "LlmImageRequestBudget",
     "MESSAGES_FILES_BETA",
     "MessageId",
+    "MODEL_UNSUPPORTED",
+    "REQUEST_EXTENSION",
     "RATE_LIMIT",
     "REQUEST_ERROR",
     "ReasoningEffortId",
@@ -56,12 +62,15 @@ __all__ = [
     "TRANSPORT",
     "UNSUPPORTED_CONTENT",
     "callConfigEquals",
+    "collect_active_plugin_packages",
     "content_has_file",
     "content_has_image",
     "expand_assistant_stream",
     "file_handle_text",
+    "install_plugin_package_inventory",
     "messages_api_root",
     "offloaded_image_text",
+    "prepare_request_extensions",
     "project_files_to_text",
     "project_images_for_text_model",
     "project_offloaded_images",

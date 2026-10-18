@@ -34,6 +34,12 @@ plugins:
     module: miniharness.cli.plugins.workspace_files
   - id: session-projections
     module: miniharness.cli.plugins.session_projections
+  - id: working-directory
+    module: miniharness.cli.plugins.working_directory
+    inject:
+      - fs
+      - sessionProjections
+      - systemPrompt
   - id: usage-stats
     module: miniharness.cli.plugins.usage_stats
   - id: turn-outline

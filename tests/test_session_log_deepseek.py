@@ -211,5 +211,59 @@ class TestPreparePrefix(unittest.TestCase):
         self.assertEqual(accepted_through(session), prepared["value"]["throughSeq"])
 
 
+class TestRegistryInstall(unittest.TestCase):
+    """把 dsh_session_log 接进 DeepSeek 请求扩展注册表（对齐上游 ctx 注册表装配）。"""
+
+    def setUp(self):
+        from miniharness.core.session_store import install_sessions
+        from miniharness.llm.deepseek_extensions import ExtensionRegistry
+        self.ctx = Context(name="root")
+        self.ctx.logger.exporter({
+            "levels": {"default": 3},
+            "export": lambda message: None,
+        })
+        self.store = install_sessions(self.ctx)
+        self.registry = ExtensionRegistry()
+
+    def tearDown(self):
+        self.ctx.dispose()
+
+    def test_provider_resolves_session_and_contributes_field(self):
+        from miniharness.session_log_deepseek import install_session_log_deepseek
+        session = self.store.create(id="dispatch")
+        session.append("turn/start", {"turn": 1})
+        dispose = install_session_log_deepseek(self.ctx, self.registry)
+        fields = self.registry.prepare({"sessionId": "dispatch"})["fields"]
+        self.assertEqual(fields["dsh_session_log"]["version"], 1)
+        self.assertEqual(fields["dsh_session_log"]["session"]["id"], "dispatch")
+        dispose()
+        self.assertEqual(self.registry.prepare({"sessionId": "dispatch"})["fields"], {})
+
+    def test_provider_omits_field_without_or_unknown_session(self):
+        from miniharness.session_log_deepseek import install_session_log_deepseek
+        install_session_log_deepseek(self.ctx, self.registry)
+        self.assertEqual(self.registry.prepare({})["fields"], {})
+        self.assertEqual(self.registry.prepare({"sessionId": "missing"})["fields"], {})
+
+    def test_provider_accepts_after_2xx_via_registry(self):
+        from miniharness.session_log_deepseek import (
+            accepted_through,
+            install_session_log_deepseek,
+        )
+        session = self.store.create(id="accepts-registry")
+        session.append("turn/start", {"turn": 1})
+        install_session_log_deepseek(self.ctx, self.registry)
+        prepared = self.registry.prepare({"sessionId": "accepts-registry"})
+        through = prepared["fields"]["dsh_session_log"]["throughSeq"]
+        self.assertEqual(accepted_through(session), -1)
+        prepared["accept"]()
+        self.assertEqual(accepted_through(session), through)
+
+    def test_install_rejects_non_object_config(self):
+        from miniharness.session_log_deepseek import install_session_log_deepseek
+        with self.assertRaisesRegex(ValueError, "config must be an object"):
+            install_session_log_deepseek(self.ctx, self.registry, config=[1])
+
+
 if __name__ == "__main__":
     unittest.main()

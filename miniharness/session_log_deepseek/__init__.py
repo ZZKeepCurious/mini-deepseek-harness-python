@@ -7,8 +7,9 @@ pending 前缀**，其序列化字段（含 `throughSeq` 位宽）不超过 `max
 重启恢复据此保守重传不确定尾巴。
 
 **装配点（载体）**：上游把 `dsh_session_log` 经 `deepseekLlmApiExtensions` 注册表注入
-DeepSeek 请求；mini 无该注册表，故本模块暴露纯函数 `prepare`/`prepare_field`/`accept`
-供宿主在请求组装 seam 调用（触发条件：引入 LLM 请求扩展注册表时接线）。
+DeepSeek 请求；mini 的 `install_session_log_deepseek(ctx, registry)` 把本模块接进
+`llm.deepseek_extensions.ExtensionRegistry`（provider 按 `request.sessionId` 经
+`ctx.sessions` 解析会话），`prepare`/`prepare_field`/`accept` 亦可直接调用。
 """
 from __future__ import annotations
 
@@ -24,6 +25,7 @@ __all__ = [
     "DEFAULT_MAX_BYTES",
     "accepted_through",
     "fold_accepted_through",
+    "install_session_log_deepseek",
     "is_enabled",
     "json_bytes",
     "prepare",
@@ -269,6 +271,32 @@ def prepare(
         })
 
     return {"value": value, "accept": accept}
+
+
+def install_session_log_deepseek(ctx: Any, registry: Any,
+                                 config: dict | None = None) -> Callable[[], None]:
+    """把 `dsh_session_log` 贡献注册到 DeepSeek 请求扩展注册表（对齐上游 apply）。
+
+    上游 provider 按 `request.sessionId` 经 `ctx.sessions` 解析会话（直连/过期会话
+    返回 `None`，不携带字段）。`config` 缺省 `{enabled: true, maxBytes: 8 MiB}`；
+    enabled 每次请求现读。
+
+    @returns registry.register 的 disposer。
+    """
+    if config is not None and not isinstance(config, Mapping):
+        raise ValueError("session-log-deepseek: config must be an object")
+
+    def prepare(request: dict):
+        session_id = request.get("sessionId")
+        if session_id is None:
+            return None
+        sessions = ctx.get("sessions")
+        session = sessions.get(session_id) if sessions is not None else None
+        if session is None:
+            return None
+        return prepare_field(session, config, logger=getattr(ctx, "logger", None))
+
+    return registry.register("dsh_session_log", {"prepare": prepare})
 
 
 def _warn_oversized(logger: Any, session: Any, first: Mapping[str, Any],

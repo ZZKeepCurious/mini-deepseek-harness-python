@@ -130,7 +130,7 @@ web 的宿主侧分两半，mini 对应如下：
 | HTTP + WS 载体与约定 | `packages/client/connection` + `packages/api/gateway` + `packages/api/session-controller` + `packages/api/remotes` | 两信封 RPC + unary 会话服务（`/api/<endpoint>` POST `{args}`）+ WS `/api/remote.mux` 承载 Remote 流（open/cancel/item/end/error）+ `$events` 注册表 + follow/control + 审批 waterfall 桥 + `frontend-static` 静态载体 | `miniharness/web/`（§7.5） |
 | 浏览器前端 | `packages/client`（React 客户端包族） | React shell、对象层、Trajectory、审批面板等 | 产品面为顶层 `webui/`（React+TS+Vite，§7.5.4）；`web/static/` vanilla SPA 是旧 wire 的教学参照 |
 
-web 的 HTTP/WS 传输层、静态约定与前端都在 §7.5 讲解，`--profile web` 启动它并监听地址/端口，优先级：`--host`/`--port`（`cli/main.py` 透传）> env `MINIHARNESS_WEB_HOST`/`MINIHARNESS_WEB_PORT`（缺省 `127.0.0.1` / `0`=OS 分配）。
+web 的 HTTP/WS 传输层、静态约定与前端都在 §7.5 讲解，`--profile web` 启动它并监听地址/端口，优先级：`--host`/`--port`（`cli/main.py` 透传）> env `MINIHARNESS_WEB_HOST`/`MINIHARNESS_WEB_PORT`（缺省 `127.0.0.1` / `0`=OS 分配）。监听地址须为**具体地址**——通配（`0.0.0.0`/`::` 及等价拼写）一律拒绝（`web/host.py`，对齐上游 webserver），非回环具体地址须配 token。
 
 ## 7.4 三个协议入口
 
@@ -206,7 +206,7 @@ hooks 的价值在于迁移成本：已经写好 Claude Code 钩子（安全策�
   - `session/follow`：首帧 snapshot `{header, cursor, records, hasMore, projections}`，之后逐 event 帧（snapshot 后重投 cursor+1..end，同 `history.ts:92-149`）。lazy async 生成器错误时机——体部 `RemoteStreamError`（session/not-found/gateway/arguments-invalid）在首个 `await gen.__anext__()` 处抛、非调用时，测试须迭代驱动。
   - `session/control`：首帧 baseline `{projections}`（上游已去 queues/jobs），之后 projection 替换帧（同 `control.ts`）。
   - `terminal/retain`：一帧 `{type:'retained'}` 后无帧保持到取消或该身份被关闭（不激活 Agent；mini 无空闲回收调度器，持有不改变清理时机）。逐帧契约见 `docs/interface-wire.md` §4.5。
-  - `terminal/follow`：首帧 `snapshot`（整屏文本 + `info`），随后有序 `output`/`state` 帧；进程终态 `state` 帧投完后流才 `end`；超 `maxBufferedBytes` 的慢消费者以 `gateway/internal` 中止，重连从新 `snapshot` 恢复（逐帧契约见 `docs/interface-wire.md` §4.5）。
+  - `terminal/attach`：首帧 `snapshot`（整屏文本 + `info` + `writable` + 可选 `inputWindow`），随后有序 `output`/`state`/`ack` 帧（双工：上行 `TerminalInput` 的 write/resize 回 ack；`read-only`/`not-running` 折带 `refusal` 的 ack）；进程终态 `state` 帧投完后流才 `end`；超 `maxBufferedBytes` 的慢消费者以 `gateway/internal` 中止，重连从新 `snapshot` 恢复（逐帧契约见 `docs/interface-wire.md` §4.5）。
   - `workspace/follow`：首帧完整 baseline（`items`/`archivedSessionIds`/`pinnedSessionIds`），随后有序 upsert/remove/order/archived/pinned 增量（重连重发 baseline；逐帧契约见 `docs/interface-wire.md` §4.6）。
   - `workspaceFiles/changes`：见 `docs/interface-wire.md` §4（ready + change 帧）。
   - 未知 endpoint → 抛 `RemoteStreamError`（`gateway/invocation-unavailable`）。
@@ -224,7 +224,7 @@ projection 替换帧（`web/api.py:295`）或 follow snapshot 的 projections �
 3. `GET /api/session.export?sessionId=<id>` → 会话导出下载（`web/downloads.py`）：root + 子代理后代 + 被引用媒体打包 zip，200/400/404/501/500 状态码链，错误走私有信封外壳。
 4. 非 `/api/` 路径 → SPA 静态服务（`web/frontend.py`，frontend-static 约定）：只服务 dist 根内文件；`..` 上跳 → 403；未命中 → `index.html` 200；MIME 按扩展名。dist 根默认 `web/static/`（教学 vanilla，旧 wire 不对新后端工作），经 `MINIHARNESS_WEBUI_DIST` 可指向产品化前端构建产物（`webui/dist/`），约定不变。
 
-`web/launcher.py` 把 `WebApi + GatewayStreams + create_app` 组装成可监听应用；host/port 优先级：`cli/main` 透传的 `--host`/`--port` > `MINIHARNESS_WEB_HOST/PORT` env > 缺省（上游是组合配置节，简化标注）。
+`web/launcher.py` 把 `WebApi + GatewayStreams + create_app` 组装成可监听应用；host/port 优先级：`cli/main` 透传的 `--host`/`--port` > `MINIHARNESS_WEB_HOST/PORT` env > 缺省（上游是组合配置节，简化标注）。host 须为具体地址：通配（`0.0.0.0`/`::`）由 `web/host.py` 加载期拒绝，非回环具体地址须配 token。
 
 **审批桥（`web/approvals.py`，同 `packages/api/remotes` waterfall + `interaction/user-approval`）**：桥挂 async `tools/ask` 闸门（power check：`_arm_ask` 注册 `tools/pre-execute` 返回 `{"kind":"ask"}`）→ 落 `approval/asked` 审计 → `events.invoke('approval/request', {approval})` 以 `$events` waterfall 投递给所有客户端 → 首个 `$events/result` 经 `receive_result` 结算 → 落 `approval/decided` → 返回 bool 供管线放行/拒绝。outcome 映射：result∈APPROVAL_OUTCOMES（`allowed-once|rejected|cancelled|unavailable`，否则 unavailable **fail-closed**）/rejected→unavailable/next→await nxt()/cancelled→cancelled；dispose 全 pending 'cancelled'（不悬挂）。
 
@@ -234,13 +234,13 @@ projection 替换帧（`web/api.py:295`）或 follow snapshot 的 projections �
 **产品化前端（`webui/`，仓库顶层独立 React+TS+Vite 工程）**：会话列表/新建（`session/list`/`session/create`）、Trajectory 折叠（选中会话 `session/follow` 拉 snapshot + 按 seq 去重增量）、审批面板（`$events` waterfall → Allow once / Reject → `$events/result` 结算，outcome∈APPROVAL_OUTCOMES 之外 fail-closed）、队列/作业面板（队列 = `session/control` 投影帧折叠出的 `inbox` 投影，作业 = `job/list` roster 流）。开发期 Vite dev server 把 `/api` 与 `/api/remote.mux` 代理到本地 Python 后端（`vite.config.ts`）；生产期 `vite build` → `MINIHARNESS_WEBUI_DIST=webui/dist` 让后端静态服务承载。`src/wire/` 是纯 TS 约定客户端（无 UI 依赖，vitest 单测 mock fetch/WS），`src/app/` 是 React 编排，`src/ui/` 是无状态展示组件。
 **教学参照（`web/static/`）**：vanilla SPA（index.html + app.js + style.css，无构建步），消费的是上游重组前的旧 SSE wire（`events.mux`/`respond`/`host.describe`），对新后端不工作，仅作教学说明。
 
-**教学简化**：心跳 = transport 级（`ws_ping_interval=2 / ws_ping_timeout=4`，同上游 gateway heartbeat：缺省 2s Ping + 连续 2 周期无 Pong terminate，`web/launcher.py` `uvicorn_options`）；认证门 = 可选 token（配置 `MINIHARNESS_WEB_TOKEN` 后 `/api/*` 全域强制、WS 升级拒绝写 HTTP 401 同上游 `rejectRemoteStreamUpgrade`，监听 `0.0.0.0` 无 token 启动即拒绝；接口约定见 interface-wire §1.1）；`$events`/`follow`/`control` 无 `since` 恢复游标（重连重拉全量）；载荷 schema 校验在 `WebApi` 内做（上游先过 zod）；session 日志事件是 mappingproxy/tuple 冻结形态（`core/session/json.py` `deep_freeze`），序列化前经 `thaw` 还原；前端产品化工程 `webui/` 走新 wire 但不整体移植上游 `packages/client` 的 UI 模块——无 slot 组合；webui Trajectory 按上游概念提供 Overview 时间线、虚拟化窗口与全文搜索，`since` 游标则与后端 wire 一致（上游 wire 无该字段）；`web/static/` vanilla SPA 是旧 wire 教学参照。测试覆盖：`tests/test_web_{stream_protocol,uplink,events,mux,streams,approvals,server,attachments,export,frontend,auth}.py`（真实 uvicorn + httpx/websockets）+ `webui/` 的 vitest（wire 层含 multipart 重组 + trajectory 模型/搜索/组件，`pnpm test` / `pnpm typecheck` / `pnpm build`）。
+**教学简化**：心跳 = transport 级（`ws_ping_interval=2 / ws_ping_timeout=4`，同上游 gateway heartbeat：缺省 2s Ping + 连续 2 周期无 Pong terminate，`web/launcher.py` `uvicorn_options`）；认证门 = 可选 token（配置 `MINIHARNESS_WEB_TOKEN` 后 `/api/*` 全域强制、WS 升级拒绝写 HTTP 401 同上游 `rejectRemoteStreamUpgrade`，非回环具体地址无 token 启动即拒绝，通配地址一律拒绝；接口约定见 interface-wire §1.1）；`$events`/`follow`/`control` 无 `since` 恢复游标（重连重拉全量）；载荷 schema 校验在 `WebApi` 内做（上游先过 zod）；session 日志事件是 mappingproxy/tuple 冻结形态（`core/session/json.py` `deep_freeze`），序列化前经 `thaw` 还原；前端产品化工程 `webui/` 走新 wire 但不整体移植上游 `packages/client` 的 UI 模块——无 slot 组合；webui Trajectory 按上游概念提供 Overview 时间线、虚拟化窗口与全文搜索，`since` 游标则与后端 wire 一致（上游 wire 无该字段）；`web/static/` vanilla SPA 是旧 wire 教学参照。测试覆盖：`tests/test_web_{stream_protocol,uplink,events,mux,streams,approvals,server,attachments,export,frontend,auth}.py`（真实 uvicorn + httpx/websockets）+ `webui/` 的 vitest（wire 层含 multipart 重组 + trajectory 模型/搜索/组件，`pnpm test` / `pnpm typecheck` / `pnpm build`）。
 
 运行方式：
 
 ```sh
 python -m miniharness.cli --profile web                    # 走启动器（缺 key → adapter 构造不抛，启动后 describe 可用）
-python -m miniharness --profile web --host 0.0.0.0 --port 8000   # 显式监听（0.0.0.0 需配 MINIHARNESS_WEB_TOKEN）
+python -m miniharness --profile web --host 192.168.1.5 --port 8000   # 显式监听具体地址（非回环需配 MINIHARNESS_WEB_TOKEN；通配地址拒绝）
 MINIHARNESS_WEB_PORT=8000 python -m miniharness --profile web
 ```
 

@@ -23,6 +23,7 @@ from typing import Any, Callable
 
 from ..core.output_retention import truncate_without_splitting_surrogate_pair, utf16_length
 from ..core.tools import Tool, ToolRegistry
+from ..core.working_cwd import working_directory_of
 
 __all__ = [
     "BASH_DIALECT",
@@ -368,12 +369,8 @@ class PersistentShells:
 
 
 def _session_cwd(owner: Any) -> str | None:
-    session = getattr(owner, "session", None)
-    meta = getattr(session, "meta", None) if session is not None else None
-    if isinstance(meta, dict):
-        cwd = meta.get("cwd")
-        return cwd if isinstance(cwd, str) and cwd else None
-    return None
+    cwd = working_directory_of(owner)
+    return cwd if isinstance(cwd, str) and cwd else None
 
 
 class _SignalAdapter:

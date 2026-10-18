@@ -3,8 +3,9 @@
 上游：
   * `types.ts:8,10` Remote 错误码扩展 `terminal/control-unavailable` /
     `terminal/limit-reached`（details 分别带 reason / limit）。
-  * `types.ts:20-63` wire 类型：TerminalShell / TerminalEnvironment /
-    WebTerminalInfo / TerminalCreateRequest / TerminalFrame（snapshot 恒为首帧）。
+  * `types.ts:20-64` wire 类型：TerminalShell / TerminalEnvironment /
+    WebTerminalInfo / TerminalCreateRequest / TerminalFrame（snapshot 恒为首帧）/
+    TerminalInput（`write{sequence,data}` / `resize{sequence,cols,rows}`）。
   * `index.ts:28-80` Config 的 Schemastery 缺省（shell 可选、shellCandidates、
     maxTerminals/maxCols/maxRows/scrollback/maxBufferedBytes/maxInputBytes/
     disposeGraceMs）。
@@ -32,6 +33,7 @@ __all__ = [
     "resolve_config",
     "is_identity",
     "frame_bytes",
+    "decode_terminal_input",
 ]
 
 #: WebTerminalId / TerminalAttachmentId 词法（index.ts:157,195 `^[\w-]{1,128}$`）：
@@ -107,6 +109,40 @@ class TerminalUnavailable(Exception):
 def is_identity(value: Any) -> bool:
     """`^[\\w-]{1,128}$`（WebTerminalId / TerminalAttachmentId 词法）。"""
     return isinstance(value, str) and IDENTITY_PATTERN.match(value) is not None
+
+
+def decode_terminal_input(value: Any) -> dict:
+    """`terminal/attach` 声明的上行 codec（types.ts:66-69 的 TerminalInput 判别联合）。
+
+    上游该 codec 由 typert 从类型图生成，逐字校验判别字段与精确字段集；mini 以
+    `web/uplink.py` 声明的 codec 等价承担：字段非法即抛，由 `UplinkItems` 折成
+    `gateway/input-invalid` 中止整条逻辑流。`sequence` 的安全整数与连续编号检查
+    在 `TerminalAttachment.submit`（对齐 terminal.ts:119 的 `Number.isSafeInteger`
+    + gap 检查），此处只做 wire 形状与类型闭集校验。
+    """
+    if not isinstance(value, dict):
+        raise ValueError("terminal input must be an object")
+    kind = value.get("type")
+    if not _is_integer(value.get("sequence")):
+        raise ValueError("terminal input sequence must be an integer")
+    if kind == "write":
+        if set(value) != {"type", "sequence", "data"}:
+            raise ValueError("terminal write input has unexpected fields")
+        if not isinstance(value["data"], str):
+            raise ValueError("terminal write data must be a string")
+        return {"type": "write", "sequence": value["sequence"], "data": value["data"]}
+    if kind == "resize":
+        if set(value) != {"type", "sequence", "cols", "rows"}:
+            raise ValueError("terminal resize input has unexpected fields")
+        if not _is_integer(value["cols"]) or not _is_integer(value["rows"]):
+            raise ValueError("terminal resize dimensions must be integers")
+        return {"type": "resize", "sequence": value["sequence"],
+                "cols": value["cols"], "rows": value["rows"]}
+    raise ValueError(f"unknown terminal input type: {kind!r}")
+
+
+def _is_integer(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def frame_bytes(frame: dict) -> int:

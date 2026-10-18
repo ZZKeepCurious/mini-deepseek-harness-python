@@ -15,6 +15,7 @@ import asyncio
 
 from miniharness.core import Context
 from miniharness.core.agents import install_agents
+from miniharness.core.session import Session
 from miniharness.core.tools import ToolExec, ToolRegistry, run_pipeline_async
 from miniharness.jobs import install_jobs, register_job_tools
 from miniharness.terminal.operation import LocalSendOperation
@@ -40,8 +41,10 @@ from miniharness.tool_terminal.render import (
 from miniharness.tool_terminal.tools import register_terminal_tools
 
 
-def _run(ctx, tool, args, agent=None, signal=None) -> dict:
-    exec_ = ToolExec(agent=agent, signal=signal or threading.Event()) if agent is not None else ToolExec(signal=threading.Event())
+def _run(ctx, tool, args, agent=None, signal=None, call_id=None,
+         root_call_id=None) -> dict:
+    exec_ = ToolExec(agent=agent, signal=signal or threading.Event(),
+                     call_id=call_id, root_call_id=root_call_id)
     return asyncio.run(run_pipeline_async(ctx, tool, args, exec_))
 
 
@@ -113,7 +116,7 @@ class StubBackend:
 class StubAgent:
     def __init__(self, id_, session_id=None):
         self.id = id_
-        self.session = type("Session", (), {"session_id": session_id or id_, "meta": {}})()
+        self.session = Session(session_id or id_)
         self.ctx = Context(name=f"agent-{id_}")
         self._carrier = None
         self.status = "idle"
@@ -147,9 +150,11 @@ class _Harness:
         self.agent = StubAgent("owner")
         self.ctx.get("agents").register(self.agent)
 
-    def run(self, name, args, agent=None, signal=None):
+    def run(self, name, args, agent=None, signal=None, call_id=None,
+            root_call_id=None):
         return _run(self.ctx, _tool_by_name(self.ctx, name), args,
-                    agent=agent if agent is not None else self.agent, signal=signal)
+                    agent=agent if agent is not None else self.agent, signal=signal,
+                    call_id=call_id, root_call_id=root_call_id)
 
 
 class _BackendWithPolicy(StubBackend):
@@ -411,10 +416,12 @@ class TestToolsBackground(unittest.TestCase):
         sent = self.h.run("terminal_send",
                           {"sessionId": sid, "text": "hi", "run_in_background": True})
         self.assertTrue(sent.ok, sent.error)
-        self.assertEqual(sent.value, {"kind": "background", "jobId": "pty-send-1"})
-        self.assertEqual(sent.content[0]["text"], "started background job pty-send-1")
+        job_id = sent.value["jobId"]
+        self.assertEqual(sent.value, {"kind": "background", "jobId": job_id})
+        self.assertRegex(job_id, r"^pty-send-[0-9a-f]{16}$")
+        self.assertEqual(sent.content[0]["text"], f"started background job {job_id}")
 
-        out = self.h.run("job_output", {"job_id": "pty-send-1", "wait": True})
+        out = self.h.run("job_output", {"job_id": job_id, "wait": True})
         self.assertEqual(out.content[0]["text"],
                          "viewport: hi\n[status: completed, wait: stdin_read]")
         self.assertEqual(out.value["job"]["label"], "pty-1: hi")
@@ -423,29 +430,49 @@ class TestToolsBackground(unittest.TestCase):
         self.assertEqual(len(listing.value), 1)
         self.assertEqual(listing.value[0]["kind"], "pty-send")
 
+    def test_background_job_records_creating_tool_call(self):
+        """后台 pty-send 把创建它的工具调用身份记为 toolCall（index.ts:264）。"""
+        sid = self.h.run("terminal_open", {"type": "stub"}).value["sessionId"]
+        sent = self.h.run("terminal_send",
+                          {"sessionId": sid, "text": "hi", "run_in_background": True},
+                          call_id="call-7", root_call_id="root-7")
+        self.assertTrue(sent.ok, sent.error)
+        registered = [e["data"] for e in self.h.agent.session.events
+                      if e["type"] == "job/registered"]
+        self.assertEqual(len(registered), 1)
+        self.assertEqual(registered[0]["jobId"], sent.value["jobId"])
+        self.assertEqual(registered[0]["toolCall"],
+                         {"callId": "call-7", "rootCallId": "root-7"})
+
     def test_killed_job(self):
         sid = self.h.run("terminal_open", {"type": "stub"}).value["sessionId"]
         self.h.sessions[-1]._settle_now = False
-        self.h.run("terminal_send", {"sessionId": sid, "text": "hi", "run_in_background": True})
-        kill = self.h.run("job_kill", {"job_id": "pty-send-1"})
+        job_id = self.h.run(
+            "terminal_send",
+            {"sessionId": sid, "text": "hi", "run_in_background": True}).value["jobId"]
+        kill = self.h.run("job_kill", {"job_id": job_id})
         self.assertEqual(kill.value["outcome"], "cancellation-requested")
-        out = self.h.run("job_output", {"job_id": "pty-send-1", "wait": True})
+        out = self.h.run("job_output", {"job_id": job_id, "wait": True})
         self.assertEqual(out.content[0]["text"],
                          "viewport: hi\n[status: killed, wait: stdin_read]")
 
     def test_failed_job(self):
         sid = self.h.run("terminal_open", {"type": "stub"}).value["sessionId"]
         self.h.sessions[-1].reject_send = True
-        self.h.run("terminal_send", {"sessionId": sid, "text": "hi", "run_in_background": True})
-        out = self.h.run("job_output", {"job_id": "pty-send-1", "wait": True})
+        job_id = self.h.run(
+            "terminal_send",
+            {"sessionId": sid, "text": "hi", "run_in_background": True}).value["jobId"]
+        out = self.h.run("job_output", {"job_id": job_id, "wait": True})
         self.assertEqual(out.content[0]["text"],
                          "viewport: hi\n[status: failed, send failed]")
 
     def test_incremental_read_reported(self):
         sid = self.h.run("terminal_open", {"type": "stub"}).value["sessionId"]
-        self.h.run("terminal_send", {"sessionId": sid, "text": "hi", "run_in_background": True})
-        self.h.run("job_output", {"job_id": "pty-send-1", "wait": True})
-        second = self.h.run("job_output", {"job_id": "pty-send-1"})
+        job_id = self.h.run(
+            "terminal_send",
+            {"sessionId": sid, "text": "hi", "run_in_background": True}).value["jobId"]
+        self.h.run("job_output", {"job_id": job_id, "wait": True})
+        second = self.h.run("job_output", {"job_id": job_id})
         self.assertEqual(second.content[0]["text"],
                          "(no new output)\n[status: completed, wait: stdin_read]")
         self.assertEqual(second.value["job"]["status"], "completed")

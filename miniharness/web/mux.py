@@ -149,7 +149,8 @@ class RemoteStreamMuxConnection:
         self._streams[stream_id] = active
         try:
             stream = self.gateway.open_stream(
-                endpoint, frame["payload"], uplink=active.inbox)
+                endpoint, frame["payload"], uplink=active.inbox,
+                uplink_window=self._uplink_window(stream_id))
         except Exception as error:  # noqa: BLE001 - open 内抛错折 error 帧（流内隔离；
             # 上游 pump catch 只发 error、不补 end——error 即该流的终态帧）
             self._streams.pop(stream_id, None)
@@ -162,6 +163,19 @@ class RemoteStreamMuxConnection:
 
     def _new_inbox(self, endpoint: str) -> UplinkInbox:
         return UplinkInbox(self.stream_inbox_bytes, endpoint)
+
+    def _uplink_window(self, stream_id: str) -> dict:
+        """本载体的上行窗口（上游 stream-server.ts:246-249）。
+
+        `maxBytes` = inbox 字节上限；`frameOverheadBytes` = 一条 `item` 帧紧凑 JSON
+        编码相对裸值的 UTF-8 封装开销（`{type:'item',streamId,value:null}` 减 `null`），
+        领域方法（如 `terminal/attach`）用它约束在途编码帧字节数。
+        """
+        envelope = len(json.dumps(
+            {"type": "item", "streamId": stream_id, "value": None},
+            ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        return {"maxBytes": self.stream_inbox_bytes,
+                "frameOverheadBytes": envelope - len("null")}
 
     async def _pump(self, active: _ActiveStream, stream) -> None:
         stream_id = active.stream_id

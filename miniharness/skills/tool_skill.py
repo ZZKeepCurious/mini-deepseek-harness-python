@@ -34,6 +34,7 @@ from typing import Any
 from ..core.scope import Context, _maybe_await
 from ..core.session import create_message, text_block
 from ..core.tools import Tool, ToolExec
+from ..core.working_cwd import working_directory_of
 from .registry import (
     digest_catalog_entries,
     escape_text,
@@ -165,12 +166,10 @@ def _render_catalog_update(entries: list[dict]) -> dict:
 
 
 def _lookup_for(agent: Any) -> dict:
-    session = getattr(agent, "session", None)
-    cwd = None
-    if session is not None:
-        # 对齐上游 agent.session.header.cwd（core/tools/src/index.ts lookup 用
-        # 会话头部 cwd 决定项目根扫描）；mini Session.meta 承载同义头部子集
-        cwd = session.meta.get("cwd")
+    # 对齐上游（skill/tool-skill/src/index.ts:188）：
+    # `lookup = { cwd: await ctx.workingDirectory.ensure(agent, signal), scope: agent }`
+    # ——消费者按"有效工作目录"（含 working_directory 工具的 cd 变更）决定项目根扫描。
+    cwd = working_directory_of(agent)
     return {
         "cwd": cwd if cwd is not None else getattr(agent, "cwd", None),
         "scope": getattr(agent, "ctx", None),

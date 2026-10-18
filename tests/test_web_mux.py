@@ -51,10 +51,12 @@ class _FakeGateway:
         self._hang = hang
         self.opened = []
         self.uplinks = []
+        self.windows = []
 
-    def open_stream(self, endpoint, payload, uplink=None, signal=None):
+    def open_stream(self, endpoint, payload, uplink=None, signal=None, uplink_window=None):
         self.opened.append((endpoint, payload))
         self.uplinks.append(uplink)
+        self.windows.append(uplink_window)
         if self._fail_open is not None:
             raise self._fail_open()
         if endpoint in self._endpoints:
@@ -323,7 +325,7 @@ class MuxUplinkTest(unittest.TestCase):
             ws = _FakeWs()
             released = []
 
-            def open_stream(endpoint, payload, uplink=None, signal=None):
+            def open_stream(endpoint, payload, uplink=None, signal=None, uplink_window=None):
                 released.append(uplink)
                 uplink.release()
                 return _never()
@@ -348,6 +350,24 @@ class MuxUplinkTest(unittest.TestCase):
         self.assertEqual(len(released), 1)
         self.assertEqual(ws.sent, [])
         self.assertIsNone(ws.closed)
+
+    def test_open_publishes_the_carrier_uplink_window(self):
+        # 上游 stream-server.ts:246-249：inbox 上限 + item 帧紧凑 JSON 封装开销
+        async def go():
+            ws = _FakeWs()
+            gateway = _FakeGateway()
+            await ws.input.put({"type": "websocket.receive", "text": json.dumps(
+                {"type": "open", "streamId": "s1", "endpoint": "e", "payload": {}})})
+            await ws.input.put({"type": "websocket.disconnect"})
+            conn = RemoteStreamMuxConnection(gateway, ws, stream_inbox_bytes=4096)
+            await conn.run()
+            return gateway.windows
+
+        windows = self._run(go())
+        envelope = len(json.dumps({"type": "item", "streamId": "s1", "value": None},
+                                  separators=(",", ":")).encode("utf-8"))
+        self.assertEqual(windows, [{"maxBytes": 4096,
+                                    "frameOverheadBytes": envelope - len("null")}])
 
     def test_cancel_ends_a_pending_uplink_read(self):
         # 读上行端点挂在 inbox 上：客户端 cancel 结束挂起读，不发终态帧

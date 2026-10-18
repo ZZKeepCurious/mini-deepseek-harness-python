@@ -13,12 +13,15 @@ from miniharness.core.agent_loop.agent import AgentLoop
 from miniharness.core.scope import Context
 from miniharness.core.session import KNOWN_TYPES, Session
 from miniharness.core.system_prompt import (
+    CONTEXT_ORDERS,
+    SECTION_ORDERS,
     SYSTEM_PROMPT_SERVICE,
     TOOL_ORDER_REST,
     SystemPromptService,
     install_system_prompt,
     order_tools,
     render_context_snapshot,
+    render_context_sections,
     render_prompt,
 )
 from miniharness.core.tools import Tool, ToolRegistry
@@ -186,6 +189,11 @@ class SystemPromptAssemblyTest(unittest.TestCase):
     def setUp(self):
         self.ctx = Context(name="sp-assembly")
 
+    def _assemble(self, service, context=None):
+        # assemble 为 async（上游同款：监听器可能做文件系统 I/O）；
+        # 本类同步测试统一在临时事件循环里跑。
+        return asyncio.run(service.assemble(context))
+
     def test_assemble_builds_all_providers(self):
         service = SystemPromptService(self.ctx)
         service.section("a", 0, "你是助手。")
@@ -193,7 +201,7 @@ class SystemPromptAssemblyTest(unittest.TestCase):
         service.tools(lambda ctx: {"schemas": [{"name": "bash", "description": "d",
                                                 "parameters": {"type": "object"}}]})
         service.variable("cwd", lambda ctx: ctx.get("cwd", "未知"))
-        assembly = service.assemble({"cwd": "/tmp"})
+        assembly = self._assemble(service, {"cwd": "/tmp"})
         self.assertEqual(render_context_snapshot(assembly),
                          "Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\ncwd: /tmp")
         self.assertNotEqual(render_context_snapshot(assembly), "")
@@ -213,7 +221,7 @@ class SystemPromptAssemblyTest(unittest.TestCase):
             {"name": "deferred", "description": "d", "parameters": {}, "deferLoading": True},
             {"name": "plain", "description": "d", "parameters": {}},
         ]})
-        assembly = service.assemble({})
+        assembly = self._assemble(service, {})
         by_name = {t["name"]: t for t in assembly["tools"]}
         self.assertIs(by_name["deferred"]["deferLoading"], True)
         self.assertNotIn("deferLoading", by_name["plain"])
@@ -223,34 +231,123 @@ class SystemPromptAssemblyTest(unittest.TestCase):
         service.section("v", 0, "值={{value}}")
         # 未知变量 → fail loud
         service.variable("value", lambda ctx: "x")
-        assembly = service.assemble({})
+        assembly = self._assemble(service, {})
         self.assertEqual(render_prompt(assembly), "值=x")
         # 畸形引用（{{}} 空名）→ 抛错
         service.section("bad", 1, "值={{}}")
         with self.assertRaises(ValueError):
-            render_prompt(service.assemble({}))
+            render_prompt(self._assemble(service, {}))
         # 未注册变量 → 抛错
         service2 = SystemPromptService(self.ctx)
         service2.section("u", 0, "{{missing}}")
         with self.assertRaisesRegex(ValueError, "未知 prompt 变量"):
-            render_prompt(service2.assemble({}))
+            render_prompt(self._assemble(service2, {}))
         # 值为 None → 抛错
         service3 = SystemPromptService(self.ctx)
         service3.section("n", 0, "{{none}}")
         service3.variable("none", lambda ctx: None)
         with self.assertRaisesRegex(ValueError, "无值"):
-            render_prompt(service3.assemble({}))
+            render_prompt(self._assemble(service3, {}))
         # 孤立 {{ 无闭合 → 字面散文（不抛错）
         service4 = SystemPromptService(self.ctx)
         service4.section("lit", 0, "这是 {{ 字面")
-        self.assertEqual(render_prompt(service4.assemble({})), "这是 {{ 字面")
+        self.assertEqual(render_prompt(self._assemble(service4, {})), "这是 {{ 字面")
 
     def test_unknown_variable_reports_registered(self):
         service = SystemPromptService(self.ctx)
         service.variable("known", lambda ctx: "k")
         service.section("s", 0, "{{known}} {{other}}")
         with self.assertRaisesRegex(ValueError, "registered variables: known"):
-            render_prompt(service.assemble({}))
+            render_prompt(self._assemble(service, {}))
+
+    def test_central_order_tables(self):
+        service = SystemPromptService(self.ctx)
+        # 集中位置表逐值对齐上游 index.ts（dsh-v0.2.1-rc.2）
+        self.assertEqual(SECTION_ORDERS["HARNESS_IDENTITY"], -1000)
+        self.assertEqual(SECTION_ORDERS["HARNESS_SOURCE"], 10000)
+        self.assertEqual(SECTION_ORDERS["WEB_SURFACE"], 10100)
+        self.assertEqual(SECTION_ORDERS["DEPLOYMENT_PERSONA_SUFFIX"], 10200)
+        self.assertEqual(CONTEXT_ORDERS, {
+            "WORKING_DIRECTORY": 100, "SANDBOX_POLICY": 110,
+            "APPROVAL_POLICY": 115, "SUBAGENT_DELEGATION": 120,
+            "TEAM_IDENTITY": 125, "HARNESS_SOURCE": 200, "WEB_SURFACE": 210,
+        })
+        self.assertEqual(service.get_section_order("TOOL_READ"), 1100)
+        self.assertEqual(service.get_context_order("WORKING_DIRECTORY"), 100)
+
+    def test_interpolate_false_preserves_literal_text(self):
+        service = SystemPromptService(self.ctx)
+        service.section("lit", 0, "字面 {{value}}", interpolate=False)
+        service.section("dyn", 1, "动态 {{value}}")
+        service.context("clit", 10, "上下文 {{value}}", interpolate=False)
+        service.context("cdyn", 20, "上下文 {{value}}")
+        service.variable("value", lambda ctx: "V")
+        assembly = self._assemble(service, {})
+        self.assertEqual(render_prompt(assembly), "字面 {{value}}\n\n动态 V")
+        self.assertEqual(
+            [c["text"] for c in render_context_sections(assembly)],
+            ["上下文 {{value}}", "上下文 V"])
+        # refresh_context 经 resolveContext 带出 interpolate=false
+        refreshed = service.refresh_context(assembly, {})
+        self.assertIs(refreshed["contexts"][0].get("interpolate"), False)
+
+    def test_required_context_survives_suppression(self):
+        service = SystemPromptService(self.ctx)
+        service.context("wd", 100, "wd", required=True)
+        service.context("opt", 200, "opt")
+        self.assertEqual([c["name"] for c in self._assemble(service, {})["contexts"]],
+                         ["wd", "opt"])
+        service.suppress_runtime_context()
+        self.assertEqual([c["name"] for c in self._assemble(service, {})["contexts"]],
+                         ["wd"])
+
+    def test_refresh_context_refreshes_provider_text(self):
+        service = SystemPromptService(self.ctx)
+        state = {"wd": "/one"}
+        service.context("wd", 100, lambda ctx: state["wd"], required=True)
+        service.context("opt", 200, lambda ctx: "opt")
+        assembly = self._assemble(service, {})
+        state["wd"] = "/two"
+        refreshed = service.refresh_context(assembly, {})
+        # 接受装配的 sections/tools/variables 保留；contexts 按提供器现值重求
+        self.assertEqual(refreshed["sections"], assembly["sections"])
+        self.assertEqual(refreshed["tools"], assembly["tools"])
+        self.assertEqual([c["text"] for c in refreshed["contexts"]], ["/two", "opt"])
+
+    def test_refresh_context_removes_optional_under_suppression(self):
+        service = SystemPromptService(self.ctx)
+        service.context("wd", 100, "wd", required=True)
+        service.context("opt", 200, "opt")
+        assembly = self._assemble(service, {})
+        service.suppress_runtime_context()
+        refreshed = service.refresh_context(assembly, {})
+        self.assertEqual([c["name"] for c in refreshed["contexts"]], ["wd"])
+
+    def test_refresh_context_restores_missing_required_in_registry_order(self):
+        service = SystemPromptService(self.ctx)
+        service.context("a", 100, "a", required=True)
+        service.context("b", 200, "b", required=True)
+        service.context("c", 300, "c")
+        # 接受装配只剩 c → 刷新把缺失的 required 按注册序补回 c 之前
+        assembly = {"sections": [], "contexts": [{"name": "c", "text": "c"}],
+                    "tools": [], "variables": {}}
+        refreshed = service.refresh_context(assembly, {})
+        self.assertEqual([c["name"] for c in refreshed["contexts"]],
+                         ["a", "b", "c"])
+
+    def test_refresh_context_keeps_waterfall_only_contexts(self):
+        service = SystemPromptService(self.ctx)
+        service.context("reg", 100, "reg")
+
+        def append(cur, nxt):
+            return {**cur, "assembly": {**cur["assembly"], "contexts": [
+                *cur["assembly"]["contexts"], {"name": "plugin", "text": "plugin"}]}}
+        service._ctx.on("system-prompt/assemble", append)
+        assembly = self._assemble(service, {})
+        refreshed = service.refresh_context(assembly, {})
+        # 仅装配 waterfall 追加、无注册提供器的上下文保留其接受值
+        self.assertEqual([c["name"] for c in refreshed["contexts"]],
+                         ["reg", "plugin"])
 
     def test_complete_section_restored_after_waterfall(self):
         service = SystemPromptService(self.ctx)
@@ -261,7 +358,7 @@ class SystemPromptAssemblyTest(unittest.TestCase):
             return {**cur, "assembly": {
                 **cur["assembly"], "sections": [{"name": "hack", "text": "篡改"}]}}
         service._ctx.on("system-prompt/assemble", rewrite)
-        assembly = service.assemble({})
+        assembly = self._assemble(service, {})
         # waterfall 结果权威，但 complete 节恢复为唯一节（上游同款）
         self.assertEqual([s["name"] for s in assembly["sections"]], ["persona"])
 
@@ -270,16 +367,16 @@ class SystemPromptAssemblyTest(unittest.TestCase):
         service.section("a", 0, "a", complete=True)
         service.section("b", 1, "b", complete=True)
         with self.assertRaisesRegex(ValueError, "多个 complete"):
-            service.assemble({})
+            self._assemble(service, {})
 
     def test_suppress_runtime_context(self):
         service = SystemPromptService(self.ctx)
         service.context("cwd", 10, "cwd")
-        self.assertEqual(len(service.assemble({})["contexts"]), 1)
+        self.assertEqual(len(self._assemble(service, {})["contexts"]), 1)
         disposer = service.suppress_runtime_context()
-        self.assertEqual(service.assemble({})["contexts"], [])
+        self.assertEqual(self._assemble(service, {})["contexts"], [])
         disposer()
-        self.assertEqual(len(service.assemble({})["contexts"]), 1)
+        self.assertEqual(len(self._assemble(service, {})["contexts"]), 1)
 
     def test_waterfall_may_rewrite_assembly(self):
         service = SystemPromptService(self.ctx)
@@ -288,7 +385,7 @@ class SystemPromptAssemblyTest(unittest.TestCase):
         def drop(cur, nxt):
             return {**cur, "assembly": {**cur["assembly"], "sections": []}}
         service._ctx.on("system-prompt/assemble", drop)
-        self.assertEqual(service.assemble({})["sections"], [])
+        self.assertEqual(self._assemble(service, {})["sections"], [])
 
     def test_tool_order_and_rest(self):
         tools = [{"name": "zsh"}, {"name": "bash"}, {"name": "grep"}]

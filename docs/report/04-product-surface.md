@@ -100,7 +100,7 @@ bin.ts → args 解析（--profile/--patch/--dump-config，task 为位置参数�
   - WebApi unary 会话服务（`api.py`）：list/search/create/selectModel/modelCatalog/…/page unary；
   - Remote 流 wire（`stream_protocol.py`）：单条 `/api/remote.mux` WebSocket 承载 open/cancel/item/end/error 帧 + `$events/result` unary 结算；
   - `$events` 注册表（`events.py`）：ready 首帧 + api-session/* 转发 + waterfall；
-  - 六条流（`streams.py`）：`session/follow` = snapshot{header,cursor,records,hasMore,projections} + 逐帧；`session/control` = baseline{projections} + 替换帧；`terminal/retain` 一帧后保持，`terminal/follow` = snapshot + 有序 output·state；`workspace/follow` = baseline + upsert·remove·order·archived·pinned 增量；`workspaceFiles/changes` = ready + change；
+  - 六条流（`streams.py`）：`session/follow` = snapshot{header,cursor,records,hasMore,projections} + 逐帧；`session/control` = baseline{projections} + 替换帧；`terminal/retain` 一帧后保持，`terminal/attach` = snapshot{writable,inputWindow?} + 有序 output·state·ack（双工）；`workspace/follow` = baseline + upsert·remove·order·archived·pinned 增量；`workspaceFiles/changes` = ready + change；
   - 审批桥（`approvals.py`）：async tools/ask 闸门 ↔ `$events` waterfall 经 result 结算 + `approval/asked|decided` 审计；
   - 会话导出下载（`downloads.py`）：`GET /api/session.export`，root + 子代理后代 + 被引用媒体 zip，200/400/404/501/500 状态码链，错误走私有信封外壳；
   - FastAPI 载体（`server.py`）：同 gateway `stream-server.ts` 状态码链 + client/connection 一元信封 + frontend-static 约定；
@@ -435,8 +435,9 @@ mini 与上游的差异（教学范围，须在文档中标注）：
 #### 后台作业（`packages/jobs/`：seam + jobs-local + tool-jobs）
 
 - 工具：`job_output(job_id, wait?, timeout_ms?)`（默认非阻塞读流式增量，wait 有界）、`job_list()`、`job_kill(job_id, reason?)`；canonical 值 `{text,job}` / `PublicJobSnapshot[]` / `{outcome:'cancellation-requested'|'already-finished', job}`；
-- **无 `job/*` 会话事件**（全仓 grep 未命中）：作业完成走进程内 onJobDone/onJobsChanged 监听器 + 模型可见的完成 notice（busy 注入 / idle 唤醒，maxConsecutiveWakes 默认 3，tool-jobs/README.md:19-25）；
-- 并发：`maxConcurrentJobsPerOwner` 默认 **10**（按精确 Agent 实例计 running+stopping，jobs-local/src/index.ts:28,144-146）；触发入口是 bash/pwsh/subagent 的 `run_in_background: true`；
+- 生命周期事件：注册表在 owner 会话追加 log-only `job/registered`/`job/settled`（JobRegisteredData/JobSettledData：jobId/owner/kind/label/startedAt/toolCall? + finishedAt/status/cause/producerReported/detail?，jobs/jobs/src/types.ts:16-66；发射失败只 warn，index.ts:443-463）；完成 notice 仍走进程内 `events.subscribe` 监听器（busy 注入 / idle 唤醒，maxConsecutiveWakes 默认 3，tool-jobs/README.md:19-25）；
+- 发号：`<kind>-<16 位 UUID hex>`（`randomUUID().replaceAll('-','').slice(0,16)`，同注册表持有旧 id 时重试，index.ts:227-232）；`JobSpec.toolCall?` 记录创建它的工具调用（callId/rootCallId），由各 producer（tool-bash/tool-pwsh/tool-terminal/tool-workflow）从 `ToolExecution` 透传；
+- 并发：`maxConcurrentJobsPerOwner` 默认 **10**（按精确 Agent 实例计 running+stopping，jobs-local/src/index.ts:28,144-146）；触发入口是 bash / pwsh / terminal(`pty-send`) / workflow 的 `run_in_background: true`（subagent 已不再是 job kind，JobKindMap 仅 `bash`，view.ts:32-34）；
 - 注册表在 host plane，standard preset 只挂模型侧 tool-jobs（standard/agent.cordis.yml:64-74）。
 
 #### 可继续子代理（`packages/subagent/`）
@@ -471,11 +472,11 @@ mini 的 token 计量与压缩实现如下（`llm/token_meter.py` + `compaction/
 
 mini 的后台作业（`jobs/`，进程内注册表 + 三工具 + 完成 notice，装配在 demo/headless/session_cmds/ACP/SDK 入口）：
 
-- **`ctx.jobs` 服务**（`LocalJobRegistry`）：start/list/get/read/kill/wait、onJobDone/onJobsChanged、attachController；id 为 `<kind>-N`；owned 作业按会话 id 栅栏、unowned 对任何调用方开放；结算 first-wins，waiters/kill/终态 read 置 reported 抑制 notice；`maxConcurrentJobsPerOwner` 默认 10（按精确 owner / unowned 桶计 running+stopping）；owner 销毁时 cancel 在飞作业 + 限时排干 + 删除（teardown cancel 抛错 force-fail 只改记录）；
+- **`ctx.jobs` 服务**（`LocalJobRegistry`）：start/list/get/read/kill/wait、onJobDone/onJobsChanged、attachController；id 为 `<kind>-<16 位 UUID hex>`（碰撞重试）；owned 作业按会话 id 栅栏、unowned 对任何调用方开放；结算 first-wins，waiters/kill/终态 read 置 reported 抑制 notice；`maxConcurrentJobsPerOwner` 默认 10（按精确 owner / unowned 桶计 running+stopping）；owner 销毁时 cancel 在飞作业 + 限时排干 + 删除（teardown cancel 抛错 force-fail 只改记录）；注册/结算在 owner 会话落 `job/registered`/`job/settled`（含创建它的 `toolCall` 与 `producerReported`）；
 - **模型侧三工具**：`job_output`（默认非阻塞读流式增量 / wait 有界、响应以 `[status: ...]` 结尾）、`job_list`（`<id> [<kind>] <status> — <label>`）、`job_kill`（requested / already-finished）；
 - **完成 notice**：按 `completionDelivery` 走 wakeup（idle owner 开 turn，预算 maxConsecutiveWakes=3，user 输入认领恢复）或 quiet（一律 inject）；
 - **输出封顶**：输出与 notice 按 `outputLimitBytes` 做 UTF-8 字节封顶，模型可见输出再经工具层 `finalizeContent` 兜底二次封顶（job_output/job_kill 保 `[status: ...]` 行，`[output truncated]` / `[result truncated]` 截断标记同上游 finalizeTaskContent）；
-- **与上游一致**：无 `job/*` 会话事件、不新增事件类型；
+- **与上游一致**：注册表在 owner 会话落 log-only `job/registered`/`job/settled`（JobRegisteredData/JobSettledData，含可选 `toolCall` 与 `producerReported`），`JobSpec.toolCall` 由各 producer 从 `ToolExecution.callId/rootCallId` 透传；
 - **简化标注与已定载体**：agent registry + assertLive（`core/agents.py` AgentRegistry + install_agents + assert_live_agent，注册点 `AgentLoop.publish()`，jobs `_assert_access`/goal `_prepare_mutation` 接线；controller/监听器另按 scope 分层：`registry.py` `_layers = ScopedLayers(...)` + `chain_layers(scope_of(owner))`，同上游作用域化分层）；wake 预算载体（user 输入认领恢复改经安装 ctx 订阅 `agent/inbox/claimed`，仅 `source.kind=='user'` 恢复，同 tool-jobs `spendWakes.delete(agent)`，+ `agent/disposed` 防泄漏，AgentLoop 删 `on_inbox_claimed` 零参钩子）；teardown 排干为事件驱动（逐任务等待 `settled` 事件，`registry.py:431-436`，同上游 `await Promise.all(settled)`，非限时轮询）；canonical value + native renderer 分离（`jobs/tools.py` execute 返回结构化结果、`render=` 承担模型可见文本，同上游 output.render）；finalizeContent 载体（上游经 `outputLimits` WeakMap 即 pre-execute prepend 捕获取上限，mini 每次现查，等价回退路径、无 policy 时行为一致）；`run_in_background` 触发入口已经模型侧 `subagent` 工具复现（见下）。
 
 mini 的可继续子代理（`seams/subagent/`：descriptor + continuation + 委托工具 `subagent` + 控制工具三件套 + report 工具，装配在 demo/headless/session_cmds 入口）：
@@ -490,7 +491,7 @@ mini 的可继续子代理（`seams/subagent/`：descriptor + continuation + 委
 - **interrupt 授权矩阵**：user/ancestor authority、stale 调用方防探针、缺席目标接受性 no-op；
 - **嵌套续跑**：exec.agent 为授权与所有权主体，孙代结算通知投 durable 直属父，`list_descendants` 沿 parentSession 链 BFS；
 - **finishDisposal 顺序**：cancel top-down → flushFinalState best-effort → capture → 拆除 → notifySettlement → releaseOwnership → end 边；
-- **模型侧 `subagent` 工具**：同 tool-subagent 约定（文案/canonical+render/路由逐字，`run_in_background` 触发入口接入 jobs producer）；
+- **模型侧 `subagent` 工具**：同 tool-subagent 约定（文案/canonical+render 逐字，canonical 恒 `{kind:'activation',subagentId}`、render `started subagent <id>`、`cwd` 参数、config 逐字拒绝 `persona`/`toolFilter`）；
 - **简化标注**：invariant 运行时校验不适用（上游 per-provider invariant 分包架构）；同步模式结算投递走非唤醒 next-step。
 
 ## 议题 10：skills 能力家族——按需加载的指令

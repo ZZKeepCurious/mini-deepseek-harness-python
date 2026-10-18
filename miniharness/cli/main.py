@@ -14,8 +14,9 @@ launcher 选项（对齐 args.ts，已核实）：
   --config <path>             指定组合文件（mini 教学扩展：上游用 profile 目录机制）
 
   --host / --port             web profile 显式监听地址/端口（小写字面，P2-17）；
-                              host ∈ {'127.0.0.1','0.0.0.0'}，port ∈ 0..65535
-                              （0 = OS 分配）；缺省走环境/缺省（见 web/launcher）
+                              host 须为具体地址（通配 0.0.0.0/:: 拒绝），
+                              port ∈ 0..65535（0 = OS 分配）；缺省走环境/缺省
+                              （见 web/launcher）
 
 mini 扩展/简化（须标注）：
   - --config 为 mini 教学扩展（上游无此标志）
@@ -66,7 +67,7 @@ USAGE = (
     '  miniharness --profile headless "task"    answer one task, print the final assistant text, and exit\n'
     "  miniharness --profile web [--host HOST] [--port PORT]\n"
     "                                          start the web service (FastAPI; requires fastapi/uvicorn)\n"
-    "                                          --host 127.0.0.1|0.0.0.0, --port 0..65535 (0 = OS assign)\n"
+    "                                          --host <concrete addr> (no wildcard), --port 0..65535 (0 = OS assign)\n"
     "  miniharness --dump-config                print the final composed configuration (read-only)\n"
     "  miniharness --dump-default-config        print only the built-in default composition\n"
     "  miniharness --dump-config-schema         print the composed configuration as a JSON Schema document\n"
@@ -97,9 +98,12 @@ def _parse_launcher(args: list[str]) -> dict[str, Any]:
         elif a == "--host":
             if i + 1 >= len(args):
                 raise _UsageError(f"option {a!r} requires a value")
-            if args[i + 1] not in ("127.0.0.1", "0.0.0.0"):
+            from ..web.host import is_wildcard_host
+
+            if is_wildcard_host(args[i + 1]):
                 raise _UsageError(
-                    f"--host must be one of ['127.0.0.1', '0.0.0.0'], got {args[i + 1]!r}")
+                    f"--host {args[i + 1]!r} is an unspecified (wildcard) address; "
+                    "bind one concrete IPv4 or IPv6 address of a local interface instead")
             parsed["host"] = args[i + 1]
             i += 2
         elif a == "--port":
@@ -343,6 +347,7 @@ def _web_main(host: str | None = None, port: int | None = None) -> None:
     from ..interaction import register_ask_user_question
     from ..llm import DeepSeekAdapter, LlmFailure
     from ..preset.presets import default_roster, register_agent_preset_projection
+    from ..preset.registry import install_agent_preset_registry
     from ..settings.forms import install_settings_forms
     from ..settings_controller import install_settings_controller
     from ..web.launcher import run_web
@@ -373,6 +378,9 @@ def _web_main(host: str | None = None, port: int | None = None) -> None:
                                    patch_path=profile.patch_path, home=home)
     install_settings_forms(ctx, config_editor=editor, profile_home=home)
     install_settings_controller(ctx, roster=roster)
+    # ctx.agentPresets 声明式注册表（roster 提供活组合解析面）：子代理
+    # `agent_preset` 独立选择经它挂载子组合（工具视图 + persona）。
+    install_agent_preset_registry(ctx, roster=roster)
     # userQuestions 工具：web 组合经 cli 挂载 ask_user_question 工具（上游经
     # agent presets 挂载；mini 仅在 web profile 注册，headless/sessions 不挂）。
     reg = default_tools(ctx)

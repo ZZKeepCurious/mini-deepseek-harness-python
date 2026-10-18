@@ -4,11 +4,14 @@
 """
 import asyncio
 import base64
+import json
 import os
 import tempfile
 import unittest
+from pathlib import Path
 
 from miniharness.core.scope import Context
+from miniharness.core.session.persistence import JsonlPersistence
 from miniharness.llm.fake import FakeLlmAdapter
 from miniharness.web.api import (
     SESSION_SEARCH_RESULT_LIMIT,
@@ -51,6 +54,7 @@ def _zero_projection() -> dict:
             "cacheReadTokens": 0, "cacheWriteTokens": 0,
         },
         "inbox": {"next-turn": [], "next-step": []},
+        "workingDirectory": CWD,
     }
 
 
@@ -336,6 +340,26 @@ class TestSessionList(WebApiTest):
         self.assertGreaterEqual(items[0]["updatedAt"], items[1]["updatedAt"])
 
 
+class TestSessionProjections(WebApiTest):
+    def test_projections_live_session_is_sequenced(self):
+        session_id = self._value(self._create(session_id="session-p"))["sessionId"]
+        value = self._value(self.api.dispatch("session.projections", "rid",
+                                              {"sessionId": session_id}))
+        self.assertEqual(value["kind"], "sequenced")
+        self.assertEqual(value["asOfSeq"], -1)
+        self.assertEqual(value["values"], _zero_projection())
+
+    def test_projections_absent_session_is_null(self):
+        value = self._value(self.api.dispatch("session.projections", "rid",
+                                              {"sessionId": "session-nope"}))
+        self.assertIsNone(value)
+
+    def test_projections_blank_session_id_rejected(self):
+        error = self._error(self.api.dispatch("session.projections", "rid",
+                                              {"sessionId": ""}))
+        self.assertEqual(error["code"], "gateway/bad-request")
+
+
 class TestSessionSearch(WebApiTest):
     def test_search_finds_prompt_text_case_insensitive(self):
         session_id = self._value(self._create())["sessionId"]
@@ -502,6 +526,49 @@ class TestSessionFork(WebApiTest):
         error = self._error(self.api.dispatch("session.fork", "rid", {
             "sessionId": session_id, "atSeq": -3}))
         self.assertEqual(error["code"], "gateway/bad-request")
+
+
+class TestSessionForkMigration(WebApiTest):
+    """`allowMigration` + `session/migration-required` 预检（上游 index.ts:444-450）。"""
+
+    def _store_legacy_session(self, session_id: str) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        pers = JsonlPersistence(Path(tmp.name), compression="none")
+        pers.append(session_id, {"type": "turn/start", "seq": 0, "time": 1,
+                                 "data": {"turn": 1}})
+        pers.flush()
+        path = pers.path_of(session_id)
+        lines = path.read_text(encoding="utf-8").splitlines()
+        lines[0] = json.dumps({"type": "session", "version": 0, "id": session_id})
+        (path.parent / "session.jsonl").write_text("\n".join(lines) + "\n",
+                                                   encoding="utf-8")
+        path.unlink()
+        self.ctx.provide("sessionPersistence", pers)
+
+    def test_allow_migration_false_rejects_stored_migration_required(self):
+        self._store_legacy_session("session-old")
+        error = self._error(self.api.dispatch("session.fork", "rid", {
+            "sessionId": "session-old", "allowMigration": False}))
+        self.assertEqual(error["code"], "session/migration-required")
+        self.assertEqual(error["details"], {"sessionId": "session-old"})
+
+    def test_allow_migration_true_unknown_session_is_not_found(self):
+        error = self._error(self.api.dispatch("session.fork", "rid", {
+            "sessionId": "session-nope", "allowMigration": True}))
+        self.assertEqual(error["code"], "session/not-found")
+
+    def test_allow_migration_false_on_live_session_forks(self):
+        session_id = self._value(self._create())["sessionId"]
+        self._prompt_and_settle(session_id, "first")
+        value = self._value(self.api.dispatch("session.fork", "rid", {
+            "sessionId": session_id, "allowMigration": False}))
+        self.assertIsNotNone(self.api.store.get(value["sessionId"]))
+
+    def test_allow_migration_must_be_boolean(self):
+        error = self._error(self.api.dispatch("session.fork", "rid", {
+            "sessionId": "session-x", "allowMigration": "yes"}))
+        self.assertEqual(error["code"], "gateway/input-invalid")
 
 
 class TestSessionCancel(WebApiTest):
@@ -899,8 +966,7 @@ class TestDispatch(WebApiTest):
             "session/cancel", "session/page", "session/projections",
             "session/workspacePathApplications", "pluginInventory/list",
             "terminal/environment", "terminal/shells", "terminal/list",
-            "terminal/create", "terminal/write", "terminal/resize",
-            "terminal/rename", "terminal/close",
+            "terminal/create", "terminal/rename", "terminal/close",
             "workspace/create", "workspace/initializeDefault", "workspace/rename",
             "workspace/delete", "workspace/insertBefore", "workspace/insertSessionBefore",
             "workspace/archiveSession", "workspace/unarchiveSession",

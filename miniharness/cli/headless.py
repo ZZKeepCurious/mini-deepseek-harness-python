@@ -109,6 +109,17 @@ def run_headless(
     install_system_prompt(ctx)
     install_web(ctx)
     install_user_questions(ctx)
+    # 会话当前工作目录服务（对齐上游 dsh-working-directory，inject
+    # fs/sessionProjections/systemPrompt）：装配前三者，工具由 default_tools 收编。
+    from ..fs import install_local_fs
+    from ..session_projection import install_session_projections
+    from ..working_directory import install_working_directory
+
+    if ctx.get("fs") is None:
+        install_local_fs(ctx, {"cwd": os.getcwd()})
+    if ctx.get("sessionProjections") is None:
+        install_session_projections(ctx)
+    install_working_directory(ctx)
     if sandbox:
         from ..seams.sandbox_local import LocalSandboxProvider
         from ..seams.sandbox_policy import SandboxPolicyService

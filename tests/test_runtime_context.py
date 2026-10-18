@@ -3,9 +3,10 @@
 上游对照：packages/core/agent-loop/src/runtime-context.ts +
 tests/runtime-context.spec.ts（restore 忽略被 replace 遮蔽的快照并继续向前找、
 project('retained', []) 无更新、快照消息带 form:'snapshot' + sections、
-cleared 哨兵不带归因）+ agent.ts preStep 接线（assemble →
-renderContextSections → project → 默认进入把快照追加在 claimed 之后，
-监听器显式 enter 决策整体接管 messages）。运行：python -m unittest discover -s tests -t .
+cleared 哨兵不带归因）+ agent.ts 请求准入接线（dsh-v0.2.1-rc.2：preStep 装配
+一次 → 默认进入把快照占位符追加在 claimed 之后；快照实体在请求准入
+（step 首 / 每 attempt）refreshContext 后落盘；监听器显式 enter 接管 claimed
+messages 时快照仍独立落盘）。运行：python -m unittest discover -s tests -t .
 """
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ from miniharness.core.scope import Context
 from miniharness.core.session import Session, create_message, text_block
 from miniharness.core.system_prompt import install_system_prompt
 from miniharness.core.tools import ToolRegistry
-from miniharness.llm import FakeLlmAdapter
+from miniharness.llm import FakeLlmAdapter, LlmFailure
 
 
 def _owned(text: str) -> dict:
@@ -206,15 +207,104 @@ class LoopIntegrationTest(unittest.TestCase):
         self.assertEqual(second["content"][0]["text"], CLEARED)
         self.assertEqual(second["source"], {"kind": KIND})
 
-    def test_explicit_enter_decision_takes_over_without_snapshot(self):
+    def test_explicit_enter_messages_take_over_but_snapshot_still_admits(self):
         session, loop, _, state = self._env()
         state["text"] = "策略 A"
         loop.ctx.on("agent/pre-step",
                     lambda payload, nxt: {"kind": "enter",
-                                          "messages": payload["messages"]})
+                                          "messages": [{
+                                              "role": "user",
+                                              "content": [{"type": "text", "text": "接管输入"}],
+                                              "source": {"kind": "user"}}]})
         loop.followup("你好")
-        self.assertEqual(len(self._snapshots(session)), 0)
+        # 0.2.1（上游 agent.ts:438-440 的尾随 append）：显式 enter 接管 claimed
+        # messages，但运行时上下文快照在请求准入时**独立**落盘。
+        self.assertEqual(len(self._snapshots(session)), 1)
         self.assertTrue(loop.last_response())
+
+
+class _RetryCaptureAdapter(FakeLlmAdapter):
+    """记录每次请求的 messages；首次请求抛 LlmFailure 以触发重试（P0-3 用）。"""
+
+    provider = "retry-capture"
+
+    def __init__(self, code: str = "RATE_LIMIT"):
+        super().__init__(final_text="好")
+        self._code = code
+        self.requests = []
+
+    async def stream(self, messages, tools, signal=None,
+                     session_id=None, purpose=None):
+        self.requests.append([dict(m) for m in messages])
+        if len(self.requests) == 1:
+            raise LlmFailure(self._code, "boom")
+        async for chunk in super().stream(messages, tools, signal, session_id,
+                                          purpose):
+            yield chunk
+
+
+class RetryAdmissionTest(unittest.TestCase):
+    """P0-3 请求准入：每 attempt 前 refreshContext（上游 agent.ts:411-440）。
+
+    上游对照：agent-loop/tests/system-prompt-admission.spec.ts
+    （"reconciles compaction retries without replaying admission"：assemblies
+    每 step 恰一次；"A retry must retain the assembly accepted for this step,
+    not pick up new sections."）。
+    """
+
+    def _env(self):
+        session = Session("rt-retry")
+        ctx = Context()
+        reg = ToolRegistry(ctx)
+        svc = install_system_prompt(ctx)
+        state = {"text": "策略 A"}
+        svc.context("t:state", 10, lambda c: state["text"])
+        adapter = _RetryCaptureAdapter()
+        loop = AgentLoop(session, adapter, reg, ctx)
+        return session, loop, svc, state, adapter, ctx
+
+    @staticmethod
+    def _snapshots(session):
+        return [e for e in session.events if e["type"] == "user/message"
+                and isinstance(e["data"].get("source"), Mapping)
+                and e["data"]["source"].get("kind") == KIND]
+
+    def test_retry_refreshes_context_without_reassembling(self):
+        session, loop, svc, state, adapter, ctx = self._env()
+        assemblies = {"n": 0}
+
+        def count_assembly(cur, nxt):
+            assemblies["n"] += 1
+            return nxt()
+        ctx.on("system-prompt/assemble", count_assembly)
+
+        attempts = {"n": 0}
+
+        def recover(payload, nxt):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                # step 内变更：context 值变化应被重试准入捕捉；
+                # 新注册的 section 不应进入已接受的装配
+                state["text"] = "策略 B"
+                svc.section("late", 20, "迟到的节")
+                return {"kind": "retry"}
+            return nxt() if nxt is not None else None
+        ctx.on("agent/request-error", recover)
+
+        loop.followup("你好")
+
+        self.assertEqual(len(adapter.requests), 2)
+        # 装配每 step 恰一次（重试不重装配）
+        self.assertEqual(assemblies["n"], 1)
+        # 快照：step 首准入「策略 A」+ 重试准入刷新「策略 B」
+        snaps = self._snapshots(session)
+        self.assertEqual(len(snaps), 2)
+        self.assertIn("策略 A", snaps[0]["data"]["content"][0]["text"])
+        self.assertIn("策略 B", snaps[1]["data"]["content"][0]["text"])
+        # 第二次请求携带刷新后的快照，但不含 step 内新注册的 section
+        second = repr(adapter.requests[1])
+        self.assertIn("策略 B", second)
+        self.assertNotIn("迟到的节", second)
 
 
 if __name__ == "__main__":

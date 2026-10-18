@@ -5,7 +5,6 @@ import unittest
 from miniharness.terminal.types import Cancellation
 from miniharness.terminal_bash import SubprocessOutcome
 from miniharness.terminal_controller.terminal import BrowserTerminal
-from miniharness.terminal_controller.types import TerminalControlUnavailable
 
 INFO = {"id": "terminal-test", "title": "bash",
         "shell": {"path": "/bin/bash", "name": "bash", "args": ["-i"]},
@@ -82,8 +81,11 @@ class FakeBrowserHandle:
         self.output.emit_end(SubprocessOutcome(self.exit_code, None))
 
 
-def attach(terminal, attachment_id="first", signal=None):
-    return terminal.follow(attachment_id, signal)
+LIMITS = {"maxInputBytes": 64 * 1024, "maxCols": 500, "maxRows": 200}
+
+
+def attach(terminal, signal=None, input_window=None):
+    return terminal.attach(LIMITS, signal, input_window)
 
 
 class TestBrowserTerminal(unittest.TestCase):
@@ -104,7 +106,7 @@ class TestBrowserTerminal(unittest.TestCase):
         self.assertEqual(handle.terminate_calls, 0)
         handle.output.emit_data(b"world")
         self.assertEqual(terminal.info["state"], "running")
-        second = attach(terminal, "second")
+        second = attach(terminal)
         frames = [second.baseline]
         if "world" not in second.baseline["screen"]:
             frames.append(second.follower.pop())
@@ -122,18 +124,19 @@ class TestBrowserTerminal(unittest.TestCase):
         handle.output.emit_data(encoded[2:])
         self.assertEqual(first.follower.pop(),
                          {"type": "output", "sequence": 1, "data": "终端"})
-        second = attach(terminal, "second")
-        with self.assertRaises(TerminalControlUnavailable) as caught:
-            terminal.write("first", "ignored")
-        self.assertEqual(caught.exception.details, {"reason": "read-only"})
-        terminal.write("second", "\t")
+        second = attach(terminal)
+        self.assertEqual(first.follower.pop()["type"], "state")
+        first.submit({"type": "write", "sequence": 1, "data": "ignored"})
+        self.assertEqual(first.follower.pop(),
+                         {"type": "ack", "sequence": 1, "refusal": "read-only"})
+        second.submit({"type": "write", "sequence": 1, "data": "\t"})
         self.assertEqual(handle.written, ["\t"])
-        terminal.resize("second", 100, 30)
+        second.submit({"type": "resize", "sequence": 2, "cols": 100, "rows": 30})
         self.assertEqual(handle.resized, [(100, 30)])
         self.assertEqual(terminal.info["cols"], 100)
         self.assertEqual(terminal.info["rows"], 30)
         second.detach()
-        self.assertNotIn("controllerId", terminal.info)
+        self.assertFalse(second.writable)
 
     def test_keeps_exit_facts_and_screen_until_explicit_cleanup(self):
         terminal, handle = self.fixture()
@@ -146,7 +149,7 @@ class TestBrowserTerminal(unittest.TestCase):
         self.assertEqual(state["info"]["state"], "exited")
         self.assertEqual(state["info"]["exitCode"], 7)
         self.assertEqual(handle.terminate_calls, 0)
-        second = attach(terminal, "second")
+        second = attach(terminal)
         self.assertEqual(second.baseline["info"]["state"], "exited")
         self.assertEqual(second.baseline["info"]["exitCode"], 7)
         terminal.close()
@@ -166,36 +169,29 @@ class TestBrowserTerminal(unittest.TestCase):
         self.assertEqual(first.follower.pop()["info"]["state"], "exited")
         self.assertTrue(first.follower.finished)
 
-    def test_rejects_input_before_attachment_during_close_and_after_exit(self):
+    def test_rejects_input_after_exit_with_a_refusal_acknowledgement(self):
         terminal, handle = self.fixture()
-        with self.assertRaises(TerminalControlUnavailable) as caught:
-            terminal.write("first", "ignored")
-        self.assertEqual(caught.exception.details, {"reason": "read-only"})
         first = attach(terminal)
         handle.output.emit_end(SubprocessOutcome(0, None))
         self.assertEqual(first.follower.pop()["info"]["state"], "exited")
-        with self.assertRaises(TerminalControlUnavailable) as not_running:
-            terminal.write("first", "ignored")
-        self.assertEqual(not_running.exception.details, {"reason": "not-running"})
-        with self.assertRaises(TerminalControlUnavailable):
-            terminal.resize("first", 100, 30)
-        terminal.close()
-        with self.assertRaises(TerminalControlUnavailable):
-            terminal.write("first", "ignored")
+        first.submit({"type": "write", "sequence": 1, "data": "ignored"})
+        self.assertEqual(first.follower.pop(),
+                         {"type": "ack", "sequence": 1, "refusal": "not-running"})
+        first.submit({"type": "resize", "sequence": 2, "cols": 100, "rows": 30})
+        self.assertEqual(first.follower.pop()["refusal"], "not-running")
         self.assertEqual(handle.written, [])
         self.assertEqual(handle.resized, [])
 
     def test_preserves_input_controller_when_an_older_follower_detaches(self):
         terminal, handle = self.fixture()
         first = attach(terminal)
-        second = attach(terminal, "second")
+        second = attach(terminal)
         first.detach()
-        self.assertEqual(terminal.info["controllerId"], "second")
         terminal.rename("build output")
         state = second.follower.pop()
         self.assertEqual(state["info"]["title"], "build output")
-        self.assertEqual(state["info"]["controllerId"], "second")
-        terminal.write("second", "pwd\r")
+        self.assertTrue(state["writable"])
+        second.submit({"type": "write", "sequence": 1, "data": "pwd\r"})
         self.assertEqual(handle.written, ["pwd\r"])
 
     def test_does_not_grant_input_to_attachments_cancelled_before_snapshot(self):
@@ -203,22 +199,22 @@ class TestBrowserTerminal(unittest.TestCase):
         aborted = Cancellation()
         aborted.abort(RuntimeError("already detached"))
         with self.assertRaisesRegex(RuntimeError, "already detached"):
-            attach(terminal, "cancelled", aborted)
-        attach(terminal)
-        self.assertEqual(terminal.info["controllerId"], "first")
+            attach(terminal, aborted)
+        first = attach(terminal)
+        self.assertTrue(first.writable)
 
     def test_continues_accepting_operations_after_provider_write_or_resize_fails(self):
         terminal, handle = self.fixture()
-        attach(terminal)
+        first = attach(terminal)
         handle.write_failures.append(RuntimeError("input transport failed"))
         handle.resize_failures.append(RuntimeError("resize transport failed"))
         with self.assertRaisesRegex(RuntimeError, "input transport failed"):
-            terminal.write("first", "failed")
+            first.submit({"type": "write", "sequence": 1, "data": "failed"})
         with self.assertRaisesRegex(RuntimeError, "resize transport failed"):
-            terminal.resize("first", 100, 30)
+            first.submit({"type": "resize", "sequence": 2, "cols": 100, "rows": 30})
         self.assertEqual(terminal.info["cols"], 80)
-        terminal.write("first", "accepted")
-        terminal.resize("first", 90, 25)
+        first.submit({"type": "write", "sequence": 3, "data": "accepted"})
+        first.submit({"type": "resize", "sequence": 4, "cols": 90, "rows": 25})
         self.assertEqual(handle.written[-1], "accepted")
         self.assertEqual((terminal.info["cols"], terminal.info["rows"]), (90, 25))
 
@@ -231,7 +227,7 @@ class TestBrowserTerminal(unittest.TestCase):
         state = first.follower.pop()
         self.assertEqual(state["info"]["state"], "failed")
         self.assertEqual(state["info"]["error"], "process wait failed")
-        second = attach(terminal, "second")
+        second = attach(terminal)
         self.assertEqual(second.baseline["info"]["state"], "failed")
         self.assertIn("last output", second.baseline["screen"])
 
@@ -256,10 +252,30 @@ class TestBrowserTerminal(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "remains alive"):
             terminal.close()
         handle.on_terminate = None
-        terminal.write("first", "retry cleanup next")
+        first.submit({"type": "write", "sequence": 1, "data": "retry cleanup next"})
         terminal.close()
         self.assertEqual(handle.terminate_calls, 2)
         self.assertTrue(first.follower.closed or first.follower.finished)
+
+    def test_snapshot_carries_writable_and_the_carrier_input_window(self):
+        terminal, handle = self.fixture()
+        first = attach(terminal, input_window={"maxBytes": 512, "frameOverheadBytes": 40})
+        self.assertEqual(first.baseline["writable"], True)
+        self.assertEqual(first.baseline["inputWindow"],
+                         {"maxBytes": 512, "frameOverheadBytes": 40})
+        second = attach(terminal)
+        self.assertNotIn("inputWindow", second.baseline)
+        self.assertEqual(second.baseline["writable"], True)
+        self.assertFalse(first.writable)
+
+    def test_rejects_an_input_sequence_gap_without_acknowledging(self):
+        terminal, handle = self.fixture()
+        first = attach(terminal)
+        first.submit({"type": "write", "sequence": 1, "data": "a"})
+        self.assertEqual(first.follower.pop(), {"type": "ack", "sequence": 1})
+        with self.assertRaisesRegex(RuntimeError, "sequence has a gap"):
+            first.submit({"type": "write", "sequence": 3, "data": "c"})
+        self.assertEqual(handle.written, ["a"])
 
 
 if __name__ == "__main__":

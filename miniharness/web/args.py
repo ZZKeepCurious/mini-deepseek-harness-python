@@ -95,6 +95,7 @@ _SPECS: dict[str, dict[str, tuple[str, bool]]] = {
     "session/fork": {
         "sessionId": (STR, True),
         "atSeq": (INT, False),
+        "allowMigration": (BOOL, False),
     },
     "session/prompt": {
         "requestId": (STR, True),
@@ -151,23 +152,9 @@ _SPECS: dict[str, dict[str, tuple[str, bool]]] = {
         "rows": (INT, True),
         "shellPath": (STR, False),
     },
-    "terminal/follow": {
+    "terminal/attach": {
         "agentId": (STR, True),
         "id": (STR, True),
-        "attachmentId": (STR, True),
-    },
-    "terminal/write": {
-        "agentId": (STR, True),
-        "id": (STR, True),
-        "attachmentId": (STR, True),
-        "data": (STR, True),
-    },
-    "terminal/resize": {
-        "agentId": (STR, True),
-        "id": (STR, True),
-        "attachmentId": (STR, True),
-        "cols": (INT, True),
-        "rows": (INT, True),
     },
     "terminal/rename": {
         "agentId": (STR, True),

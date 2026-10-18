@@ -41,6 +41,7 @@ __all__ = [
     "AUTH",
     "attribution_headers",
     "BlockAssembler",
+    "CLIENT_UPGRADE_REQUIRED",
     "CONTEXT_WINDOW_EXCEEDED",
     "EMPTY_RESPONSE",
     "IMAGE_OFFLOAD_REQUIRED",
@@ -62,6 +63,8 @@ __all__ = [
     "ModelModality",
     "ModelModalityMap",
     "MALFORMED_RESPONSE",
+    "MODEL_UNSUPPORTED",
+    "REQUEST_EXTENSION",
     "QUOTA",
     "RATE_LIMIT",
     "REQUEST_ERROR",
@@ -360,6 +363,10 @@ UNSUPPORTED_REASONING_EFFORT = "UNSUPPORTED_REASONING_EFFORT"
 ACCOUNT_QUOTA = "ACCOUNT_QUOTA"                       # 账户额度耗尽，可经计费页充值（区别于供应商中立的 QUOTA）
 ACCOUNT_SIGN_IN_REQUIRED = "ACCOUNT_SIGN_IN_REQUIRED"  # 未登录 / 目标 origin 不允许账户认证
 ACCOUNT_TOKEN_INVALID = "ACCOUNT_TOKEN_INVALID"        # 账户 token 被 provider 401 拒绝
+# 账户目录版本门控码（上游 llm-deepseek-account/src/index.ts:39,42 refuse()）。
+CLIENT_UPGRADE_REQUIRED = "CLIENT_UPGRADE_REQUIRED"    # 列出的模型要求更新的客户端版本
+MODEL_UNSUPPORTED = "MODEL_UNSUPPORTED"                # 该构建不支持列出的模型
+REQUEST_EXTENSION = "REQUEST_EXTENSION"                # 请求扩展准备/合并失败（上游 deepseek request-extensions）
 
 
 class StreamChunk(dict):

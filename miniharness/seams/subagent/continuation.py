@@ -62,10 +62,13 @@ from ...core.session import Session, create_message, is_json_safe, text_block, t
 from ...core.session.persistence import SessionPersistence, inherited_cut
 from ...core.system_prompt import (
     PERSONA_PREFIX_SECTION,
+    PERSONA_SUFFIX_ORDER,
+    PERSONA_SUFFIX_SECTION,
     SYSTEM_PROMPT_SERVICE,
     SystemPromptService,
 )
 from ...core.tools import Tool, ToolExec, ToolRegistry
+from ...core.working_cwd import working_directory_of
 from ...attachment import admit_prompt_content
 from ...llm import FakeLlmAdapter, LlmAdapter
 from .archive_admission import install_subagent_archive_admission
@@ -105,6 +108,22 @@ _DEFAULT_CHILD_PERSONA = (
     "You are a background subagent working on behalf of the parent agent. "
     "Complete the task you are given and report the result back."
 )
+
+
+def _preset_persona_prefix(persona: Any) -> str | None:
+    """preset persona 的前缀节文本（PersonaConfig.system_prompt，V3 前缀）。"""
+    if persona is None:
+        return None
+    text = getattr(persona, "system_prompt", None)
+    return text or None
+
+
+def _preset_persona_suffix(persona: Any) -> str | None:
+    """preset persona 的尾节文本；`complete` 压制尾节（上游 persona 语义）。"""
+    if persona is None or getattr(persona, "complete", False):
+        return None
+    suffix = getattr(persona, "suffix", None)
+    return suffix or None
 
 # 上游 report 工具随附的 system prompt 段文案（tool-subagent-report
 # installReportTool 的 'tool:report' section，order 117，逐字对齐）
@@ -395,6 +414,44 @@ class ActivationPool:
         return release
 
 
+class ActivationResult:
+    """一次激活终局结果的同步结果箱（上游 `SubagentActivation.result` 的载体）。
+
+    upstream 用 `PromiseWithResolvers<SubagentResult>`——caller delivery 的编程
+    调用方 await 它，parent delivery 无人等待。mini 同步载体以
+    `threading.Event` + 结果槽等价：`resolve`/`reject` 幂等（终局恰好一次），
+    `wait()` 阻塞取结果或在基础设施故障时重抛。parent delivery 也照样
+    resolve（无人 wait 时零开销），保证语义统一。
+    """
+
+    def __init__(self) -> None:
+        self._done = threading.Event()
+        self._value: dict | None = None
+        self._error: BaseException | None = None
+
+    def resolve(self, value: dict) -> None:
+        """记录终局结果（幂等：首个终局权威）。"""
+        if self._done.is_set():
+            return
+        self._value = value
+        self._done.set()
+
+    def reject(self, error: BaseException) -> None:
+        """记录无法表达为终局原因的基础设施故障（幂等）。"""
+        if self._done.is_set():
+            return
+        self._error = error
+        self._done.set()
+
+    def wait(self) -> dict:
+        """阻塞取终局结果（{output, stopReason, structured?, diagnostic?}）。"""
+        self._done.wait()
+        if self._error is not None:
+            raise self._error
+        assert self._value is not None
+        return self._value
+
+
 class SubagentContinuationManager:
     """可继续子代理管理器：创建 / 续跑 / 中断 / 结算投递 / 枚举。
 
@@ -435,6 +492,11 @@ class SubagentContinuationManager:
         self._adapter_factory = adapter_factory or _default_adapter_factory
         self._activations: dict[str, dict] = {}
         self._persisted: dict[str, int] = {}
+        # 激活收据面（上游 SubagentActivation）：本次 start_activation 键控的
+        # delivery 策略与终局结果箱。物化点从 _pending_delivery 取 delivery，
+        # 建 result_box 存入 _results；收据读取后即摘除（无泄漏）。
+        self._pending_delivery: dict[str, str] = {}
+        self._results: dict[str, ActivationResult] = {}
         # 活体注册表（对齐上游 ctx.agents 的 exact-live 校验面）：id → AgentLoop。
         # 父构造时登记；子激活物化时登记、结算弹出。interrupt 授权矩阵与
         # 投递 lineage 授权都以"注册表里的同一对象"为准。
@@ -760,6 +822,140 @@ class SubagentContinuationManager:
             child_id, prompt, source="parent", parent=parent)
         return {"childId": child_id, "messageId": message_id}
 
+    # ---------- 上游 0.2.1 startActivation（取代 startContinuable）----------
+
+    def start_activation(self, spec: dict) -> dict:
+        """启动一次受管子代理激活（上游 SubagentManager.startActivation 的
+        本地通道 startLocal，dsh-v0.2.1-rc.2 起取代 startContinuable）。
+
+        @param spec - {"provider", "label", "child_id"?, "request", "delivery"}：
+          * provider：注册的 provider 名（mini 仅 CONTINUATION_PROVIDER）；
+          * label：写入 catalog 的短标签；
+          * child_id：可选的预留子会话 id（上游 spec.childId）；
+          * request：{cwd?, agent_preset?, prompt, parent, signal?,
+            agent_options?, output_schema?, max_depth?}——`label`/`signal` 由
+            spec 另行持有，不在 request 内；
+          * delivery：'parent'（运行时通知模型）| 'caller'（只回结果）。
+        @returns {"childId", "messageId", "result", "dispose"}；result 是
+          ActivationResult（caller delivery 的编程调用方等待），dispose 释放
+          本激活及其拥有的后代（幂等；已结算 → no-op）。
+        """
+        parent = self._activation_parent(spec)
+        child_id = self._start_activation_preflight(spec, parent)
+        return self._start_activation_local(spec, parent, child_id)
+
+    async def start_activation_async(self, spec: dict) -> dict:
+        """start_activation 的事件循环内版本（初始 prompt 经 send_message_async
+        投递：父无 driver → 内联泵子回合、确定性结算；父有 driver → 上环）。"""
+        parent = self._activation_parent(spec)
+        child_id = self._start_activation_preflight(spec, parent)
+        return await self._start_activation_local_async(spec, parent, child_id)
+
+    def _activation_parent(self, spec: dict) -> AgentLoop:
+        """解析激活的委托父（request.parent，缺省顶层父）。"""
+        request = spec.get("request") or {}
+        return request.get("parent") or self.parent
+
+    def _start_activation_preflight(self, spec: dict, parent: AgentLoop) -> str:
+        """激活准入前缀（上游 startLocal 的同步前缀）：provider 校验、准入、
+        深度上限、子身份可用性。返回解析后的子会话 id。"""
+        provider = spec.get("provider") or CONTINUATION_PROVIDER
+        if provider != CONTINUATION_PROVIDER:
+            raise SubagentError(
+                f"provider {provider!r} 不可用（mini 仅内建 {CONTINUATION_PROVIDER!r}）",
+                "UNAVAILABLE",
+            )
+        delivery = spec.get("delivery", "parent")
+        if delivery not in ("parent", "caller"):
+            raise ValueError(
+                f"unknown subagent delivery {delivery!r}; expected 'parent' or 'caller'")
+        self.assert_admitting(parent)
+        request = spec.get("request") or {}
+        max_depth = self.resolve_max_depth(request.get("max_depth"))
+        depth = delegation_depth_of(parent)
+        if max_depth is not None and depth >= max_depth:
+            raise SubagentError(
+                f"子代理嵌套深度 {depth} 达到上限 {max_depth}", "MAX_DEPTH_EXCEEDED",
+            )
+        child_id = spec.get("child_id") or ("child-" + uuid.uuid4().hex[:12])
+        self._assert_child_id_available(child_id)
+        return child_id
+
+    def _start_activation_local(self, spec: dict, parent: AgentLoop,
+                                child_id: str) -> dict:
+        """同步本地激活：物化前缀 + 初始投递（send_message 内联泵子回合）。
+
+        activation 在 send_message 路径内物化完成；delivery 以 `_pending_delivery`
+        键控在物化点取出，result box 由 `_results` 键控供本次收据读取。
+        """
+        request = spec.get("request") or {}
+        self._pending_delivery[child_id] = spec.get("delivery", "parent")
+        try:
+            cwd = self._resolve_child_directory(parent, request.get("cwd"), spec.get("signal"))
+            parent, child_id = self._prepare_continuable(
+                spec.get("label"), None, None, parent, child_id,
+                request.get("agent_options"), cwd=cwd,
+                agent_preset=request.get("agent_preset"))
+            message_id = None
+            if request.get("prompt") is not None:
+                message_id = self.send_message(
+                    child_id, request["prompt"], source="parent", parent=parent)
+            return self._activation_receipt(child_id, message_id)
+        finally:
+            self._pending_delivery.pop(child_id, None)
+
+    async def _start_activation_local_async(self, spec: dict, parent: AgentLoop,
+                                            child_id: str) -> dict:
+        """异步本地激活：初始 prompt 经 send_message_async 投递。"""
+        request = spec.get("request") or {}
+        self._pending_delivery[child_id] = spec.get("delivery", "parent")
+        try:
+            cwd = self._resolve_child_directory(parent, request.get("cwd"), spec.get("signal"))
+            parent, child_id = self._prepare_continuable(
+                spec.get("label"), None, None, parent, child_id,
+                request.get("agent_options"), cwd=cwd,
+                agent_preset=request.get("agent_preset"))
+            message_id = None
+            if request.get("prompt") is not None:
+                message_id = await self.send_message_async(
+                    child_id, request["prompt"], source="parent", parent=parent)
+            return self._activation_receipt(child_id, message_id)
+        finally:
+            self._pending_delivery.pop(child_id, None)
+
+    def _activation_receipt(self, child_id: str, message_id: str | None) -> dict:
+        """构造激活收据（上游 receipt）：childId/messageId/result/dispose。"""
+        box = self._results.pop(child_id, None) or ActivationResult()
+        return {
+            "childId": child_id,
+            "messageId": message_id,
+            "result": box,
+            "dispose": self._activation_disposer(child_id),
+        }
+
+    def _activation_disposer(self, child_id: str) -> Callable[[], None]:
+        """本激活的释放句柄（上游 SubagentActivation.dispose）：强制结算本激活
+        及其拥有的后代；已结算/已冷恢复为不同激活时 no-op（幂等）。"""
+        def dispose() -> None:
+            activation = self._activations.get(child_id)
+            if activation is not None:
+                self._settle(child_id, activation, force=True)
+        return dispose
+
+    def _resolve_child_directory(self, parent: AgentLoop, requested: str | None,
+                                 signal: Any) -> str:
+        """解析子代理初始工作目录（上游 resolveDirectory，manager.ts:525-531）：
+
+        显式绝对路径原样采用；否则以父当前有效目录（workingDirectory.ensure）
+        为基准 resolve(requested or '.')。父未装 working-directory 服务时退化为
+        父会话 header.cwd（或工作目录），与"目录从未被本服务变更"等价。
+        """
+        import os
+        if requested is not None and os.path.isabs(requested):
+            return requested
+        base = working_directory_of(parent) or os.getcwd()
+        return os.path.normpath(os.path.join(base, requested or "."))
+
     def _prepare_continuable(
         self,
         label: str | None,
@@ -768,9 +964,16 @@ class SubagentContinuationManager:
         parent: AgentLoop,
         child_id: str,
         agent_options: dict | None,
+        cwd: str | None = None,
+        agent_preset: str | None = None,
     ) -> tuple[AgentLoop, str]:
-        """sync/async start_continuable 共享的物化前缀：seed / meta / descriptor /
-        首轮落盘。返回 (父, 子 id)。"""
+        """sync/async start 共享的物化前缀：seed / meta / descriptor /
+        首轮落盘。返回 (父, 子 id)。
+
+        cwd/agent_preset：上游 0.2.1 `childSessionMeta` 的 `header.cwd` 与
+        `agentPreset`（独立 preset 选择或继承父组合）——写进子会话 header，
+        working-directory 投影 init 与 preset 投影 init 据此取值。
+        """
         child_depth = delegation_depth_of(parent) + 1
         seed = completed_turn_prefix(parent.session.events)
         meta: dict[str, Any] = {
@@ -778,6 +981,18 @@ class SubagentContinuationManager:
             "origin": "subagent",
             "delegationDepth": child_depth,
         }
+        if cwd is not None:
+            meta["cwd"] = cwd
+        # 有效 preset = 独立选择 ?? 父组合（上游 childSessionMeta：
+        # `selectedPreset ?? parent.ctx.get('agentPresets')?.composedPreset`）。
+        # 父的组合以小代理会话 header.agentPreset 承载。
+        effective_preset = agent_preset
+        if effective_preset is None:
+            parent_preset = parent.session.meta.get("agentPreset")
+            if isinstance(parent_preset, str) and parent_preset:
+                effective_preset = parent_preset
+        if effective_preset is not None:
+            meta["agentPreset"] = effective_preset
         # label 不入 header meta（v2 物理 header 键闭集拒绝未知键——上游
         # isHeaderLine 同款）；label 随 subagent/descriptor 事件持久化，读路径
         # 从描述符恢复（见 _catalog_entry / restore descriptor fold）。
@@ -807,13 +1022,17 @@ class SubagentContinuationManager:
         if seed:
             meta["isSeeded"] = True
         child_session = Session(child_id, seed=seed, meta=meta)
+        # 独立选择先于描述符落盘（上游 manager.ts:888-890：agent-preset/selected
+        # 在 subagent/descriptor 之前）——冷恢复据此判定子是否独立组合。
+        if agent_preset is not None:
+            child_session.append("agent-preset/selected", {"agentPreset": agent_preset})
         seed_descriptor_turn(child_session, descriptor)
         self.persistence.declare(child_id, meta, created_at=child_session.created_at)
         self._persist_delta(child_session, start=0)
         self._persisted[child_id] = len(child_session.events)
         return parent, child_id
 
-    def send_message(self, child_id: str, message: str | dict, source: str = "parent",
+    def send_message(self, child_id: str, message: str | dict | list, source: str = "parent",
                      parent: AgentLoop | None = None) -> str:
         """向子代理投递一条消息，返回 message id。
 
@@ -838,11 +1057,8 @@ class SubagentContinuationManager:
         except BaseException:
             self._release_ownership(child_id)
             raise
-        msg = message if isinstance(message, dict) else create_message(
-            "user", [text_block(message)],
-            {"kind": "coordinator", "form": "relay", "senderSessionId": parent.id},
-        )
-        if isinstance(message, dict):
+        msg = self._delivery_message(parent, message)
+        if isinstance(message, (dict, list)):
             msg["content"] = self._admit_child_prompt(
                 parent, activation, child_id, msg.get("content") or [])
         if parent._driver is not None:
@@ -851,7 +1067,7 @@ class SubagentContinuationManager:
             self._submit_sync(child_id, activation, msg, parent)
         return msg["id"]
 
-    async def send_message_async(self, child_id: str, message: str | dict,
+    async def send_message_async(self, child_id: str, message: str | dict | list,
                                  source: str = "parent",
                                  parent: AgentLoop | None = None) -> str:
         """async 工具契约入口：事件循环内且父无 driver 时内联泵子回合。
@@ -872,11 +1088,8 @@ class SubagentContinuationManager:
         except BaseException:
             self._release_ownership(child_id)
             raise
-        msg = message if isinstance(message, dict) else create_message(
-            "user", [text_block(message)],
-            {"kind": "coordinator", "form": "relay", "senderSessionId": parent.id},
-        )
-        if isinstance(message, dict):
+        msg = self._delivery_message(parent, message)
+        if isinstance(message, (dict, list)):
             msg["content"] = self._admit_child_prompt(
                 parent, activation, child_id, msg.get("content") or [])
         if parent._driver is not None:
@@ -889,6 +1102,17 @@ class SubagentContinuationManager:
             else:
                 await self._submit_async(child_id, activation, msg, parent)
         return msg["id"]
+
+    def _delivery_message(self, parent: AgentLoop, message: Any) -> dict:
+        """把投递载荷规范成 user message：dict 原样；列表（上游 request.prompt
+        的 ContentBlock[]）或字符串铸成带 coordinator 来源的 user 消息。"""
+        if isinstance(message, dict):
+            return message
+        blocks = message if isinstance(message, list) else [text_block(message)]
+        return create_message(
+            "user", blocks,
+            {"kind": "coordinator", "form": "relay", "senderSessionId": parent.id},
+        )
 
     def _admit_child_prompt(self, parent: AgentLoop, activation: dict,
                             child_id: str, content: list) -> list:
@@ -1395,6 +1619,28 @@ class SubagentContinuationManager:
             self._root_pools[parent] = pool
         return pool
 
+    def _preset_composition(self, parent: AgentLoop, preset_id: str) -> dict:
+        """解析一个 preset 的活组合（工具清单 + persona），供子组合挂载。
+
+        对齐上游 `applyChildComposition` 的 `ctx.get('agentPresets').mount`：服务
+        缺席 → PRESET_UNAVAILABLE；未知 id → PRESET_NOT_FOUND；broken → PRESET_UNAVAILABLE。
+        mini 无 live fiber，`resolve_composition` 只产出组合数据，由物化点应用。
+        """
+        service = parent.ctx.get("agentPresets")
+        if service is None or not hasattr(service, "resolve_composition"):
+            raise SubagentError(
+                "selecting a child agent preset requires the agent-presets service",
+                "PRESET_UNAVAILABLE")
+        composition = service.resolve_composition(preset_id)
+        if composition is None:
+            raise SubagentError(
+                f'unknown agent preset "{preset_id}"', "PRESET_NOT_FOUND")
+        if composition.get("broken"):
+            raise SubagentError(
+                f'agent preset "{preset_id}" is broken: {composition["broken"]}',
+                "PRESET_UNAVAILABLE")
+        return composition
+
     def _materialize_activation(self, child_session: Session, descriptor: dict, persisted: int,
                                 parent: AgentLoop, pool: ActivationPool,
                                 release_slot: Callable[[], None]) -> dict:
@@ -1406,28 +1652,54 @@ class SubagentContinuationManager:
         child_ctx._isolate.setdefault(SYSTEM_PROMPT_SERVICE, object())
 
         reg = ToolRegistry(child_ctx)
-        # toolFilter {allow?, deny?}（上游 ToolRestriction 形状）；控制工具随父
-        # 注册表继承 → 嵌套续跑天然可用（深度上限由 start_continuable 守门）
-        tool_filter = descriptor.get("toolFilter") or {}
-        allow = set(tool_filter.get("allow") or [])
-        deny = set(tool_filter.get("deny") or [])
-        for name in parent.tools.names():
-            if allow and name not in allow:
-                continue
-            if name in deny:
-                continue
-            if name == _REPORT_TOOL_NAME:
-                # 上一代子的专属 report 工具不继承（senderSessionId 绑定的是
-                # 错误的直属父）；本代在下方注册自己的 report
-                continue
-            tool = parent.tools.resolve(name)
-            if tool is not None:
+        # 独立 preset 选择（本子会话日志含 agent-preset/selected）→ 组合来自 preset
+        # （工具视图 + persona，上游 applyChildComposition 的独立分支）；否则继承父
+        # 组合（工具随父注册表 + 描述符 toolFilter/persona 覆盖，上游 composeFrom 分支）。
+        selected_preset = None
+        for event in child_session.events:
+            if event.get("type") == "agent-preset/selected":
+                value = (event.get("data") or {}).get("agentPreset")
+                if isinstance(value, str) and value:
+                    selected_preset = value
+        persona_prefix = descriptor.get("persona") or _DEFAULT_CHILD_PERSONA
+        persona_suffix = None
+        if selected_preset is not None:
+            composition = self._preset_composition(parent, selected_preset)
+            for name in composition["tools"]:
+                tool = parent.tools.resolve(name)
+                if tool is None:
+                    raise SubagentError(
+                        f'agent preset "{selected_preset}" declares tool "{name}" '
+                        "that the host does not provide", "PRESET_TOOL_UNAVAILABLE")
                 reg.register(tool)
+            preset_prefix = _preset_persona_prefix(composition["persona"])
+            if preset_prefix:
+                persona_prefix = preset_prefix
+            persona_suffix = _preset_persona_suffix(composition["persona"])
+        else:
+            # toolFilter {allow?, deny?}（上游 ToolRestriction 形状）；控制工具随父
+            # 注册表继承 → 嵌套续跑天然可用（深度上限由 start_continuable 守门）
+            tool_filter = descriptor.get("toolFilter") or {}
+            allow = set(tool_filter.get("allow") or [])
+            deny = set(tool_filter.get("deny") or [])
+            for name in parent.tools.names():
+                if allow and name not in allow:
+                    continue
+                if name in deny:
+                    continue
+                if name == _REPORT_TOOL_NAME:
+                    # 上一代子的专属 report 工具不继承（senderSessionId 绑定的是
+                    # 错误的直属父）；本代在下方注册自己的 report
+                    continue
+                tool = parent.tools.resolve(name)
+                if tool is not None:
+                    reg.register(tool)
         reg.register(self._report_tool(child_id))
 
         child = AgentLoop(
             child_session, self._resolve_adapter(descriptor), reg, child_ctx,
-            system_prompt=parent.system_prompt,
+            system_prompt=(persona_prefix if selected_preset is not None
+                           else parent.system_prompt),
             max_steps=parent.max_steps,
             max_parallel_tool_calls=parent.max_parallel_tool_calls,
         )
@@ -1439,8 +1711,9 @@ class SubagentContinuationManager:
         # 全局单例非 scope-aware → 子作用域提供独立实例）
         svc = SystemPromptService(child_ctx)
         child_ctx.provide(SYSTEM_PROMPT_SERVICE, svc)
-        svc.section(PERSONA_PREFIX_SECTION, 0,
-                    descriptor.get("persona") or _DEFAULT_CHILD_PERSONA)
+        svc.section(PERSONA_PREFIX_SECTION, 0, persona_prefix)
+        if persona_suffix:
+            svc.section(PERSONA_SUFFIX_SECTION, PERSONA_SUFFIX_ORDER, persona_suffix)
         svc.section("report-guidance", 117, _REPORT_GUIDANCE)
         svc.section("delegation-context", 120, lambda c: self._delegation_context(parent, child_id))
 
@@ -1471,10 +1744,18 @@ class SubagentContinuationManager:
             "disposal": None,                # 结算/关闭标记（已结算 → 不再投递）
             "watched": False,                # watcher + driver + claimed 钩子已就绪
             "owned_children": set(),         # 本激活委托出的、尚未结算的子代 id
+            # 上游 SubagentActivation：delivery 策略 + 终局结果箱。delivery 从
+            # 本次 start_activation 的 _pending_delivery 取（缺省 parent）。
+            "delivery": self._pending_delivery.get(child_id, "parent"),
+            "result_box": ActivationResult(),
         }
         self._locks.setdefault(child_id, threading.Lock())
         self._activations[child_id] = activation
         self._live[child_id] = child
+        # 结果箱只在 caller delivery 下需要被收据读取（parent delivery 的结果
+        # 经运行时通知投递，无编程等待方）→ 仅 caller 登记，避免无读者键槽泄漏。
+        if activation["delivery"] == "caller":
+            self._results[child_id] = activation["result_box"]
         # 生命周期 start 边（上游 observer.start：任何 turn 运行前发布本 epoch）
         self._emit_lifecycle(parent, "subagent/start", {
             "runId": activation["run_id"],
@@ -1654,7 +1935,19 @@ class SubagentContinuationManager:
                 release_slot()              # 结算释放池槽（上游 finishDisposal）
         # 锁外收尾：先摘激活再投递，父 pump 可对同一子代理再次 send_message
         # （此时必须冷恢复而非撞既有激活）
-        self._notify_settlement(activation, stop, output, child_id)
+        # 终局结果箱（上游 SubagentActivation.result）：caller delivery 的编程
+        # 调用方等待它；parent delivery 无人 wait（照样 resolve，语义统一）。
+        result_box = activation.get("result_box")
+        if result_box is not None:
+            payload: dict[str, Any] = {"output": list(output or []), "stopReason": stop}
+            diagnostic = None if failure else subagent_diagnostic(epoch)
+            if diagnostic is not None:
+                payload["diagnostic"] = diagnostic
+            result_box.resolve(payload)
+        # caller delivery 只把结果交给调用方，不向模型投递终局通知（上游
+        # SubagentActivationSpec.delivery 语义）。
+        if activation.get("delivery", "parent") != "caller":
+            self._notify_settlement(activation, stop, output, child_id)
         self._release_ownership(child_id)
         # 终局边最后发布（上游 observer.settle 在 releaseOwnership 之后）
         info = {

@@ -17,6 +17,7 @@ import stat
 from typing import Any
 
 from ..core.scope import Context
+from ..core.working_cwd import working_directory_of
 from .file_reference import FILE_REFERENCE_PROMPT, FileReferenceService
 
 __all__ = [
@@ -257,8 +258,8 @@ class LocalFileReferenceService(FileReferenceService):
 
     def list(self, agent, query: str, signal=None) -> list:
         search = self._searches.get(agent)
-        if search is None:
-            root = (getattr(agent.session, "meta", {}) or {}).get("cwd") or os.getcwd()
+        root = working_directory_of(agent) or os.getcwd()
+        if search is None or search.root != os.path.abspath(root):
             search = WorkspaceFileSearch(root, self.config)
             self._searches[agent] = search
         return search.list(query)

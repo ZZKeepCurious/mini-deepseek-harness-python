@@ -34,6 +34,7 @@ from miniharness.jobs import (
 )
 from miniharness.jobs.pump import start_pump
 from miniharness.jobs.ring import OutputRing
+from miniharness.jobs import registry as registry_module
 from miniharness.jobs.tools import install_completion_delivery
 from miniharness.llm import FakeLlmAdapter
 
@@ -71,7 +72,8 @@ def _make_owner(agents, session_id: str, scope_ctx: Context | None = None):
     return owner
 
 
-def _start(registry, *, owner=None, kind="bash", label="s", output=None, limit=None):
+def _start(registry, *, owner=None, kind="bash", label="s", output=None, limit=None,
+           tool_call=None):
     """启动一条作业；返回 (id, box, holder)。holder['handle'] 为 JobHandle。"""
     box = JobDoneBox()
     holder: dict = {"cancel": lambda r=None: None}
@@ -87,6 +89,8 @@ def _start(registry, *, owner=None, kind="bash", label="s", output=None, limit=N
         spec["output"] = output
     if limit is not None:
         spec["outputLimitBytes"] = limit
+    if tool_call is not None:
+        spec["toolCall"] = tool_call
     return registry.start(spec), box, holder
 
 
@@ -146,13 +150,35 @@ class RegistryBasicsTest(unittest.TestCase):
         self.assertEqual(snap["status"], "running")
         self.assertEqual(snap["owner"], "o1")
 
-    def test_id_counter_per_kind(self):
+    def test_job_id_short_uuid(self):
+        """id 形如 `<kind>-<16 位 UUID hex>`；同 kind 不再用递增计数器
+        （对齐 jobs-local index.ts:227-232）。"""
         self.registry.attach_controller("test")
         owner = _make_owner(self.agents, "o1")
         a, _b1, _h1 = _start(self.registry, owner=owner, label="1")
         b, _b2, _h2 = _start(self.registry, owner=owner, label="2")
         c, _b3, _h3 = _start(self.registry, owner=owner, kind="subagent", label="3")
-        self.assertEqual((a, b, c), ("bash-1", "bash-2", "subagent-1"))
+        for tid, kind in ((a, "bash"), (b, "bash"), (c, "subagent")):
+            prefix, _, suffix = tid.partition("-")
+            self.assertEqual(prefix, kind)
+            self.assertRegex(suffix, r"^[0-9a-f]{16}$")
+        self.assertNotEqual(a, b)
+
+    def test_id_collision_retries(self):
+        """发号撞上注册表仍持有的旧 id 时重试（对齐 jobs-local index.ts:227-232）。"""
+        self.registry.attach_controller("test")
+        owner = _make_owner(self.agents, "o1")
+        first, _b1, _h1 = _start(self.registry, owner=owner, label="1")
+        suffix = first.split("bash-", 1)[1]
+        seq = iter([suffix, "0" * 16])
+        original = registry_module.job_id
+        registry_module.job_id = lambda kind: f"{kind}-{next(seq)}"
+        try:
+            second, _b2, _h2 = _start(self.registry, owner=owner, label="2")
+        finally:
+            registry_module.job_id = original
+        self.assertEqual(second, "bash-" + "0" * 16)
+        self.assertNotEqual(first, second)
 
     def test_invalid_spec_rejected(self):
         self.registry.attach_controller("test")
@@ -670,11 +696,11 @@ class NoticeDeliveryTest(unittest.TestCase):
 
     def test_wakeup_delivery_when_idle(self):
         self.owner.status = "idle"
-        self._start_and_settle({"status": "completed"})
+        tid = self._start_and_settle({"status": "completed"})
         self.assertEqual(len(self.owner.delivered), 1)
         kind, notice = self.owner.delivered[0]
         self.assertEqual(kind, "wakeup")
-        self.assertIn("background job bash-1", notice)
+        self.assertIn(f"background job {tid}", notice)
         self.assertEqual(self.owner.wakes, 1)
 
     def test_inject_delivery_when_busy(self):
@@ -846,13 +872,13 @@ class JobsToolsTest(unittest.TestCase):
         return self.tools.resolve(name).render(value)
 
     def test_job_list_format(self):
-        _tid, _box, _h = _start(self.registry, owner=self.owner, label="sleep")
+        tid, _box, _h = _start(self.registry, owner=self.owner, label="sleep")
         canonical = self._call("job_list", {})
         self.assertEqual(len(canonical), 1)
         self.assertEqual(canonical[0]["kind"], "bash")
         self.assertEqual(canonical[0]["status"], "running")
         rendered = self._render("job_list", canonical)
-        self.assertEqual(rendered, [{"type": "text", "text": "bash-1 [bash] running — sleep"}])
+        self.assertEqual(rendered, [{"type": "text", "text": f"{tid} [bash] running — sleep"}])
 
     def test_job_list_empty(self):
         canonical = self._call("job_list", {})
@@ -934,10 +960,10 @@ class JobsToolsTest(unittest.TestCase):
         return None
 
     def test_finalize_producer_limit_bounds_body_and_status(self):
-        _tid, _box, holder = _start(self.registry, owner=self.owner, label="sleep",
-                                    limit=48)
+        tid, _box, holder = _start(self.registry, owner=self.owner, label="sleep",
+                                   limit=48)
         holder["handle"].append("界" * 100)
-        result = self._pipeline("job_output", {"job_id": "bash-1"})
+        result = self._pipeline("job_output", {"job_id": tid})
         self.assertTrue(result.ok)
         text = self._block_text(result.content)
         self.assertIsNotNone(text)
@@ -946,19 +972,19 @@ class JobsToolsTest(unittest.TestCase):
         self.assertIn("[status: running]", text)
 
     def test_finalize_producer_limit_preserves_empty_and_newline_terminated(self):
-        _tid, _box, holder = _start(self.registry, owner=self.owner, label="sleep",
-                                    limit=64)
-        r1 = self._pipeline("job_output", {"job_id": "bash-1"})
+        tid, _box, holder = _start(self.registry, owner=self.owner, label="sleep",
+                                   limit=64)
+        r1 = self._pipeline("job_output", {"job_id": tid})
         self.assertEqual(self._block_text(r1.content), "(no new output)\n[status: running]")
         holder["handle"].append("line\n")
-        r2 = self._pipeline("job_output", {"job_id": "bash-1"})
+        r2 = self._pipeline("job_output", {"job_id": tid})
         self.assertEqual(self._block_text(r2.content), "line\n[status: running]")
 
     def test_finalize_deny_flow_through_pipeline(self):
         self.ctx.on("tools/pre-execute",
                     lambda p, nxt: {"kind": "deny"} if p["tool"] == "job_output" else nxt(p))
-        _tid, _box, _h = _start(self.registry, owner=self.owner, label="sleep", limit=64)
-        denied = self._pipeline("job_output", {"job_id": "bash-1"})
+        tid, _box, _h = _start(self.registry, owner=self.owner, label="sleep", limit=64)
+        denied = self._pipeline("job_output", {"job_id": tid})
         self.assertTrue(denied.is_error)
         self.assertEqual(denied.error, "denied by tools/pre-execute")
 
@@ -968,21 +994,21 @@ class JobsToolsTest(unittest.TestCase):
         self.assertIsNone(self.tools.resolve("job_list").finalize_content)
 
     def test_finalize_bounds_long_error_text(self):
-        _tid, _box, _h = _start(self.registry, owner=self.owner, label="sleep", limit=64)
+        tid, _box, _h = _start(self.registry, owner=self.owner, label="sleep", limit=64)
         hook = self.tools.resolve("job_output").finalize_content
-        exec_ = ToolExec(agent=self.owner, name="job_output", arguments={"job_id": "bash-1"})
+        exec_ = ToolExec(agent=self.owner, name="job_output", arguments={"job_id": tid})
         bounded = hook(exec_, {"content": [{"type": "text", "text": "denied: " + "d" * 1000}],
                                "value": None, "is_error": True})
         self.assertLessEqual(len(bounded[0]["text"].encode("utf-8")), 64)
         self.assertIn("[result truncated]", bounded[0]["text"])
 
     def test_finalize_policy_replaced_content_bounded_without_status(self):
-        _tid, _box, _h = _start(self.registry, owner=self.owner, label="sleep", limit=64)
+        tid, _box, _h = _start(self.registry, owner=self.owner, label="sleep", limit=64)
         hook = self.tools.resolve("job_output").finalize_content
-        exec_ = ToolExec(agent=self.owner, name="job_output", arguments={"job_id": "bash-1"})
+        exec_ = ToolExec(agent=self.owner, name="job_output", arguments={"job_id": tid})
         replaced = hook(exec_, {"content": [{"type": "text", "text": "p" * 1000}],
                                 "value": {"text": "canonical output",
-                                          "job": {"id": "bash-1", "kind": "bash",
+                                          "job": {"id": tid, "kind": "bash",
                                                   "label": "sleep", "status": "running"}},
                                 "is_error": False})
         text = replaced[0]["text"]
@@ -991,9 +1017,9 @@ class JobsToolsTest(unittest.TestCase):
         self.assertNotIn("[status: running]", text)
 
     def test_finalize_without_limit_unchanged(self):
-        _tid, _box, holder = _start(self.registry, owner=self.owner, label="sleep")
+        tid, _box, holder = _start(self.registry, owner=self.owner, label="sleep")
         holder["handle"].append("hello")
-        result = self._pipeline("job_output", {"job_id": "bash-1"})
+        result = self._pipeline("job_output", {"job_id": tid})
         self.assertTrue(result.ok)
         self.assertEqual(self._block_text(result.content), "hello\n[status: running]")
 
@@ -1020,6 +1046,52 @@ class RealLoopIntegrationTest(unittest.TestCase):
         self.assertTrue(notices, "notice 应作为 plugin user/message 落日志")
         self.assertEqual(len(loop.inbox), 0)
         self.assertIn(tid, [j["id"] for j in registry.list(loop)])
+
+    def test_lifecycle_events_recorded_on_owner_session(self):
+        """注册/结算在 owner 会话落 `job/registered` / `job/settled`（index.ts:443-463）。"""
+        ctx, loop = self._loop_ctx("jobs-life", "jobs-life-1", _TextAdapter("done"))
+        registry = ctx.get("jobs")
+        tid, box, _h = _start(registry, owner=loop, label="long",
+                              tool_call={"callId": "c1", "rootCallId": "c0"})
+        events = [e for e in loop.session.events if e["type"].startswith("job/")]
+        self.assertEqual([e["type"] for e in events], ["job/registered"])
+        data = events[0]["data"]
+        self.assertEqual(data["jobId"], tid)
+        self.assertEqual(data["owner"], loop.id)
+        self.assertEqual(data["kind"], "bash")
+        self.assertEqual(data["label"], "long")
+        self.assertEqual(data["toolCall"], {"callId": "c1", "rootCallId": "c0"})
+        self.assertIsInstance(data["startedAt"], int)
+        box.settle({"status": "completed"})
+        settled = [e for e in loop.session.events if e["type"] == "job/settled"]
+        self.assertEqual(len(settled), 1)
+        sdata = settled[0]["data"]
+        self.assertEqual(sdata["jobId"], tid)
+        self.assertEqual(sdata["status"], "completed")
+        self.assertEqual(sdata["cause"], "producer")
+        self.assertIs(sdata["producerReported"], True)
+        self.assertIsInstance(sdata["finishedAt"], int)
+
+    def test_lifecycle_settled_marks_producer_contract_violation(self):
+        """done reject → 结算 failed 且 producerReported=false（index.ts:284-291）。"""
+        ctx, loop = self._loop_ctx("jobs-life2", "jobs-life-2", _TextAdapter("done"))
+        registry = ctx.get("jobs")
+        _tid, box, _h = _start(registry, owner=loop, label="long")
+        box.fail(RuntimeError("boom"))
+        settled = [e for e in loop.session.events if e["type"] == "job/settled"]
+        self.assertEqual(len(settled), 1)
+        sdata = settled[0]["data"]
+        self.assertEqual(sdata["status"], "failed")
+        self.assertIs(sdata["producerReported"], False)
+        self.assertIn("boom", sdata["detail"])
+
+    def test_unowned_job_records_no_lifecycle_events(self):
+        """owner 缺席的作业不在任何会话落生命周期事件（index.ts:448-449）。"""
+        ctx, _loop = self._loop_ctx("jobs-life3", "jobs-life-3", _TextAdapter("done"))
+        registry = ctx.get("jobs")
+        tid, box, _h = _start(registry, label="free")
+        box.settle({"status": "completed"})
+        self.assertEqual(registry.get(tid)["status"], "completed")
 
     def test_real_loop_user_claim_resets_budget(self):
         ctx, loop = self._loop_ctx("jobs-real-2", "jobs-real-2", _TextAdapter("done"),

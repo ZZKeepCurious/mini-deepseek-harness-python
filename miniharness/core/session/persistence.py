@@ -504,6 +504,14 @@ class SessionPersistence:
         """枚举全部会话 header：{id, meta, created_at, cwd}（meta/cwd 可能为 None）。"""
         raise NotImplementedError
 
+    def format_status(self, session_id: str, cwd: str | None = None) -> str | None:
+        """**非迁移地**分类存储会话的格式状态（上游 `sessionPersistence.stat.formatStatus`）。
+
+        @returns `'current'`（存储版本 == 当前）或 `'migration-required'`（released 旧版，
+        需迁移）；会话不存在或后端不暴露首行分类面 → None。不得触发 migrate-on-open。
+        """
+        return None
+
     def read_raw(self, session_id: str, cwd: str | None = None) -> str | None:
         """读出会话的逐字原始制品文本（上游逐会话 raw artifact）。
 
@@ -1063,6 +1071,40 @@ class JsonlPersistence(SessionPersistence):
                     "cwd": meta.get("cwd"),
                 })
         return headers
+
+    def format_status(self, session_id: str, cwd: str | None = None) -> str | None:
+        """非迁移地分类存储会话格式（上游 `sessionPersistence.stat.formatStatus`）。
+
+        只读扫描各项目目录下该 id 的**最高代**制品并读首行分类：存储版本 == 当前
+        → `'current'`；released 旧版 → `'migration-required'`；不存在/非 header
+        → None（**不触发** `_find` 的 migrate-on-open）。未来版本响亮拒绝。
+        """
+        self._ensure_root_encoding()
+        for project in self._list_project_dirs():
+            self._reject_legacy_flat_artifacts(project)
+            session_dir = project / encode_segment(session_id)
+            if not session_dir.is_dir():
+                continue
+            resolved = resolve_generation_in_directory(session_dir, self.compression)
+            if resolved is None:
+                return None
+            first = self._read_first_line(resolved["source_path"])
+            if first is None:
+                return None
+            try:
+                raw_header = json.loads(first)
+            except ValueError:
+                return None
+            if not isinstance(raw_header, dict) or raw_header.get("type") != "session":
+                return None
+            version = raw_header.get("version")
+            if version == SESSION_FORMAT_VERSION:
+                return "current"
+            if isinstance(version, int) and not isinstance(version, bool) \
+                    and 0 <= version < SESSION_FORMAT_VERSION:
+                return "migration-required"
+            raise ValueError(session_format_version_refusal(session_id, version))
+        return None
 
     def _read_first_line(self, path: Path) -> str | None:
         """只读第一条完整记录（明文首行或首个 zstd 帧），验证其为单行 header。"""

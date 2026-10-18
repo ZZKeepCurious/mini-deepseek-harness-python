@@ -340,6 +340,18 @@ class WebApi:
 
             register_user_question_projection(projections)
         install_usage_stats(ctx)
+        # 会话当前工作目录服务（对齐上游 dsh-working-directory）：装配 fs /
+        # systemPrompt 前置（sessionProjections 已在上面装配）；工具随注册表收编。
+        if ctx.get("systemPrompt") is None:
+            from ..core.system_prompt import install_system_prompt
+            install_system_prompt(ctx)
+        if ctx.get("fs") is None:
+            from ..fs import install_local_fs
+            install_local_fs(ctx, {"cwd": self.cwd})
+        from ..working_directory import install_working_directory, register_working_directory_tool
+        install_working_directory(ctx)
+        if self.tools.resolve("working_directory") is None:
+            register_working_directory_tool(ctx, self.tools)
         self.attachments = ctx.get("attachments")
         self._agents: dict[str, AgentLoop] = {}
         # selectModel 记录（advisory：单适配器部署回落恒单模型，不驱动路由）
@@ -376,8 +388,6 @@ class WebApi:
         "terminal/shells": "terminal_shells",
         "terminal/list": "terminal_list",
         "terminal/create": "terminal_create",
-        "terminal/write": "terminal_write",
-        "terminal/resize": "terminal_resize",
         "terminal/rename": "terminal_rename",
         "terminal/close": "terminal_close",
         "workspace/create": "workspace_create",
@@ -616,17 +626,6 @@ class WebApi:
         if payload.get("shellPath") is not None:
             request["shellPath"] = payload["shellPath"]
         return self._remote_call(lambda: self._terminal_controller().create(agent, request))
-
-    def terminal_write(self, payload: dict) -> None:
-        agent = self.resolve_terminal_agent(payload.get("agentId"))
-        self._remote_call(lambda: self._terminal_controller().write(
-            agent, payload["id"], payload["attachmentId"], payload["data"]))
-
-    def terminal_resize(self, payload: dict) -> None:
-        agent = self.resolve_terminal_agent(payload.get("agentId"))
-        self._remote_call(lambda: self._terminal_controller().resize(
-            agent, payload["id"], payload["attachmentId"],
-            payload["cols"], payload["rows"]))
 
     def terminal_rename(self, payload: dict) -> None:
         agent = self.resolve_terminal_agent(payload.get("agentId"))
@@ -1509,8 +1508,9 @@ class WebApi:
     def projections(self, payload: dict) -> dict | None:
         """一次非激活的会话投影读（上游 index.ts projections）。
 
-        @returns `SessionProjectionBaseline`（`{asOfSeq, values}`），会话不存在
-        时返回 None；部署未挂投影注册表 → `session/projections-unavailable`。
+        @returns `SessionProjectionsValue` 判别联合：活会话返回
+        `{kind:'sequenced', asOfSeq, values}`（宿主 live 注册表直读）；会话缺席返回
+        None。部署未挂投影注册表 → `session/projections-unavailable`。
         """
         session_id = payload.get("sessionId")
         if not isinstance(session_id, str) or session_id == "":
@@ -1523,7 +1523,7 @@ class WebApi:
             raise _Reject("session/projections-unavailable",
                           "Session projections are unavailable", {})
         registry.snapshot(session)
-        return {"asOfSeq": session.seq - 1,
+        return {"kind": "sequenced", "asOfSeq": session.seq - 1,
                 "values": projection_values(session, self.ctx.get("usageStats"), registry)}
 
     # ---------- session.fork ----------
@@ -1541,8 +1541,17 @@ class WebApi:
         if at_seq is not None and (not isinstance(at_seq, int)
                                    or isinstance(at_seq, bool) or at_seq < 0):
             raise _Reject("gateway/bad-request", "atSeq must be a non-negative safe integer", {})
+        allow_migration = payload.get("allowMigration")
+        if allow_migration is not None and not isinstance(allow_migration, bool):
+            raise _Reject("gateway/bad-request", "allowMigration must be a boolean", {})
         source = self.store.get(session_id)
         if source is None:
+            # allowMigration=false 的迁移预检（上游 index.ts:444-450）：源非 live 且
+            # 存储制品需迁移 → 拒绝，要求先打开源会话完成迁移；allowMigration 缺省 true。
+            if allow_migration is False and self._stored_needs_migration(session_id):
+                raise _Reject("session/migration-required",
+                              "Open the source Session to complete migration before forking",
+                              {"sessionId": session_id})
             raise _Reject("session/not-found", f'session "{session_id}" not found',
                           {"sessionId": session_id})
         events = list(source.events)
@@ -1590,6 +1599,17 @@ class WebApi:
                 break
             boundary = event["seq"]
         return boundary
+
+    def _stored_needs_migration(self, session_id: str) -> bool:
+        """存储中的会话是否需迁移（上游 `sessionPersistence.stat().formatStatus`）。
+
+        非迁移只读分类；未挂持久化或后端不暴露分类面 → False（视为无需迁移）。
+        """
+        persistence = self.ctx.get("sessionPersistence")
+        if persistence is None:
+            return False
+        status = persistence.format_status(session_id)
+        return status == "migration-required"
 
     # ---------- session.page ----------
 

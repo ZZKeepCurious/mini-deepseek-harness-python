@@ -324,11 +324,17 @@ def message_source_value(value: Any, label: str, version: int,
         # V4：解释过的消息槽要求生产者自有的 kind（非 plugin 包裹）。
         raise fail(f"{label} requires a producer-owned source kind")
     if kind == "user":
-        exact_keys(source, ("kind",), ("rpcId", "clientTimeZone"), label)
+        # 0.2.1 same-version：v4 起 user-rpc source 可携带 `principal?`
+        # （session-controller/src/types.ts:415-418，仅在非 owner 提交时写入；
+        # merge-extensible union，只要求 JSON 对象不闭键）。v0~v3 保持闭集。
+        user_optional = ["rpcId", "clientTimeZone"] + (["principal"] if version >= 4 else [])
+        exact_keys(source, ("kind",), tuple(user_optional), label)
         if source.get("rpcId") is not None:
             non_empty_string(source.get("rpcId"), f"{label} rpcId")
         if source.get("clientTimeZone") is not None:
             non_empty_string(source.get("clientTimeZone"), f"{label} clientTimeZone")
+        if source.get("principal") is not None:
+            released_v0_record(source.get("principal"), f"{label} principal")
         return
     if kind == "plugin":
         plugin_source_value(source, label)
@@ -398,6 +404,11 @@ def message_source_value(value: Any, label: str, version: int,
             non_empty_string(source.get(key), f"{label} {key}")
         literal_value(source.get("form"), ["notice"], f"{label} form")
         string_value(source.get("summary"), f"{label} summary")
+        return
+    if kind == "working-directory":
+        # 工作目录变更通知（上游 working-directory/src/index.ts MessageSourceMap
+        # `'working-directory': { kind: 'working-directory' }`，0.2.1 新增）。
+        exact_keys(source, ("kind",), (), label)
         return
     non_empty_string(kind, f"{label} kind")
 
@@ -788,6 +799,47 @@ def instant_value(value: Any, label: str) -> None:
         raise fail(f"{label} must be a canonical UTC instant")
 
 
+def working_directory_change_value(data: dict, label: str) -> None:
+    """working-directory/change 载荷（上游 working-directory/src/index.ts
+    SessionEventMap）：恰 {cwd} 单键，cwd 为非空绝对目录字符串。"""
+    record = exact_record(data, label, ["cwd"])
+    non_empty_string(record.get("cwd"), f"{label} cwd")
+
+
+def job_tool_call_value(value: Any, label: str) -> None:
+    """JobToolCall（上游 jobs/jobs/src/types.ts:16-23）：{callId, rootCallId}
+    均为非空工具调用身份。"""
+    call = exact_record(value, label, ["callId", "rootCallId"])
+    non_empty_string(call.get("callId"), f"{label} callId")
+    non_empty_string(call.get("rootCallId"), f"{label} rootCallId")
+
+
+def job_registered_value(data: dict, label: str) -> None:
+    """job/registered 载荷（上游 JobRegisteredData）：{jobId, owner, kind,
+    label, startedAt, toolCall?}。"""
+    non_empty_string(data.get("jobId"), f"{label} jobId")
+    non_empty_string(data.get("owner"), f"{label} owner")
+    non_empty_string(data.get("kind"), f"{label} kind")
+    string_value(data.get("label"), f"{label} label")
+    count_value(data.get("startedAt"), f"{label} startedAt")
+    if data.get("toolCall") is not None:
+        job_tool_call_value(data.get("toolCall"), f"{label} toolCall")
+
+
+def job_settled_value(data: dict, label: str) -> None:
+    """job/settled 载荷（上游 JobSettledData）：registered 字段 +
+    {finishedAt, status, cause, producerReported, detail?}。"""
+    job_registered_value(data, label)
+    count_value(data.get("finishedAt"), f"{label} finishedAt")
+    literal_value(data.get("status"), ["completed", "killed", "failed"],
+                  f"{label} status")
+    literal_value(data.get("cause"), ["producer", "kill", "teardown"],
+                  f"{label} cause")
+    boolean_value(data.get("producerReported"), f"{label} producerReported")
+    if data.get("detail") is not None:
+        string_value(data.get("detail"), f"{label} detail")
+
+
 def title_source_value(value: Any, label: str) -> None:
     source = released_v0_record(value, label)
     if source.get("kind") == "provider":
@@ -904,10 +956,16 @@ def workflow_identity(data: dict, label: str) -> None:
     positive_integer_value(data.get("seq"), f"{label} seq")
 
 
-def deep_seek_search_body_value(value: Any, label: str) -> None:
-    body = exact_record(value, label, ["model", "max_tokens", "messages", "tools"])
+def deep_seek_search_body_value(value: Any, label: str, version: int) -> None:
+    # 0.2.1 same-version：v4 起 body 可携带 `thinking?: {type:'disabled'}`
+    # （deepseek-search/src/index.ts，禁用思考时显式下发）。v0~v3 保持闭集。
+    body = exact_record(value, label, ["model", "max_tokens", "messages", "tools"],
+                        ["thinking"] if version >= 4 else [])
     non_empty_string(body.get("model"), f"{label} model")
     positive_integer_value(body.get("max_tokens"), f"{label} max_tokens")
+    if version >= 4 and body.get("thinking") is not None:
+        thinking = exact_record(body.get("thinking"), f"{label} thinking", ["type"])
+        literal_value(thinking.get("type"), ["disabled"], f"{label} thinking type")
     messages = array_value(body.get("messages"), f"{label} messages",
                            _deep_seek_search_message)
     if len(messages) != 1:
@@ -1128,6 +1186,10 @@ def assert_released_payload_semantics(event: dict, version: int) -> None:
                     lambda member, _label: message_value(
                         member, f"{label} message", version))
         positive_integer_value(data.get("maxTokens"), f"{label} maxTokens")
+        if version >= 4 and data.get("reasoningEffort") is not None:
+            # 0.2.1 same-version：v4 起可携带 `reasoningEffort?`
+            # （session-title-llm/src/index.ts:44-49，原样透传不归一）。
+            non_empty_string(data.get("reasoningEffort"), f"{label} reasoningEffort")
     elif etype in ("step/end", "step/start"):
         coordinate_pair(data, label)
     elif etype == "subagent/descriptor":
@@ -1183,6 +1245,16 @@ def assert_released_payload_semantics(event: dict, version: int) -> None:
         if etype in ("tool/code-dispatch", "tool/ptc-dispatch"):
             boolean_value(data.get("isError"), f"{label} isError")
             content_blocks_value(data.get("content"), f"{label} content", version)
+            if version >= 4 and data.get("error") is not None:
+                # 0.2.1 same-version：v4 起 tool/ptc-dispatch 可携带结构化
+                # `error?: {name, code, reason?}`（core/tools/src/types.ts:27）。
+                # meta 是 JsonValue，只经 disposition opaque 校验。
+                error = exact_record(data.get("error"), f"{label} error",
+                                     ["name", "code"], ["reason"])
+                non_empty_string(error.get("name"), f"{label} error name")
+                non_empty_string(error.get("code"), f"{label} error code")
+                if error.get("reason") is not None:
+                    string_value(error.get("reason"), f"{label} error reason")
     elif etype == "tool/result":
         coordinate_pair(data, label)
         if version >= 4:
@@ -1218,6 +1290,12 @@ def assert_released_payload_semantics(event: dict, version: int) -> None:
         developer_message_value(data, label, version)
     elif etype == "workspace/changes":
         count_value(data.get("turn"), f"{label} turn")
+    elif etype == "working-directory/change":
+        working_directory_change_value(data, label)
+    elif etype == "job/registered":
+        job_registered_value(data, label)
+    elif etype == "job/settled":
+        job_settled_value(data, label)
     elif etype == "turn/end":
         count_value(data.get("turn"), f"{label} turn")
         turn_end_reason_value(data.get("reason"), f"{label} reason")
@@ -1228,7 +1306,7 @@ def assert_released_payload_semantics(event: dict, version: int) -> None:
     elif etype == "web/deepseek-search-llm-request":
         non_empty_string(data.get("endpoint"), f"{label} endpoint")
         non_empty_string(data.get("apiVersion"), f"{label} apiVersion")
-        deep_seek_search_body_value(data.get("body"), f"{label} body")
+        deep_seek_search_body_value(data.get("body"), f"{label} body", version)
     elif etype == "image/offload":
         image_offload_value(data, label)
     else:

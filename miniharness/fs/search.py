@@ -13,6 +13,7 @@ from typing import Any
 
 from ..core.scope import Context
 from ..core.tools import Tool
+from ..core.working_cwd import working_directory_of
 
 __all__ = [
     "GLOB_MAX_RESULTS",
@@ -34,9 +35,9 @@ GLOB_VCS_EXCLUDES = (".git", ".svn", ".hg", ".bzr", ".jj", ".sl")
 
 def _session_cwd(exec: Any) -> str | None:
     agent = getattr(exec, "agent", None)
-    session = getattr(agent, "session", None)
-    meta = getattr(session, "meta", None)
-    return meta.get("cwd") if isinstance(meta, dict) else None
+    if agent is None:
+        return None
+    return working_directory_of(agent)
 
 
 def _workdir(exec: Any, path: str | None) -> str:

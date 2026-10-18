@@ -24,6 +24,7 @@ sse.ts + translate.ts）。
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from typing import Any
@@ -46,6 +47,7 @@ from .protocol import (
 )
 from ..identity import get_or_create_anonymous_user_id
 from .retry_policy import resolve_retry_policy
+from .deepseek_extensions import prepare_request_extensions
 from .content import (
     content_has_image,
     content_has_file,
@@ -129,6 +131,8 @@ __all__ = [
 
 # 上游 api-key.ts LEGAL_API_KEY：HTTP 头可逐字携带的字符（可打印 ASCII，空格除外）。
 _LEGAL_API_KEY = re.compile(r"^[\x21-\x7E]+$")
+
+logger = logging.getLogger(__name__)
 
 
 # ---------- image-capable 请求辅助（serialize.ts / request-files.ts 载体桥） ----------
@@ -218,7 +222,8 @@ class DeepSeekAdapter(LlmAdapter):
                  files_store=None, files_transport=None,
                  file_policy=None, default_context_window=None,
                  thinking=None, account_token=None,
-                 auth: str | None = None, reject_token=None):
+                 auth: str | None = None, reject_token=None,
+                 account_route=None, extensions=None):
         self._key = api_key if api_key is not None else os.environ.get("DEEPSEEK_API_KEY", "")
         # DSH 账户 token：配置后以 x-dsh-auth-token 发送（账户 provider 路由）。
         self._account_token = account_token
@@ -234,6 +239,12 @@ class DeepSeekAdapter(LlmAdapter):
         self.provider = "deepseek-account" if auth == "account" else "deepseek-official"
         # 账户 token 被 401 拒绝时的回调（上游 account.rejectToken；mini 由宿主注入）。
         self._reject_token = reject_token
+        # 账户路由目录（上游 llm-deepseek-account 的连接事实）：提供版本门控拒绝与
+        # 登录态目录发现；official 路由为 None。
+        self._account_route = account_route
+        # 官方请求扩展注册表（上游 deepseekLlmApiExtensions + prepareRequestExtensions）：
+        # 每次请求按注册字段准备顶层贡献（如 dsh_plugin_packages），准备失败逐字段省略。
+        self._extensions = extensions
         self._base = (base_url or os.environ.get(
             "DEEPSEEK_BASE_URL", "https://api.deepseek.com/anthropic")).rstrip("/")
         self._model = model
@@ -372,6 +383,35 @@ class DeepSeekAdapter(LlmAdapter):
     def resolve_model_info(self) -> dict:
         """按模型目录解析能力（上游 adapter.ts resolveModelInfo → modelInfo）。"""
         return model_info(self._connection, self.provider, self._model)
+
+    def admit(self, model: str) -> None:
+        """在网络 I/O 之前按账户目录版本门控拒绝一个模型（上游 admit/refuse）。
+
+        账户路由携带目录时，未列出的要求/不支持的模型抛
+        `CLIENT_UPGRADE_REQUIRED` / `MODEL_UNSUPPORTED`；official 路由与无目录
+        载体的账户路由为 no-op。
+        """
+        if self._auth == "account" and self._account_route is not None:
+            self._account_route.admit(model)
+
+    def available_models(self) -> list:
+        """登录/凭据可用时可路由的目录（上游 discoverModels）。
+
+        official 路由凭据缺失 → 空目录（上游 api-key index.ts:46）；账户路由
+        未登录 → 空目录；否则给出目录模型。
+        """
+        from .deepseek_files import catalog_model_info
+        if self._auth == "account":
+            if self._account_route is None:
+                return []
+            return self._account_route.discover_models()
+        try:
+            self._auth_headers()
+        except LlmFailure as error:
+            if error.code == MISSING_CREDENTIAL:
+                return []
+            raise
+        return [catalog_model_info(self.provider, model) for model in self._models]
 
     async def stream(self, messages, tools, signal=None,
                      session_id=None, purpose=None):
@@ -536,10 +576,19 @@ class DeepSeekAdapter(LlmAdapter):
         if self._transport is not None:
             kwargs["transport"] = self._transport
         endpoint = messages_api_root(self._base) + "/messages"
+        payload, accept_extensions = prepare_request_extensions(
+            body,
+            {"signal": abort_event, "sessionId": session_id, "purpose": purpose},
+            self._extensions,
+            on_omitted=lambda fields, error: logger.warning(
+                "deepseek-llm-api-extensions: omitting fields %s because the merged "
+                "request is not serializable: %r", fields, error),
+            on_unaccepted=lambda error: logger.warning(
+                "deepseek-llm-api-extensions: extension acceptance failed: %r", error))
         try:
             async with httpx.AsyncClient(**kwargs) as client:
                 async with client.stream(
-                    "POST", endpoint, json=body, headers=headers,
+                    "POST", endpoint, json=payload, headers=headers,
                 ) as resp:
                     if resp.status_code >= 400:
                         raw_text = (await resp.aread()).decode("utf-8", "replace")
@@ -569,6 +618,8 @@ class DeepSeekAdapter(LlmAdapter):
                                 provider_retry_after_ms=failure.provider_retry_after_ms,
                                 request_id=failure.request_id)
                         raise failure
+                    # HTTP 2xx 已到：提交扩展（失败只上报，不使请求失败）。
+                    accept_extensions()
                     async for chunk in self._parse_sse(resp.aiter_lines(), abort_event):
                         yield chunk
         except httpx.TimeoutException as e:

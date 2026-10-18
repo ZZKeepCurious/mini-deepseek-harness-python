@@ -83,6 +83,22 @@ class ServiceDefinitionTest(unittest.TestCase):
         self.assertIs(ctx.get("ptcRuntime"), first)
         self.assertIs(install_ptc_runtime(ctx), first)
 
+    def test_program_format_defaults_to_function_body(self):
+        self.assertEqual(PtcRuntime().program_format, "function-body")
+        self.assertEqual(PythonPtcRuntime().program_format, "function-body")
+
+    def test_release_default_is_async_noop(self):
+        runtime = PtcRuntime()
+        self.assertIsNone(asyncio.run(runtime.release(object())))
+
+    def test_resolve_carries_state_owner(self):
+        runtime = PythonPtcRuntime()
+        owner = object()
+        spec = runtime.resolve(PtcRunRequest(program="return 1", stateOwner=owner))
+        self.assertIs(spec.stateOwner, owner)
+        self.assertIsNone(
+            runtime.resolve(PtcRunRequest(program="return 1")).stateOwner)
+
 
 class PythonRuntimeTest(unittest.TestCase):
     def setUp(self):

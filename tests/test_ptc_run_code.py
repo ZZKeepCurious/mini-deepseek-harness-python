@@ -4,6 +4,7 @@
 程序经 `tools.<name>` 调用注册表工具，子派发落 `tool/ptc-dispatch-start` /
 `tool/ptc-dispatch`，外层结果精心挑选。
 """
+import asyncio
 import unittest
 
 from miniharness.core.scope import Context
@@ -156,6 +157,70 @@ class _FakeTsRuntime:
     @property
     def sandbox_mode(self):
         return None
+
+
+class _StubAgent:
+    def __init__(self, session, ctx):
+        self.session = session
+        self.ctx = ctx
+
+
+class _RecordingRuntime(PythonPtcRuntime):
+    """记录 resolve 请求与 release 调用的真实 provider（非 mock）。"""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.requests = []
+        self.releases = []
+
+    def resolve(self, request):
+        self.requests.append(request)
+        return super().resolve(request)
+
+    async def release(self, owner):
+        self.releases.append(owner)
+        return await super().release(owner)
+
+
+class RunCodeStateOwnerTest(unittest.TestCase):
+    """stateOwner 契约：owner = 调用 Agent，owner 结束时 release（上游 ptc.ts:699-714）。"""
+
+    def setUp(self):
+        self.session = Session("ptc-owner")
+        self.registry_ctx, self.registry = _registry_with_echo()
+        self.runtime = _RecordingRuntime()
+        self.tool = create_run_code_tool(
+            self.registry, runtime=self.runtime,
+            ctx=self.registry_ctx, session=self.session)
+        self.agent_ctx = Context(name="root")
+        self.agent = _StubAgent(self.session, self.agent_ctx)
+
+    def _exec(self):
+        exec_ = ToolExec(agent=self.agent, call_id="call-1", root_call_id="call-1")
+        exec_.name = RUN_CODE_NAME
+        exec_.signal = _Signal()
+        return exec_
+
+    def test_state_owner_is_calling_agent(self):
+        self.tool.execute({"code": "return 1", "description": "x"}, self._exec())
+        self.assertIs(self.runtime.requests[-1].stateOwner, self.agent)
+
+    def test_release_runs_when_owner_ends(self):
+        self.tool.execute({"code": "return 1", "description": "x"}, self._exec())
+        self.assertEqual(self.runtime.releases, [])
+        asyncio.run(self._dispose_agent())
+        self.assertEqual(self.runtime.releases, [self.agent])
+
+    def test_state_owner_registered_once_per_agent(self):
+        self.tool.execute({"code": "return 1", "description": "x"}, self._exec())
+        self.tool.execute({"code": "return 2", "description": "y"}, self._exec())
+        asyncio.run(self._dispose_agent())
+        self.assertEqual(self.runtime.releases, [self.agent])
+
+    async def _dispose_agent(self):
+        completion = self.agent_ctx.dispose()
+        if completion is not None:
+            await completion
 
 
 class RunCodeImageDeferTest(unittest.TestCase):

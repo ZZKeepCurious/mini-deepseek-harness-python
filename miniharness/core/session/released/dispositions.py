@@ -172,6 +172,29 @@ def _v4_table() -> dict[str, dict]:
     table = dict(RELEASED_V3_EVENT_DISPOSITIONS)
     table["developer/message"] = _disposition(["turn", "step", "message"], ["headerSeq"])
     table["workspace/changes"] = _disposition(["turn"])
+    # dsh-v0.2.1-rc.2 same-version 扩展（SESSION_FORMAT_VERSION 仍为 4）：
+    # 3 条新事件 required-on-read，加入 v4 canonical 词表。
+    # 工作目录变更（上游 working-directory/src/index.ts）：恰 {cwd}。
+    table["working-directory/change"] = _disposition(["cwd"])
+    # 作业注册（上游 jobs/jobs/src/types.ts JobRegisteredData）：{jobId, owner,
+    # kind, label, startedAt}，toolCall 可选（{callId, rootCallId}）。
+    table["job/registered"] = _disposition(
+        ["jobId", "owner", "kind", "label", "startedAt"], ["toolCall"])
+    # 作业结算（JobSettledData = JobRegisteredData + 结算字段）：detail 可选。
+    table["job/settled"] = _disposition(
+        ["jobId", "owner", "kind", "label", "startedAt", "finishedAt", "status",
+         "cause", "producerReported"],
+        ["toolCall", "detail"])
+    # dsh-v0.2.1-rc.2 既有事件可选字段加白（same-version，仅 v4 读面）：
+    # session/title-llm-request.reasoningEffort?（session-title-llm/src/index.ts:44-49）
+    table["session/title-llm-request"] = _disposition(
+        ["titleProvider", "messageSeqs", "route", "system", "messages", "maxTokens"],
+        ["reasoningEffort"])
+    # tool/ptc-dispatch.meta? 与 error?（core/tools/src/types.ts:21-25）：
+    # meta 为 JsonValue（opaque）、error 结构化。
+    table["tool/ptc-dispatch"] = _disposition(
+        ["rootCallId", "parentCallId", "subCallId", "name", "arguments", "isError", "content"],
+        ["meta", "error"], ["arguments", "meta"])
     return table
 
 

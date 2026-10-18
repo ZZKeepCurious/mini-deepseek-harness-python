@@ -128,6 +128,20 @@ class PtcRuntime:
         raise NotImplementedError
 
     @property
+    def program_format(self) -> str:
+        """源求值形态（``'function-body'`` / ``'repl'``），独立于 provider 是否为
+        某 owner 保留状态（上游 programFormat）。默认 ``'function-body'``。"""
+        return "function-body"
+
+    async def release(self, owner) -> None:
+        """释放某 owner 的保留环境并等待其执行资源（上游 release）。
+
+        无状态 provider 无保留资源可释放（默认实现即 no-op）。owner 是请求里
+        ``stateOwner`` 的同一对象身份；由消费方在 owner 结束时 await。
+        """
+        return None
+
+    @property
     def execution_instructions(self) -> str:
         """provider 拥有的程序使用指引（consumer 与源语言一同呈现）。"""
         return ""

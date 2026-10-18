@@ -46,12 +46,15 @@ class TestErrorCodeSet(unittest.TestCase):
         # permission-presets 新增 permission/invalid + duplicate-auto +
         # auto-unavailable；
         # dsh-v0.2.0-rc.2 session-controller 新增 provider-credentials-unavailable
-        # + provider-models-unavailable）
-        self.assertEqual(len(RPC_ERROR_CODES), 59)
+        # + provider-models-unavailable；
+        # dsh-v0.2.1-rc.2 session-controller 新增 session/migration-required）
+        # dsh-v0.2.1-rc.2 gateway/remote-access 新增 gateway/interactions-forbidden
+        # + gateway/peer-disposed + remote-access/denied（声明的兜底码，mini 组合暂无生产者）
+        self.assertEqual(len(RPC_ERROR_CODES), 63)
 
     def test_known_codes_present(self):
         for code in ("gateway/bad-request", "session/not-found", "session/model-unavailable",
-                     "session/conflict", "session/invalid-time-zone", "workspace/not-found",
+                     "session/conflict", "session/invalid-time-zone", "session/migration-required", "workspace/not-found",
                      "agent-preset/conflict", "session/agent-busy",
                      "session/attachment-invalid", "session/queue-item-not-found",
                      "session/steer-unavailable", "session/title-invalid",
@@ -60,6 +63,8 @@ class TestErrorCodeSet(unittest.TestCase):
                      "subagent/unauthorized", "gateway/internal", "gateway/cancelled",
                      "gateway/arguments-invalid", "gateway/input-invalid",
                      "gateway/invocation-unavailable", "gateway/lookup-not-found",
+                     "gateway/interactions-forbidden", "gateway/peer-disposed",
+                     "remote-access/denied",
                      "terminal/control-unavailable", "terminal/limit-reached",
                      "terminal/unavailable",
                      "workspace/invalid-path", "workspace/name-conflict",

@@ -1,7 +1,7 @@
 """Session 作用域的浏览器终端控制器（对齐 packages/api/terminal-controller/src/index.ts）。
 
-承载 `ctx.terminalController`：`environment` / `shells` / `list` / `create` / `follow`
-/ `write` / `resize` / `rename` / `close`。终端进程独立于浏览器与 follower 生命周期；
+承载 `ctx.terminalController`：`environment` / `shells` / `list` / `create` / `attach`
+/ `rename` / `close`。终端进程独立于浏览器与 follower 生命周期；
 保留一个终端即保留其进程与一屏有界缓冲。输出不进模型转录。
 
 依赖的执行 provider（上游 `ctx.subprocess`）：mini 的 PTY seam 落在 `terminal_bash.provider`
@@ -20,7 +20,8 @@ from __future__ import annotations
 from typing import Any
 
 from ..core.scope import Context, Service
-from ..terminal.types import Cancellation, _utf8_bytes
+from ..core.working_cwd import working_directory_of
+from ..terminal.types import Cancellation
 from .shells import discover_shells, resolve_shell
 from .terminal import BrowserTerminal
 from .types import (
@@ -98,15 +99,17 @@ class TerminalController(Service):
     def environment(self, agent: Any, signal=None) -> dict:
         """读会话工作目录与终端限额（不解析 shell）。
 
-        上游 index.ts:121：cwd = `session.header.cwd ?? sandboxPolicy.workspaceRoot`
-        （会话头部 cwd 优先，缺失回退策略工作区根）。
+        对齐上游 index.ts:122：`cwd = workingDirectory.get(agent.session)`
+        ——"日志记录的当前目录，读取时不做文件系统校验"（有效投影值，含
+        `working_directory` 工具的 cd 变更）。与上游 `execution(agent)` 一致：
+        缺 subprocess / sandboxPolicy provider 时 fail loud。
         """
         self._throw_if_aborted(signal)
-        policy = self._policy()
-        resolved = policy.resolve({"session": agent.session})
-        cwd = (getattr(agent.session, "meta", {}) or {}).get("cwd") or resolved["workspaceRoot"]
+        self._policy()
+        cwd = working_directory_of(agent)
         return {"cwd": cwd,
                 "maxInputBytes": self.config["maxInputBytes"],
+                "maxBufferedBytes": self.config["maxBufferedBytes"],
                 "maxCols": self.config["maxCols"],
                 "maxRows": self.config["maxRows"],
                 "scrollback": self.config["scrollback"]}
@@ -160,22 +163,15 @@ class TerminalController(Service):
         owner.terminals[request["id"]] = terminal
         return terminal.info
 
-    def follow(self, agent: Any, id: str, attachment_id: str, signal=None):
-        """附加到一个终端而不把其进程生命周期绑定到传输。"""
-        if not is_identity(attachment_id):
-            raise ValueError("Invalid terminal attachment identity")
-        return self._terminal(agent, id).follow(attachment_id, signal)
+    def attach(self, agent: Any, id: str, signal=None,
+               input_window: dict | None = None):
+        """把终端输入/输出附加到一条物理 Remote 流（index.ts:208-220）。
 
-    def write(self, agent: Any, id: str, attachment_id: str, data: str) -> None:
-        """投递原始输入，含 Tab 补全与控制字符。"""
-        if _utf8_bytes(data) > self.config["maxInputBytes"]:
-            raise RuntimeError("Terminal input exceeds the configured limit")
-        self._terminal(agent, id).write(attachment_id, data)
-
-    def resize(self, agent: Any, id: str, attachment_id: str, cols: int, rows: int) -> None:
-        """更新 PTY 与恢复屏幕的尺寸。"""
-        self._dimensions(cols, rows)
-        self._terminal(agent, id).resize(attachment_id, cols, rows)
+        取代上游旧 `follow`/`write`/`resize` 三方法：输入随附加流的 uplink 到达，
+        输出与 ack 走同一帧序列。进程生命周期不绑定传输；输入永不重放。
+        """
+        return self._terminal(agent, id).attach(
+            self.config, signal, input_window)
 
     def rename(self, agent: Any, id: str, title: str) -> None:
         """重命名终端而不改变其 shell。"""

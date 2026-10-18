@@ -22,6 +22,7 @@ from typing import Any
 from ..core.home_paths import DSH_HOME_DIR_NAME, resolve_dsh_home
 from ..core.scope import Context
 from ..core.session.message import create_message, text_block
+from ..core.working_cwd import working_directory_of
 
 __all__ = [
     "NAME",
@@ -581,7 +582,7 @@ def reconcile_instruction_context(agent: Any, resolved: dict, version_cache: dic
                                   options: dict) -> dict | None:
     session = agent.session
     effective = _visible_instruction_changes(agent, options.get("authorityMessages", []))
-    cwd = (getattr(session, "meta", {}) or {}).get("cwd") or os.getcwd()
+    cwd = working_directory_of(agent) or os.getcwd()
     project_root = options.get("projectRoot") or find_project_root(
         cwd, resolved["projectRootMarkers"])
     scopes: set = set()
@@ -775,7 +776,7 @@ def apply_agent_instructions(ctx: Context, config: dict | None = None) -> None:
         max_bytes = resolved["maxBytes"]
         if max_bytes is None or max_bytes <= 0:
             return None
-        cwd = (getattr(agent.session, "meta", {}) or {}).get("cwd") or os.getcwd()
+        cwd = working_directory_of(agent) or os.getcwd()
         project_root = find_project_root(cwd, resolved["projectRootMarkers"])
         identity = workspace_baseline_identity(resolved, cwd, project_root)
         visible_baseline = _visible_baseline_source(agent, authority)

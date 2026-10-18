@@ -315,6 +315,32 @@ class SerializeMessagesTest(unittest.TestCase):
         self.assertEqual(body['system'], 'update')
         self.assertEqual([m['role'] for m in body['messages']], ['user'])
 
+    def test_empty_assistant_text_block_skipped(self):
+        from miniharness.llm import serialize_messages
+        wire = serialize_messages([
+            {'role': 'user', 'content': [{'type': 'text', 'text': 'hi'}]},
+            {'role': 'assistant', 'content': [{'type': 'text', 'text': ''}]},
+            {'role': 'assistant', 'content': [{'type': 'text', 'text': 'ok'}]},
+        ])
+        self.assertEqual(len(wire), 2)
+        self.assertEqual(wire[1]['role'], 'assistant')
+        self.assertEqual(wire[1]['content'], [{'type': 'text', 'text': 'ok'}])
+
+    def test_empty_assistant_message_does_not_flush_system_updates(self):
+        from miniharness.llm import serialize_messages
+        # 空 assistant 消息整体跳过，且不触发 flush——system 更新仍等到下一个
+        # 非空 assistant（或末尾 user）才发出（上游 serialize.ts:123-124）。
+        wire = serialize_messages([
+            {'role': 'user', 'content': [{'type': 'text', 'text': 'hi'}]},
+            {'role': 'system', 'content': [{'type': 'text', 'text': 'update'}]},
+            {'role': 'assistant', 'content': [{'type': 'text', 'text': ''}]},
+            {'role': 'user', 'content': [{'type': 'text', 'text': 'bye'}]},
+        ], model='deepseek-flash', models=DEFAULT_MODELS)
+        self.assertEqual([m['role'] for m in wire], ['user', 'system'])
+        self.assertEqual(wire[0]['content'],
+                         [{'type': 'text', 'text': 'hi'}, {'type': 'text', 'text': 'bye'}])
+        self.assertEqual(wire[1]['content'], [{'type': 'text', 'text': 'update'}])
+
     def test_developer_message_rejected(self):
         from miniharness.llm import serialize_messages
         message = {'role': 'developer', 'content': [{'type': 'tool-addition', 'toolName': 'x'}]}
@@ -674,6 +700,59 @@ class AuthSeamTest(unittest.TestCase):
         out = _collect(adapter)
         self.assertEqual(out[-1]['type'], 'finish')
         self.assertEqual(adapter.provider, 'deepseek-account')
+
+
+class RequestExtensionWiringTest(unittest.TestCase):
+    """上游 llm-deepseek/src/request-extensions.ts：注册字段并入请求体顶层，
+    HTTP 2xx 后才接受；未注册时请求体不变。"""
+
+    def test_registered_field_posted_and_accepted_after_2xx(self):
+        from miniharness.llm.deepseek_extensions import ExtensionRegistry
+        seen = {'body': None, 'accepted': False}
+
+        def handler(request):
+            seen['body'] = json.loads(request.content)
+            return _sse_response()
+
+        registry = ExtensionRegistry()
+        registry.register('dsh_plugin_packages', {
+            'prepare': lambda _r: {'value': {'version': 1, 'packages': []},
+                                   'accept': lambda: seen.__setitem__('accepted', True)}})
+        adapter = DeepSeekAdapter(api_key='sk-test', extensions=registry,
+                                  transport=httpx.MockTransport(handler))
+        out = _collect(adapter)
+        self.assertEqual(out[-1]['type'], 'finish')
+        self.assertEqual(seen['body']['dsh_plugin_packages'],
+                         {'version': 1, 'packages': []})
+        self.assertTrue(seen['accepted'])
+
+    def test_no_registry_leaves_body_unmodified(self):
+        seen = {}
+
+        def handler(request):
+            seen['body'] = json.loads(request.content)
+            return _sse_response()
+
+        adapter = _stream(handler)
+        _collect(adapter)
+        self.assertNotIn('dsh_plugin_packages', seen['body'])
+
+    def test_extension_not_accepted_on_error_status(self):
+        from miniharness.llm.deepseek_extensions import ExtensionRegistry
+        seen = {'accepted': False}
+
+        def handler(request):
+            return httpx.Response(500, text='boom')
+
+        registry = ExtensionRegistry()
+        registry.register('dsh_plugin_packages', {
+            'prepare': lambda _r: {'value': {'version': 1, 'packages': []},
+                                   'accept': lambda: seen.__setitem__('accepted', True)}})
+        adapter = DeepSeekAdapter(api_key='sk-test', extensions=registry,
+                                  transport=httpx.MockTransport(handler))
+        with self.assertRaises(LlmFailure):
+            _collect(adapter)
+        self.assertFalse(seen['accepted'])
 
 
 if __name__ == '__main__':

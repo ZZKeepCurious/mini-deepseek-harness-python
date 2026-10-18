@@ -127,7 +127,10 @@ def _assistant_blocks(message: dict) -> list[dict]:
     for block in message.get("content") or []:
         btype = block.get("type")
         if btype == "text":
-            blocks.append({"type": "text", "text": block["text"]})
+            # 空文本块被跳过（上游 serialize.ts:30）；整条空 assistant 消息随后
+            # 也在 _build_messages 中被跳过。
+            if block["text"]:
+                blocks.append({"type": "text", "text": block["text"]})
         elif btype == "reasoning":
             # mini 无 ReplayEnvelope 重放双半（见 protocol.StreamChunk 简化标注），
             # 历史 thinking 不带 signature；上游仅在 replay 元数据可用时才附。
@@ -229,7 +232,6 @@ def _build_messages(messages: list, *, in_history: bool,
                 history_system = text
             continue
         if role == "assistant":
-            flush_system_updates()
             blocks = _assistant_blocks(message)
         elif role == "tool":
             result: dict = {
@@ -242,8 +244,14 @@ def _build_messages(messages: list, *, in_history: bool,
             blocks = [result]
         else:  # user
             blocks = _input_blocks(content, message_index, image_parts)
-        if role == "user" and not blocks:
+        # 空 user/assistant 消息整体跳过（上游 serialize.ts:123）；tool 轮即使结果
+        # 为空也保留 call id。
+        if role in ("user", "assistant") and not blocks:
             continue
+        # flush 后移：只有在即将落一条非空 assistant 消息前，才把前一个
+        # user/tool-result 轮之后累积的 system 更新发出（上游 serialize.ts:124）。
+        if role == "assistant":
+            flush_system_updates()
         wire_role = "user" if role == "tool" else role
         if wire and wire[-1]["role"] == wire_role:
             wire[-1]["content"].extend(blocks)

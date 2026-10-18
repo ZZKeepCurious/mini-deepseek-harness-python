@@ -5,20 +5,22 @@
 分离不杀进程，显式 close 才终止。
 
 载体差异（已登记）：上游以 async 队列有序化 write/resize/output；mini 单进程同步模型
-以可重入锁保序，输出到达发生在 provider reader 线程（回调）。
+以可重入锁保序，输出到达发生在 provider reader 线程（回调）。输入消费（上行命令的
+序列检查、ack/refusal）由 `TerminalAttachment.submit` 同步承担，async 泵留在 web 层。
 """
 from __future__ import annotations
 
 import codecs
 import threading
-from typing import Any, Iterator
+from typing import Any
 
 import pyte
 
+from ..terminal.types import _utf8_bytes
 from .stream import TerminalFollower
 from .types import TerminalControlUnavailable
 
-__all__ = ["BrowserTerminal", "TerminalFollow"]
+__all__ = ["BrowserTerminal", "TerminalAttachment"]
 
 
 def _row_text(row: Any) -> str:
@@ -30,28 +32,65 @@ def _row_text(row: Any) -> str:
     return "".join(row[col].data for col in sorted(row)).rstrip()
 
 
-class TerminalFollow:
-    """一次附加：一张完整有界屏幕（baseline）后跟有序输出（types.ts:59-63）。
+class TerminalAttachment:
+    """一次附加：独占输入控制 + 一张完整有界屏幕后跟有序输出（types.ts:71-79）。
+
+    对齐上游 `BrowserTerminal.attach`（terminal.ts:82-111）：snapshot 为首帧，
+    `writable` 指示本附加当前是否持有输入控制；上行的 `TerminalInput` 命令经
+    `submit` 同步处理并按序产出 `ack` 帧（被拒时带 `refusal`）。较晚附加接管输入，
+    旧附加保持只读。
 
     @param terminal - 所属 BrowserTerminal。
-    @param attachment_id - 新独占输入附加身份。
+    @param limits - 输入字节与 PTY 尺寸上限（`TerminalEnvironment` 的
+        `maxInputBytes` / `maxCols` / `maxRows`）。
     @param signal - 附加取消（不终止进程）；已中止的附加不获得输入控制权。
+    @param input_window - 载体上行窗口（`RemoteUplinkWindow`）；载体无编码帧 inbox
+        限额时缺省，snapshot 不带 `inputWindow`。
     """
 
-    def __init__(self, terminal: "BrowserTerminal", attachment_id: str, signal=None):
+    def __init__(self, terminal: "BrowserTerminal", limits: dict, signal=None,
+                 input_window: dict | None = None):
         self._terminal = terminal
-        self.baseline, self.follower = terminal._attach(attachment_id, signal)
+        self._limits = limits
+        self._sequence = 0
+        self.baseline, self.follower = terminal._attach(signal, input_window)
+
+    @property
+    def writable(self) -> bool:
+        """本附加当前是否持有输入控制。"""
+        return self._terminal.writable(self.follower)
+
+    def submit(self, command: dict) -> None:
+        """处理一条已解码的 `TerminalInput` 命令并产出其 `ack`（terminal.ts:113-152）。
+
+        对齐上游 `consumeInput`：序列从 1 连续编号，缺口即失败整条附加（抛错，由
+        web 层折进 follower）；`terminal/control-unavailable` 与已退出进程折成带
+        `refusal` 的 `ack`（输出附加保持有效），其它失败照原样抛出。
+        """
+        self._sequence += 1
+        sequence = command.get("sequence")
+        if not _is_safe_int(sequence) or sequence != self._sequence:
+            raise RuntimeError("Terminal input sequence has a gap")
+        try:
+            self._terminal._apply_command(command, self.follower, self._limits)
+        except TerminalControlUnavailable as error:
+            self.follower.push({"type": "ack", "sequence": sequence,
+                                "refusal": error.details["reason"]})
+            return
+        except Exception:  # noqa: BLE001 - provider 写/调整失败：已退出即不运行，否则重抛
+            if self._terminal.exited:
+                self.follower.push({"type": "ack", "sequence": sequence,
+                                    "refusal": "not-running"})
+                return
+            raise
+        self.follower.push({"type": "ack", "sequence": sequence})
 
     def detach(self) -> None:
         self._terminal._detach(self.follower)
 
-    def read(self) -> Iterator[dict]:
-        """同步帧源：先 baseline，再跟随队列（生成器结束时自动分离）。"""
-        try:
-            yield self.baseline
-            yield from self.follower.read()
-        finally:
-            self.detach()
+
+def _is_safe_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 class BrowserTerminal:
@@ -72,7 +111,7 @@ class BrowserTerminal:
         self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self._followers: set[TerminalFollower] = set()
         self._sequence = 0
-        self._controller: tuple[str, TerminalFollower] | None = None
+        self._controller: TerminalFollower | None = None
         self._closing = False
         self._lock = threading.RLock()
         self._drained = threading.Event()
@@ -112,7 +151,7 @@ class BrowserTerminal:
         else:
             info["error"] = error
         self.info = info
-        self._broadcast({"type": "state", "info": self.info})
+        self._broadcast_state()
         self._drained.set()
 
     def _output(self, data: str) -> None:
@@ -140,18 +179,25 @@ class BrowserTerminal:
         """
         return self._closing
 
-    def _attach(self, attachment_id: str, signal) -> tuple[dict, TerminalFollower]:
+    @property
+    def exited(self) -> bool:
+        """provider 是否已结算（退出或失败，terminal.ts:24 的 `exited` 闩）。"""
+        return self._consumed
+
+    def _attach(self, signal, input_window: dict | None = None) -> tuple[dict, TerminalFollower]:
         if signal is not None:
             signal.throw_if_aborted()
         with self._lock:
             if signal is not None:
                 signal.throw_if_aborted()
             follower = TerminalFollower(self._max_buffered_bytes)
-            self._controller = (attachment_id, follower)
-            self.info = {**self.info, "controllerId": attachment_id}
-            self._broadcast({"type": "state", "info": self.info})
+            self._controller = follower
+            self._broadcast_state()
             snapshot = {"type": "snapshot", "sequence": self._sequence,
-                        "screen": self._serialize(), "info": self.info}
+                        "screen": self._serialize(), "info": self.info,
+                        "writable": self.writable(follower)}
+            if input_window is not None:
+                snapshot["inputWindow"] = input_window
             self._followers.add(follower)
             return snapshot, follower
 
@@ -159,36 +205,47 @@ class BrowserTerminal:
         with self._lock:
             self._followers.discard(follower)
             follower.close()
-            if self._controller is not None and self._controller[1] is follower:
+            if self._controller is follower:
                 self._controller = None
-                info = {k: v for k, v in self.info.items() if k != "controllerId"}
-                self.info = info
-                self._broadcast({"type": "state", "info": info})
+                self._broadcast_state()
 
-    def follow(self, attachment_id: str, signal=None) -> TerminalFollow:
-        """附加并取得 baseline + 有序输出（较晚附加接管输入，旧的降为只读）。"""
-        return TerminalFollow(self, attachment_id, signal)
+    def attach(self, limits: dict, signal=None,
+               input_window: dict | None = None) -> TerminalAttachment:
+        """附加输入/输出（较晚附加接管输入，旧的降为只读）。"""
+        return TerminalAttachment(self, limits, signal, input_window)
 
-    def write(self, attachment_id: str, data: str) -> None:
-        """投递原始输入（不做命令解释）。"""
+    def _apply_command(self, command: dict, follower: TerminalFollower,
+                       limits: dict) -> None:
+        """在输入控制下执行一条已校验的 `TerminalInput`（terminal.ts:121-141）。"""
         with self._lock:
-            self._require_controller(attachment_id)
-            self._handle.write(data)
+            self._require_controller(follower)
+            if command["type"] == "write":
+                if _utf8_bytes(command["data"]) > limits["maxInputBytes"]:
+                    raise RuntimeError("Terminal input exceeds the configured limit")
+                self._handle.write(command["data"])
+                return
+            if command["type"] == "resize":
+                cols, rows = command["cols"], command["rows"]
+                if (not _is_safe_int(cols) or cols < 2 or cols > limits["maxCols"]
+                        or not _is_safe_int(rows) or rows < 1 or rows > limits["maxRows"]):
+                    raise RuntimeError("Terminal dimensions exceed the configured limits")
+                self._handle.resize(cols, rows)
+                self._screen.resize(rows, cols)
+                self.info = {**self.info, "cols": cols, "rows": rows}
+                self._broadcast_state()
+                return
+            raise RuntimeError(f"unknown terminal input type: {command.get('type')!r}")
 
-    def resize(self, attachment_id: str, cols: int, rows: int) -> None:
-        """按与输出相同的操作顺序调整 PTY 与恢复屏幕。"""
-        with self._lock:
-            self._require_controller(attachment_id)
-            self._handle.resize(cols, rows)
-            self._screen.resize(rows, cols)
-            self.info = {**self.info, "cols": cols, "rows": rows}
-            self._broadcast({"type": "state", "info": self.info})
+    def writable(self, follower: TerminalFollower) -> bool:
+        """本 follower 当前是否持有输入控制（terminal.ts:154-156）。"""
+        return (not self._consumed and not self._closing
+                and self.info["state"] == "running" and self._controller is follower)
 
     def rename(self, title: str) -> None:
         """向每个附加视图发布显示名。"""
         with self._lock:
             self.info = {**self.info, "title": title}
-            self._broadcast({"type": "state", "info": self.info})
+            self._broadcast_state()
 
     def close(self) -> None:
         """先终止 provider 拥有的完整进程范围，再排空并释放屏幕；失败可重试。"""
@@ -210,15 +267,21 @@ class BrowserTerminal:
 
     # ---------- 内部 ----------
 
-    def _require_controller(self, attachment_id: str) -> None:
+    def _require_controller(self, follower: TerminalFollower) -> None:
         if self._closing or self.info["state"] != "running":
             raise TerminalControlUnavailable("not-running")
-        if self._controller is None or self._controller[0] != attachment_id:
+        if self._controller is not follower:
             raise TerminalControlUnavailable("read-only")
 
     def _broadcast(self, frame: dict) -> None:
         for follower in list(self._followers):
             follower.push(frame)
+
+    def _broadcast_state(self) -> None:
+        """向每个 follower 独立发布当前元数据与其 `writable`（terminal.ts:158-160）。"""
+        for follower in list(self._followers):
+            follower.push({"type": "state", "info": self.info,
+                           "writable": self.writable(follower)})
 
     def _serialize(self) -> str:
         """完整有界屏幕文本（含滚出历史），行尾空白裁剪、尾随空行去除。"""

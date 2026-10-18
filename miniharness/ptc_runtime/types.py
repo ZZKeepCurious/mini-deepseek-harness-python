@@ -72,9 +72,24 @@ class PtcBindingNamespace:
 
 @dataclass(frozen=True)
 class PtcRunRequest:
-    """一次程序的调用方输入（上游 PtcRunRequest）。"""
+    """一次程序的调用方输入（上游 PtcRunRequest）。
+
+    @param program - 程序源码，取运行时的 ``language``；形态取决于 provider 的
+        ``program_format``：async 函数体支持顶层 ``await`` 与 ``return``；REPL 支持
+        顶层声明、``await`` 与末尾表达式。完成值成为 PtcRunResult.value。
+    @param stateOwner - 可选的内存状态对象身份 owner。省略即请求全新环境；消费方
+        必须在 owner 结束时 await ``runtime.release(owner)``。无状态 provider 忽略
+        此字段；保留状态从不持久。
+    @param bindings - 暴露给程序的宿主函数，每个命名空间一个全局对象。
+    @param cwd - 挂载文件系统与子进程执行世界里的工作目录。
+    @param timeoutMs - 执行预算（毫秒）；省略用 provider 默认，``None`` 表示无截止。
+    @param sandboxPolicy - 本次执行已解析的权限；无约束的 provider 拒绝显式策略。
+    @param signal - 中止运行：运行时硬停止程序并以 kind ``'abort'`` 的 PtcRunFailure
+        resolve；在途绑定调用由调用方自行结算。
+    """
 
     program: str
+    stateOwner: Any = None
     bindings: list[PtcBindingNamespace] = field(default_factory=list)
     cwd: str | None = None
     timeoutMs: int | None = None
@@ -90,6 +105,7 @@ class PtcRunSpec:
     bindings: list[PtcBindingNamespace]
     cwd: str
     timeoutMs: int | None
+    stateOwner: Any = None
     sandboxPolicy: Any = None
     signal: Any = None
 

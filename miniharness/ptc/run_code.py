@@ -21,10 +21,12 @@ finish）+ 并发池；mini 的工具管线是同步/简单载体，故子派发
 from __future__ import annotations
 
 import json
+import weakref
 from typing import Any
 
 from ..core.session import Session, create_message
 from ..core.tools import Tool, ToolExec, ToolRegistry, ToolResult, run_pipeline
+from ..core.working_cwd import working_directory_of
 
 __all__ = [
     "RUN_CODE_DESCRIPTION_PARAM_DESCRIPTION",
@@ -110,6 +112,27 @@ def create_run_code_tool(registry: ToolRegistry, *, runtime, ctx=None,
     @param session - 目标会话；子派发事件写它的日志。
     """
     flavor = _resolve_flavor(runtime)
+    #: 已登记 release 的 owner 集合（上游 ptc.ts:332 `stateOwners` WeakMap，
+    #: 每个 (agent, runtime) 只登记一次）。挂在工厂闭包上——状态有所属者。
+    state_owners: "weakref.WeakSet" = weakref.WeakSet()
+
+    def _ensure_state_owner(agent) -> None:
+        """owner 结束时释放 provider 保留状态（上游 ptc.ts:699-714）。
+
+        当前 Python 后端无状态（release no-op），但消费方仍须登记：``stateOwner``
+        是同一 Agent 的保留环境身份，provider 拆解时要被 await。
+        """
+        if agent is None or agent in state_owners:
+            return
+        agent_ctx = getattr(agent, "ctx", None)
+        if agent_ctx is None:
+            return
+        state_owners.add(agent)
+
+        async def _release_owner() -> None:
+            await runtime.release(agent)
+
+        agent_ctx.effect(lambda: _release_owner, "PTC retained environment")
 
     def _visible_names() -> list[str]:
         return [name for name in registry.names() if name != RUN_CODE_NAME]
@@ -127,6 +150,7 @@ def create_run_code_tool(registry: ToolRegistry, *, runtime, ctx=None,
         agent = exec_.agent
         agent_session = session if session is not None else (
             getattr(agent, "session", None) if agent is not None else None)
+        _ensure_state_owner(agent)
         parent_call_id = getattr(exec_, "call_id", None) or ""
         root_call_id = getattr(exec_, "root_call_id", None) or parent_call_id
         state = {"dispatch": 0}
@@ -185,10 +209,13 @@ def create_run_code_tool(registry: ToolRegistry, *, runtime, ctx=None,
 
         bindings = [PtcBindingNamespace("tools", functions)]
         cwd = None
-        if agent_session is not None:
-            cwd = agent_session.meta.get("cwd")
+        if agent is not None:
+            cwd = working_directory_of(agent)
+        elif agent_session is not None:
+            cwd = working_directory_of(agent_session)
         spec = runtime.resolve(_request(code=code, bindings=bindings, cwd=cwd,
                                         timeout_ms=timeout_ms,
+                                        state_owner=agent,
                                         signal=getattr(exec_, "signal", None)))
         import asyncio
 
@@ -208,13 +235,14 @@ def create_run_code_tool(registry: ToolRegistry, *, runtime, ctx=None,
             }
         return output
 
-    def _request(*, code, bindings, cwd, timeout_ms, signal):
+    def _request(*, code, bindings, cwd, timeout_ms, state_owner=None, signal):
         from ..ptc_runtime.types import PtcRunRequest
 
         return PtcRunRequest(
             program=code, bindings=bindings,
             **({} if cwd is None else {"cwd": cwd}),
             **({} if timeout_ms is None else {"timeoutMs": int(timeout_ms)}),
+            **({} if state_owner is None else {"stateOwner": state_owner}),
             signal=signal)
 
     def render(args: dict, value: dict) -> list[dict]:

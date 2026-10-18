@@ -2,7 +2,11 @@
 
 契约要点（与上游逐条一致）：
   * JobStatus = 'running' | 'stopping' | 'completed' | 'killed' | 'failed'
-  * id 由注册表生成 `<kind>-N`（品牌化 JobId；可预测，授权靠 owner 会话 id 而非保密）
+  * id 由注册表生成 `<kind>-<short-uuid>`（kind 后接 16 位 UUID hex，碰撞时重试；
+    品牌化 JobId 的 `JobId(id)` 只品牌不校验，授权靠 owner 会话 id 而非保密）
+  * 注册表在 owner 会话发射 `job/registered` / `job/settled`（JobRegisteredData =
+    {jobId, owner, kind, label, startedAt, toolCall?} / JobSettledData = registered
+    字段 + {finishedAt, status, cause, producerReported, detail?}），发射失败只告警
   * JobOutcome.status 只允许三种终态；detail 是终态原因；result 是"值型结果"
     （workflow 渲染结果 / 子代理报告），由结算后第一次 read 交出一次；输出流走
     ring，不再经 outcome 承载
@@ -17,6 +21,7 @@ SessionId 在 mini 是裸字符串（上游为品牌化 string，语义等价）
 from __future__ import annotations
 
 import concurrent.futures
+import uuid
 from typing import Any, Callable
 
 __all__ = [
@@ -31,6 +36,7 @@ __all__ = [
     "TERMINAL_STATUSES",
     "TASK_WAIT_TIMEOUT",
     "job_id",
+    "job_tool_call",
 ]
 
 #: SessionId 在 mini 是裸字符串（会话 id）；上游为 brand.ts 的品牌类型。
@@ -124,6 +130,24 @@ class JobHandle:
         self._update_progress(line)
 
 
-def job_id(kind: str, count: int) -> str:
-    """注册表 id 生成：`<kind>-N`（对齐 brand.ts JobId 语义）。"""
-    return f"{kind}-{count}"
+def job_id(kind: str) -> str:
+    """注册表 id 发号：`<kind>-<16 位 UUID hex>`（对齐 jobs-local index.ts:227-232）。
+
+    上游用 `randomUUID().replaceAll('-','').slice(0,16)`；`JobId(id)` 只品牌不校验
+    （brand.ts）。碰撞重试由 registry 在仍持有旧 id 时自行完成。
+    """
+    return f"{kind}-{uuid.uuid4().hex[:16]}"
+
+
+def job_tool_call(exec_: Any) -> dict | None:
+    """从工具执行上下文提取 JobToolCall（上游 ToolExecution.callId/rootCallId）。
+
+    两字段即创建作业的工具调用身份；任一缺席（如程序化派发）返回 None，调用方
+    据此省略 `toolCall` 字段。
+    """
+    call_id = getattr(exec_, "call_id", None)
+    root_call_id = getattr(exec_, "root_call_id", None)
+    if call_id is None or root_call_id is None:
+        return None
+    return {"callId": call_id, "rootCallId": root_call_id}
+

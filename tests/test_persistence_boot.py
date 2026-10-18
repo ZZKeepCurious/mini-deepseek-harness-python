@@ -56,6 +56,27 @@ class TestJsonl(unittest.TestCase):
             self.assertEqual(header["id"], "s1")
             self.assertIsInstance(header["createdAt"], int)
 
+    def test_format_status_current_and_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = JsonlPersistence(Path(tmp), compression="none")
+            p.append("s1", {"type": "turn/start", "seq": 0, "time": 1, "data": {"turn": 1}})
+            p.flush()
+            self.assertEqual(p.format_status("s1"), "current")
+            self.assertIsNone(p.format_status("nope"))
+
+    def test_format_status_migration_required(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = JsonlPersistence(Path(tmp), compression="none")
+            p.append("s1", {"type": "turn/start", "seq": 0, "time": 1, "data": {"turn": 1}})
+            p.flush()
+            path = p.path_of("s1")
+            lines = path.read_text(encoding="utf-8").splitlines()
+            lines[0] = json.dumps({"type": "session", "version": 0, "id": "s1"})
+            (path.parent / "session.jsonl").write_text("\n".join(lines) + "\n",
+                                                       encoding="utf-8")
+            path.unlink()
+            self.assertEqual(p.format_status("s1"), "migration-required")
+
     def test_version_mismatch_fail_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = JsonlPersistence(Path(tmp), compression="none")

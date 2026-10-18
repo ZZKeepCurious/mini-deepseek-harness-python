@@ -1,4 +1,4 @@
-"""web terminal 域：unary 路由 + terminal/follow 流（对齐 typert gateway 契约）。"""
+"""web terminal 域：unary 路由 + terminal/attach 双工流（对齐 typert gateway 契约）。"""
 
 import asyncio
 import os
@@ -10,6 +10,7 @@ from miniharness.llm.fake import FakeLlmAdapter
 from miniharness.seams.sandbox_policy import SandboxPolicyService
 from miniharness.terminal_controller.index import install_terminal_controller
 from miniharness.web.api import WebApi
+from miniharness.web.uplink import UplinkInbox
 
 from tests.test_terminal_controller_terminal import FakeBrowserHandle
 
@@ -70,21 +71,13 @@ class WebTerminalTest(unittest.TestCase):
 
     def test_terminal_errors_map_to_remote_codes(self):
         agent_id = self.session_id
-        self.api.dispatch("terminal/create", "c1",
-                          {"agentId": agent_id, "id": "terminal-1", "cols": 80, "rows": 24})
-        read_only = self._error(self.api.dispatch(
-            "terminal/write", "c2", {"agentId": agent_id, "id": "terminal-1",
-                                     "attachmentId": "writer", "data": "x"}))
-        self.assertEqual(read_only["code"], "terminal/control-unavailable")
-        self.assertEqual(read_only["details"], {"reason": "read-only"})
         bad_dims = self._error(self.api.dispatch(
             "terminal/create", "c3",
             {"agentId": agent_id, "id": "terminal-2", "cols": 1, "rows": 24}))
         self.assertEqual(bad_dims["code"], "gateway/internal")
-        oversized = self._error(self.api.dispatch(
-            "terminal/write", "c4", {"agentId": agent_id, "id": "terminal-1",
-                                     "attachmentId": "writer", "data": "x" * 1001}))
-        self.assertEqual(oversized["code"], "gateway/internal")
+        missing = self._error(self.api.dispatch(
+            "terminal/environment", "c4", {"agentId": "absent"}))
+        self.assertEqual(missing["code"], "session/not-found")
 
     def test_terminal_args_are_validated_at_the_boundary(self):
         missing = self._error(self.api.dispatch(
@@ -102,17 +95,21 @@ class WebTerminalTest(unittest.TestCase):
         response = api.dispatch("terminal/environment", "r2", {"agentId": session_id})
         self.assertEqual(self._error(response)["code"], "gateway/invocation-unavailable")
 
-    def test_terminal_follow_streams_snapshot_then_output_then_state(self):
+    def test_terminal_attach_streams_snapshot_output_and_acknowledgements(self):
         agent_id = self.session_id
         self.api.dispatch("terminal/create", "s1",
                           {"agentId": agent_id, "id": "terminal-1", "cols": 80, "rows": 24})
         handle = self.handles[0]
+        window = {"maxBytes": 262144, "frameOverheadBytes": 76}
 
         async def go():
+            inbox = UplinkInbox(262144, "terminal/attach")
             stream = self.api.gateway.open_stream(
-                "terminal/follow", {"args": {"agentId": agent_id, "id": "terminal-1",
-                                             "attachmentId": "browser-1"}})
+                "terminal/attach", {"args": {"agentId": agent_id, "id": "terminal-1"}},
+                uplink=inbox, uplink_window=window)
             frames = [await stream.__anext__()]
+            inbox.push({"type": "write", "sequence": 1, "data": "hi"}, 33)
+            frames.append(await stream.__anext__())
             handle.output.emit_data(b"hello\r\n")
             frames.append(await stream.__anext__())
             handle.output.emit_end(None)
@@ -122,19 +119,35 @@ class WebTerminalTest(unittest.TestCase):
 
         frames = asyncio.run(go())
         self.assertEqual(frames[0]["type"], "snapshot")
-        self.assertEqual(frames[1], {"type": "output", "sequence": 1, "data": "hello\r\n"})
-        self.assertEqual(frames[2]["type"], "state")
-        self.assertEqual(frames[2]["info"]["state"], "exited")
+        self.assertEqual(frames[0]["inputWindow"], window)
+        self.assertTrue(frames[0]["writable"])
+        self.assertEqual(frames[1], {"type": "ack", "sequence": 1})
+        self.assertEqual(handle.written, ["hi"])
+        self.assertEqual(frames[2], {"type": "output", "sequence": 1, "data": "hello\r\n"})
+        self.assertEqual(frames[3]["type"], "state")
+        self.assertEqual(frames[3]["info"]["state"], "exited")
 
-    def test_terminal_follow_rejects_an_unknown_shell_identity(self):
-        async def go():
+    def test_terminal_attach_rejects_boundary_args_and_unknown_terminals(self):
+        async def bad_args():
             stream = self.api.gateway.open_stream(
-                "terminal/follow", {"args": {"agentId": self.session_id, "id": "missing",
-                                             "attachmentId": "browser-1"}})
+                "terminal/attach", {"args": {"agentId": self.session_id, "id": "terminal-1",
+                                             "extra": True}})
             return await stream.__anext__()
 
-        with self.assertRaises(Exception):
-            asyncio.run(go())
+        with self.assertRaises(Exception) as boundary:
+            asyncio.run(bad_args())
+        self.assertEqual(getattr(boundary.exception, "code", None),
+                         "gateway/arguments-invalid")
+
+        async def missing():
+            stream = self.api.gateway.open_stream(
+                "terminal/attach", {"args": {"agentId": self.session_id, "id": "missing"}})
+            return await stream.__anext__()
+
+        with self.assertRaises(Exception) as unavailable:
+            asyncio.run(missing())
+        self.assertEqual(getattr(unavailable.exception, "code", None),
+                         "terminal/unavailable")
 
 
 if __name__ == "__main__":

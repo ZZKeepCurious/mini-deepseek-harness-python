@@ -5,6 +5,8 @@
     remove / attachController + events（subscribe）；owner 是 SessionId（经
     ctx.agents 解析 live Agent），owned 按会话 id 栅栏、结算 first-wins、
     `settled{cause,awaited}`、teardown cancel force-fail 只改记录
+  * 发号 `<kind>-<16 位 UUID hex>`（碰撞重试）；注册表在 owner 会话发射
+    `job/registered` / `job/settled`（含可选 toolCall 与 producerReported）
   * JobSpec.run(JobHandle) 收 append/updateProgress；pull 源（JobOutputSource）
     由注册表按 cadence 泵入 ring；JobOutcome.result 交出值型结果（无 readOutput）
   * 模型侧三工具 job_output / job_list / job_kill + 完成 notice（busy 注入 /
@@ -24,6 +26,7 @@ from .types import (
     TERMINAL_STATUSES,
     JobDoneBox,
     TASK_WAIT_TIMEOUT,
+    job_tool_call,
 )
 from . import tools as _tools
 
@@ -39,6 +42,7 @@ __all__ = [
     "job_kill_tool",
     "job_list_tool",
     "job_output_tool",
+    "job_tool_call",
     "public_job",
     "register",
     "register_job_tools",

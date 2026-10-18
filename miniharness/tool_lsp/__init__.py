@@ -15,6 +15,7 @@ from typing import Any
 
 from ..core.scope import Context
 from ..core.tools import Tool, ToolRegistry
+from ..core.working_cwd import working_directory_of
 from ..lsp import LSP_OPERATIONS, LspError
 from .render import (
     DEFAULT_MAX_LOCATIONS,
@@ -139,16 +140,12 @@ def _resolve_config(config: dict | None) -> dict:
 
 
 def _session_cwd(exec_: Any) -> str | None:
-    """调用方 agent 的会话工作区 cwd；非 agent 调用方 → None。"""
+    """调用方 agent 的会话当前工作目录；非 agent 调用方 → None。"""
     agent = getattr(exec_, "agent", None)
-    session = getattr(agent, "session", None) if agent is not None else None
-    if session is None:
+    if agent is None:
         return None
-    meta = getattr(session, "meta", None)
-    if isinstance(meta, dict):
-        cwd = meta.get("cwd")
-        return cwd if isinstance(cwd, str) and cwd else None
-    return None
+    cwd = working_directory_of(agent)
+    return cwd if isinstance(cwd, str) and cwd else None
 
 
 def create_lsp_tool(ctx: Context, config: dict | None = None) -> Tool:

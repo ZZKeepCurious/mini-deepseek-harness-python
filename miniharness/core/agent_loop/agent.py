@@ -827,30 +827,54 @@ class AgentLoop:
             if self._turn_open:
                 self._close_turn(self._turn_end)
 
-    def _project_runtime_context(self) -> dict | None:
-        """P2-19：运行时上下文投影（上游 preStep 的 assemble →
-        renderContextSections → project 段，agent.ts:225-234）。组装
-        systemPrompt 服务的 contexts 渲染为节列表，经投影去重后铸快照
-        user 消息；无 systemPrompt 服务时返回 None（行为与未装服务的历史
-        路径完全一致）。"""
+    async def _assemble_prompt(self) -> tuple[dict | None, dict | None]:
+        """本 step 装配一次 systemPrompt，并给出 pre-step 默认进入用的
+        运行时上下文快照候选（上游 preStep：assemble 一次 → 默认 enter 工厂里
+        renderContextSections → project；agent.ts:272-284）。
+
+        @returns (assembly, placeholder)：无 systemPrompt 服务时 (None, None)。
+        placeholder 是未经提交的快照候选消息（未变化时为 None）。
+        """
         service = self.ctx.get("systemPrompt")
         if service is None:
-            return None
-        assembly = service.assemble({"agent": self, "session": self.session})
+            return None, None
+        assemble_context = {"agent": self, "session": self.session,
+                            "signal": self._abort_proxy}
+        assembly = await service.assemble(assemble_context)
         sections = render_context_sections(assembly)
         if self._rt_projection is None:
             self._rt_projection = RuntimeContextProjection(self.session)
-        return self._rt_projection.project(join_context_sections(sections), sections)
+        placeholder = self._rt_projection.project(join_context_sections(sections), sections)
+        return assembly, placeholder
+
+    def _admit_runtime_context(self, assembly: dict | None) -> None:
+        """请求准入前刷新运行时上下文并注入快照（上游 agent.ts:411-440：
+        refreshContext → renderContextSections → project → 落 durable
+        user/message）。仅当渲染结果相对已提交快照变化时才落盘（投影去重）；
+        无 systemPrompt 服务或未装配时不动。"""
+        service = self.ctx.get("systemPrompt")
+        if service is None or assembly is None:
+            return
+        refreshed = service.refresh_context(
+            assembly, {"agent": self, "session": self.session,
+                       "signal": self._abort_proxy})
+        sections = render_context_sections(refreshed)
+        if self._rt_projection is None:
+            self._rt_projection = RuntimeContextProjection(self.session)
+        message = self._rt_projection.project(join_context_sections(sections), sections)
+        if message is not None:
+            self.session.append("user/message", message, surfaceOp="append")
 
     async def _run_step_async(self, claimed: list[dict]) -> dict | None:
         """async step：pre-step 走 awaterfall，工具走并行调度器。
 
-        P2-19：pre-step waterfall 前先投影 runtime-context（上游同序）；
-        默认进入的 messages = claimed + 快照消息（上游 default enter 工厂）；
-        监听器显式返回 {kind:'enter', messages:[...]} 时整体替换、不追加
-        （上游监听器决策同样完全接管 messages）。
+        P0-3：pre-step 前装配一次 systemPrompt（assembly 同时供系统提示词
+        投影与请求准入复用）；默认进入的 messages = claimed + 快照候选消息
+        （上游 default enter 工厂）；监听器显式返回 {kind:'enter',
+        messages:[...]} 时整体替换、不追加。快照的真实落盘在请求准入
+        （_stream_step_async / _stream_attempt）完成——快照消息仅作占位符。
         """
-        context_message = self._project_runtime_context()
+        assembly, context_placeholder = await self._assemble_prompt()
         decision = await self.ctx.awaterfall("agent/pre-step", {
             "messages": claimed,
             "agent": self,
@@ -868,8 +892,8 @@ class AgentLoop:
             candidate = decision.get("messages")
             if isinstance(candidate, list):
                 messages = candidate
-        if context_message is not None and not explicit_enter:
-            messages = [*messages, context_message]
+        if context_placeholder is not None and not explicit_enter:
+            messages = [*messages, context_placeholder]
 
         self._step += 1
         self._continue = False
@@ -882,7 +906,8 @@ class AgentLoop:
         )
         step_start_seq = self.session.seq
         try:
-            tool_calls = await self._stream_step_async(messages, starts_request_series)
+            tool_calls = await self._stream_step_async(
+                messages, starts_request_series, assembly)
             concluded = await self._execute_tools_async(tool_calls)
             self._continue = bool(tool_calls)
         except BaseException as error:
@@ -909,7 +934,8 @@ class AgentLoop:
         return {"kind": "completed"} if concluded else None
 
     async def _stream_step_async(self, messages: list,
-                                 starts_request_series: bool = False) -> list[dict]:
+                                 starts_request_series: bool = False,
+                                 assembly: dict | None = None) -> list[dict]:
         """落日志 + LLM 流式（async 迭代器）。返回模型产出的 tool-call 块
         列表（模型序）。
 
@@ -952,14 +978,21 @@ class AgentLoop:
                          or self._request_surface_generation != self.session.content_generation
                          or (tool_update is None and self._tools_changed(tools)))
         for message, intent in self._system_prompt_projection(
-                self._system_prompt_text(), in_history, starts_series):
+                await self._system_prompt_text(assembly), in_history, starts_series):
             self.session.append("system/message",
                                 {"turn": self._turn, "step": self._step, "message": message},
                                 surfaceOp=intent.get("surfaceOp"),
                                 sourceEventSeqs=intent.get("sourceEventSeqs"))
 
+        # 首 attempt 的 user 批（上游 agent.ts:426-437）：运行时上下文快照是
+        # 占位符（默认 enter 追加），其实体在准入时由 _admit_runtime_context
+        # 刷新后落盘；其余认领消息原样落盘。
         for message in messages:
+            if isinstance(message, dict) \
+                    and (message.get("source") or {}).get("kind") == "runtime-context":
+                continue
             self.session.append("user/message", message, surfaceOp="append")
+        self._admit_runtime_context(assembly)
 
         # 请求信封入日志（模型可见 ⟺ 已记录；对齐上游 buildRequest：
         # agent/request waterfall 决议 config → canonicalHeader → 首落
@@ -1036,7 +1069,7 @@ class AgentLoop:
                            {"agent": self, "boundary": "request"},
                            this_arg=self._carrier)
 
-        return await self._stream_attempt()
+        return await self._stream_attempt(assembly)
 
     def _system_prompt_projection(self, rendered: str, in_history: bool,
                                   starts_series: bool) -> list[tuple[dict, dict]]:
@@ -1117,18 +1150,25 @@ class AgentLoop:
         return list(derive_messages(
             self.session.events, default_message_projections()))
 
-    def _system_prompt_text(self) -> str:
+    async def _system_prompt_text(self, assembly: dict | None = None) -> str:
         """渲染系统提示文本：AgentLoop.system_prompt 基底 + systemPrompt 服务
-        装配结果（sections 插值 variables 后按 \n\n 连接；对齐上游
+        装配结果（sections 插值 variables 后按 \\n\\n 连接；对齐上游
         renderPrompt 连接语义；无该服务时仅基底）。
         V3：渲染结果经 SystemPromptProjection 落为 system/message surface 节点
         （node 0 / in-history append / 规范化 replace），不再随 request/header
-        携带（上游 canonicalHeader 已删 system 字段）。"""
+        携带（上游 canonicalHeader 已删 system 字段）。
+        @param assembly - 本 step 已装配的结果（复用，避免重复装配）；
+        缺省时自行装配（兼容无 assembly 的调用路径）。
+        """
         parts = [self.system_prompt]
-        system_prompt = self.ctx.get("systemPrompt")
-        if system_prompt is not None:
-            text = render_prompt(system_prompt.assemble(
-                {"agent": self, "session": self.session}))
+        if assembly is None:
+            service = self.ctx.get("systemPrompt")
+            if service is not None:
+                assembly = await service.assemble(
+                    {"agent": self, "session": self.session,
+                     "signal": self._abort_proxy})
+        if assembly is not None:
+            text = render_prompt(assembly)
             if text:
                 parts.append(text)
         return "\n\n".join(part for part in parts if part)
@@ -1174,7 +1214,7 @@ class AgentLoop:
             defaults["reasoningEffort"] = True
         return defaults or None
 
-    async def _stream_attempt(self) -> list[dict]:
+    async def _stream_attempt(self, assembly: dict | None = None) -> list[dict]:
         """一次 step 内的模型请求 attempt 循环（上游 request → retry → 终局）。
 
         每次循环首次都会重新派生 messages，以便 compaction checkpoint
@@ -1186,8 +1226,13 @@ class AgentLoop:
         完整流，不留 surface message）。正常完成落 `assistant/message`，
         同样内嵌 `stream: AssistantStreamRecord[]`（替代旧版逐 chunk 落盘 +
         sourceEventSeqs 引用）。
+
+        P0-3：每次 attempt 准入前刷新运行时上下文（上游 agent.ts:411；与
+        step 首准入同源——首 attempt 因已提交去重而不重复落盘）。
         """
         while True:
+            # 请求准入前的运行时上下文刷新（重试时可捕捉 step 内变更）
+            self._admit_runtime_context(assembly)
             messages = self._derive_history()
             # file 块投影（alpha.1，llm/content.ts projectFilesToText）：请求组装
             # 无条件把 file（含嵌套 tool-result）换为 handle 文本——file 永不原生

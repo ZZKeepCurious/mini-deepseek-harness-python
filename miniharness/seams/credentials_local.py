@@ -4,14 +4,18 @@
 + packages/credentials/credentials-local（LocalCredentialProvider）。
 
 上游语义（已核实，credentials-local/src/index.ts 头注释 + resolve/
-describe/set/unset/assertUnshadowed/assertOwnerOnly/parseCredentialsDocument）：
-  * 层级按信任度：
-      inherited process environment      (只读，胜出)
-      > $DSH_HOME/.credentials.yaml      (provider 管理，可写)
-      > <调用 cwd>/.env                   (只读回退，project)
-      > $DSH_HOME/.env                    (只读回退，user)
-  * 继承环境胜出：`DEEPSEEK_API_KEY=… dsh`、CI secret、容器 -e 是本次
-    运行的显式意图，且进程内不可编辑，所以必须"可见只读"而非静默遮蔽写。
+describe/set/unset/assertOwnerOnly/parseCredentialsDocument）：
+  * 层级按信任度（0.2.1 起**管理文件胜出**）：
+      $DSH_HOME/.credentials.yaml        (provider 管理，可写，胜出)
+      > inherited process environment    (回退；本 provider 绝不写它)
+      > <调用 cwd>/.env                   (回退，project)
+      > $DSH_HOME/.env                    (回退，user)
+  * 管理文件胜出：用户在 Models 页显式保存的凭据必须对每个 provider 一致
+    生效——启动环境（含 CI secret）只在该引用未存文件值时适用；调用项目可
+    提供 key（产品信任其启动所在的项目），但排在管理文件之下，一次 checkout
+    自带的 key 永不顶掉 Models 页存的 key。
+  * 每个引用都可写（无 assertUnshadowed）：set 写管理文件（胜过每个回退层），
+    unset 让回退层重新暴露；继承环境层同样报 writable=True。
   * 管理文件层的写（set/unset）每次重读磁盘后只补丁自己的键——注释与
     未触碰条目的格式全部幸存；外部编辑热生效；重载整表替换，删掉的条目
     绝不在内存残留。
@@ -25,7 +29,8 @@ describe/set/unset/assertUnshadowed/assertOwnerOnly/parseCredentialsDocument）�
     路（"Add `version: 1` and nest the existing N entries under `refs:`.
     No values need to change."），但**可识别的 flat 文档在启动时自动迁移**
     （renderFlatLayoutMigration：持锁重读后原值换布局落盘——老构建存的键
-    必须活过布局变更，不需手工编辑）；version 不符 / 未知顶层键 fail-closed。
+    必须活过布局变更，不需手工编辑）；version 不符 fail-closed，而**未知顶层
+    键不再拒绝**——外来键保留在磁盘、只告警、解析不出任何东西。
    * 记录键语法（上游 credentials/src/index.ts:18-21）：
      `KEY_SEGMENT_PATTERN = /^[a-z][a-z0-9-]*$/` 两段各校验（小写连字符标识
      符，与 CredentialRef 的 POSIX 语法不相交、永不碰撞）；`parseCredentialKey`
@@ -43,10 +48,9 @@ describe/set/unset/assertUnshadowed/assertOwnerOnly/parseCredentialsDocument）�
      下一个启动拒绝这份文档"。备写经 `_render_document` 重渲染落盘、内存随
      后更新。描述语义：存在即事实（无 key 无 env 的 api-key 仍是配置过的
      store 决策，不是空白）；record 无分层遮蔽，writable 恒真。
-  * resolve 层级顺序：env → file → project-env → user-env（都没有 →
-    undefined）；describe 报告 {configured, source, writable}（只有继承
-    环境不可写）；set/unset 在 env 层已提供该 ref 时拒绝（写了也会被
-    遮蔽成无效果）。
+  * resolve 层级顺序：file → env → project-env → user-env（都没有 →
+    undefined）；describe 报告 {configured, source, writable}（每个引用都
+    可写）；set/unset 无遮蔽拒绝——管理文件层恒胜出。
   * 文档解析严格（不是跳过）：非映射根、非 POSIX 标识符的 key、非字符串
     值、空串值全部拒绝——"我存的键没效果"比报错更糟；重复键是解析错误。
    * 权限：POSIX 上组/其他位可读的凭据文档在读之前直接拒绝；创建与替换
@@ -363,11 +367,14 @@ def _parse_records(section: Any, filename: str) -> dict[str, dict[str, Any]]:
 
 
 def parse_credentials_document(text: str, filename: str) -> dict[str, dict]:
-    """解析凭据文档为 version-1 布局：任何坏条目整体拒绝（不是跳过）。
+    """解析凭据文档为 version-1 布局：段内任何坏条目整体拒绝（不是跳过）。
 
-    返回 {"refs": {...}, "records": {...}}。空文档（含空白）是空存储、无需
-    version；非空无 version = pre-release flat 布局 → 拒读并指路；version
-    不符 / 未知顶层键 fail-closed。错误信息只带键名与位置，绝不引用值。
+    返回 {"refs": {...}, "records": {...}, "ignored_keys": [...]}。空文档（含
+    空白）是空存储、无需 version；非空无 version = pre-release flat 布局 →
+    拒读并指路；version 不符 fail-closed。**未知顶层键不再拒绝**：另一工具写入
+    的外来键被保留在磁盘上、解析不出任何东西，交由调用方上报（上游
+    `ignoredKeys`，credentials-local index.ts:175-177,228）。错误信息只带键名
+    与位置，绝不引用值。
     """
     root = _load_json_document(text, filename) if text.strip() else {}
     if not isinstance(root, dict):
@@ -375,7 +382,7 @@ def parse_credentials_document(text: str, filename: str) -> dict[str, dict]:
     keys = list(root)
     # 空（或纯注释）文档就是空存储：后续布局不可能赋予它别的含义
     if len(keys) == 0:
-        return {"refs": {}, "records": {}}
+        return {"refs": {}, "records": {}, "ignored_keys": [], "ignored": {}}
     if "version" not in root:
         raise ValueError(
             f"credentials-local: {filename} uses the pre-release flat layout. "
@@ -388,11 +395,11 @@ def parse_credentials_document(text: str, filename: str) -> dict[str, dict]:
             f"credentials-local: {filename} declares version {json.dumps(root['version'])};"
             f" this build reads version {DOCUMENT_VERSION}"
         )
-    for key in keys:
-        if key not in ("version", "refs", "records"):
-            raise ValueError(f'credentials-local: unknown top-level key "{key}" in {filename}')
+    ignored = [key for key in keys if key not in ("version", "refs", "records")]
     return {"refs": _parse_refs(root.get("refs"), filename),
-            "records": _parse_records(root.get("records"), filename)}
+            "records": _parse_records(root.get("records"), filename),
+            "ignored_keys": ignored,
+            "ignored": {key: root[key] for key in ignored}}
 
 
 def render_flat_layout_migration(text: str) -> str | None:
@@ -436,8 +443,19 @@ def _assert_owner_only(filename: str, stat_fn: Any = os.stat) -> None:
         )
 
 
+def _warn_ignored_keys(ignored: list[str], filename: str) -> None:
+    """上报解析不出任何东西的顶层键；只打印键名，绝不打印值（上游 warnIgnoredKeys）。"""
+    if not ignored:
+        return
+    logger.warning(
+        "credentials-local: ignoring unknown top-level keys %s in %s; "
+        "only `refs` and `records` entries resolve",
+        ", ".join(json.dumps(key) for key in ignored), filename,
+    )
+
+
 class LocalCredentialProvider:
-    """四层凭据提供者：env > 管理文件 > project .env > user .env。
+    """四层凭据提供者：管理文件 > env > project .env > user .env。
 
     对齐上游 LocalCredentialProvider 的 resolve/describe/set/unset 语义 +
     记录半边五件套（readRecord/describeRecord/listRecords/modifyRecord/
@@ -459,6 +477,9 @@ class LocalCredentialProvider:
         # version-1 记录段：外部写入的合法记录按上游准入读取并原样保留（写
         # refs 时 records 不丢）；P2-20 起提供服务侧读写（record 五件套）
         self._records: dict[str, dict] = {}
+        # 本构建不读的顶层外来键：解析不出任何东西，但原样留在文档里
+        # （上游 ignoredKeys "stay on disk"）——写路径重建文档时须带回
+        self._ignored: dict[str, Any] = {}
         self._text: str | None = None
         # 磁盘变更探测（B 档，2026-08-31）：最后一次成功读取的 mtime/size，
         # 读侧热重载据此判断外部编辑，无需 watchdog。
@@ -509,31 +530,37 @@ class LocalCredentialProvider:
     # ---------- 查询 ----------
 
     def resolve(self, key: str) -> tuple[str, str] | None:
-        """按层序解析：env → file → project-env → user-env；都没有 → None。
+        """按层序解析：file → env → project-env → user-env；都没有 → None。
 
-        与上游 resolve 返回 {value, source} | undefined 同语义。
+        管理文件胜出：用户在 Models 页显式存的凭据必须对每个 provider 一致生效；
+        启动环境（含 CI secret）只在该引用未存文件值时适用。与上游 resolve
+        返回 {value, source} | undefined 同语义。
         """
         self._refresh_if_changed()
-        inherited = self._inherited(key)
-        if inherited is not None:
-            return inherited, "env"
         stored = self._values.get(key)
         if stored is not None:
             return stored, "file"
+        inherited = self._inherited(key)
+        if inherited is not None:
+            return inherited, "env"
         fallback = self._dotenv_fallback(key)
         if fallback is not None:
             return fallback
         return None
 
     def describe(self, key: str) -> dict:
-        """{configured, source, writable}：只有继承环境层不可写。"""
+        """{configured, source, writable}：每个引用都可写。
+
+        set 写管理文件（胜过每个回退层），unset 让回退层重新暴露；故继承环境
+        层也报 writable=True（上游 describe 同款）。
+        """
         self._refresh_if_changed()
-        inherited = self._inherited(key)
-        if inherited is not None:
-            return {"configured": True, "source": "env", "writable": False}
         stored = self._values.get(key)
         if stored is not None:
             return {"configured": True, "source": "file", "writable": True}
+        inherited = self._inherited(key)
+        if inherited is not None:
+            return {"configured": True, "source": "env", "writable": True}
         fallback = self._dotenv_fallback(key)
         if fallback is not None:
             return {"configured": True, "source": fallback[1], "writable": True}
@@ -585,7 +612,6 @@ class LocalCredentialProvider:
         self._write(key, None)
 
     def _write(self, key: str, value: str | None) -> None:
-        self._assert_unshadowed(key, "set" if value is not None else "unset")
         # 锁的排他创建需要父目录存在（上游 credentials-local index.ts:381：
         # 先建 0700 目录，再取 <file>.lock 兄弟锁）
         directory = os.path.dirname(self._filename)
@@ -618,15 +644,17 @@ class LocalCredentialProvider:
 
     def _render_document(self, refs: dict[str, str],
                          records: dict | None = None) -> str:
-        """version-1 布局渲染：refs + records（无记录省略该段）。
+        """version-1 布局渲染：refs + records（无记录省略该段）+ 外来顶层键。
 
         refs 写路径沿用既有键；记录写路径（modify/delete_record）传入下一
-        时刻的记录表快照，避免先把内存改脏再做原子写。
+        时刻的记录表快照，避免先把内存改脏再做原子写。本构建不读的外来顶层
+        键（`_ignored`）原样带回——一次 ref 写绝不静默删掉别的工具的条目。
         """
         document: dict[str, Any] = {"version": DOCUMENT_VERSION, "refs": refs}
         next_records = self._records if records is None else records
         if next_records:
             document["records"] = next_records
+        document.update(self._ignored)
         return json.dumps(document, ensure_ascii=False, indent=2) + "\n"
 
     # ---------- 记录：写（modifyRecord 是唯一的记录写路径） ----------
@@ -700,13 +728,6 @@ class LocalCredentialProvider:
                 f"atomic-write: timed out waiting for the writer lock at {lock_path}"
             ) from error
 
-    def _assert_unshadowed(self, key: str, verb: str) -> None:
-        if self._inherited(key) is not None:
-            raise ValueError(
-                f'credentials-local: "{key}" is supplied read-only by the launching environment, '
-                f"so {verb} would be shadowed; unset it in the shell you start dsh from instead"
-            )
-
     def _disk_stat(self):
         """磁盘当前 stat；缺文件 → None（含并发替换窗口内的瞬时缺失）。"""
         try:
@@ -736,9 +757,12 @@ class LocalCredentialProvider:
             text = None
         self._record_mtime()
         if text is None:
+            self._ignored = {}
             self._apply_external_change({}, {}, None)
             return
         document = parse_credentials_document(text, self._filename)
+        _warn_ignored_keys(document["ignored_keys"], self._filename)
+        self._ignored = document["ignored"]
         self._apply_external_change(document["refs"], document["records"], text)
 
     def _refresh_if_changed(self) -> None:
@@ -891,9 +915,12 @@ class LocalCredentialProvider:
             self._record_mtime()
             return
         if text is None:
+            self._ignored = {}
             self._apply_external_change({}, {}, None)
         else:
             document = parse_credentials_document(text, self._filename)
+            _warn_ignored_keys(document["ignored_keys"], self._filename)
+            self._ignored = document["ignored"]
             self._apply_external_change(document["refs"], document["records"], text)
         self._record_mtime()
 
@@ -937,8 +964,10 @@ class LocalCredentialProvider:
         if render_flat_layout_migration(text) is not None:
             text = self._migrate_flat_document(text)
         document = parse_credentials_document(text, self._filename)
+        _warn_ignored_keys(document["ignored_keys"], self._filename)
         self._values = document["refs"]
         self._records = document["records"]
+        self._ignored = document["ignored"]
         self._text = text
         self._record_mtime()
 

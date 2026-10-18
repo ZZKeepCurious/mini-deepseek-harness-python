@@ -1,13 +1,16 @@
 """web profile 启动器：组装 WebApi + GatewayStreams + FastAPI 应用并监听。
 
 对齐上游 `packages/host/webserver` 的监听契约（index.ts Config）：
-  * host 只允许两值 '127.0.0.1' / '0.0.0.0'（loopback / all-interfaces）；
+  * host 必须是**具体地址**；通配（未指定）地址 `0.0.0.0`/`::`（含 IPv4-mapped 与
+    zone 等价拼写）加载期拒绝（上游 index.ts:283 `isWildcardAddress`）——绑全部
+    接口会把 RCE 暴露到网络；
   * port 为自然数，0 表示由操作系统分配（listen 后经 server.port 读取实际端口）。
 
 mini 教学简化（须在 AGENTS.md 标注）：host/port 从
 MINIHARNESS_WEB_HOST / MINIHARNESS_WEB_PORT 环境变量读（缺省
 '127.0.0.1' / '0'），而非上游组合配置节；本 profile 的持久化沿用
 WebApi 的默认内存 SessionStore（无 JSONL 落盘，与 headless 不同）。
+上游的 `tls` / `--public-url` / `--trusted-host` 未见 mini 对应物（登记缺口）。
 
 心跳（alpha.1 复核批对齐上游 gateway heartbeat 契约）：每条 WS 连接按
 `websocketHeartbeatIntervalMs` 缺省 **2000ms** 发 transport 级 Ping，连续
@@ -23,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 from ..core.scope import Context
 from .api import WebApi
 from .auth import resolve_web_token
+from .host import is_loopback_host, is_wildcard_host
 from .server import create_app
 from .streams import GatewayStreams
 
@@ -30,8 +34,6 @@ if TYPE_CHECKING:  # 可选依赖：fastapi 缺失时 launcher 仍可导入（[w
     from fastapi import FastAPI
 
 __all__ = ["build_app", "run_web", "uvicorn_options"]
-
-HOSTS = ("127.0.0.1", "0.0.0.0")
 
 #: transport 级心跳间隔（秒）。对齐 upstream gateway `websocketHeartbeatIntervalMs`
 #: 缺省 2000（index.ts Config @default 2000）。
@@ -67,8 +69,14 @@ def uvicorn_options(heartbeat_interval: float | None = WS_HEARTBEAT_INTERVAL,
 
 def _resolve_bind(host: str | None, port: int | None) -> tuple[str, int]:
     host = host if host is not None else os.environ.get("MINIHARNESS_WEB_HOST", "127.0.0.1")
-    if host not in HOSTS:
-        raise ValueError(f"web host must be one of {list(HOSTS)}, got {host!r}")
+    if not isinstance(host, str) or host == "":
+        raise ValueError(f"web host must be a non-empty bind address, got {host!r}")
+    if is_wildcard_host(host):
+        raise ValueError(
+            f"web host {host!r} is an unspecified (wildcard) address, which is not "
+            "supported: binding every interface would expose remote code execution to "
+            "the network; bind one concrete IPv4 or IPv6 address of a local interface "
+            "instead")
     raw_port = port if port is not None else int(os.environ.get("MINIHARNESS_WEB_PORT", "0"))
     if not 0 <= raw_port <= 65535:
         raise ValueError(f"web port must be in 0..65535, got {raw_port!r}")
@@ -95,16 +103,17 @@ def run_web(adapter: Any, tools: Any, ctx: Context | None = None,
             token: str | None = None, roster: Any = None) -> None:
     """构建应用并阻塞监听（`--profile web` 的进程级入口）。
 
-    生产纪律：监听 `0.0.0.0`（非回环）时**必须**已配置 token（参数或
-    `MINIHARNESS_WEB_TOKEN`）——非回环裸听是安全实质风险，fail loud。
+    生产纪律：监听**非回环**地址（任何非 loopback 字面量，含具体网卡 IP）时
+    **必须**已配置 token（参数或 `MINIHARNESS_WEB_TOKEN`）——非回环裸听是安全
+    实质风险，fail loud。通配地址已在 `_resolve_bind` 加载期拒绝。
     """
     import uvicorn
 
     host, port = _resolve_bind(host, port)
     resolved_token = token if token is not None else resolve_web_token()
-    if host == "0.0.0.0" and not resolved_token:
+    if not is_loopback_host(host) and not resolved_token:
         raise ValueError(
-            "listening on 0.0.0.0 requires a web token "
+            f"listening on non-loopback host {host!r} requires a web token "
             "(pass token= or set MINIHARNESS_WEB_TOKEN)")
     app = build_app(adapter, tools, ctx, token=resolved_token, roster=roster)
     uvicorn.run(app, host=host, port=port, log_level="info", **uvicorn_options())

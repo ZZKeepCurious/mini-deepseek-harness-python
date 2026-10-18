@@ -11,7 +11,8 @@ import os
 import threading
 
 from ..core.tools import Tool
-from ..jobs import JobDoneBox
+from ..core.working_cwd import working_directory_of
+from ..jobs import JobDoneBox, job_tool_call
 from ..shell.types import is_aborted
 from ..tool_bash.background import process_outcome, process_sources, ring_delta
 from .render import render_job_read, render_promoted, render_pwsh_result
@@ -125,10 +126,13 @@ def _canonical(result: dict) -> dict:
     return canonical
 
 
-def _resolve_workdir(model_workdir, session) -> str | None:
-    """显式 workdir 优先（相对路径按会话 cwd 解析），否则会话 cwd。"""
-    session_cwd = (getattr(session, "meta", None) or {}).get("cwd") \
-        if session is not None else None
+def _resolve_workdir(model_workdir, agent) -> str | None:
+    """显式 workdir 优先（相对路径按会话有效工作目录解析），否则会话 cwd。
+
+    对齐上游（shell/tool-pwsh/src/index.ts:514）：`sessionCwd =
+    await ctx.workingDirectory.ensure(agent, signal)`；相对 per-call workdir 相对它解析。
+    """
+    session_cwd = working_directory_of(agent) if agent is not None else None
     if model_workdir is None:
         return session_cwd
     if session_cwd is not None and not os.path.isabs(model_workdir):
@@ -150,7 +154,8 @@ def _validate_args(args: dict) -> None:
             f"invalid timeoutMs: expected a positive number, got {timeout!r}")
 
 
-def _start_job(shell, jobs, label: str, owner, spec: dict):
+def _start_job(shell, jobs, label: str, owner, spec: dict,
+               tool_call: dict | None = None):
     """把一个已解析 spec 注册为 pwsh 作业；返回 {id, process, stopped}。"""
     state = {"proc": None}
     stopped = {"reason": None}
@@ -176,6 +181,8 @@ def _start_job(shell, jobs, label: str, owner, spec: dict):
         "output": process_sources(lambda: state["proc"]),
         "run": run,
     }
+    if tool_call is not None:
+        spec_dict["toolCall"] = tool_call
     job_id = jobs.start(spec_dict)
     return {"id": job_id, "process": lambda: state["proc"],
             "stopped": lambda: stopped["reason"]}
@@ -240,8 +247,7 @@ def create_pwsh_tool(ctx, shell, config: dict | None = None) -> Tool:
 
     def build_request(args: dict, exec_) -> dict:
         agent = agent_of(exec_)
-        session = getattr(agent, "session", None)
-        workdir = _resolve_workdir(args.get("workdir"), session)
+        workdir = _resolve_workdir(args.get("workdir"), agent)
         request: dict = {"command": args["command"],
                          "dshEnv": _collect_dsh_env(ctx, exec_)}
         if workdir is not None:
@@ -255,6 +261,7 @@ def create_pwsh_tool(ctx, shell, config: dict | None = None) -> Tool:
         request = build_request(args, exec_)
         agent = agent_of(exec_)
         owner = getattr(agent, "id", None)
+        tool_call = job_tool_call(exec_)
         if args.get("run_in_background") is True:
             if not cfg["enableRunInBackground"]:
                 raise RuntimeError(
@@ -267,13 +274,13 @@ def create_pwsh_tool(ctx, shell, config: dict | None = None) -> Tool:
             if is_aborted(getattr(exec_, "signal", None)):
                 raise ToolAborted("tool call aborted")
             spec = shell.resolve({**request, "onExpiry": "none"})
-            attached = _start_job(shell, jobs, args["command"], owner, spec)
+            attached = _start_job(shell, jobs, args["command"], owner, spec, tool_call)
             return {"kind": "background", "jobId": attached["id"]}
         if promote:
             spec = shell.resolve({**request, "onExpiry": "none"})
             attached = None
             try:
-                attached = _start_job(shell, jobs, args["command"], owner, spec)
+                attached = _start_job(shell, jobs, args["command"], owner, spec, tool_call)
             except Exception as error:  # noqa: BLE001 - 准入拒绝回退前台 deadline kill
                 _warn(ctx, f"pwsh: job registration refused, running in the foreground "
                            f"with the timeout kill instead: {error}")

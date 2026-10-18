@@ -53,6 +53,7 @@ LAYER_UNITS = [
     ("core.output_retention", 0),
     ("core.version", 0),
     ("core.home_paths", 0),
+    ("core.working_cwd", 0),
     ("loader", 0),
     ("core.session_store", 1),
     ("core.agents", 1),
@@ -96,6 +97,7 @@ LAYER_UNITS = [
     ("todo", 2),
     ("spill", 2),
     ("session_projection", 1),
+    ("working_directory", 2),
     ("lsp_stdio", 2),
     ("tool_lsp", 2),
     ("persistent_shell", 2),
@@ -387,6 +389,13 @@ class ImportDirectionTest(unittest.TestCase):
                     # §5 显式例外（单方向）：account-controller wire 面复用
                     # isRunningAccountTask 判据（上游 api/account-controller 直接
                     # 依赖 dsh-deepseek-account）；deepseek_account 不得反向 import web
+                    continue
+                if src_unit == "web" and dst_unit == "terminal_controller":
+                    # §5 显式例外（单方向）：`terminal/attach` 双工流的类型化上行
+                    # codec（TerminalInput 判别联合）由 terminal-controller 域声明，
+                    # gateway 流层仅消费它（上游 codec 由 terminal-controller 类型图
+                    # 生成、经 `descriptor.uplink.codec` 注册）；terminal_controller
+                    # 不得反向 import web
                     continue
                 if src_unit == "llm" and dst_unit == "identity":
                     # §5 显式例外（单方向）：llm-deepseek 请求头

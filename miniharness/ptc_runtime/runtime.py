@@ -227,6 +227,7 @@ class PythonPtcRuntime(PtcRuntime):
         return PtcRunSpec(
             program=request.program, bindings=list(request.bindings),
             cwd=cwd, timeoutMs=timeout_ms,
+            stateOwner=request.stateOwner,
             sandboxPolicy=None, signal=request.signal)
 
     async def run(self, spec: PtcRunSpec) -> PtcRunResult:

@@ -9,7 +9,8 @@
   * `session/control` —— 宿主级 live control：首个 `baseline` 帧（projections）
     后按变更给 `projection` 替换帧。
   * `terminal/retain` —— 窗口持有流：一帧 `retained` 后保持到取消或身份关闭。
-  * `terminal/follow` —— 终端恢复流：一个 `snapshot` 帧后跟有序 `output`/`state`。
+  * `terminal/attach` —— 终端恢复流（双工）：一个 `snapshot` 帧后跟有序
+    `output`/`state`/`ack`；上行承载 `TerminalInput`（`write`/`resize`）。
   * `workspace/follow` —— 工作区投影流：一个 `baseline` 帧后跟有序
     `upsert`/`remove`/`order`/`archived`/`pinned` 增量。
   * `workspaceFiles/changes` —— 文件观察流：`{kind:'ready'}` 后跟 `{kind:'change'}`。
@@ -34,13 +35,16 @@ turnWindow 截断，对齐 history.follow）；`_attach` 冷会话自动 resume 
 保证，无游标也无需再造。control baseline 对齐上游 control.ts（全部 live 会话
 每会话一条 projections 块，空也放；替换帧只来自 `sessionProjections.onChanged`，
 queues/jobs 已从 rc.1 control wire 移除）。terminal/workspace 三条流把控制器进程侧
-对象经 `TERMINAL_FOLLOW_POLL` 短轮询桥接成 async 生成器（`TerminalFollow`/
-`TerminalFollower`/`WorkspaceFollow` 的非阻塞 pop），帧形状与顺序同上游。心跳 Ping 由
-launcher 的 transport 级 ping 闭合（`web/launcher.py` uvicorn_options，不在此层）。
+对象经 `TERMINAL_FOLLOW_POLL` 短轮询桥接成 async 生成器（`TerminalAttachment`/
+`TerminalFollower`/`WorkspaceFollow` 的非阻塞 pop），帧形状与顺序同上游。
+`terminal/attach` 是 rc.1 双工流：上行命令由 web 层 async 泵读 `invocation.uplink()`
+并交 `TerminalAttachment.submit`（同步序列检查 + ack），下行仍是 follower 轮询。
+心跳 Ping 由 launcher 的 transport 级 ping 闭合（`web/launcher.py` uvicorn_options，不在此层）。
 """
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import Any
 
 from .api import DEFAULT_MAX_MESSAGES, _Reject
@@ -54,11 +58,12 @@ from .events import RemoteEventRegistry
 from .stream_protocol import REMOTE_EVENT_STREAM_ENDPOINT
 from .uplink import UplinkInbox, UplinkItems
 from ..telemetry import projection_values
+from ..terminal_controller.types import decode_terminal_input
 
 __all__ = ["GatewayStreams", "RemoteStreamError", "StreamInvocation"]
 
 FOLLOW_POLL_INTERVAL = 0.05
-#: terminal/follow 帧轮询间隔（秒）：同步 follower 非阻塞 pop 的桥接粒度。
+#: terminal/attach 帧轮询间隔（秒）：同步 follower 非阻塞 pop 的桥接粒度。
 TERMINAL_FOLLOW_POLL = 0.01
 
 
@@ -87,12 +92,16 @@ class StreamInvocation:
     @param signal - 取消句柄（mux 关闭 / 客户端 cancel）。
     @param codec - 该方法声明的上行 codec；`None` 表示未声明，走无损 JSON 校验
         （上游 `prepared.descriptor.uplink?.codec ?? SRC_JSON_CODEC`）。
+    @param uplink_window - 载体上行窗口（`RemoteUplinkWindow`：`maxBytes` +
+        `frameOverheadBytes`）；载体无编码帧 inbox 限额时为 None，领域方法的
+        snapshot 据此省略或带上 `inputWindow`。
     """
 
     def __init__(self, endpoint: str, uplink: UplinkInbox | None, signal,
-                 codec=None):
+                 codec=None, uplink_window: dict | None = None):
         self.endpoint = endpoint
         self.signal = signal
+        self.uplink_window = uplink_window
         self._uplink = uplink
         self._codec = codec
         self._items: UplinkItems | None = None
@@ -157,9 +166,11 @@ class GatewayStreams:
         self._control_queues: dict[asyncio.Queue, None] = {}
         self._attached = False
         self._disposers: list[Any] = []
-        #: endpoint → 声明的上行 codec；出厂为空（rc.1 全部 Remote 方法 `In = never`），
-        #: 声明点见 `uplink_codecs`。
-        self._uplink_codecs: dict[str, Any] = {}
+        #: endpoint → 声明的上行 codec；rc.1 起 `terminal/attach` 声明
+        #: `TerminalInput` 判别联合（上游 typert 生成），其余方法 `In = never`。
+        self._uplink_codecs: dict[str, Any] = {
+            "terminal/attach": decode_terminal_input,
+        }
 
     # ---------- mux 分发入口 ----------
 
@@ -170,7 +181,7 @@ class GatewayStreams:
             "session/follow": "follow",
             "session/control": "control",
             "terminal/retain": "terminal_retain",
-            "terminal/follow": "terminal_follow",
+            "terminal/attach": "terminal_attach",
             "workspace/follow": "workspace_follow",
             "workspaceFiles/changes": "workspace_changes",
             "job/list": "job_list",
@@ -183,13 +194,13 @@ class GatewayStreams:
         """endpoint → 该方法声明的上行 codec（缺省即不声明，走无损 JSON 校验）。
 
         上游这份声明来自 typert 生成的 `InvocationDescriptor.uplink.codec`
-        （types.ts:355-357）；rc.1 出厂的 Remote 方法全是 `In = never`
-        （session/follow、control、terminal/follow、workspace/follow、
-        workspaceFiles/changes、$events），故本表出厂为空。
+        （types.ts:355-357）。rc.1 起只有 `terminal/attach` 声明非空 `In`
+        （`TerminalInput` 判别联合）；其余 Remote 方法仍是 `In = never`。
         """
         return self._uplink_codecs
 
-    def open_stream(self, endpoint: str, payload: Any, uplink: Any = None, signal=None):
+    def open_stream(self, endpoint: str, payload: Any, uplink: Any = None, signal=None,
+                    uplink_window: dict | None = None):
         """按 endpoint 打开一个流：返回 async 生成器（帧 value 序列）。
 
         @param payload - open 帧的 payload（`{args: ...}`，各 endpoint 自校验）。
@@ -198,6 +209,8 @@ class GatewayStreams:
             的 uplink 活到该流结束（上游 `invocation.close()` 释放），期间客户端
             item 帧受字节上限约束、违例中止本流。
         @param signal - 可选取消句柄（mux 关闭/客户端 cancel 时终止）。
+        @param uplink_window - 本载体的上行窗口（`RemoteUplinkWindow`），透传到
+            `StreamInvocation.uplink_window` 供领域方法公布。
         @raises EventSourceFailure / RemoteStreamError。
         """
         endpoint = canonical_endpoint(endpoint)
@@ -222,15 +235,16 @@ class GatewayStreams:
             raise RemoteStreamError(
                 error.code, boundary_error_message(endpoint, error.message)) from error
         invocation = StreamInvocation(
-            endpoint, uplink, signal, self._uplink_codecs.get(endpoint))
+            endpoint, uplink, signal, self._uplink_codecs.get(endpoint),
+            uplink_window)
         if kind == "follow":
             return _with_uplink(self._follow(payload["args"], invocation), invocation)
         if kind == "terminal_retain":
             return _with_uplink(
                 self._terminal_retain(payload["args"], invocation), invocation)
-        if kind == "terminal_follow":
+        if kind == "terminal_attach":
             return _with_uplink(
-                self._terminal_follow(payload["args"], invocation), invocation)
+                self._terminal_attach(payload["args"], invocation), invocation)
         if kind == "workspace_follow":
             return _with_uplink(
                 self._workspace_follow(payload["args"], invocation), invocation)
@@ -333,41 +347,70 @@ class GatewayStreams:
                 return
             await asyncio.sleep(TERMINAL_FOLLOW_POLL)
 
-    # ---------- terminal/follow（浏览器终端恢复流） ----------
+    # ---------- terminal/attach（浏览器终端双工恢复流） ----------
 
-    async def _terminal_follow(self, args: dict, invocation: StreamInvocation):
-        """`terminal/follow`：一个完整有界屏幕（snapshot）后跟有序 output/state 帧。
+    async def _terminal_attach(self, args: dict, invocation: StreamInvocation):
+        """`terminal/attach`：一个完整有界屏幕（snapshot）后跟有序 output/state/ack。
 
-        对齐上游 Remote stream `follow(agent, id, attachmentId)`：附加即独占输入，
-        分离不杀进程。mini 以 follower 的非阻塞 pop + 短轮询桥接同步载体
-        （进程内输出回调在 provider reader 线程，见 terminal_controller/terminal.py）。
-        取消（mux task.cancel）经 finally 分离。
+        对齐上游 Remote stream `attach(agent, id)`（index.ts:208-220 → terminal.ts
+        `attach`）：附加即独占输入，分离不杀进程；上行 `TerminalInput` 命令经
+        `invocation.uplink()` 到达，由 `TerminalAttachment.submit` 同步处理并推 ack。
+        mini 以 follower 的非阻塞 pop + 短轮询桥接同步载体（进程内输出回调在
+        provider reader 线程，见 terminal_controller/terminal.py），命令泵是独立
+        asyncio 任务（上行读是 async）。取消（mux task.cancel）经 finally 分离。
         """
         controller = self.api.ctx.get("terminalController")
         if controller is None:
             raise RemoteStreamError(
                 "gateway/invocation-unavailable",
-                "typert gateway: terminal/follow: terminal namespace is not mounted")
+                "typert gateway: terminal/attach: terminal namespace is not mounted")
         try:
             agent = self.api.resolve_terminal_agent(args.get("agentId"))
-            follow = controller.follow(agent, args.get("id"), args.get("attachmentId"))
+            attachment = controller.attach(
+                agent, args.get("id"), invocation.signal, invocation.uplink_window)
         except Exception as error:  # noqa: BLE001 - 折流 error 帧（不关 WS）
             raise RemoteStreamError(getattr(error, "code", None) or "gateway/internal",
                                     str(error)) from error
+        items = invocation.uplink()
+        pump = asyncio.get_running_loop().create_task(
+            self._terminal_commands(attachment, items))
         try:
-            yield follow.baseline
+            yield attachment.baseline
             while True:
-                frame = follow.follower.pop()
+                frame = attachment.follower.pop()
                 if frame is not None:
                     yield frame
                     continue
-                if follow.follower.failure is not None:
-                    raise RemoteStreamError("gateway/internal", str(follow.follower.failure))
-                if follow.follower.finished or follow.follower.closed:
+                failure = attachment.follower.failure
+                if failure is not None:
+                    raise RemoteStreamError(
+                        getattr(failure, "code", None) or "gateway/internal",
+                        str(failure))
+                if attachment.follower.finished or attachment.follower.closed:
                     return
                 await asyncio.sleep(TERMINAL_FOLLOW_POLL)
         finally:
-            follow.detach()
+            attachment.detach()
+            items.close()
+            if not pump.done():
+                pump.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await pump
+
+    @staticmethod
+    async def _terminal_commands(attachment, items) -> None:
+        """读上行命令并交附加处理；失败折进 follower（上游 consumeInput().catch）。
+
+        序列缺口（普通失败）与未过 codec 的上行项（`gateway/input-invalid`）都以
+        follower 失败收场；`_terminal_attach` 把该失败折成终态 error 帧。
+        """
+        try:
+            async for command in items:
+                attachment.submit(command)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # noqa: BLE001 - 折 follower 失败（见上）
+            attachment.follower.fail(error)
 
     # ---------- workspace/follow（工作区投影流） ----------
 

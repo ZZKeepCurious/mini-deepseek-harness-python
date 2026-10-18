@@ -31,11 +31,13 @@ from typing import Any, Callable
 from .scope import Context
 
 __all__ = [
+    "CONTEXT_ORDERS",
     "PERSONA_ORDER",
     "PERSONA_SECTION",
     "PERSONA_PREFIX_SECTION",
     "PERSONA_SUFFIX_SECTION",
     "PERSONA_SUFFIX_ORDER",
+    "SECTION_ORDERS",
     "SYSTEM_PROMPT_SERVICE",
     "TOOL_ORDER_REST",
     "SystemPromptService",
@@ -62,6 +64,54 @@ PERSONA_SECTION = PERSONA_PREFIX_SECTION
 
 # toolOrder 的未列出工具插入位（上游 index.ts TOOL_ORDER_REST）
 TOOL_ORDER_REST = "<unlisted-tools>"
+
+# 集中分配的 section 位置（上游 index.ts SECTION_ORDERS，逐值对齐）：
+SECTION_ORDERS = {
+    "HARNESS_IDENTITY": -1000,
+    "DEPLOYMENT_PERSONA_PREFIX": 0,
+    "PLAN_POLICY": 500,
+    "TEAM_POLICY": 600,
+    "PTC_ONLY": 800,
+    "FILE_REFERENCE": 900,
+    "TOOL_BASH": 1000,
+    "TOOL_PWSH": 1010,
+    "TOOL_READ": 1100,
+    "TOOL_WRITE": 1200,
+    "TOOL_EDIT": 1300,
+    "TOOL_GLOB": 1400,
+    "TOOL_GREP": 1500,
+    "TOOL_JOBS": 1600,
+    "TOOL_PTY": 1700,
+    "TOOL_WEB_SEARCH": 2000,
+    "TOOL_WEB_FETCH": 2100,
+    "TOOL_LSP": 2200,
+    "TOOL_SESSION_QUERY": 2300,
+    "TOOL_GOAL": 2400,
+    "TOOL_WORKFLOW": 2600,
+    "TOOL_RALPH": 2700,
+    "TOOL_SUBAGENT": 2800,
+    "TOOL_REPORT": 2900,
+    "TOOL_COMPUTER_USE": 3000,
+    "MCP_SERVERS": 3100,
+    "TOOLS_SDK": 5000,
+    "DELIVERABLE_FILE_REFERENCES": 9000,
+    "STRUCTURED_OUTPUT": 9900,
+    "HARNESS_SOURCE": 10000,
+    "WEB_SURFACE": 10100,
+    "DEPLOYMENT_PERSONA_SUFFIX": 10200,
+}
+
+# 集中分配的运行时上下文位置（上游 index.ts CONTEXT_ORDERS，dsh-v0.2.1-rc.2
+# 新增 WORKING_DIRECTORY/TEAM_IDENTITY/HARNESS_SOURCE/WEB_SURFACE）：
+CONTEXT_ORDERS = {
+    "WORKING_DIRECTORY": 100,
+    "SANDBOX_POLICY": 110,
+    "APPROVAL_POLICY": 115,
+    "SUBAGENT_DELEGATION": 120,
+    "TEAM_IDENTITY": 125,
+    "HARNESS_SOURCE": 200,
+    "WEB_SURFACE": 210,
+}
 
 # 合法变量名（上游 index.ts VARIABLE_NAME）
 _VARIABLE_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -155,12 +205,14 @@ def _interpolate(input_: dict, variables: dict, kind: str) -> str:
 
 def render_prompt(assembly: dict) -> str:
     """渲染装配好的 prompt：插值、去空节、空行连接（上游 renderPrompt）。
+    `interpolate is False` 的节保留字面文本（不解析变量）。
     @param assembly - assemble() 返回的 PromptAssembly。
     """
     variables = assembly.get("variables", {})
     rendered = []
     for s in assembly.get("sections", []):
-        text = _interpolate(s, variables, "section")
+        text = s["text"] if s.get("interpolate") is False \
+            else _interpolate(s, variables, "section")
         if text:
             rendered.append(text)
     return "\n\n".join(rendered)
@@ -168,12 +220,14 @@ def render_prompt(assembly: dict) -> str:
 
 def render_context_sections(assembly: dict) -> list[dict]:
     """渲染运行时上下文节列表（上游 renderContextSections）：逐节插值后
-    过滤空文本，返回 [{name, text}, ...]（保序）。"""
+    过滤空文本，返回 [{name, text}, ...]（保序）。`interpolate is False`
+    的节保留字面文本。"""
     variables = assembly.get("variables", {})
     return [
         {"name": c["name"], "text": t}
         for c in assembly.get("contexts", [])
-        for t in [_interpolate(c, variables, "context")]
+        for t in [c["text"] if c.get("interpolate") is False
+                  else _interpolate(c, variables, "context")]
         if t != ""
     ]
 
@@ -191,6 +245,18 @@ def render_context_snapshot(assembly: dict) -> str:
     """渲染完整运行时上下文快照（上游 renderContextSnapshot）：
     join_context_sections(render_context_sections(assembly))。"""
     return join_context_sections(render_context_sections(assembly))
+
+
+def _resolve_context(entry: dict, context: dict) -> dict:
+    """求值一个已注册的运行时事实为 AssembledContext（上游 resolveContext）；
+    interpolate 非 None 时随结果带出（缺省由渲染面按 True 处理）。"""
+    text = entry["text"](context) if callable(entry["text"]) else entry["text"]
+    if not isinstance(text, str):
+        raise TypeError(f"prompt context {entry['name']!r} 返回了非字符串")
+    out = {"name": entry["name"], "text": text}
+    if entry.get("interpolate") is not None:
+        out["interpolate"] = entry["interpolate"]
+    return out
 
 
 class SystemPromptService:
@@ -213,12 +279,14 @@ class SystemPromptService:
     # ---------- 注册面 ----------
 
     def section(self, name: str, order: int, text: str | Callable[[dict], str],
-                complete: bool = False) -> Callable:
+                complete: bool = False,
+                interpolate: bool | None = None) -> Callable:
         """注册一个有序 prompt section，返回其 disposer。
         @param name - 唯一节名（重复注册抛 ValueError）。
         @param order - 升序连接位置（上游约定：-100 身份、0 人设、plan 用 50）。
         @param text - 静态文本或按装配上下文（含 agent）求值的可调用对象。
         @param complete - 视作完整 system prompt：装配后该节成为唯一节。
+        @param interpolate - 是否插值变量；False 保留字面文本（缺省 True）。
         """
         if not isinstance(name, str) or name == "":
             raise ValueError("prompt section 需要一个非空 name")
@@ -229,7 +297,7 @@ class SystemPromptService:
         if any(s["name"] == name for s in self._sections):
             raise ValueError(f"prompt section {name!r} 已注册")
         entry = {"name": name, "order": order, "text": text,
-                 "complete": complete, "seq": self._seq}
+                 "complete": complete, "interpolate": interpolate, "seq": self._seq}
         self._seq += 1
         self._sections.append(entry)
         return self._ctx.effect(
@@ -237,9 +305,15 @@ class SystemPromptService:
             f"prompt section {name!r}")
 
     def context(self, name: str, order: int,
-                text: str | Callable[[dict], str]) -> Callable:
+                text: str | Callable[[dict], str],
+                interpolate: bool | None = None,
+                required: bool = False) -> Callable:
         """注册一个有序动态上下文贡献（上游 PromptContext），返回 disposer。
-        同名重复注册抛错；空文本在渲染时被跳过。"""
+        同名重复注册抛错；空文本在渲染时被跳过。
+        @param interpolate - 是否插值变量；False 保留字面文本（缺省 True）。
+        @param required - 运行时上下文被抑制（includeRuntimeContext=false 或
+        suppress_runtime_context）时仍保留该节（上游 PromptContext.required）。
+        """
         if not isinstance(name, str) or name == "":
             raise ValueError("prompt context 需要一个非空 name")
         if not isinstance(order, int):
@@ -248,7 +322,8 @@ class SystemPromptService:
             raise TypeError(f"prompt context {name!r} 的 text 必须是字符串或可调用对象")
         if any(c["name"] == name for c in self._contexts):
             raise ValueError(f"prompt context {name!r} 已注册")
-        entry = {"name": name, "order": order, "text": text, "seq": self._seq}
+        entry = {"name": name, "order": order, "text": text,
+                 "interpolate": interpolate, "required": required, "seq": self._seq}
         self._seq += 1
         self._contexts.append(entry)
         return self._ctx.effect(
@@ -279,12 +354,62 @@ class SystemPromptService:
             f"prompt variable {name!r}")
 
     def suppress_runtime_context(self) -> Callable:
-        """在当前作用域抑制全部动态上下文贡献（上游
-        suppressRuntimeContext），返回 disposer。多个抑制器各自独立可撤销。"""
+        """在当前作用域抑制**可选**动态上下文贡献（上游
+        suppressRuntimeContext）：`required=True` 的上下文仍保留），返回
+        disposer。多个抑制器各自独立可撤销。"""
         self._runtime_context_suppressors.append(True)
         return self._ctx.effect(
             lambda: (lambda: self._runtime_context_suppressors.remove(True)),
             "prompt suppress runtime context")
+
+    # ---------- 位置面 ----------
+
+    def get_section_order(self, name: str) -> int:
+        """解析仓库 prompt section 的集中分配位置（上游 getSectionOrder）。"""
+        return SECTION_ORDERS[name]
+
+    def get_context_order(self, name: str) -> int:
+        """解析仓库运行时上下文的集中分配位置（上游 getContextOrder）。"""
+        return CONTEXT_ORDERS[name]
+
+    # ---------- 请求准入面 ----------
+
+    def refresh_context(self, assembly: dict, context: dict | None = None) -> dict:
+        """为请求准入刷新被接受的已注册运行时事实（上游 refreshContext）：
+        仅装配 waterfall 追加的上下文保留其接受值；抑制时移除可选上下文、按
+        注册序补回缺失的 required 注册。sections/tools/variables 保留接受装配，
+        其提供器与 waterfall 不重跑。
+
+        @param assembly - 本 step 被接受的装配。
+        @param context - 同一作用域的当前装配字段（含 agent/session）。
+        @returns 上下文提供器文本已刷新的装配副本。
+        """
+        context = context or {}
+        providers = {c["name"]: c for c in self._contexts}
+        suppressed = bool(self._runtime_context_suppressors)
+        required = {n: e for n, e in providers.items() if e.get("required") is True}
+        contexts: list[dict] = []
+        for accepted in assembly.get("contexts", []):
+            provider = providers.get(accepted["name"])
+            required.pop(accepted["name"], None)
+            if suppressed and not (provider is not None
+                                   and provider.get("required") is True):
+                continue
+            contexts.append(accepted if provider is None
+                            else _resolve_context(provider, context))
+        # 缺失的 required 按注册序补回（上游 splice 到首个 order 更大的节前）
+        for entry in self._contexts:
+            if entry["name"] not in required:
+                continue
+            index = next(
+                (i for i, out in enumerate(contexts)
+                 if providers.get(out["name"]) is not None
+                 and providers[out["name"]]["order"] > entry["order"]),
+                -1,
+            )
+            contexts.insert(len(contexts) if index < 0 else index,
+                            _resolve_context(entry, context))
+        return {**assembly, "contexts": contexts}
 
     # ---------- 渲染面 ----------
 
@@ -302,16 +427,23 @@ class SystemPromptService:
                 raise TypeError(f"prompt section {s['name']!r} 返回了非字符串")
             if text == "":
                 continue
-            out.append({"name": s["name"], "text": text})
+            entry = {"name": s["name"], "text": text}
+            if s.get("interpolate") is not None:
+                entry["interpolate"] = s["interpolate"]
+            out.append(entry)
         return out
 
-    def assemble(self, context: dict | None = None) -> dict:
+    async def assemble(self, context: dict | None = None) -> dict:
         """装配 sections / contexts / tools / variables，然后派发
         'system-prompt/assemble' waterfall（payload = {assembly, context}）。
         返回权威 assembly；但 complete 节恢复为唯一节、运行时上下文抑制后
-        contexts 强制为空（上游同款恢复语义）。
+        contexts 仅保留 `required=True` 的节（上游同款恢复语义）。
 
-        @param context - 装配上下文（含 agent/session，传给可调用提供器）。
+        async（上游 assemble 同为 async）：监听器可能需要文件系统 I/O
+        （如 working-directory 装配时 ensure 目录并恢复），故经 awaterfall
+        派发并 await。
+
+        @param context - 装配上下文（含 agent/session/signal，传给可调用提供器）。
         @returns PromptAssembly：{sections, contexts, tools, variables}。
         """
         context = context or {}
@@ -342,17 +474,17 @@ class SystemPromptService:
             if not isinstance(text, str):
                 raise TypeError(f"prompt section {s['name']!r} 返回了非字符串")
             assembled = {"name": s["name"], "text": text}
+            if s.get("interpolate") is not None:
+                assembled["interpolate"] = s["interpolate"]
             if s.get("complete"):
                 complete_section = dict(assembled)
             sections.append(assembled)
 
         contexts: list[dict] = []
-        if not suppressed:
-            for c in sorted(self._contexts, key=lambda e: (e["order"], e["seq"])):
-                text = c["text"](context) if callable(c["text"]) else c["text"]
-                if not isinstance(text, str):
-                    raise TypeError(f"prompt context {c['name']!r} 返回了非字符串")
-                contexts.append({"name": c["name"], "text": text})
+        for c in sorted(self._contexts, key=lambda e: (e["order"], e["seq"])):
+            if suppressed and c.get("required") is not True:
+                continue
+            contexts.append(_resolve_context(c, context))
 
         assembly: dict = {
             "sections": sections,
@@ -360,13 +492,17 @@ class SystemPromptService:
             "tools": order_tools(collected, self._tool_order, known_names),
             "variables": variables,
         }
-        transformed = self._ctx.waterfall("system-prompt/assemble",
-                                          {"assembly": assembly, "context": context})
+        transformed = await self._ctx.awaterfall("system-prompt/assemble",
+                                                 {"assembly": assembly, "context": context})
         result = transformed.get("assembly", assembly) if isinstance(transformed, dict) else assembly
         if complete_section is not None:
             result = {**result, "sections": [complete_section]}
         if suppressed:
-            result = {**result, "contexts": []}
+            required_names = {c["name"] for c in self._contexts
+                              if c.get("required") is True}
+            result = {**result,
+                      "contexts": [c for c in result.get("contexts", [])
+                                   if c["name"] in required_names]}
         return result
 
 

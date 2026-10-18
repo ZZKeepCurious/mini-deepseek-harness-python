@@ -89,8 +89,8 @@ class TestLauncherFlags(unittest.TestCase):
     # ---- P2-17：--host / --port 显式监听参数 ----
 
     def test_host_port_parsed_and_forwarded(self):
-        parsed = _parse_launcher_flags(["--host", "0.0.0.0", "--port", "8080", "--profile", "web"])
-        self.assertEqual(parsed["host"], "0.0.0.0")
+        parsed = _parse_launcher_flags(["--host", "192.168.1.5", "--port", "8080", "--profile", "web"])
+        self.assertEqual(parsed["host"], "192.168.1.5")
         self.assertEqual(parsed["port"], 8080)
 
     def test_host_port_forwarded_to_web_main(self):
@@ -98,16 +98,18 @@ class TestLauncherFlags(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as home:
             with mock_patch.object(web_launcher, "run_web") as run_web_mock:
-                _run_cli(["--host", "0.0.0.0", "--port", "9000", "--profile", "web"],
+                _run_cli(["--host", "192.168.1.5", "--port", "9000", "--profile", "web"],
                          env={"DSH_HOME": home, "MINIHARNESS_HOME": home})
                 kwargs = run_web_mock.call_args.kwargs
-                self.assertEqual(kwargs["host"], "0.0.0.0")
+                self.assertEqual(kwargs["host"], "192.168.1.5")
                 self.assertEqual(kwargs["port"], 9000)
 
-    def test_host_invalid_fails(self):
-        out, err, code = _run_cli(["--host", "evil.example", "--profile", "web"])
-        self.assertEqual(code, 1)
-        self.assertIn("must be one of", err)
+    def test_wildcard_host_fails(self):
+        # 通配地址（0.0.0.0 / ::）加载期拒绝；具体地址与主机名放行（上游 webserver）
+        for bad in ("0.0.0.0", "::", "::ffff:0.0.0.0"):
+            out, err, code = _run_cli(["--host", bad, "--profile", "web"])
+            self.assertEqual(code, 1), bad
+            self.assertIn("wildcard", err), bad
 
     def test_port_non_integer_fails(self):
         out, err, code = _run_cli(["--port", "abc", "--profile", "web"])

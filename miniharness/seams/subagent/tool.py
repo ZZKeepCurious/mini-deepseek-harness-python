@@ -1,38 +1,43 @@
 """模型侧子代理委托工具（对齐 packages/subagent/tool-subagent/src/index.ts）。
 
-契约要点（与上游逐字一致）：
-  * schema：description / prompt 必填；`run_in_background` 可选布尔——
-    enableRunInBackground=false 的实例整个省略该参数，且执行期强制后台调用
-    逐字拒绝（index.ts:257）。
-  * 文案随 provider 形态变化：mini 子会话恒继承父 completed turns → 取
-    inheritsParentContext=true 分支（index.ts:214-225）；后台默认值随
-    backgroundMode（continuable 默认后台、one-shot 默认前台，
-    resolveDelegationRun index.ts:249-267）。
-  * canonical value 三形态 + render（index.ts:329-367）：background → job id、
-    continuable → 持久 child id、foreground → 输出文本块拼接。
-  * 非 completed 终局按 stopReasonError 映射为错误并附保留的部分输出
-    （index.ts:125-157）；maxDepth 由 manager 强制（上游 depthLimit 能力位）。
+契约要点（与上游逐字一致，0.2.1 起）：
+  * schema：`cwd`（可选）/ `description`（必填）/ `prompt`（必填）；模型选择
+    启用时追加 provider/model/reasoning_effort。**不再有 run_in_background /
+    background_mode**——每次委托都是独立管理的激活，工具立即返回子 id，
+    运行结束由运行时通知模型（index.ts:215）。
+  * 描述后缀取 provider 有 `prepareContinuable` 分支（mini 进程内通道恒有）：
+    "This tool starts an independently managed subagent and immediately returns
+    its id. The runtime notifies you when it finishes. The child reports results
+    with `send_message`; ..."（index.ts:215-218）。
+  * canonical value 恒为 `{kind:'activation', subagentId}`（index.ts:264-274）；
+    render → `started subagent {id}`。
+  * 配置拒收 `persona`/`toolFilter`：0.2.1 起人设与工具过滤改由 Agent Preset
+    承担并以 `agentPreset` 选择（index.ts:147-151，逐字错误）。
+  * maxDepth 由 manager 强制（上游 depthLimit 能力位）；工具另注册
+    `tool:{name}:depth` 运行时上下文，在达到上限的 agent 上提示不要委派
+    （index.ts:382-395）。
 
 mini 教学适配（有意保留，须在文档标注）：
   * 上游 provider 抽象（capabilities/provider-added|removed 事件/多通道）未复
     现：mini 单一 in-process continuable 通道，provider 名固定 CONTINUATION_PROVIDER。
-  * 后台两模式统一经 ctx.jobs 承载（producer 线程跑子首回合；cancel →
-    interrupt 子代理）：上游 continuable 后台不建 job（inbox 接受即返回），
-    mini 同步模型需要确定性线程边界；完成通知因此经 jobs notice + 结算
-    notice 双路到达（语义一致，多一条 jobs 收条）。
+    配置 `agent_preset`/`allowed_agent_presets` 使子代理可独立选择 preset（经
+    `ctx.agentPresets` 挂载子组合：工具视图 + persona）；因 mini 合并了上游
+    spawn/fork 双通道，选择不受 `inheritsParentContext` 限制（上游 fork 通道禁选），
+    见 verified-diffs 载体差异。
+  * 同步载体下无 driver 的父内联泵完子首回合再返回 id（上游子回合并发运行）；
+    结算通知照常投递父（见 continuation.py 模块头 A7/A8）。
 """
 from __future__ import annotations
 
-import threading
 from typing import Any
 
 from ...core.system_prompt import SYSTEM_PROMPT_SERVICE
 from ...core.tools import Tool, ToolExec
-from ...jobs.types import JobDoneBox
 from .continuation import (
     CONTINUATION_PROVIDER,
     SubagentContinuationManager,
     SubagentError,
+    delegation_depth_of,
     epoch_stop_reason,
     final_assistant_output,
     subagent_diagnostic,
@@ -40,16 +45,7 @@ from .continuation import (
 
 __all__ = ["install_subagent_delegation_tool"]
 
-# 结算关键词 → 错误头（逐字 index.ts:125-142）
-_STOP_REASON_ERRORS = {
-    "completed": None,
-    "aborted": "subagent run was cancelled",
-    "error": "subagent run failed",
-    "max-tokens": "subagent run hit its token limit before finishing",
-    "refusal": "subagent declined the task",
-}
-
-# 工具描述与参数描述（逐字 index.ts:214-237，inheritsParentContext=true 分支：
+# 工具描述与参数描述（逐字 index.ts:113-137，inheritsParentContext=true 分支：
 # mini 子会话由父 completed-turn 前缀播种，恒继承会话历史）
 _DESCRIPTION = (
     "Delegate a task to a subagent that inherits this conversation: a child agent seeded with all "
@@ -62,29 +58,45 @@ _PROMPT_DESCRIPTION = (
     "The task for the subagent. It already sees this conversation's completed turns, so build on them "
     "freely and state only what is new."
 )
-
-# 描述后缀（逐字 index.ts:383-388，2026-09-30 精简）
-_SUFFIX_CONTINUABLE = (
-    " It runs in the background by default and returns a subagent id you can continue with "
-    "`send_message`; you are notified when the run settles."
-)
-_SUFFIX_ONE_SHOT = " This call waits for the result by default."
-_SUFFIX_DISABLED = " This call waits for the subagent and returns its result."
-
-# run_in_background 参数描述（逐字 index.ts:421-426）
-_PARAM_DESC_CONTINUABLE = (
-    "Defaults to true. Set false only when your next action depends on the result."
-)
-_PARAM_DESC_ONE_SHOT = (
-    "Run as a background job and return its id (collect with job_output, stop with job_kill). "
-    "Defaults to false."
+_PARAM_DESC_CWD = (
+    "Initial child working directory. Relative paths use your current directory; omitted inherits it. "
+    "Later directory changes in either agent are independent."
 )
 
-# continuable 常驻提示节（逐字 index.ts:600-604）
+# 描述后缀（逐字 index.ts:215-218，provider 有 prepareContinuable 分支）
+_SUFFIX_MANAGED = (
+    " This tool starts an independently managed subagent and immediately returns its id. The runtime "
+    "notifies you when it finishes. The child reports results with `send_message`; use `send_message` "
+    "to steer it while running or continue its conversation after it finishes."
+)
+
+# continuable 常驻提示节（逐字 index.ts:379）
 _SECTION_TEXT = (
-    "Start independent {name} delegations together in one assistant message and continue useful "
-    "work while they run."
+    "Start independent delegations with {names} together in one assistant message and continue "
+    "useful work while they run."
 )
+
+# 委派深度上下文（逐字 index.ts:392-393）
+_DEPTH_CONTEXT_TEXT = (
+    "Delegation depth for `{name}`: current {depth}, maximum {max_depth}, remaining levels 0."
+    " Do not call `{name}` at this depth; carry out the work directly."
+)
+
+# 工具 canonical 输出 schema（逐字 index.ts:264-274）
+_ACTIVATION_OUTPUT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "kind": {"type": "string", "const": "activation"},
+        "subagentId": {"type": "string"},
+    },
+    "required": ["kind", "subagentId"],
+}
+
+# 已弃用的配置键（0.2.1 起逐字拒绝，index.ts:147-151）：mini 配置用 snake_case
+# 键名，错误文案沿用上游的 persona/toolFilter 字段名。
+_REMOVED_CONFIG_FIELDS = (("persona", "persona"), ("tool_filter", "toolFilter"),
+                          ("toolFilter", "toolFilter"))
 
 # ---- 模型选择（对齐 tool-subagent model-selection.ts + index.ts:364-412）----
 # providerRouteDefaults 恒未定义（mini continuation provider 无路由默认值），
@@ -325,48 +337,90 @@ def _list_subagent_models_tool(routes: list[dict], manager: Any) -> Tool:
     )
 
 
-def _stop_reason_error(stop: str) -> str | None:
-    """终局关键词 → 错误头（合并可扩展 union：未知原因按异常终局处理）。"""
-    if stop in _STOP_REASON_ERRORS:
-        return _STOP_REASON_ERRORS[stop]
-    return f"subagent run ended abnormally ({stop})"
+def _activation_render(args: dict, value: dict) -> list[dict]:
+    """canonical 激活值 → 模型可见文本（逐字 index.ts:273）。"""
+    return [{"type": "text", "text": f"started subagent {value['subagentId']}"}]
 
 
-def _with_partial_text(error: str, output: list | None) -> str:
-    """错误头附保留的部分输出（逐字 index.ts:151-157）。"""
-    text = "".join(
-        b.get("text", "") for b in (output or []) if isinstance(b, dict) and b.get("type") == "text"
-    )
-    if not text:
-        return error
-    return f"{error}\nPartial output before the run ended:\n{text}"
+def _epoch_result(manager: SubagentContinuationManager, child_id: str,
+                  base: int) -> tuple[str, list | None, str | None]:
+    """从持久化事件折叠某 epoch 的（终局关键词, 最终输出, 失败诊断）。
 
-
-def _output_value_text(values: Any) -> str:
-    """canonical 输出块数组 → 模型可见文本（只信 text 块，index.ts:102-109）。"""
-    if not isinstance(values, list):
-        return ""
-    return "".join(
-        b.get("text", "")
-        for b in values
-        if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)
-    )
-
-
-def _resolve_delegation_run(request: dict, *, background_enabled: bool, continuable: bool) -> bool:
-    """模型的后台请求解析为唯一执行路由（index.ts:249-267）。
-
-    @returns 是否后台执行。
+    供编程调用方（workflow_ptc 的 `agent` 绑定）在子首回合结算后读取终局；
+    模型侧委托工具不再使用（0.2.1 起结果经运行时通知投递）。
     """
-    if not background_enabled:
-        # 校验器不拒绝未声明键，schema 省略还需执行期强制
-        if request.get("run_in_background") is True:
+    info = manager.persistence.inspect(child_id)
+    epoch = info["events"][base:]
+    return (epoch_stop_reason(epoch), final_assistant_output(epoch),
+            subagent_diagnostic(epoch))
+
+
+class _SubagentPresetSelection:
+    """一个委托工具上部署方拥有的 preset 选择（对齐 preset-selection.ts）。
+
+    config：`agent_preset?`（独立缺省 preset；模型未选择且配置了缺省时用它，否则
+    继承父）+ `allowed_agent_presets?`（非空允许名单，暴露模型参数 `agent_preset`；
+    省略即关闭模型选择）。缺省 id 必须属于允许名单；名单不得有重复。
+    """
+
+    def __init__(self, config: dict):
+        agent_preset = config.get("agent_preset")
+        allowed = config.get("allowed_agent_presets")
+        if agent_preset is not None and (not isinstance(agent_preset, str)
+                                         or agent_preset == ""):
+            raise RuntimeError("tool-subagent: agent_preset must be a non-empty string")
+        if allowed is not None:
+            if (not isinstance(allowed, (list, tuple)) or len(allowed) == 0
+                    or any(not isinstance(item, str) or item == "" for item in allowed)):
+                raise RuntimeError(
+                    "tool-subagent: allowed_agent_presets must be a non-empty array "
+                    "of preset ids")
+            if len(set(allowed)) != len(allowed):
+                raise RuntimeError(
+                    "tool-subagent: allowed_agent_presets contains duplicate preset ids")
+            if agent_preset is not None and agent_preset not in allowed:
+                raise RuntimeError(
+                    "tool-subagent: agent_preset must be included in allowed_agent_presets")
+        self._agent_preset = agent_preset
+        self._allowed = list(allowed) if allowed is not None else None
+
+    @property
+    def configured(self) -> bool:
+        return self._agent_preset is not None or self._allowed is not None
+
+    @property
+    def choices(self) -> list[str] | None:
+        """模型参数里公开的 preset id 集合（未配允许名单 → None，参数不暴露）。"""
+        return self._allowed
+
+    @property
+    def description(self) -> str:
+        fallback = ("Omit to inherit the parent agent's current preset."
+                    if self._agent_preset is None
+                    else f"Omit to use {self._agent_preset}.")
+        text = f"Agent preset for this child. {fallback}"
+        if self._allowed:
+            text += f" Available presets: {', '.join(self._allowed)}"
+        return text
+
+    def validate(self, ctx: Any) -> None:
+        """发布工具前的配置校验：配置了选择就必须挂 agent-presets 服务。"""
+        if self.configured and ctx.get("agentPresets") is None:
             raise RuntimeError(
-                "run_in_background is disabled for this tool instance "
-                "(enableRunInBackground: false)"
-            )
-        return False
-    return bool(request.get("run_in_background", continuable))
+                "tool-subagent: agent preset selection requires the agent-presets service")
+
+    def resolve(self, args: dict) -> str | None:
+        """校验模型输入并套用部署缺省；返回选中 id，或 None 表示继承父。"""
+        value = args.get("agent_preset")
+        if value is None:
+            return self._agent_preset
+        if self._allowed is None:
+            raise RuntimeError(
+                "agent_preset selection is disabled for this tool instance")
+        if not isinstance(value, str) or value not in self._allowed:
+            raise RuntimeError(
+                f"agent_preset must be one of: {', '.join(self._allowed)}")
+        return value
 
 
 def install_subagent_delegation_tool(
@@ -377,15 +431,23 @@ def install_subagent_delegation_tool(
 ) -> Tool:
     """在父注册表安装模型侧委托工具（默认名 `subagent`）。
 
-    config：tool_name / enable_run_in_background / background_mode
-    （'one-shot' | 'continuable'）/ persona / tool_filter（allow 列表）/
-    agent_options（{provider?, model?, reasoningEffort?} 子默认路由）/
-    model_selection（opt-in 模型选择；真值要求 model_routes 非空）/
-    model_routes（[{provider, model}] 允许路由，成为 list_subagent_models
-    编目与策略拦截面）。
-    continuable 模式同时注册常驻提示节（systemPrompt 服务须已提供）。
+    config：tool_name / provider / agent_options（{provider?, model?,
+    reasoningEffort?} 子默认路由）/ model_selection（opt-in 模型选择；真值要求
+    model_routes 非空）/ model_routes（[{provider, model}] 允许路由，成为
+    list_subagent_models 编目与策略拦截面）/ max_depth（子绝对深度上限）。
+
+    0.2.1 起拒收 `persona`/`toolFilter`（逐字错误，index.ts:147-151）；`provider`
+    非 CONTINUATION_PROVIDER 逐字 UNAVAILABLE。注册 `tool:{name}` 常驻提示节与
+    `tool:{name}:depth` 委派深度上下文（systemPrompt 服务须已提供）。
     """
     cfg = config or {}
+    for key, field in _REMOVED_CONFIG_FIELDS:
+        if key in cfg:
+            raise SubagentError(
+                f"tool-subagent: {field} is no longer supported; configure persona and tool "
+                "plugins in an Agent Preset and select it with agentPreset (spawn only)",
+                "UNSUPPORTED_CONFIG",
+            )
     provider = cfg.get("provider", CONTINUATION_PROVIDER)
     if provider != CONTINUATION_PROVIDER:
         raise SubagentError(
@@ -393,34 +455,35 @@ def install_subagent_delegation_tool(
             "UNAVAILABLE",
         )
     tool_name = cfg.get("tool_name", "subagent")
-    background_enabled = cfg.get("enable_run_in_background", True) is not False
-    continuable = (cfg.get("background_mode") or "one-shot") == "continuable"
-    persona = cfg.get("persona")
-    tool_filter = cfg.get("tool_filter")
     agent_options = cfg.get("agent_options")
     model_selection = cfg.get("model_selection") is True
     model_routes = _validate_model_routes(cfg.get("model_routes") or []) if model_selection else []
     if model_selection and not model_routes:
         raise RuntimeError(
             "enabled subagent model selection requires at least one allowed model")
+    max_depth = cfg.get("max_depth")
+    preset_selection = _SubagentPresetSelection(cfg)
+    preset_selection.validate(ctx)
 
-    if background_enabled and continuable:
-        svc = ctx.get(SYSTEM_PROMPT_SERVICE)
-        section_api = getattr(svc, "section", None) if svc is not None else None
+    svc = ctx.get(SYSTEM_PROMPT_SERVICE)
+    if svc is not None:
+        section_api = getattr(svc, "section", None)
         if section_api is not None:
-            # order 118：report-guidance(117) 与 delegation-context(120) 之间
-            # （mini 约定；上游 PromptLayer 优先级体系未复现）
-            section_api(f"tool:{tool_name}", 118, _SECTION_TEXT.format(name=tool_name))
+            section_api(f"tool:{tool_name}",
+                        svc.get_section_order("TOOL_SUBAGENT"),
+                        _SECTION_TEXT.format(names=f"`{tool_name}`"))
+        context_api = getattr(svc, "context", None)
+        if context_api is not None and manager.resolve_max_depth(max_depth) is not None:
+            context_api(f"tool:{tool_name}:depth",
+                        svc.get_context_order("SUBAGENT_DELEGATION"),
+                        _depth_context_callable(tool_name, manager, max_depth))
 
-    suffix = (
-        _SUFFIX_CONTINUABLE if background_enabled and continuable
-        else _SUFFIX_ONE_SHOT if background_enabled
-        else _SUFFIX_DISABLED
-    )
     if model_selection:
         # 发现工具只随启用实例注册（index.ts:356 同款：policy 定义才注册）
         reg.register(_list_subagent_models_tool(model_routes, manager))
+
     properties: dict[str, Any] = {
+        "cwd": {"type": "string", "description": _PARAM_DESC_CWD},
         "description": {
             "type": "string",
             "description": "A short (3-5 word) description of the delegated task, for display.",
@@ -433,10 +496,12 @@ def install_subagent_delegation_tool(
         properties["reasoning_effort"] = {
             "type": "string", "description": _PARAM_DESC_REASONING_EFFORT,
         }
-    if background_enabled:
-        properties["run_in_background"] = {
-            "type": "boolean",
-            "description": _PARAM_DESC_CONTINUABLE if continuable else _PARAM_DESC_ONE_SHOT,
+    if preset_selection.choices is not None:
+        # 允许名单配置时才暴露（index.ts:235-241：choices === undefined → 无参数）
+        properties["agent_preset"] = {
+            "type": "string",
+            "enum": list(preset_selection.choices),
+            "description": preset_selection.description,
         }
 
     async def execute(args: dict, exec_: ToolExec):
@@ -444,8 +509,8 @@ def install_subagent_delegation_tool(
         if parent is None:
             raise RuntimeError("subagent tool requires a calling agent (exec.agent was undefined)")
         label = args["description"]
-        requested = _requested_agent_options(
-            parent, agent_options, args, model_selection)
+        agent_preset = preset_selection.resolve(args)
+        requested = _requested_agent_options(parent, agent_options, args, model_selection)
         _assert_allowed_model_selection(model_routes, parent, requested, args)
         if _has_delegation_model_request(args) or _has_configured_llm_selection(agent_options):
             # preflight：子创建前解析路由（上游 preflightChildLlmRoute 时机）。
@@ -457,143 +522,60 @@ def install_subagent_delegation_tool(
                     "cannot select child LLM values without an effective provider and model")
             manager.resolve_route(effective["provider"], effective["model"],
                                   effective.get("reasoningEffort"))
-        run_in_background = _resolve_delegation_run(
-            args, background_enabled=background_enabled, continuable=continuable,
-        )
-        if not run_in_background:
-            child_id, output, stop = await _run_foreground(
-                manager, label, args["prompt"], persona, tool_filter, parent=parent,
-                agent_options=requested)
-            error = _stop_reason_error(stop)
-            if error is not None:
-                raise RuntimeError(_with_partial_text(error, output))
-            return {"kind": "foreground", "runId": child_id, "output": output or []}
-        return _start_background(ctx, manager, parent, label, args["prompt"],
-                                 persona, tool_filter, continuable,
-                                 agent_options=requested)
+        # 取消信号（上游 exec.signal）在 mini 同步载体上体现为线程取消事件，
+        # 经 ToolExec 传入；缺省 None 表示不取消。
+        request: dict[str, Any] = {
+            "prompt": [{"type": "text", "text": args["prompt"]}],
+            "parent": parent,
+        }
+        if args.get("cwd") is not None:
+            request["cwd"] = args["cwd"]
+        if requested is not None:
+            request["agent_options"] = requested
+        if agent_preset is not None:
+            request["agent_preset"] = agent_preset
+        resolved_max = manager.resolve_max_depth(max_depth)
+        if resolved_max is not None:
+            request["max_depth"] = resolved_max
+        started = await manager.start_activation_async({
+            "provider": provider,
+            "label": label,
+            "request": request,
+            "signal": getattr(exec_, "signal", None),
+            "delivery": "parent",
+        })
+        return {"kind": "activation", "subagentId": started["childId"]}
 
     tool = Tool(
         name=tool_name,
-        description=(_DESCRIPTION + suffix
-                     + (_CHOICE_DESCRIPTION if model_selection else "")),
+        description=_DESCRIPTION + _SUFFIX_MANAGED
+        + (_CHOICE_DESCRIPTION if model_selection else ""),
         parameters={"type": "object", "properties": properties,
                     "required": ["description", "prompt"]},
         execute=execute,
-        render=lambda value: [
-            {"type": "text", "text": (
-                f"started background subagent job {value['jobId']}"
-                if value.get("kind") == "background"
-                else f"started subagent {value['subagentId']}"
-                if value.get("kind") == "continuable"
-                else _output_value_text(value.get("output"))
-            )},
-        ],
+        output={"schema": _ACTIVATION_OUTPUT_SCHEMA},
+        render=_activation_render,
     )
     reg.register(tool)
     return tool
 
 
-def _epoch_result(manager: SubagentContinuationManager, child_id: str, base: int) -> tuple[str, list | None, str | None]:
-    """从持久化事件折叠本 epoch 的（终局关键词, 最终输出, 失败诊断）。"""
-    info = manager.persistence.inspect(child_id)
-    epoch = info["events"][base:]
-    return (epoch_stop_reason(epoch), final_assistant_output(epoch),
-            subagent_diagnostic(epoch))
+def _depth_context_callable(tool_name: str, manager: SubagentContinuationManager,
+                            max_depth: Any):
+    """`tool:{name}:depth` 上下文可调用对象（上游 index.ts:382-395）。
 
-
-async def _run_foreground(
-    manager: SubagentContinuationManager, label: str, prompt: str,
-    persona: str | None, tool_filter: list[str] | None,
-    parent: Any = None, agent_options: dict | None = None,
-) -> tuple[str, list | None, str]:
-    """前台委托：创建子会话 + 循环内内联泵首回合，收集（child_id, 输出, 终局）。
-
-    必须走 send_message_async（循环内检测 → _submit_async 内联
-    `await child._pump_async()`）：子 turn/end 先于工具返回落盘，结果确定性。
-    同步门面 send_message 在运行中的事件循环里会退化成 fire-and-forget driver，
-    与 asyncio.run 的拆除竞速。上游前台对 continuable provider 也等待首回合
-    结果（jobs.spec.ts:1115 同款语义：仅显式 run_in_background:false 时等待）；
-    结算通知照常投递父代理（父 running → next-step 边界消费）。
-    @param parent - 委托方 agent loop（嵌套时为子代理自身）；授权与所有权主体。
-    @param agent_options - 模型选择解析后的子路由（start_continuable 透传）。
+    达到上限的 agent 上返回提示文本；否则空串（渲染时跳过）。
     """
-    child_id = manager.start_continuable(label=label, tool_filter=tool_filter,
-                                         persona=persona, parent=parent,
-                                         agent_options=agent_options)
-    base = len(manager.persistence.inspect(child_id)["events"])
-    await manager.send_message_async(child_id, prompt, source="parent", parent=parent)
-    stop, output, _ = _epoch_result(manager, child_id, base)
-    return child_id, output, stop
-
-
-def _job_outcome(stop: str, diagnostic: str | None = None,
-                 output: str | None = None) -> dict:
-    """终局关键词 → JobOutcome（对齐上游 run-settlement.ts runOutcome）。
-
-    completed 携带最终文本（finalText）；无诊断的 aborted（本地取消）→
-    killed；带 provider 诊断的 aborted（远程中止）与其余一切 reason →
-    failed。失败 detail 取原始 stopReason 词，有诊断附 "; diagnostic: ..."
-    （run-settlement failureDetail，rc.2 起 SubagentResult.diagnostic 经此
-    进入 jobs 通道；诊断本身不进 subagent/end）。
-    """
-    if stop == "completed":
-        return {"status": "completed", "result": output or ""}
-    if stop == "aborted":
-        if diagnostic is None:
-            return {"status": "killed"}
-        return {"status": "failed", "detail": f"aborted; diagnostic: {diagnostic}"}
-    detail = stop
-    if diagnostic:
-        detail = f"{detail}; diagnostic: {diagnostic}"
-    return {"status": "failed", "detail": detail}
-
-
-def _start_background(
-    ctx: Any, manager: SubagentContinuationManager, parent: Any, label: str,
-    prompt: str, persona: str | None, tool_filter: list[str] | None,
-    continuable: bool, agent_options: dict | None = None,
-) -> dict:
-    """后台委托：jobs producer 在工作线程跑子首回合。
-
-    continuable 模式回持久 child id（子会话保留供 send_message 续跑）；
-    one-shot 回 job id。job cancel → interrupt 子代理（kill 语义）。
-    """
-    jobs = ctx.get("jobs")
-    if jobs is None:
-        raise RuntimeError(
-            "background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs"
-        )
-    child_id = manager.start_continuable(label=label, tool_filter=tool_filter,
-                                         persona=persona, parent=parent,
-                                         agent_options=agent_options)
-    base = len(manager.persistence.inspect(child_id)["events"])
-    box = JobDoneBox()
-
-    def work() -> None:
-        try:
-            manager.send_message(child_id, prompt, source="parent", parent=parent)
-        except BaseException as error:  # noqa: BLE001 - reject → 注册表转 failed
-            box.fail(error)
-            return
-        stop, output, diagnostic = _epoch_result(manager, child_id, base)
-        box.settle(_job_outcome(stop, diagnostic, _output_value_text(output)))
-
-    worker = threading.Thread(target=work, name=f"subagent-job-{child_id}", daemon=True)
-    job_id_ = jobs.start({
-        "kind": "subagent",
-        "label": label,
-        # owner 是 SessionId（上游 JobSpec.owner；mini 的 Agent.id 即会话 id）
-        "owner": parent.id,
-        # 无输出源：子会话拥有中间细节，最终文本经 outcome.result 交出（index.ts:557）
-        "run": lambda _job: {
-            "done": box,
-            # kill 语义：以委托方 ancestor 身份中断激活中的子代理
-            # （已结算 → 接受性 no-op）
-            "cancel": lambda reason=None: manager.interrupt(
-                child_id, {"kind": "ancestor", "agent": parent}),
-        },
-    })
-    worker.start()
-    if continuable:
-        return {"kind": "continuable", "subagentId": child_id}
-    return {"kind": "background", "jobId": job_id_}
+    def render(context: dict) -> str:
+        agent = (context or {}).get("agent")
+        if agent is None:
+            return ""
+        resolved = manager.resolve_max_depth(max_depth)
+        if resolved is None:
+            return ""
+        depth = delegation_depth_of(agent)
+        if depth < resolved:
+            return ""
+        return _DEPTH_CONTEXT_TEXT.format(name=tool_name, depth=depth,
+                                          max_depth=resolved)
+    return render

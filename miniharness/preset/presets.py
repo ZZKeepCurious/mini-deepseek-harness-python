@@ -649,6 +649,7 @@ _PLUGIN_TOOL_NAMES: dict[str, tuple[str, ...]] = {
     "dsh-tool-pwsh-persistent": ("pwsh",),
     "dsh-tool-str-replace-editor": ("str_replace_editor",),
     "dsh-tool-fs": ("fs_read", "fs_write"),
+    "dsh-tool-working-directory": ("working_directory",),
     "dsh-tool-skill": ("skills",),
     "dsh-tool-goal": ("goal",),
     "dsh-plan-mode": ("plan",),

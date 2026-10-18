@@ -7,6 +7,7 @@ watchSettlement 结算、steer 批内合并、interrupt 缺省 no-op）。
 """
 import asyncio
 import json
+import os
 import tempfile
 import unittest
 
@@ -1165,6 +1166,169 @@ class TestScopedLifecycleDispatch(_DrainFixture):
             self.mgr._resolve_adapter(
                 {"agentProvider": "acme", "agentModel": "m1"})
         self.assertEqual(caught.exception.code, "UNAVAILABLE")
+
+
+class TestActivationStart(unittest.TestCase):
+    """上游 0.2.1 startActivation（SubagentActivation 收据 + delivery 策略）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.persistence = JsonlPersistence(self.tmp.name)
+        self.parent, self.ctx, self.reg = _parent_loop()
+
+    def _manager(self, **kwargs):
+        kwargs.setdefault("adapter_factory",
+                          lambda p, m, e=None: FakeLlmAdapter(final_text="子响应"))
+        return SubagentContinuationManager(self.parent, self.persistence, **kwargs)
+
+    def _spec(self, **overrides):
+        spec = {
+            "provider": "in-process",
+            "label": "研",
+            "request": {"prompt": "查资料", "parent": self.parent},
+            "delivery": "parent",
+        }
+        spec.update(overrides)
+        return spec
+
+    def test_parent_delivery_receipt_and_notice(self):
+        mgr = self._manager()
+        receipt = mgr.start_activation(self._spec())
+        self.assertEqual(set(receipt), {"childId", "messageId", "result", "dispose"})
+        cid = receipt["childId"]
+        self.assertTrue(cid.startswith("child-"))
+        self.assertTrue(receipt["messageId"])
+        self.assertTrue(callable(receipt["dispose"]))
+        # parent delivery：结果经运行时通知投递，不登记编程结果箱
+        self.assertEqual(mgr._results, {})
+        events = self.persistence.inspect(cid)["events"]
+        self.assertEqual(events[-1]["type"], "turn/end")
+        self.assertEqual(events[-1]["data"]["reason"]["kind"], "completed")
+        notices = _settlement_notices(self.parent.session)
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(notices[0]["data"]["source"]["senderSessionId"], cid)
+
+    def test_caller_delivery_skips_notice_and_resolves_result(self):
+        mgr = self._manager()
+        receipt = mgr.start_activation(self._spec(delivery="caller"))
+        self.assertEqual(_settlement_notices(self.parent.session), [])
+        self.assertEqual(mgr._results, {})            # 收据取走后不残留键槽
+        result = receipt["result"].wait()
+        self.assertEqual(result["stopReason"], "completed")
+        self.assertIn("output", result)
+        self.assertTrue(result["output"])
+
+    def test_activation_async_inline_pump(self):
+        mgr = self._manager()
+
+        async def run():
+            return await mgr.start_activation_async(self._spec())
+
+        receipt = asyncio.run(run())
+        events = self.persistence.inspect(receipt["childId"])["events"]
+        self.assertEqual(events[-1]["type"], "turn/end")
+
+    def test_preflight_rejects_unknown_provider_and_delivery(self):
+        mgr = self._manager()
+        with self.assertRaises(SubagentError) as caught:
+            mgr.start_activation(self._spec(provider="acp"))
+        self.assertEqual(caught.exception.code, "UNAVAILABLE")
+        with self.assertRaises(ValueError) as caught:
+            mgr.start_activation(self._spec(delivery="nope"))
+        self.assertEqual(
+            str(caught.exception),
+            "unknown subagent delivery 'nope'; expected 'parent' or 'caller'")
+
+    def test_preflight_max_depth_and_duplicate_child(self):
+        mgr = self._manager(max_depth=0)
+        with self.assertRaises(SubagentError) as caught:
+            mgr.start_activation(self._spec())
+        self.assertEqual(caught.exception.code, "MAX_DEPTH_EXCEEDED")
+        mgr2 = self._manager()
+        mgr2.start_activation(self._spec(
+            child_id="child-fixed001",
+            request={"prompt": "x", "parent": self.parent}))
+        with self.assertRaises(SubagentError) as caught:
+            mgr2.start_activation(self._spec(child_id="child-fixed001"))
+        self.assertEqual(caught.exception.code, "DUPLICATE_CHILD")
+
+    def test_activation_threads_cwd_and_agent_preset_into_meta(self):
+        from miniharness.preset.registry import AgentPresetRegistry, PresetDefinition
+
+        registry = AgentPresetRegistry(self.ctx)
+        registry.register(PresetDefinition(id="standard", plugins=[]))
+        self.ctx.provide("agentPresets", registry)
+        mgr = self._manager()
+        receipt = mgr.start_activation(self._spec(request={
+            "prompt": "x", "parent": self.parent, "cwd": ".",
+            "agent_preset": "standard"}))
+        meta = self.persistence.inspect(receipt["childId"])["meta"]
+        self.assertEqual(meta["cwd"], os.path.normpath(os.getcwd()))
+        self.assertEqual(meta["agentPreset"], "standard")
+        # 独立选择落 durable `agent-preset/selected`（先于描述符）
+        events = self.persistence.inspect(receipt["childId"])["events"]
+        selected = [e for e in events if e["type"] == "agent-preset/selected"]
+        self.assertEqual([e["data"]["agentPreset"] for e in selected], ["standard"])
+
+    def test_activation_independent_preset_requires_service(self):
+        mgr = self._manager()
+        with self.assertRaises(SubagentError) as caught:
+            mgr.start_activation(self._spec(request={
+                "prompt": "x", "parent": self.parent, "agent_preset": "standard"}))
+        self.assertEqual(caught.exception.code, "PRESET_UNAVAILABLE")
+
+    def test_activation_inherits_parent_preset_without_selection(self):
+        from miniharness.preset.registry import AgentPresetRegistry, PresetDefinition
+
+        self.parent.session.meta["agentPreset"] = "standard"
+        registry = AgentPresetRegistry(self.ctx)
+        registry.register(PresetDefinition(id="standard", plugins=[]))
+        self.ctx.provide("agentPresets", registry)
+        mgr = self._manager()
+        receipt = mgr.start_activation(self._spec())
+        meta = self.persistence.inspect(receipt["childId"])["meta"]
+        self.assertEqual(meta["agentPreset"], "standard")
+        events = self.persistence.inspect(receipt["childId"])["events"]
+        self.assertEqual([e for e in events if e["type"] == "agent-preset/selected"], [])
+
+    def test_activation_absolute_cwd_verbatim(self):
+        mgr = self._manager()
+        with tempfile.TemporaryDirectory() as other:
+            receipt = mgr.start_activation(self._spec(request={
+                "prompt": "x", "parent": self.parent, "cwd": other}))
+            meta = self.persistence.inspect(receipt["childId"])["meta"]
+            self.assertEqual(meta["cwd"], other)
+
+    def test_dispose_is_idempotent(self):
+        mgr = self._manager()
+        receipt = mgr.start_activation(self._spec())
+        receipt["dispose"]()
+        receipt["dispose"]()                          # 幂等，不再抛
+
+    def test_send_message_accepts_content_block_list(self):
+        mgr = self._manager()
+        cid = mgr.start_continuable(label="研")
+        mid = mgr.send_message(cid, [text_block("查资料")], parent=self.parent)
+        self.assertTrue(mid)
+        events = self.persistence.inspect(cid)["events"]
+        self.assertEqual(events[-1]["type"], "turn/end")
+
+
+class TestActivationResult(unittest.TestCase):
+    def test_resolve_and_reject_first_wins(self):
+        from miniharness.seams.subagent.continuation import ActivationResult
+        box = ActivationResult()
+        box.resolve({"stopReason": "completed", "output": []})
+        box.reject(RuntimeError("late"))
+        self.assertEqual(box.wait()["stopReason"], "completed")
+        failed = ActivationResult()
+        error = RuntimeError("boom")
+        failed.reject(error)
+        failed.resolve({"stopReason": "completed", "output": []})
+        with self.assertRaises(RuntimeError) as caught:
+            failed.wait()
+        self.assertIs(caught.exception, error)
 
 
 if __name__ == "__main__":

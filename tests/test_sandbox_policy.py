@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import tempfile
@@ -172,7 +173,9 @@ class PromptSectionTest(unittest.TestCase):
         install_system_prompt(ctx)
         SandboxPolicyService(ctx, config)
         prompt = ctx.get("systemPrompt")
-        return render_context_snapshot(prompt.assemble({"agent": None, "session": session}))
+        assembly = asyncio.run(
+            prompt.assemble({"agent": None, "session": session}))
+        return render_context_snapshot(assembly)
 
     def test_fresh_session_gets_read_only_section(self):
         text = self._snapshot({}, Session("s1"))

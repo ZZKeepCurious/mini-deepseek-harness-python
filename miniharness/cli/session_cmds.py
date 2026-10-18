@@ -117,6 +117,16 @@ def resume_session(
     install_system_prompt(ctx)
     install_web(ctx)
     install_user_questions(ctx)
+    # 会话当前工作目录服务：装配 fs/sessionProjections 前置（工具由 default_tools 收编）。
+    from ..fs import install_local_fs
+    from ..session_projection import install_session_projections
+    from ..working_directory import install_working_directory
+
+    if ctx.get("fs") is None:
+        install_local_fs(ctx, {"cwd": (session.meta or {}).get("cwd") or os.getcwd()})
+    if ctx.get("sessionProjections") is None:
+        install_session_projections(ctx)
+    install_working_directory(ctx)
     store = install_sessions(ctx)
     install_agents(ctx)
     # 三段式（对齐 headless / 上游 agent-loop 工厂）：prepare → 构造 loop →

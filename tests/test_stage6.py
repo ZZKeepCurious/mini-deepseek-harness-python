@@ -236,7 +236,8 @@ class TestCredentialsParsing(unittest.TestCase):
         # version-1 布局（rc.2）：refs 段准入规则不变
         self.assertEqual(parse_credentials_document(
             '{"version": 1, "refs": {"api_key": "sk-1"}}', "f"),
-            {"refs": {"api_key": "sk-1"}, "records": {}})
+            {"refs": {"api_key": "sk-1"}, "records": {},
+             "ignored_keys": [], "ignored": {}})
         with self.assertRaises(TypeError):
             parse_credentials_document('["a"]', "f")
         with self.assertRaises(ValueError):
@@ -256,9 +257,9 @@ class TestCredentialsParsing(unittest.TestCase):
     def test_parse_document_versioning(self):
         # 空（或纯空白）文档 = 空存储，无需 version
         self.assertEqual(parse_credentials_document("", "f"),
-                         {"refs": {}, "records": {}})
+                         {"refs": {}, "records": {}, "ignored_keys": [], "ignored": {}})
         self.assertEqual(parse_credentials_document("   \n", "f"),
-                         {"refs": {}, "records": {}})
+                         {"refs": {}, "records": {}, "ignored_keys": [], "ignored": {}})
         # 非空无 version = pre-release flat 布局 → 拒读并指路（措辞逐字）
         with self.assertRaisesRegex(
                 ValueError,
@@ -272,9 +273,12 @@ class TestCredentialsParsing(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,
                                     r'declares version 2; this build reads version 1'):
             parse_credentials_document('{"version": 2, "refs": {}}', "f")
-        # 未知顶层键 fail-closed
-        with self.assertRaisesRegex(ValueError, 'unknown top-level key "extra"'):
-            parse_credentials_document('{"version": 1, "refs": {}, "extra": {}}', "f")
+        # 未知顶层键不再拒绝：保留在磁盘、解析不出任何东西，只登记待上报
+        document = parse_credentials_document(
+            '{"version": 1, "refs": {}, "extra": {}}', "f")
+        self.assertEqual(document["ignored_keys"], ["extra"])
+        self.assertEqual(document["ignored"], {"extra": {}})
+        self.assertEqual(document["refs"], {})
 
     def test_parse_records_admission(self):
         # 合法 api-key / grant 记录原样保留
@@ -345,7 +349,14 @@ class TestLocalCredentialProvider(unittest.TestCase):
     def test_resolve_none_when_unconfigured(self):
         self.assertIsNone(self._provider.resolve("api_key"))
 
-    def test_env_wins_over_everything(self):
+    def test_managed_file_wins_over_env(self):
+        # 0.2.1：用户在 Models 页存的 key 对每个 provider 一致生效
+        self._provider.set("api_key", "stored-key")
+        os.environ["api_key"] = "env-key"
+        value, source = self._provider.resolve("api_key")
+        self.assertEqual((value, source), ("stored-key", "file"))
+
+    def test_env_wins_over_dotenv_when_no_stored(self):
         self._write_dotenv(os.path.join(self._project, ".env"), {"api_key": "proj-key"})
         os.environ["api_key"] = "env-key"
         value, source = self._provider.resolve("api_key")
@@ -373,7 +384,7 @@ class TestLocalCredentialProvider(unittest.TestCase):
                          {"configured": False, "writable": True})
         os.environ["api_key"] = "env-key"
         self.assertEqual(self._provider.describe("api_key"),
-                         {"configured": True, "source": "env", "writable": False})
+                         {"configured": True, "source": "env", "writable": True})
         del os.environ["api_key"]
         self._provider.set("api_key", "stored-key")
         self.assertEqual(self._provider.describe("api_key"),
@@ -390,12 +401,13 @@ class TestLocalCredentialProvider(unittest.TestCase):
         with self.assertRaises(ValueError):
             self._provider.set("api_key", "")
 
-    def test_set_rejected_when_env_shadows(self):
+    def test_set_overrides_env_and_unset_reexposes_it(self):
+        # 0.2.1：无遮蔽拒绝——set 写管理文件胜出，unset 让环境层重新暴露
         os.environ["api_key"] = "env-key"
-        with self.assertRaises(ValueError):
-            self._provider.set("api_key", "stored-key")
-        with self.assertRaises(ValueError):
-            self._provider.unset("api_key")
+        self._provider.set("api_key", "stored-key")
+        self.assertEqual(self._provider.resolve("api_key"), ("stored-key", "file"))
+        self._provider.unset("api_key")
+        self.assertEqual(self._provider.resolve("api_key"), ("env-key", "env"))
 
     def test_write_preserves_external_edits(self):
         self._provider.set("a", "1")
@@ -449,6 +461,26 @@ class TestLocalCredentialProvider(unittest.TestCase):
             on_disk = json.load(handle)
         self.assertEqual(on_disk["records"]["my-plugin/cache"],
                          {"kind": "grant", "payload": {"n": 1}})
+        self.assertEqual(on_disk["refs"], {"api_key": "sk-1", "other": "v"})
+
+    def test_unknown_top_level_key_warned_and_preserved(self):
+        # 0.2.1：外来顶层键解析不出任何东西、留在磁盘、只告警（不 fail-closed）
+        os.makedirs(self._dsh_home, exist_ok=True)
+        with open(self._filename, "w", encoding="utf-8") as handle:
+            json.dump({"version": 1, "refs": {"api_key": "sk-1"},
+                       "foreign": {"x": 1}}, handle)
+        os.chmod(self._filename, 0o600)
+        with self.assertLogs("miniharness.seams.credentials_local",
+                             level="WARNING") as logs:
+            provider = LocalCredentialProvider(filename=self._filename,
+                                               dsh_home=self._dsh_home,
+                                               project_dir=self._project)
+        self.assertTrue(any("unknown top-level keys" in line for line in logs.output))
+        self.assertEqual(provider.resolve("api_key"), ("sk-1", "file"))
+        provider.set("other", "v")
+        with open(self._filename, encoding="utf-8") as handle:
+            on_disk = json.load(handle)
+        self.assertEqual(on_disk["foreign"], {"x": 1})
         self.assertEqual(on_disk["refs"], {"api_key": "sk-1", "other": "v"})
 
     def test_world_readable_rejected_on_posix(self):

@@ -63,4 +63,10 @@ def default_tools(ctx: Context) -> ToolRegistry:
     if engine is not None and ctx.get("jobs") is not None:
         from ..tool_workflow import install_tool_workflow
         install_tool_workflow(ctx)
+    # ctx.workingDirectory 服务存在时收编 `working_directory` 工具（读/cd）。
+    # 上游经 tool-working-directory 插件按预设挂载；mini 同 jobs/skills/web/lsp 先例，
+    # 由 default_tools 条件收编。
+    if ctx.get("workingDirectory") is not None:
+        from ..working_directory import register_working_directory_tool
+        register_working_directory_tool(ctx, reg)
     return reg

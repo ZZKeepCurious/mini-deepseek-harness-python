@@ -119,7 +119,6 @@ class LocalJobRegistry:
             if not _is_positive_int(value):
                 raise ValueError(f"invalid {name}: expected a positive integer, got {value!r}")
         self._store: dict[str, dict] = {}
-        self._counters: dict[str, int] = {}
         # controller/订阅者按注册 scope 分层（对齐 ScopedLayers<JobLayer>）。
         self._layers = ScopedLayers(lambda _scope: JobLayer(), lambda: None)
         self._hub = JobEventHub(self._layers, self._warn)
@@ -157,7 +156,7 @@ class LocalJobRegistry:
     # ---------- 服务面 ----------
 
     def start(self, spec: dict) -> str:
-        """启动前完整 preflight，之后原子注册，注册后不可失败。返回 `<kind>-N`。"""
+        """启动前完整 preflight，之后原子注册，注册后不可失败。返回 `<kind>-<short-uuid>`。"""
         owner_session = self._caller_session(spec.get("owner"))
         owner_agent = self._resolve_owner(owner_session)
         if not self._serves_owner(owner_agent):
@@ -185,9 +184,13 @@ class LocalJobRegistry:
                 "use job_kill to stop an unneeded job, wait for it to finish, then retry"
             )
 
-        count = self._counters.get(kind, 0) + 1
-        self._counters[kind] = count
-        task_id = job_id(kind, count)
+        # producer 与控件、持久生命周期记录共用同一短 UUID 身份；注册表仍持有旧
+        # id 时重试（对齐 jobs-local index.ts:227-232）。
+        while True:
+            task_id = job_id(kind)
+            if task_id not in self._store:
+                break
+        tool_call = None if spec.get("toolCall") is None else dict(spec["toolCall"])
         ring = OutputRing()
         state: dict = {"progress": None, "job": None}
         handle = JobHandle(
@@ -195,7 +198,7 @@ class LocalJobRegistry:
             lambda text, options=None: self._append_ring(state, ring, text, options, "producer"),
             lambda line: self._update_progress(state, line),
         )
-        # starter 同步执行；throw 则不留任何注册（消耗的序号被跳过）。
+        # starter 同步执行；throw 则不留任何注册（id 已被发号并丢弃）。
         hooks = spec["run"](handle)
         done = hooks["done"]
         cancel = hooks["cancel"]
@@ -203,6 +206,7 @@ class LocalJobRegistry:
             raise TypeError("hooks['done'] must expose add_done_callback()/result() (JobDoneBox or Future)")
         job: dict = {
             "id": task_id,
+            "toolCall": tool_call,
             "kind": kind,
             "label": label,
             "outputLimitBytes": limit,
@@ -228,6 +232,8 @@ class LocalJobRegistry:
         }
         state["job"] = job
         self._store[task_id] = job
+        # 在 live 订阅者或完成等待者反应前先发布已提交事实（owner 会话日志）。
+        self._record_session_event(job)
         # 注册提交即发布；pump 随后创建（其同步首排干可能 announce output，
         # 故一条作业的首个事件恒为 registered）。
         self._emit({"type": "registered", "job": self._view(job)}, owner_agent)
@@ -244,13 +250,15 @@ class LocalJobRegistry:
             )
 
         def on_producer_settle() -> None:
-            outcome = self._extract_outcome(job, done)
+            outcome, producer_reported = self._extract_outcome(job, done)
             if job["pump"] is not None:
                 job["pumpUntil"].set()
                 job["pump"].wait()
-            self._settle(job, outcome, job["settleCause"] or "producer")
+            self._settle(job, outcome, job["settleCause"] or "producer",
+                         producer_reported)
 
-        # 等价 hooks.done.then(settle, reject → failed)（producer 契约违例也要收场）。
+        # 等价 hooks.done.then(settle, reject → failed)：producer 契约违例（done
+        # reject）也收场，且 producerReported=false（对齐 index.ts:284-291）。
         done.add_done_callback(lambda _box: on_producer_settle())
         return task_id
 
@@ -408,6 +416,34 @@ class LocalJobRegistry:
             event["owner"] = job["owner"]
         self._emit(event, job["owner_agent"])
 
+    def _record_session_event(self, job: dict, settlement: dict | None = None) -> None:
+        """在 owner 会话追加已提交的生命周期事件（对齐 index.ts:443-463）。
+
+        settlement 为空 → `job/registered`（JobRegisteredData）；否则
+        `job/settled`（registered 字段 + settlement）。owner 缺席时无操作；
+        记录失败只告警（不能孤儿化已启动的工作或阻止等待者释放）。
+        """
+        owner_agent = job["owner_agent"]
+        if owner_agent is None:
+            return
+        session = getattr(owner_agent, "session", None)
+        data: dict = {
+            "jobId": job["id"],
+            "owner": job["owner"],
+            "kind": job["kind"],
+            "label": job["label"],
+            "startedAt": job["startedAt"],
+        }
+        if job["toolCall"] is not None:
+            data["toolCall"] = job["toolCall"]
+        try:
+            if settlement is None:
+                session.append("job/registered", data)
+            else:
+                session.append("job/settled", {**data, **settlement})
+        except Exception as error:  # noqa: BLE001 - 记录失败被包含，不改生命周期
+            self._warn(f"jobs: failed to record lifecycle for {job['id']}: {error}")
+
     # ---------- 内部：producer 面 ----------
 
     def _append_ring(self, state: dict, ring: OutputRing, text: str,
@@ -461,23 +497,28 @@ class LocalJobRegistry:
 
     # ---------- 内部：结算与清理 ----------
 
-    def _extract_outcome(self, job: dict, done: Any) -> dict:
+    def _extract_outcome(self, job: dict, done: Any) -> tuple[dict, bool]:
+        """读 producer 终态，返回 (outcome, producerReported)。
+
+        producerReported = done 正常兑现；done reject 或非法 payload 视为契约违例，
+        记日志并收编为 failed（对齐 index.ts:284-291 的 reject 分支）。
+        """
         try:
             value = done.result()
         except BaseException as error:  # noqa: BLE001 - producer 契约违例被收编
             self._warn(
                 f"jobs: job {job['id']} producer done promise rejected "
                 f"(producer contract violation): {error}")
-            return {"status": "failed", "detail": str(error)}
+            return {"status": "failed", "detail": str(error)}, False
         if not isinstance(value, dict) or value.get("status") not in TERMINAL_STATUSES:
-            return {"status": "failed",
-                    "detail": f"producer done settled with invalid outcome: {value!r}"}
+            return ({"status": "failed",
+                     "detail": f"producer done settled with invalid outcome: {value!r}"}, True)
         outcome: dict = {"status": value["status"]}
         if value.get("detail") is not None:
             outcome["detail"] = value["detail"]
         if value.get("result") is not None:
             outcome["result"] = value["result"]
-        return outcome
+        return outcome, True
 
     def _kill_job(self, job: dict, reason: str | None) -> str:
         if job["status"] in TERMINAL_STATUSES:
@@ -492,7 +533,8 @@ class LocalJobRegistry:
         self._emit({"type": "stopping", "job": self._view(job)}, job["owner_agent"])
         return "requested"
 
-    def _settle(self, job: dict, outcome: dict, cause: str) -> None:
+    def _settle(self, job: dict, outcome: dict, cause: str,
+                producer_reported: bool = True) -> None:
         if job["status"] in TERMINAL_STATUSES:
             return  # first-wins：对迟到的 producer 结算免疫
         job["status"] = outcome["status"]
@@ -506,6 +548,16 @@ class LocalJobRegistry:
         job["state"]["progress"] = None
         job["result"] = outcome.get("result")
         job["finishedAt"] = now_ms()
+        settlement: dict = {
+            "finishedAt": job["finishedAt"],
+            "status": outcome["status"],
+            "cause": cause,
+            "producerReported": producer_reported,
+        }
+        if job["detail"] is not None:
+            settlement["detail"] = job["detail"]
+        # 先记录已提交终态事实（owner 会话日志），再裁 ring / 放行等待者。
+        self._record_session_event(job, settlement)
         # 结算终结流：在观察者读终态投影前裁到 settled cap，但绝不裁到模型游标
         # 之下（作业在首次模型读前完成时保留活 cap 下的全部字节）。
         job["ring"].trim(max(self.settled_retain_bytes,
@@ -574,7 +626,7 @@ class LocalJobRegistry:
                 self._warn(
                     f"jobs: cancel of {job['id']} threw during teardown; "
                     f"job record forced failed and work may be orphaned: {error}")
-                self._settle(job, {"status": "failed", "detail": detail}, "teardown")
+                self._settle(job, {"status": "failed", "detail": detail}, "teardown", False)
 
     def _drop(self, jobs: list[dict]) -> None:
         """丢弃已结算记录并逐条 announce removed（可见集唯一的变更）。"""

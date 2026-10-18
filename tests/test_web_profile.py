@@ -32,6 +32,7 @@ EXPECTED_ENTRY_IDS = [
     "system-prompt", "web", "user-questions", "sandbox-policy",
     "terminal-controller", "fs", "subprocess", "credentials", "workspaces",
     "workspace-controller", "workspace-files", "session-projections",
+    "working-directory",
     "usage-stats", "turn-outline", "command-feedback", "message-feedback",
     "approval", "permission-presets", "session-title",
     "session-title-first-prompt-llm", "deepseek-account",

@@ -33,7 +33,7 @@ from typing import Any, Callable
 
 from ..core.tools import Tool, ToolRegistry
 from ..core.system_prompt import install_system_prompt
-from ..jobs import JobDoneBox
+from ..jobs import JobDoneBox, job_tool_call
 from ..terminal.service import install_terminals
 from .render import (
     bound_terminal_text,
@@ -283,7 +283,7 @@ def _send_source(state: dict) -> dict:
 
 
 def _start_background_send(terminals, jobs, agent, session_id: str, request: dict,
-                           max_bytes: int) -> str:
+                           max_bytes: int, tool_call: dict | None = None) -> str:
     """开一个 `pty-send` 后台作业并返回 jobId（index.ts:250-276）。
 
     run(handle) 在 jobs 注册时同步执行：创建 operation、绑定惰性 pull 源与取消
@@ -319,14 +319,17 @@ def _start_background_send(terminals, jobs, agent, session_id: str, request: dic
         threading.Thread(target=produce, daemon=True).start()
         return {"done": box, "cancel": cancel}
 
-    return jobs.start({
+    spec: dict = {
         "kind": "pty-send",
         "label": f"{session_id}: {request['text'] or '(input)'}",
         "owner": agent.id,
         "outputLimitBytes": max_bytes,
         "output": [_send_source(state)],
         "run": run,
-    })
+    }
+    if tool_call is not None:
+        spec["toolCall"] = tool_call
+    return jobs.start(spec)
 
 
 # ---------- 六工具 ----------
@@ -405,7 +408,8 @@ def _terminal_send_tool(terminals, jobs_getter: Callable[[], Any], config: dict)
                 raise RuntimeError(
                     "background terminal sends require @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs")
             return {"kind": "background", "jobId": _start_background_send(
-                terminals, jobs, agent, sid, request, max_bytes)}
+                terminals, jobs, agent, sid, request, max_bytes,
+                job_tool_call(exec_))}
         operation = terminals.start_send(agent, sid, request)
         result = await asyncio.to_thread(
             _await_settle, terminals, agent, sid, operation, getattr(exec_, "signal", None))

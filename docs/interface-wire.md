@@ -20,8 +20,8 @@
 
 | 通道 | 载体 | 覆盖范围 | 载体状态码 |
 |---|---|---|---|
-| unary RPC | `POST /api/<endpoint>` | `WebApi.ROUTES` 全部 71 个 unary 端点（`session/*` 17 个 + `terminal`/`workspace`/`workspaceFiles`/`settings`/`credentials`/`schedule`/`account`/`agentPresets` 等各域端点）+ `$events/result` 特判 | 401* / 404 / 415 / 400 / 500 / 200 |
-| Remote 流 | `WS /api/remote.mux` | `GatewayStreams.stream_kinds` 全部 11 条流：`$events` + `session/follow`/`session/control` + `terminal/retain`/`terminal/follow` + `workspace/follow` + `workspaceFiles/changes` + `job/list`/`job/follow` + `account/watchExpiry` + `userQuestions/attachWait` | HTTP 401*（升级拒绝）/ WS 关闭码 1003 / 1008 / 1011 |
+| unary RPC | `POST /api/<endpoint>` | `WebApi.ROUTES` 全部 69 个 unary 端点（`session/*` 17 个 + `terminal`/`workspace`/`workspaceFiles`/`settings`/`credentials`/`schedule`/`account`/`agentPresets` 等各域端点）+ `$events/result` 特判 | 401* / 404 / 415 / 400 / 500 / 200 |
+| Remote 流 | `WS /api/remote.mux` | `GatewayStreams.stream_kinds` 全部 11 条流：`$events` + `session/follow`/`session/control` + `terminal/retain`/`terminal/attach` + `workspace/follow` + `workspaceFiles/changes` + `job/list`/`job/follow` + `account/watchExpiry` + `userQuestions/attachWait` | HTTP 401*（升级拒绝）/ WS 关闭码 1003 / 1008 / 1011 |
 | 会话导出 | `GET /api/session.export` | 会话日志 zip 下载 | 401* / 200 / 400 / 404 / 501 / 500 |
 | SPA 静态 | `GET`/`HEAD /{path}`（非 `/api/`） | `webui/dist/` 或 `web/static/` 产物承载 | 403 / 200 / 404 / 405 |
 
@@ -42,8 +42,9 @@
 - **拒绝形态**：http → `401 {"error":"unauthorized"}`；WS 升级 → 经 ASGI
   `websocket.http.response.*` 写 HTTP 401 响应后 `websocket.close(1008)`（与上游
   `rejectRemoteStreamUpgrade` 同形，uvicorn 支持）。比较为常数时间。
-- **部署纪律**：`run_web` 监听 `0.0.0.0` 时**必须**已配置 token，否则启动即
-  `ValueError`（非回环裸听 fail loud）。
+- **部署纪律**：通配地址（`0.0.0.0`/`::` 及等价拼写）加载期即拒绝（`web/launcher.py`
+  `_resolve_bind` → `web/host.is_wildcard_host`，对齐上游 webserver index.ts:283）；监听
+  非回环具体地址时**必须**已配置 token，否则启动即 `ValueError`（非回环裸听 fail loud）。
 
 ### 1.2 unary 载体状态码语义（`web/server.py`）
 
@@ -88,18 +89,20 @@
 
 **RpcError 的 `code` 是命名空间闭集**（统一为 `<namespace>/<name>` 形式，键集与 typert
 `RemoteErrorDetailsMap` 一致：基础设施 `gateway/*` 加各域可扩展注册；`web/envelope.py`
-`RPC_ERROR_CODES` 收 59 码（`rpc_error` 对越界码 fail loud），下方全量枚举——其中 29 码在
-`miniharness/web/` 模块内直接构造，其余 30 码为各域注册的码；
+`RPC_ERROR_CODES` 收 63 码（`rpc_error` 对越界码 fail loud），下方全量枚举——其中 30 码在
+`miniharness/web/` 模块内直接构造，30 码为各域注册的码，另 3 码（`gateway/interactions-forbidden`、
+`gateway/peer-disposed`、`remote-access/denied`）为上游客房声明的兜底码（mini 组合暂无生产者，域缺席时仍可兜底拒绝）；
 路由层边界校验收 `gateway/input-invalid`，未知端点折算为 `gateway/invocation-unavailable`）：
 
 ```
 gateway/arguments-invalid    gateway/bad-request            gateway/cancelled
 gateway/input-invalid        gateway/internal               gateway/invocation-unavailable
+gateway/interactions-forbidden  gateway/peer-disposed
 gateway/lookup-not-found     gateway/protocol               gateway/uplink-overflow
 session/not-found            session/conflict               session/agent-busy
 session/attachment-invalid   session/queue-item-not-found   session/steer-unavailable
 session/title-invalid        session/fork-unavailable       session/invalid-time-zone
-session/model-unavailable    session/provider-credentials-unavailable
+session/migration-required   session/model-unavailable      session/provider-credentials-unavailable
 session/provider-models-unavailable    session/projections-unavailable
 session/workspace-attach-failed        session/writer-held
 workspace/not-found          workspace/session-active       workspace/invalid-path
@@ -112,9 +115,9 @@ agent-preset/conflict        agent-preset/not-found         agent-preset/invalid
 agent-preset/locked          agent-preset/read-only         permission/auto-unavailable
 permission/duplicate-auto    permission/invalid             terminal/unavailable
 terminal/control-unavailable terminal/limit-reached         settings/conflict
-settings/rejected            job/not-found                  credential/rejected
-note-blank                   note-too-large                 session-not-found
-target-not-found             version-conflict
+remote-access/denied         settings/rejected              job/not-found
+credential/rejected          note-blank                     note-too-large
+session-not-found            target-not-found               version-conflict
 ```
 
 > 部分码带具体签发点：`session/model-unavailable` 由 `session/selectModel`
@@ -142,13 +145,13 @@ client `connection/src/client/rpc.ts` 按 `/` 切两段）；`web/args.canonical
 | `session/canOpenWorkspacePath` | 工作区路径可达性检查 | — |
 | `session/openWorkspacePath` | 打开工作区 | gateway/bad-request |
 | `session/rename` | 改标题 | gateway/bad-request / session/not-found |
-| `session/fork` | 分支会话（无 fork 场景 → session/fork-unavailable） | gateway/bad-request / session/not-found / session/attachment-invalid / session/fork-unavailable |
+| `session/fork` | 分支会话（`allowMigration?` 缺省 true；无 fork 场景 → session/fork-unavailable） | gateway/bad-request / session/not-found / session/attachment-invalid / session/fork-unavailable / session/migration-required |
 | `session/prompt` | 投递 prompt（`mode` queue/steer、content 逐块 text/image、时间戳校验） | gateway/bad-request / session/not-found / session/invalid-time-zone / session/attachment-invalid / session/agent-busy |
 | `session/attachment` | 附件受理（media + variantId） | session/not-found / session/attachment-invalid / gateway/internal |
 | `session/updateQueue` | 队列编辑（edit/remove/steer 三类） | gateway/bad-request / session/attachment-invalid / session/queue-item-not-found / session/steer-unavailable |
 | `session/cancel` | 取消当前回合 | session/not-found / session/agent-busy |
 | `session/page` | 分页历史（throughSeq/beforeSeq/maxMessages） | gateway/bad-request / session/not-found / gateway/internal |
-| `session/projections` | 一次非激活的会话投影读（`{asOfSeq, values}`；会话不存在 → null） | gateway/bad-request / session/projections-unavailable |
+| `session/projections` | 一次非激活的会话投影读，返 `SessionProjectionsValue` 判别联合（活会话 `{kind:'sequenced', asOfSeq, values}`；会话不存在 → null） | gateway/bad-request / session/projections-unavailable |
 | `session/workspacePathApplications` | 路径的桌面打开候选（无原生打开器 → 空数组） | gateway/bad-request（`path` 缺失） |
 
 > 各端点 `args` 先在路由层经 `web/args.py` 做**统一 `{args}` 边界校验**（同 gateway
@@ -217,10 +220,12 @@ client `connection/src/client/rpc.ts` 按 `/` 切两段）；`web/args.canonical
   被拒项 → 该流以 `gateway/input-invalid` 中止，终态 `error` 帧消息
   `typert gateway: <endpoint>: wire field "uplink" failed boundary validation`，
   `details` 为 `{endpoint, field: "uplink"}`。每次调用 `uplink()` 只能取一次（第二次抛错）；
-  出厂的全部 Remote 方法都是 `In = never`，故 `GatewayStreams.uplink_codecs()` 出厂为空表
-  ——声明点即 typert 生成的描述符 `uplink.codec`（`packages/typert/protocol/src/types.ts:355-357`）。
+  出厂 Remote 方法多为 `In = never`，唯 `terminal/attach` 声明了强类型 `In`（`TerminalInput`
+  判别联合，codec = `decode_terminal_input`），故 `GatewayStreams.uplink_codecs()` 出厂只含该项
+  ——声明点即 typert 生成的描述符 `uplink.codec`（`packages/typert/protocol/src/types.ts:355-357`，
+  上游同样只由 terminal-controller 的类型图生成）。
 - `endpoint` 全集（`GatewayStreams.stream_kinds`，十一条）：`$events`、`session/follow`、
-  `session/control`、`terminal/retain`、`terminal/follow`、`workspace/follow`、
+  `session/control`、`terminal/retain`、`terminal/attach`、`workspace/follow`、
   `workspaceFiles/changes`、`job/list`、`job/follow`、`account/watchExpiry`、
   `userQuestions/attachWait`；未知 endpoint → `error` 帧
   `gateway/invocation-unavailable`
@@ -334,7 +339,7 @@ by deltas」。
   （`web/launcher.py` 的 `uvicorn_options`，间隔取上游 `websocketHeartbeatIntervalMs`
   @default 2000）。
 
-### 4.5 `terminal/retain` / `terminal/follow`（终端持有与恢复流）
+### 4.5 `terminal/retain` / `terminal/attach`（终端持有与双工恢复流）
 
 `terminal/retain` —— 一条物理 Remote 流为一个终端身份**持窗**（不激活 Agent、不取输入控制）。
 
@@ -347,35 +352,52 @@ by deltas」。
 - 错误：身份缺失/已关闭/owner 正在清理 → `terminal/unavailable`；命名空间未挂载 →
   `gateway/invocation-unavailable`（同 §4 头）。
 
-`terminal/follow` —— 附加到一个终端，**不把进程生命周期绑到传输**。
+`terminal/attach` —— 附加到一个终端（**双工**），**不把进程生命周期绑到传输**。
 
-- open payload：`{args:{agentId, id, attachmentId}}`；`attachmentId` 须合 `^[\w-]{1,128}$`。
-  附加即独占输入控制（较晚附加接管输入，旧的降为只读），分离不杀进程。
+- open payload：`{args:{agentId, id}}`。附加即独占输入控制（较晚附加接管输入，旧的降为
+  只读），分离不杀进程。
 - 首帧 `snapshot`（完整有界屏幕，含滚出历史；行尾空白裁剪、尾随空行去除）：
 
 ```json
-{"type": "snapshot", "sequence": <int>, "screen": "<整屏文本>", "info": {<WebTerminalInfo>}}
+{"type": "snapshot", "sequence": <int>, "screen": "<整屏文本>",
+ "info": {<WebTerminalInfo>}, "writable": <bool>, "inputWindow": {<RemoteUplinkWindow>}?}
 ```
 
-  `info` = `{id, title, shell:{path,args,name}, cwd, cols, rows, state, exitCode, error?, controllerId?}`，
-  `state` ∈ `running|exited|failed`；`exited` 带 `exitCode`，`failed` 带 `error`；
-  `controllerId` 只在当前有输入控制者时出现（附加期间必有）。`cwd` 是创建时工作目录，
-  shell 内 `cd` 不回写该字段。
-- 续帧（有序，三型与上游 `TerminalFrame` 一一对应）：
+  `info` = `{id, title, shell:{path,args,name}, cwd, cols, rows, state, exitCode, error?}`，
+  `state` ∈ `running|exited|failed`；`exited` 带 `exitCode`，`failed` 带 `error`。`cwd` 是创建时
+  工作目录，shell 内 `cd` 不回写该字段。`writable` 是本附加此刻是否持有输入控制；
+  `inputWindow` 只在载体提供了窗口时出现（`{maxBytes, frameOverheadBytes}`，见下）。
+- 续帧（有序，四型与上游 `TerminalFrame` 一一对应）：
 
 ```json
 {"type": "output", "sequence": <int>, "data": "<本段输出>"}
-{"type": "state",  "info": {<WebTerminalInfo>}}
+{"type": "state",  "info": {<WebTerminalInfo>}, "writable": <bool>}
+{"type": "ack",    "sequence": <int>, "refusal": "read-only" | "not-running"?}
 ```
 
+  `state` 帧的 `writable` 逐 follower 独立计算（输入控制易手时，接管的收到 `true`、被降级的
+  收到 `false`）；`state` 也会在 `resize`（cols/rows）、`rename`（title）、进程结算时出现。
+- 上行（`TerminalInput` 判别联合，经 `invocation.uplink()`，codec = `decode_terminal_input`）：
+
+```json
+{"type": "write",  "sequence": <int>, "data": "<键入>"}
+{"type": "resize", "sequence": <int>, "cols": <int>, "rows": <int>}
+```
+
+  `sequence` 从 1 起**连续编号**（每个附加独立），缺口即失败整条附加（普通失败 → 流错误帧，
+  不折 refusal）。每条命令回一帧 `ack`：成功 `{"type":"ack","sequence":n}`；写/调整不可用
+  （无输入控制/进程未运行）→ 带 `refusal`（`read-only`|`not-running`）的 `ack`，且**输出附加
+  保持有效**（上游 `terminal/control-unavailable` 语义）。`write` 超 `maxInputBytes`、`resize`
+  越界（`cols<2` / `cols>maxCols` / `rows<1` / `rows>maxRows`）为普通失败。
+- `inputWindow`（`RemoteUplinkWindow`）：载体给客户端的写入窗口提示——`maxBytes` 为上行
+  inbox 字节上限，`frameOverheadBytes` 为单帧 JSON 封装开销。客户端据此自限上行批量。
 - 终态：进程退出/失败先投一帧 `state`（`state` 转 `exited`/`failed`），**队列里剩余帧投完后
-  流才 `end`**（上游 `TerminalFollower.finish`）。`state` 帧也会在 `resize`（cols/rows）、
-  `rename`（title）、输入控制权易手时出现。
+  流才 `end`**（上游 `TerminalFollower.finish`）。
 - 慢消费者：单 follower 排队字节超 `maxBufferedBytes`（缺省 2 MiB）→ 该流以
   `gateway/internal` 中止（消息 `Terminal output consumer exceeded its buffer; reconnect to
   recover the current screen`）；重连开新代次从 `snapshot` 恢复当前屏幕。
 - 错误：未知 `agentId` → `session/not-found`；身份缺失/已关闭 → `terminal/unavailable`；
-  `attachmentId` 非法 → `gateway/internal`（上游同为普通 `Error`，折算同一码）。
+  命名空间未挂载 → `gateway/invocation-unavailable`。
 
 ### 4.6 `workspace/follow`（工作区投影流）
 

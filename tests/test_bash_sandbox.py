@@ -518,7 +518,9 @@ class BashToolTest(unittest.TestCase):
             sent = shell.requests[0]
             self.assertEqual(sent["command"], "x")
             self.assertEqual(sent["sandboxPolicy"]["mode"], "danger-full-access")
-            self.assertEqual(Path(sent["workdir"]), Path(os.path.realpath(tmp)))
+            # 对齐上游 tool-bash：workdir = workingDirectory.get(agent.session)
+            # （会话头部 cwd 字面值，非 sandboxPolicy 的规范化工作区根）。
+            self.assertEqual(Path(sent["workdir"]), Path(tmp))
 
     def test_validate_rejects_blank_command(self):
         shell = self._FakeShell(settled_execution(0, "", ""))

@@ -144,6 +144,17 @@ KNOWN_TYPES = frozenset({
     # run-end {runId, stopReason}
     "tool-workflow/run-start", "tool-workflow/agent-start",
     "tool-workflow/agent-end", "tool-workflow/run-end",
+    # 工作目录变更（上游 packages/session/working-directory/src/index.ts
+    # SessionEventMap，dsh-v0.2.1-rc.2 新增、required-on-read；log-only 非
+    # surface）：{cwd}——header.cwd（不可变项目身份）与「当前执行目录」分离后，
+    # 后者由本事件持久化（投影单元 workingDirectory 的 fold 输入）。
+    "working-directory/change",
+    # 作业注册/结算（上游 jobs/jobs/src/types.ts SessionEventMap，
+    # dsh-v0.2.1-rc.2 新增、两条均 required-on-read；log-only 非 surface，
+    # 由 registry 在 owner 会话发射）：registered {jobId, owner, kind, label,
+    # startedAt, toolCall?}；settled = registered + {finishedAt, status, cause,
+    # producerReported, detail?}（同一 jobId 配对存活控制）。
+    "job/registered", "job/settled",
 })
 
 # message-投影事件类型（上游 known-event-types.ts MESSAGE_PROJECTION_EVENT_TYPES）：

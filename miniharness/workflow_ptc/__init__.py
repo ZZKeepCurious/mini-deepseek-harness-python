@@ -37,6 +37,7 @@ from typing import Any, Callable
 
 from ..core.agent_loop.resident_loop import run_on_resident
 from ..core.scope import Context
+from ..core.working_cwd import working_directory_of
 from ..seams.subagent import SubagentContinuationManager, SubagentError
 from ..workflow import (
     WorkflowEngine,
@@ -153,7 +154,7 @@ class PtcWorkflowRun:
         request = PtcRunRequest(
             program=program,
             bindings=[bindings],
-            cwd=(self.parent.session.meta or {}).get("cwd"),
+            cwd=working_directory_of(self.parent),
             timeoutMs=None,
             signal=self._abort_event,
         )
