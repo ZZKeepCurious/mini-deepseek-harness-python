@@ -1,19 +1,26 @@
-"""模型侧文件工具：`read` / `write` / `edit`（对齐 packages/fs/tool-fs）。
+"""模型侧文件工具：`read` / `read_image` / `write` / `edit`（对齐 packages/fs/tool-fs）。
 
 - `read`：一次 stat 决定类型/分派/观测版本；大文件或未知大小走流式；窗口化（offset/limit、
   单行/总字节上限）后 emit `fs/observed`。
+- `read_image`：读 PNG/JPEG/WebP/GIF 并回图本体（无扩展名者按文件签名识别）；需挂
+  attachment store；成功后 emit。路由须声明 image 输入。
 - `write`：从 `fs/write-intent` 单槽取意图（无策略 → 无条件原子写），带沙箱策略；成功后 emit。
 - `edit`：从 `fs/edit-intent` 单槽取版本守卫，字面替换；成功后 emit。
+- 成功结果以 canonical `ctx.fs.process_path` 暴露路径（mutationResult / session-cwd 等价）。
 
 工具注册进 `ctx.tools`。沙箱升级（`sandbox_permissions`/`justification`）经 `ctx.get("approval")`
 （duck-typed，避免 L1 引 L3）；无审批服务时 fail loud。
 """
 from __future__ import annotations
 
+import os
 from typing import Any, AsyncIterator, Iterable
 
+from ..attachment.error import AttachmentError
+from ..attachment.types import SaveImageAttachment
 from ..core.code_language import read_lang_hint_for_path as lang_from_path
 from ..core.scope import Context
+from ..core.session import image_block
 from ..core.tools import Tool
 from ..core.working_cwd import working_directory_of
 from .diff import fs_diff_meta
@@ -25,14 +32,18 @@ __all__ = [
     "READ_MAX_LINE_LENGTH",
     "STREAM_MIN_SIZE",
     "apply_edit_tool",
+    "apply_read_image_tool",
     "apply_read_tool",
     "apply_write_tool",
     "build_window",
     "format_edit_output",
+    "format_image_read_output",
     "format_read_output",
     "format_write_output",
+    "image_media_type_for_path",
     "install_fs_tools",
     "lang_from_path",
+    "mutation_result",
     "parse_edit_args",
     "parse_read_args",
     "parse_write_args",
@@ -40,6 +51,7 @@ __all__ = [
     "remediate_fs_error",
     "sandbox_permissions_description",
     "session_cwd",
+    "sniff_image_media_type",
     "write_presentation_meta",
 ]
 
@@ -204,6 +216,16 @@ def remediate_fs_error(error: BaseException, display_path: str) -> BaseException
     if error.code == "FS_STALE_VERSION":
         return FsError(f"{error} — re-read the file, then retry", error.code, error)
     return error
+
+
+def mutation_result(ctx: Context, target: Any, outcome: Any, exec: Any, result: dict) -> dict:
+    """记录新文件版本并以 canonical 路径暴露变更结果（对齐 mutation-result.ts）。
+
+    上游从成功 outcome 里剔除 `version`（版本留在观测事件里）再补 `path`；mini 的
+    provider outcome 同样携带 `version`，由调用方显式列出其余结果字段。
+    """
+    ctx.emit("fs/observed", (target, FsObservation("present", outcome.version), exec))
+    return {"path": ctx.get("fs").process_path(target), **result}
 
 
 def sandbox_denial_marker(mode: str) -> str:
@@ -428,7 +450,7 @@ async def _read_execute(ctx: Context, args: dict, exec: Any, limit: int,
         "maxLineLength": max_line_length, "maxBytes": max_bytes,
     }, target.display_path)
     ctx.emit("fs/observed", (target, FsObservation("present", info.version), exec))
-    return {"path": target.display_path, "offset": input_["offset"],
+    return {"path": ctx.get("fs").process_path(target), "offset": input_["offset"],
             "lines": window["lines"], "totalLines": window["totalLines"]}
 
 
@@ -468,9 +490,8 @@ async def _write_execute(ctx: Context, gate: FsSandboxGate, args: dict, exec: An
                                       getattr(exec, "signal", None), policy)
     except BaseException as error:
         raise remediate_fs_error(gate.map_error(error, policy), target.display_path)
-    ctx.emit("fs/observed", (target, FsObservation("present", outcome.version), exec))
-    return {"path": target.display_path, "operation": outcome.operation,
-            "before": outcome.before, "after": outcome.after}
+    return mutation_result(ctx, target, outcome, exec, {
+        "operation": outcome.operation, "before": outcome.before, "after": outcome.after})
 
 
 def apply_edit_tool(ctx: Context, gate: FsSandboxGate) -> Tool:
@@ -511,15 +532,223 @@ async def _edit_execute(ctx: Context, gate: FsSandboxGate, args: dict, exec: Any
             intent, getattr(exec, "signal", None), policy)
     except BaseException as error:
         raise remediate_fs_error(gate.map_error(error, policy), target.display_path)
-    ctx.emit("fs/observed", (target, FsObservation("present", outcome.version), exec))
-    return {"path": target.display_path, "before": outcome.before, "after": outcome.after}
+    return mutation_result(ctx, target, outcome, exec, {
+        "before": outcome.before, "after": outcome.after})
 
 
-def install_fs_tools(ctx: Context, *, read_limit: int = READ_LIMIT,
+_IMAGE_EXTENSIONS = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
+
+_PNG_SIGNATURE = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+_JPEG_SIGNATURE = bytes([0xFF, 0xD8, 0xFF])
+
+
+def _matches_bytes(data: bytes, offset: int, expected: bytes) -> bool:
+    return data[offset:offset + len(expected)] == expected
+
+
+def sniff_image_media_type(data: bytes) -> str | None:
+    """按文件签名识别受支持图像媒体类型（对齐 sniffImageMediaType）。
+
+    只读签名，不做完整解码——`attachments.save_image` 的完整解码才是权威。
+    """
+    if _matches_bytes(data, 0, _PNG_SIGNATURE):
+        return "image/png"
+    if _matches_bytes(data, 0, _JPEG_SIGNATURE):
+        return "image/jpeg"
+    if _matches_bytes(data, 0, b"GIF87a") or _matches_bytes(data, 0, b"GIF89a"):
+        return "image/gif"
+    if _matches_bytes(data, 0, b"RIFF") and _matches_bytes(data, 8, b"WEBP"):
+        return "image/webp"
+    return None
+
+
+def image_media_type_for_path(file_path: str) -> str | None:
+    """按扩展名声明媒体类型；非受支持扩展 → None（对齐 imageMediaTypeForPath）。"""
+    return _IMAGE_EXTENSIONS.get(os.path.splitext(file_path)[1].lower())
+
+
+def format_image_read_output(path: str, image: dict) -> str:
+    """图片读的模型可见信封（对齐 formatImageReadOutput）。
+
+    降采样读同时给出磁盘尺寸与坐标倍率（两轴四舍五入到同一值时只给一个倍率）。
+    """
+    scaled = ""
+    original = image.get("originalDimensions")
+    if original is not None:
+        x = f"{original['width'] / image['width']:.2f}"
+        y = f"{original['height'] / image['height']:.2f}"
+        advice = (f"multiply coordinates by {x}" if x == y
+                  else f"multiply x coordinates by {x} and y coordinates by {y}")
+        scaled = (f" (downscaled from {original['width']}x{original['height']} px; "
+                  f"{advice} to locate features in the original file)")
+    return (f"<path>{path}</path>\n<type>image</type>\n<content>\n"
+            f"{image['mediaType']} image, {image['width']}x{image['height']} px, "
+            f"{image['bytes']} bytes{scaled}\n</content>")
+
+
+def _assert_image_capable_route(exec: Any, requested_path: str) -> None:
+    """严格判定调用路由是否声明 image 输入（对齐 assertImageCapableRoute）。
+
+    mini 无 `ctx.llm`：以调用 Agent 的适配器当前模型信息为路由事实。未解析出
+    provider/model、或未声明 image 输入 → 拒绝（比宿主上传预检更严格）。
+    """
+    agent = getattr(exec, "agent", None)
+    adapter = getattr(agent, "adapter", None) if agent is not None else None
+    resolve = getattr(adapter, "resolve_model_info", None)
+    info = resolve() if callable(resolve) else None
+    if not isinstance(info, dict) or info.get("model") is None:
+        raise RuntimeError(
+            f'cannot read "{requested_path}" as an image: the current model route '
+            "could not be resolved")
+    modalities = info.get("input_modalities")
+    if not modalities or "image" not in modalities:
+        raise RuntimeError(
+            f'cannot read "{requested_path}" as an image: model "{info.get("model")}" '
+            "does not declare image input; switch to an image-capable model to read images")
+
+
+def _assert_deployment_accepts(attachments: Any, media_type: str, display_path: str) -> None:
+    if media_type not in attachments.image_limits.mediaTypes:
+        raise RuntimeError(
+            f'cannot read "{display_path}": {media_type} images are not accepted by this deployment')
+
+
+def _map_read_image_error(error: AttachmentError, limits: Any, declared: str | None,
+                          extension: str, media_type: str,
+                          display_path: str) -> BaseException:
+    """attachment 错误 → 可恢复的模型可见诊断（对齐 read-image.ts 的 catch）。"""
+    code = getattr(error, "code", None)
+    if code == "IMAGE_DIMENSION_TOO_LARGE":
+        return RuntimeError(
+            f'cannot read "{display_path}": at least one image side exceeds the '
+            f"{limits.maxImageDimension}px limit; downscale the image and read the smaller copy")
+    if code == "IMAGE_TOO_MANY_PIXELS":
+        return RuntimeError(
+            f'cannot read "{display_path}": the image exceeds the {limits.maxImagePixels}-pixel '
+            "decoded-size limit; downscale the image and read the smaller copy")
+    if code == "IMAGE_TOO_LARGE":
+        return RuntimeError(
+            f'cannot read "{display_path}": the image cannot be stored within the deployment\'s '
+            "byte limits; downscale the image and read the smaller copy")
+    if code == "ATTACHMENT_WRITE_FAILED" and "16-bit PNG" in str(error):
+        return RuntimeError(
+            f'cannot read "{display_path}": the 16-bit PNG could not be converted to the '
+            "normalized 8-bit sRGB form; convert it to an 8-bit PNG/JPEG/WebP and retry")
+    if code == "INVALID_IMAGE" and declared is None:
+        return RuntimeError(
+            f'cannot read "{display_path}": the bytes do not decode as a supported '
+            "PNG/JPEG/WebP/GIF image; the file may be truncated or corrupt")
+    if code != "IMAGE_TYPE_MISMATCH":
+        return error
+    if declared is None:
+        return RuntimeError(
+            f'cannot read "{display_path}": the file signature claims {media_type}, but the '
+            "bytes decode as a different image format; the file may be corrupt")
+    return RuntimeError(
+        f'cannot read "{display_path}": the {extension} extension declares {media_type}, but the '
+        "bytes use a different image format; rename the file to match its actual format if it is "
+        "PNG/JPEG/WebP/GIF, or convert it to one of those formats")
+
+
+def apply_read_image_tool(ctx: Context) -> Tool:
+    """注册 `read_image`（对齐 applyReadImageTool）。
+
+    组装方负责 attachments 门：`install_fs_tools` 仅在挂 attachment store 时注册；
+    执行体仍对直接调用方复查 `ctx.get("attachments")`。
+    """
+    async def execute(args: dict, exec_: Any) -> dict:
+        file_path = args.get("file_path")
+        if not isinstance(file_path, str) or file_path.strip() == "":
+            raise RuntimeError("file_path must be a non-empty string")
+        # 所有读前门都在任何文件 I/O 之前（拒绝不泄漏部分读或附件写）。
+        extension = os.path.splitext(file_path)[1].lower()
+        declared = image_media_type_for_path(file_path)
+        if declared is None and extension != "":
+            raise RuntimeError(
+                f'cannot read "{file_path}": the {extension} extension does not declare a '
+                "supported image format; read_image accepts PNG/JPEG/WebP/GIF files, including "
+                "extension-less files in those formats")
+        attachments = ctx.get("attachments")
+        if attachments is None:
+            raise RuntimeError(
+                f'cannot read "{file_path}" as an image: no attachment service is mounted')
+        if declared is not None:
+            _assert_deployment_accepts(attachments, declared, file_path)
+        _assert_image_capable_route(exec_, file_path)
+
+        target, info = await _resolve_regular_read_target(ctx, exec_, file_path)
+        limits = attachments.image_limits
+        byte_cap = min(limits.maxImageBytes, limits.maxMessageImageBytes)
+        data = await ctx.get("fs").read_bytes(target, getattr(exec_, "signal", None), byte_cap)
+        media_type = declared or sniff_image_media_type(data)
+        if media_type is None:
+            raise RuntimeError(
+                f'cannot read "{target.display_path}": the file content is not a supported image '
+                "format; read_image accepts PNG/JPEG/WebP/GIF")
+        if declared is None:
+            _assert_deployment_accepts(attachments, media_type, target.display_path)
+        try:
+            ref = attachments.save_image(SaveImageAttachment(
+                data=data, mediaType=media_type, name=os.path.basename(target.display_path)))
+        except AttachmentError as error:
+            raise _map_read_image_error(error, limits, declared, extension, media_type,
+                                        target.display_path) from error
+        ctx.emit("fs/observed", (target, FsObservation("present", info.version), exec_))
+        image = {"attachmentId": str(ref.attachmentId), "mediaType": ref.mediaType,
+                 "bytes": ref.bytes, "width": ref.width, "height": ref.height}
+        if ref.name is not None:
+            image["name"] = ref.name
+        if ref.originalDimensions is not None:
+            image["originalDimensions"] = ref.originalDimensions.to_dict()
+        return {"path": ctx.get("fs").process_path(target), "image": image}
+
+    tool = Tool(
+        name="read_image",
+        description=("Read a PNG/JPEG/WebP/GIF file and return the image itself. Large images "
+                     "are downscaled automatically; do not install image libraries or create "
+                     "thumbnails to inspect an image."),
+        parameters={
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string",
+                              "description": "Path to the image file, resolved by the filesystem backend."},
+            },
+            "required": ["file_path"],
+        },
+        is_concurrency_safe=True,
+        execute=execute,
+        render=lambda args, value: [
+            {"type": "text", "text": format_image_read_output(value["path"], value["image"])},
+            image_block(dict(value["image"])),
+        ],
+        presentation_meta=lambda args, value: {"path": value["path"]},
+    )
+    ctx.get("tools").register(tool)
+    return tool
+
+
+def _mount_read_image_tool(image_ctx: Context, _config: Any = None) -> None:
+    """inject 插件体：deps = attachments，装载时挂 read_image（签名 (ctx, config)）。"""
+    apply_read_image_tool(image_ctx)
+
+
+def install_fs_tools(ctx: Context, *, read: bool = True, read_image: bool = True,
+                     write: bool = True, edit: bool = True,
+                     read_limit: int = READ_LIMIT,
                      read_max_line_length: int = READ_MAX_LINE_LENGTH,
                      read_max_bytes: int = READ_MAX_BYTES,
                      read_stream_min_size: int = STREAM_MIN_SIZE) -> dict:
-    """注册 read/write/edit 三工具（已注册同名则跳过）。返回工具表。"""
+    """注册选定的文件工具（已注册同名则跳过）。返回工具表。
+
+    注册开关对齐上游 Config：`read`/`read_image`/`write`/`edit`（缺省 true）。
+    `read_image` 仅在有 attachment store 时注册（无持久化不可落盘图片字节）。
+    """
     registry = ctx.get("tools")
     if registry is None:
         raise RuntimeError("tool-fs: ctx.tools is required")
@@ -529,12 +758,17 @@ def install_fs_tools(ctx: Context, *, read_limit: int = READ_LIMIT,
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
             raise ValueError(f"tool-fs: {name} must be a positive integer")
     gate = FsSandboxGate(ctx)
-    if registry.resolve("read") is None:
+    if read and registry.resolve("read") is None:
         apply_read_tool(ctx, limit=read_limit, max_line_length=read_max_line_length,
                         max_bytes=read_max_bytes, stream_min_size=read_stream_min_size)
-    if registry.resolve("write") is None:
+    # read_image 是组装条件：无挂载 attachment store 的部署不能持久化图片字节，
+    # 缺失依赖的 fiber 保持 PENDING（对齐上游 ctx.inject(['attachments'])——
+    # 服务到场才注册）；execute 体保留对直接调用方的防御性复查。
+    if read_image:
+        ctx.inject(["attachments"], _mount_read_image_tool)
+    if write and registry.resolve("write") is None:
         apply_write_tool(ctx, gate)
-    if registry.resolve("edit") is None:
+    if edit and registry.resolve("edit") is None:
         apply_edit_tool(ctx, gate)
-    return {"read": registry.resolve("read"), "write": registry.resolve("write"),
-            "edit": registry.resolve("edit")}
+    return {"read": registry.resolve("read"), "read_image": registry.resolve("read_image"),
+            "write": registry.resolve("write"), "edit": registry.resolve("edit")}

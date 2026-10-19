@@ -1,19 +1,36 @@
-"""tool-fs（read/write/edit）验收（对齐 packages/fs/tool-fs）。"""
+"""tool-fs（read/read_image/write/edit）验收（对齐 packages/fs/tool-fs）。"""
+import base64
 import pathlib
 import tempfile
 import unittest
 
+from miniharness.attachment.store import LocalAttachmentStore
 from miniharness.core.agent_loop.tool_calls import append_tool_call, emit_tool_result
 from miniharness.core.session.session import Session
 from miniharness.core.scope import Context
 from miniharness.core.tools import ToolExec, ToolRegistry, ToolResult, run_pipeline_async
 from miniharness.fs import FsError, install_local_fs, install_fs_observation_policy
-from miniharness.fs.tools import install_fs_tools
+from miniharness.fs.tools import install_fs_tools, sniff_image_media_type
+
+TINY_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8"
+    "z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+
+
+class _Adapter:
+    def __init__(self, model="m", modalities=("text", "image")):
+        self._model = model
+        self._modalities = modalities
+
+    def resolve_model_info(self):
+        return {"provider": "fake", "model": self._model,
+                "input_modalities": list(self._modalities)}
 
 
 class _Agent:
-    def __init__(self, session):
+    def __init__(self, session, adapter=None):
         self.session = session
+        self.adapter = adapter
 
 
 class FsToolsTestCase(unittest.IsolatedAsyncioTestCase):
@@ -60,7 +77,10 @@ class FsToolsTestCase(unittest.IsolatedAsyncioTestCase):
         session_dir.mkdir()
         (session_dir / "f.txt").write_text("hi\n", encoding="utf-8")
         value = await self.tools["read"].execute({"file_path": "f.txt"}, self._exec(str(session_dir)))
-        self.assertEqual(value["path"], str(session_dir / "f.txt"))
+        # 结果 `path` 是 canonical process_path（mutationResult/session-cwd 对齐），
+        # 而非 display_path——Windows 上会展开 8.3 短名。
+        target = await self.fs.resolve("f.txt", {"cwd": str(session_dir)})
+        self.assertEqual(value["path"], self.fs.process_path(target))
 
     async def test_write_create_and_update_without_policy(self):
         created = await self.tools["write"].execute(
@@ -173,6 +193,171 @@ class FsToolsTestCase(unittest.IsolatedAsyncioTestCase):
         meta = event["data"]["meta"]
         self.assertEqual(meta["operation"], "create")
         self.assertEqual(list(meta["diffs"]), [])
+
+
+    async def test_install_switches(self):
+        ctx = Context(name="switches")
+        registry = ToolRegistry(ctx)
+        install_local_fs(ctx, {"cwd": str(self.dir)})
+        install_fs_tools(ctx, read=False, write=False, edit=True)
+        names = {name for name in ("read", "read_image", "write", "edit")
+                 if registry.resolve(name) is not None}
+        self.assertEqual(names, {"edit"})
+
+    async def test_write_edit_result_path_is_process_path(self):
+        observed = []
+        self.ctx.on("fs/observed", lambda payload: observed.append(payload))
+        created = await self.tools["write"].execute(
+            {"file_path": "out.txt", "content": "a\n"}, self._exec())
+        target = await self.fs.resolve("out.txt", {"cwd": str(self.dir)})
+        self.assertEqual(created["path"], self.fs.process_path(target))
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0][0], target)
+        self.assertEqual(observed[0][1].kind, "present")
+        updated = await self.tools["edit"].execute(
+            {"file_path": "out.txt", "old_string": "a", "new_string": "b"}, self._exec())
+        self.assertEqual(updated["path"], self.fs.process_path(target))
+        self.assertEqual(len(observed), 2)
+
+
+class ReadImageToolsTestCase(unittest.IsolatedAsyncioTestCase):
+    """read_image 组装/门禁/持久化（对齐 packages/fs/tool-fs src/read-image.ts）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(self._tmp.name)
+        self.ctx = Context(name="root")
+        self.registry = ToolRegistry(self.ctx)
+        self.fs = install_local_fs(self.ctx, {"cwd": str(self.dir)})
+        self.attachments = LocalAttachmentStore(root=str(self.dir / "attachments"))
+        self.ctx.provide("attachments", self.attachments)
+        install_fs_tools(self.ctx)
+
+    def tearDown(self):
+        self.ctx.dispose()
+        self._tmp.cleanup()
+
+    def _exec(self, exec_adapter=None) -> ToolExec:
+        session = Session("s-image")
+        exec_adapter = exec_adapter if exec_adapter is not None else _Adapter()
+        return ToolExec(agent=_Agent(session, adapter=exec_adapter))
+
+    def _write_png(self, name="img.png", data=None):
+        path = self.dir / name
+        path.write_bytes(data if data is not None else TINY_PNG)
+        return path
+
+    async def test_read_image_end_to_end(self):
+        self._write_png()
+        tool = self.registry.resolve("read_image")
+        self.assertIsNotNone(tool)
+        value = await tool.execute({"file_path": "img.png"}, self._exec())
+        target = await self.fs.resolve("img.png", {"cwd": str(self.dir)})
+        self.assertEqual(value["path"], self.fs.process_path(target))
+        self.assertEqual(value["image"]["mediaType"], "image/png")
+        self.assertEqual(value["image"]["width"], 1)
+        self.assertEqual(value["image"]["height"], 1)
+        self.assertEqual(value["image"]["name"], "img.png")
+        self.assertGreater(value["image"]["bytes"], 0)
+        # 渲染 = 文本信封 + image block；meta 携带 canonical path。
+        blocks = tool.render({"file_path": "img.png"}, value)
+        self.assertEqual(blocks[0]["type"], "text")
+        self.assertIn("<type>image</type>", blocks[0]["text"])
+        self.assertIn("1x1 px", blocks[0]["text"])
+        self.assertEqual(blocks[1]["type"], "image")
+        self.assertEqual(blocks[1]["attachment"]["attachmentId"],
+                         value["image"]["attachmentId"])
+        self.assertEqual(tool.presentation_meta({}, value)["path"], value["path"])
+        # 内容寻址去重：同名同字节重读复用同一 attachmentId。
+        again = await tool.execute({"file_path": "img.png"}, self._exec())
+        self.assertEqual(again["image"]["attachmentId"], value["image"]["attachmentId"])
+
+    async def test_read_image_sniffs_extensionless_png(self):
+        self._write_png("plain")
+        value = await self.registry.resolve("read_image").execute(
+            {"file_path": "plain"}, self._exec())
+        self.assertEqual(value["image"]["mediaType"], "image/png")
+
+    async def test_read_image_rejects_unsupported_extension_before_io(self):
+        (self.dir / "notes.txt").write_text("hi", encoding="utf-8")
+        with self.assertRaises(RuntimeError) as caught:
+            await self.registry.resolve("read_image").execute(
+                {"file_path": "notes.txt"}, self._exec())
+        self.assertIn("does not declare a supported image format", str(caught.exception))
+
+    async def test_read_image_rejects_format_mismatch(self):
+        # 真 JPEG 字节 + .png 扩展名声明 → IMAGE_TYPE_MISMATCH 的可恢复改写
+        import io
+        from PIL import Image as PILImage
+        buffer = io.BytesIO()
+        PILImage.new("RGB", (1, 1)).save(buffer, format="JPEG")
+        self._write_png("bad.png", data=buffer.getvalue())
+        with self.assertRaises(RuntimeError) as caught:
+            await self.registry.resolve("read_image").execute(
+                {"file_path": "bad.png"}, self._exec())
+        message = str(caught.exception)
+        self.assertIn(".png", message)
+        self.assertIn("different image format", message)
+
+    async def test_read_image_rejects_garbage_declared_png_verbatim(self):
+        # 无扩展名智慧的垃圾字节 + 声明扩展 → 原样抛存储校验错误（上游同样不匹记载）
+        self._write_png("garbage.png", data=b"definitely not a png")
+        with self.assertRaises(Exception) as caught:
+            await self.registry.resolve("read_image").execute(
+                {"file_path": "garbage.png"}, self._exec())
+        self.assertIn("Unsupported or malformed image data", str(caught.exception))
+
+    async def test_read_image_rejects_unsupported_content(self):
+        # 无扩展名 + 非图像字节 → 嗅探失败，在任何存储前拒绝
+        (self.dir / "blob").write_bytes(b"plain text")
+        with self.assertRaises(RuntimeError) as caught:
+            await self.registry.resolve("read_image").execute(
+                {"file_path": "blob"}, self._exec())
+        self.assertIn("not a supported image format", str(caught.exception))
+
+    async def test_read_image_rejects_route_without_image_input(self):
+        self._write_png()
+        with self.assertRaises(RuntimeError) as caught:
+            await self.registry.resolve("read_image").execute(
+                {"file_path": "img.png"}, self._exec(_Adapter(modalities=("text",))))
+        self.assertIn("does not declare image input", str(caught.exception))
+
+    async def test_read_image_rejects_unresolved_route(self):
+        self._write_png()
+        with self.assertRaises(RuntimeError) as caught:
+            await self.registry.resolve("read_image").execute(
+                {"file_path": "img.png"}, self._exec(_Adapter(model=None)))
+        self.assertIn("could not be resolved", str(caught.exception))
+
+    async def test_read_image_requires_attachment_service(self):
+        ctx = Context(name="no-attach")
+        ToolRegistry(ctx)
+        install_local_fs(ctx, {"cwd": str(self.dir)})
+        install_fs_tools(ctx)
+        self.assertIsNone(ctx.get("tools").resolve("read_image"))
+        from miniharness.fs.tools import apply_read_image_tool
+        apply_read_image_tool(ctx)
+        with self.assertRaises(RuntimeError) as caught:
+            await ctx.get("tools").resolve("read_image").execute(
+                {"file_path": "img.png"}, self._exec())
+        self.assertIn("no attachment service is mounted", str(caught.exception))
+
+    def test_sniff_image_media_type(self):
+        self.assertEqual(sniff_image_media_type(TINY_PNG), "image/png")
+        self.assertEqual(sniff_image_media_type(b"RIFF1234WEBPVP8 "), "image/webp")
+        self.assertEqual(sniff_image_media_type(b"\xff\xd8\xff\xe0xx"), "image/jpeg")
+        self.assertEqual(sniff_image_media_type(b"GIF89a......"), "image/gif")
+        self.assertIsNone(sniff_image_media_type(b"hello world"))
+
+    async def test_install_switch_can_disable_read_image(self):
+        ctx = Context(name="no-image")
+        ToolRegistry(ctx)
+        store = LocalAttachmentStore(root=str(self.dir / "att2"))
+        ctx.provide("attachments", store)
+        install_local_fs(ctx, {"cwd": str(self.dir)})
+        install_fs_tools(ctx, read_image=False)
+        self.assertIsNone(ctx.get("tools").resolve("read_image"))
+        self.assertIsNotNone(ctx.get("tools").resolve("read"))
 
 
 if __name__ == "__main__":

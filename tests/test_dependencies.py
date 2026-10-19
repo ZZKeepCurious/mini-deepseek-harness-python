@@ -308,6 +308,13 @@ class ImportDirectionTest(unittest.TestCase):
                     # 模型面消费者（上游 tool-pwsh 依赖 dsh-shell / dsh-shell-env）；
                     # shell 层不得反向 import tool_pwsh
                     continue
+                if src_unit == "fs" and dst_unit == "attachment":
+                    # §5 显式例外（单方向）：tool-fs 的 read_image 消费 attachment
+                    # 的数据契约与错误码（上游 tool-fs peerDep `@deepseek-ai/dsh-attachment`；
+                    # read-image.ts:16-17 引 AttachmentError/AttachmentId/AttachmentStore/
+                    # ImageAttachmentRef/ImageMediaType，package.json:37）；attachment
+                    # 层不得反向 import fs
+                    continue
                 if src_unit == "tool_pwsh" and dst_unit == "tool_bash":
                     # §5 显式例外（单方向）：tool-pwsh 复用 tool-bash 的 background
                     # 助手（process_sources/ring_delta/process_outcome——上游

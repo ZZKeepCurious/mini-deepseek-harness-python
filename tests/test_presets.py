@@ -238,7 +238,7 @@ class TestYamlTranslation(unittest.TestCase):
             self.assertEqual(p.order, 7)
             self.assertTrue(p.persona.complete)
             # 平台门静态求值：pwsh === 'win32' 被禁 → win32 上不含 pwsh
-            expected = ["bash", "fs_read", "fs_write", "plan", "skills", "web_search"]
+            expected = ["bash", "plan", "read", "write", "edit", "skills", "web_search"]
             if sys.platform == "win32":
                 self.assertNotIn("pwsh", p.tools)
             else:
@@ -250,7 +250,7 @@ class TestMount(unittest.TestCase):
     def setUp(self):
         self.host = Context(name="host")
         self.registry = ToolRegistry(self.host)
-        for name in ["bash", "fs_read", "fs_write", "str_replace_editor", "web_search",
+        for name in ["bash", "read", "write", "edit", "str_replace_editor", "web_search",
                      "skills", "goal", "plan"]:
             self.registry.register(make_tool(name), scope=None)
 
@@ -262,8 +262,8 @@ class TestMount(unittest.TestCase):
         self.assertEqual(sorted(view.names(agent)),
                          ["bash", "str_replace_editor"])
         # host 注册表不受影响（仍是全部工具）
-        self.assertIn("fs_write", self.registry.names())
-        self.assertIsNone(view.resolve("fs_write", agent))
+        self.assertIn("write", self.registry.names())
+        self.assertIsNone(view.resolve("write", agent))
 
     def test_mount_missing_tool_fails_loud(self):
         agent = self.host.create_scope("agent:2")

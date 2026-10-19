@@ -158,10 +158,10 @@ class TestDescriptor(unittest.TestCase):
              "mode": "one-shot", "provider": "p", "persona": "x"}))  # one-shot 无 persona
 
     def test_tool_filter_shape(self):
-        payload = self._payload(toolFilter={"allow": ["bash"], "deny": ["fs_write"]})
+        payload = self._payload(toolFilter={"allow": ["bash"], "deny": ["write"]})
         self.assertEqual(parse_subagent_descriptor(
             snapshot_subagent_descriptor(payload)).get("toolFilter"),
-            {"allow": ["bash"], "deny": ["fs_write"]})
+            {"allow": ["bash"], "deny": ["write"]})
 
     def test_agent_reasoning_effort_roundtrip(self):
         # v3 增量：可选 branded string（descriptor.ts:213-222 同款）；

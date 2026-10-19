@@ -10,8 +10,9 @@
   },
   "tools": [
     "bash",
-    "fs_read",
-    "fs_write",
+    "read",
+    "write",
+    "edit",
     "str_replace_editor",
     "web_search",
     "skills",
