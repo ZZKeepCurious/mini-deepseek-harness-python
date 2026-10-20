@@ -102,9 +102,9 @@ class TestResolveDshHome(unittest.TestCase):
     def test_resolve_dsh_home_prefers_env(self):
         from miniharness.core.home_paths import resolve_dsh_home
 
-        self.assertEqual(
-            resolve_dsh_home(env={"DSH_HOME": "C:/harness"}), "C:\\harness" if os.name == "nt" else "/harness"
-        )
+        configured = "C:/harness" if os.name == "nt" else "/harness"
+        self.assertEqual(resolve_dsh_home(env={"DSH_HOME": configured}),
+                         os.path.normpath(configured))
 
     def test_resolve_dsh_home_tilde_expansion(self):
         from miniharness.core.home_paths import expand_home_path

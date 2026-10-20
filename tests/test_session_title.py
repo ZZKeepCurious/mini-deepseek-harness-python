@@ -12,6 +12,7 @@ service-contracts,projection}.spec.ts` + `session-title-first-prompt-llm`：
 - 提供者校验（messageSeqs 唯一有序、model 非空）
 - LLM 提供者：系统提示词、输入字节上限、max-tokens/error 映射
 """
+import os
 import unittest
 
 from miniharness.core.scope import Context
@@ -30,6 +31,9 @@ from miniharness.session_title import (
     register_first_prompt_llm_provider,
     truncate_title_utf8,
 )
+
+
+_WORKSPACE_CWD = "C:\\work" if os.name == "nt" else "/work"
 
 
 def _user_message(session, text, kind="user", seq=None):
@@ -123,7 +127,7 @@ class SessionTitleServiceTest(unittest.TestCase):
         self.service = install_session_title(self.ctx, {
             "fallbackMaxWords": 5, "fallbackMaxBytes": 40, "maxTitleBytes": 80},
             adapter=FakeLlmAdapter())
-        self.session = self.store.create("s1", {"meta": {"cwd": "C:\\work"}})
+        self.session = self.store.create("s1", {"meta": {"cwd": _WORKSPACE_CWD}})
 
     def tearDown(self):
         self.ctx.dispose()
@@ -208,7 +212,7 @@ class TitleProjectionTest(unittest.TestCase):
         self.service = install_session_title(self.ctx, {
             "fallbackMaxWords": 5, "fallbackMaxBytes": 40, "maxTitleBytes": 80},
             adapter=FakeLlmAdapter())
-        self.session = self.store.create("p1", {"meta": {"cwd": "C:\\work"}})
+        self.session = self.store.create("p1", {"meta": {"cwd": _WORKSPACE_CWD}})
 
     def tearDown(self):
         self.ctx.dispose()
@@ -235,7 +239,7 @@ class FirstPromptLlmProviderTest(unittest.TestCase):
         self.service = install_session_title(self.ctx, {
             "fallbackMaxWords": 5, "fallbackMaxBytes": 24, "maxTitleBytes": 24},
             adapter=FakeLlmAdapter())
-        self.session = self.store.create("l1", {"meta": {"cwd": "C:\\work"}})
+        self.session = self.store.create("l1", {"meta": {"cwd": _WORKSPACE_CWD}})
 
     def tearDown(self):
         self.ctx.dispose()

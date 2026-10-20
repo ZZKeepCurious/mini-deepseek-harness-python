@@ -274,7 +274,8 @@ class LocalPtySession:
         if self._active is not operation or self._closing or self._interrupting is operation:
             return
         operation.set_initial_foreground(foreground)
-        input_text = f"{request.get('text', '')}{'\r' if request.get('submit') else ''}"
+        carriage_return = "\r" if request.get("submit") else ""
+        input_text = f"{request.get('text', '')}{carriage_return}"
         if len(input_text) > 0 and not operation.cancel_requested:
             self._reset_readiness_evidence()
             try:

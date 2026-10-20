@@ -725,6 +725,14 @@ class RuntimeHarness(ServiceHarness):
         now = _ms_local()
         return {**record, "scheduledAt": _iso(now - seconds_ago * 1000)}
 
+    async def _await_drive(self):
+        """等待在飞投递完全落定（含提交落库），替代固定 sleep。"""
+        while True:
+            running = self.service._runtime._running
+            if running is None:
+                return
+            await asyncio.shield(running)
+
 
 def _ms_local():
     import time
@@ -741,7 +749,7 @@ class RuntimeTest(RuntimeHarness):
                 "sessionId": "root", "record": record, "status": "active",
                 "deliveryHistory": {"records": [], "earlierRecordsUnavailable": False}})
             self.service._runtime.request_drive()
-            await asyncio.sleep(0.1)
+            await self._await_drive()
             self.assertEqual(len(self.followups), 1)
             text = self.followups[0]["content"][0]["text"]
             self.assertIn(SCHEDULED_MESSAGE_FRAMING, text)
@@ -765,7 +773,7 @@ class RuntimeTest(RuntimeHarness):
                     "sessionId": "root", "record": record, "status": "active",
                     "deliveryHistory": {"records": [], "earlierRecordsUnavailable": False}})
             self.service._runtime.request_drive()
-            await asyncio.sleep(0.1)
+            await self._await_drive()
             self.assertEqual(len(self.followups), 1)
             text = self.followups[0]["content"][0]["text"]
             self.assertIn("[SCHEDULE REMINDER BATCH]", text)
@@ -790,7 +798,7 @@ class RuntimeTest(RuntimeHarness):
             # Force the persistence barrier to report failure; nothing may commit.
             self.service._runtime._flush = _false_flush
             self.service._runtime.request_drive()
-            await asyncio.sleep(0.1)
+            await self._await_drive()
             task = self.service._table.get("schedule-1")
             self.assertEqual(task["status"], "active")
             self.assertEqual(len(task["deliveryHistory"]["records"]), 0)

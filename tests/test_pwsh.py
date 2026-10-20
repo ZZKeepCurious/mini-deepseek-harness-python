@@ -60,8 +60,9 @@ class PwshLocalTest(unittest.TestCase):
         candidates = candidate_pwsh_paths({
             "ProgramFiles": r"C:\PF", "PATH": "", "SystemRoot": r"C:\WINDOWS"})
         self.assertEqual(candidates, [
-            r"C:\PF\PowerShell\7\pwsh.exe",
-            r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe",
+            os.path.join(r"C:\PF", "PowerShell", "7", "pwsh.exe"),
+            os.path.join(r"C:\WINDOWS", "System32", "WindowsPowerShell", "v1.0",
+                         "powershell.exe"),
         ])
 
     def test_install_idempotent(self):
