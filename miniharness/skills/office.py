@@ -1,16 +1,18 @@
 """Bundled Office skill provider（对齐 packages/skill/skill-office）。
 
 上游对照：packages/skill/skill-office/src/index.ts —— 一个注册 `dsh-office`
-provider 的 bundled 技能族：三个技能（office-docx / office-pptx /
-office-xlsx），资源为 `<assetRoot>/<name>/SKILL.md` + 共享 `scripts/check_office.py`
-（纯 stdlib 只读检查脚本），`list` 返回三候选、`get` 读入正文并追加
+provider 的 bundled 技能族：**七个**技能（office / office-docx / office-pptx /
+office-xlsx / office-render / office-recalculate / office-export-pdf），资源为
+`<assetRoot>/<name>/SKILL.md`（office 另带 `references/sidecar.md`）；`list` 返回七
+候选、`get` 读入正文，并只对 render/recalculate/export-pdf 追加
 "Installed LibreOffice Kit" 段（含 libreofficeKit.node / cli 绝对路径）。
+上游已删除共享 `scripts/check_office.py`（不再要求资源含该脚本）。
 
 mini 载体差异（登记）：
   * 无 `@deepseek-ai/libreoffice-kit`（Node CLI + LibreOffice 二进制）——按上游
-    `cli: false` 的既定降级分支语义，正文追加 "LibreOffice Kit is disabled in
-    this deployment."；渲染/PDF 导出/公式重算登记为触发条件（环境有 soffice 时
-    立项）。
+    `cli: false` 的既定降级分支语义，三个渲染技能正文追加 "LibreOffice Kit is
+    disabled in this deployment."；渲染/PDF 导出/公式重算登记为触发条件（环境有
+    soffice 时立项）。
   * 上游默认 `assetRoot` = 包 assets 目录；mini 用 `miniharness/skills/assets/`
     （随包数据，同 preset 目录载体）。
   * 上游注册在 sdk-app bundle（DSH_PRIMARY_RUNTIME 门控）；mini 在 SDK 入口 opt-in
@@ -26,11 +28,16 @@ from .registry import BUNDLED_SKILL_RANK
 
 __all__ = [
     "OFFICE_SKILL_NAMES",
+    "RENDER_SKILL_NAMES",
     "install_office_skills",
 ]
 
 PROVIDER_NAME = "dsh-office"
-OFFICE_SKILL_NAMES = ("office-docx", "office-pptx", "office-xlsx")
+#: 上游 SKILL_NAMES（index.ts:13）：七个内置技能。
+OFFICE_SKILL_NAMES = ("office", "office-docx", "office-pptx", "office-xlsx",
+                      "office-render", "office-recalculate", "office-export-pdf")
+#: 需要 LibreOffice Kit 运行时段的技能（index.ts:90）。
+RENDER_SKILL_NAMES = ("office-render", "office-recalculate", "office-export-pdf")
 INVOCATION = {"modelInvocable": True, "userInvocable": True}
 
 #: 上游 `officeRuntime()` 在 `cli: false` 时追加的段（index.ts:48）。
@@ -58,7 +65,7 @@ def _parse_skill(raw: str, path: str) -> dict:
 
 
 class OfficeSkillProvider:
-    """内置 `dsh-office` provider（对齐上游 skill-office index.ts:76-96）。"""
+    """内置 `dsh-office` provider（对齐上游 skill-office index.ts:69-94）。"""
 
     name = PROVIDER_NAME
 
@@ -66,9 +73,6 @@ class OfficeSkillProvider:
         self._asset_root = Path(asset_root) if asset_root is not None else _ASSET_ROOT
         if not self._asset_root.is_absolute():
             raise RuntimeError("skill-office: assetRoot must be an absolute directory")
-        checker = self._asset_root / "scripts" / "check_office.py"
-        if not checker.is_file():
-            raise RuntimeError("skill-office: assets must contain scripts/check_office.py")
         self._candidates = []
         for skill_name in OFFICE_SKILL_NAMES:
             directory = self._asset_root / skill_name
@@ -79,7 +83,8 @@ class OfficeSkillProvider:
                 "invocation": dict(INVOCATION),
                 "provider": PROVIDER_NAME, "source": "bundled",
                 "rank": BUNDLED_SKILL_RANK,
-                "resourceBase": {"kind": "directory", "path": str(directory)},
+                # 上游归一为 POSIX 分隔符（index.ts:80）
+                "resourceBase": {"kind": "directory", "path": directory.as_posix()},
                 "locator": str(path),
             })
 
@@ -94,9 +99,11 @@ class OfficeSkillProvider:
         parsed = _parse_skill(path.read_text(encoding="utf-8"), locator)
         summary = {k: v for k, v in candidate.items()
                    if k not in ("rank", "locator")}
+        # 上游只对渲染/重算/导出三技能追加运行时段（index.ts:90）
+        runtime = _DISABLED_RUNTIME if candidate.get("name") in RENDER_SKILL_NAMES else ""
         return {
             **summary,
-            "content": parsed["content"] + _DISABLED_RUNTIME,
+            "content": parsed["content"] + runtime,
         }
 
     def invalidate(self) -> None:

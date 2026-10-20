@@ -29,7 +29,10 @@ __all__ = ["apply", "McpServerConnection"]
 
 #: 每个注册 scope 的活跃 serverName 集合（scope-of(ctx) → set；同名实例
 #: 在同一 scope 内互斥。mini 用普通 dict + 拆除时删除，等价上游 WeakMap）。
-_active_server_names: dict[int, set[str]] = {}
+#: 键为 owner 的稳定身份：scope 键是字符串时按值键控；否则按对象身份键控，且条目
+#: **持有 owner 强引用**——否则对象回收后 `id()` 会被新对象复用，陈留条目会误拒
+#: 新实例的同一 serverName（2026-10-19 全量套件实测的跨模块偶发）。
+_active_server_names: dict = {}
 _active_server_names_lock = threading.Lock()
 
 SCOPE_UNSET = object()
@@ -45,10 +48,20 @@ def _scope_key(ctx: Context) -> Any:
         return getattr(ctx, "root", ctx)
 
 
+def _owner_key(owner: Any) -> Any:
+    """owner 的稳定表键：字符串 scope 键按值，其余对象按身份。"""
+    return owner if isinstance(owner, str) else id(owner)
+
+
 def _reserve_server_name(ctx: Context, server_name: str) -> None:
     owner = _scope_key(ctx)
+    key = _owner_key(owner)
     with _active_server_names_lock:
-        names = _active_server_names.setdefault(id(owner), set())
+        entry = _active_server_names.get(key)
+        if entry is None:
+            entry = (owner, set())
+            _active_server_names[key] = entry
+        names = entry[1]
         if server_name in names:
             raise ReferenceError(
                 f'mcp-client: serverName "{server_name}" is already in use by another '
@@ -59,11 +72,12 @@ def _reserve_server_name(ctx: Context, server_name: str) -> None:
 def _release_server_name(ctx: Context, server_name: str) -> None:
     owner = _scope_key(ctx)
     with _active_server_names_lock:
-        names = _active_server_names.get(id(owner))
-        if names:
-            names.discard(server_name)
-            if not names:
-                _active_server_names.pop(id(owner), None)
+        entry = _active_server_names.get(_owner_key(owner))
+        if entry is None:
+            return
+        entry[1].discard(server_name)
+        if not entry[1]:
+            _active_server_names.pop(_owner_key(owner), None)
 
 
 async def apply(ctx: Context, config: dict) -> McpServerConnection:

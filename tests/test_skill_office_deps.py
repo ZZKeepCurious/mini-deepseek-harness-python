@@ -10,6 +10,7 @@ from miniharness.core.tools import ToolRegistry
 from miniharness.skills import install_skills
 from miniharness.skills.office import (
     OFFICE_SKILL_NAMES,
+    RENDER_SKILL_NAMES,
     OfficeSkillProvider,
     install_office_skills,
 )
@@ -37,10 +38,11 @@ def _runtime_manifest(platform="win32", arch="x64", python="3.12.0",
 
 
 class TestOfficeSkillProvider(unittest.TestCase):
-    def test_lists_three_office_skills(self):
+    def test_lists_seven_office_skills(self):
         provider = OfficeSkillProvider()
         names = [c["name"] for c in provider.list()]
         self.assertEqual(names, list(OFFICE_SKILL_NAMES))
+        self.assertEqual(len(names), 7)
         for candidate in provider.list():
             self.assertEqual(candidate["provider"], "dsh-office")
             self.assertEqual(candidate["source"], "bundled")
@@ -48,14 +50,18 @@ class TestOfficeSkillProvider(unittest.TestCase):
             self.assertTrue(candidate["resourceBase"]["path"].endswith(
                 candidate["name"]))
 
-    def test_get_returns_content_with_disabled_runtime(self):
+    def test_runtime_section_only_on_render_skills(self):
+        """运行时段只追加到 render/recalculate/export-pdf（上游 index.ts:90）。"""
         provider = OfficeSkillProvider()
-        candidate = provider.list()[0]
-        skill = provider.get(candidate)
-        self.assertIsNotNone(skill)
-        self.assertIn("LibreOffice Kit is disabled in this deployment.",
-                      skill["content"])
-        self.assertIn("## ", skill["content"])
+        by_name = {c["name"]: c for c in provider.list()}
+        for name in RENDER_SKILL_NAMES:
+            skill = provider.get(by_name[name])
+            self.assertIn("LibreOffice Kit is disabled in this deployment.",
+                          skill["content"], name)
+        for name in ("office", "office-docx", "office-pptx", "office-xlsx"):
+            skill = provider.get(by_name[name])
+            self.assertNotIn("LibreOffice Kit is disabled", skill["content"], name)
+            self.assertTrue(skill["content"].strip(), name)
 
     def test_get_unknown_provider_returns_none(self):
         provider = OfficeSkillProvider()

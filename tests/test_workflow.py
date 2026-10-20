@@ -105,6 +105,39 @@ class WorkflowEngineStartTest(unittest.TestCase):
         finally:
             ctx2.dispose()
 
+    def _engine_with_mode(self, mode):
+        """在挂载了指定部署策略的全新 ctx 上装引擎（沙箱门读数在装配期取服务）。"""
+        from miniharness.seams.sandbox_policy import SandboxPolicyService
+
+        ctx = Context(name=f"wf-{mode}")
+        self.addCleanup(ctx.dispose)
+        parent, _, _ = _parent_loop(session_id=f"p-{mode}")
+        install_sessions(ctx)
+        manager = SubagentContinuationManager(parent, self.persistence)
+        install_ptc_runtime(ctx)
+        ctx.provide("subagents", manager)
+        SandboxPolicyService(ctx, {"mode": mode})
+        return install_workflow_engine(ctx, {"provider": "spawn"}), parent
+
+    def test_restrictive_policy_without_enforcing_runtime_fails_loud(self):
+        """沙箱强制门（上游 host.ts:287-289）：运行时不能强制文件策略而部署挂了受限策略
+        → 拒绝开跑并给出可诊断错误（不是静默不强制）。"""
+        engine, parent = self._engine_with_mode("read-only")
+        run = engine.start({"meta": {"name": "audit", "description": "d"},
+                            "script": "return 1", "parent": parent})
+        result = run.result()
+        self.assertEqual(result["stopReason"], "error")
+        self.assertEqual(result["error"],
+                         "workflow runtime cannot enforce the read-only file policy")
+
+    def test_danger_full_access_policy_passes_gate(self):
+        engine, parent = self._engine_with_mode("danger-full-access")
+        run = engine.start({"meta": {"name": "audit", "description": "d"},
+                            "script": "return 7", "parent": parent})
+        result = run.result()
+        self.assertEqual(result["stopReason"], "completed")
+        self.assertEqual(result["value"], 7)
+
     def test_meta_invalid(self):
         with self.assertRaises(WorkflowError) as raised:
             self.engine.start({"meta": {"name": ""}, "script": "return 1",

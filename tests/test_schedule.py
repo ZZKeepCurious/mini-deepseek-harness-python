@@ -41,6 +41,7 @@ from miniharness.schedule import (
     delivery_history_page,
     fold_schedule_events,
     install_schedule,
+    install_tool_schedule,
     is_recurring_schedule_record,
     normalize_weekdays,
     render_recurring_reminder_batch_framing,
@@ -499,6 +500,8 @@ class ServiceHarness(unittest.TestCase):
 
         self.agent.followup = recording
         self.service = install_schedule(self.ctx)
+        # 工具与服务已拆分（对齐上游 dsh-schedule / dsh-tool-schedule 两包）
+        install_tool_schedule(self.ctx, self.service)
         self.changed = []
         self.ctx.on("schedule/changed", lambda *_args: self.changed.append(1))
 
@@ -642,6 +645,77 @@ class ToolsTest(ServiceHarness):
             self.assertIn('"prompt":"hello world"', rendered[0]["text"])
             self.assertNotIn(", ", rendered[0]["text"])
         asyncio.run(run())
+
+
+# ===== 委派子代理拒绝（对齐 schedule index.ts:398-417 + tool-schedule index.ts:228-238）=====
+
+_SUBAGENT_SESSION_MESSAGE = (
+    "This Session belongs to subagent routing, which never receives reminder delivery.")
+_SUBAGENT_CALLER_MESSAGE = "A delegated subagent cannot use reminders."
+
+
+class SubagentRefusalTest(ServiceHarness):
+    def _as_subagent(self):
+        self.agent.session.meta["delegationDepth"] = 1
+
+    def test_create_refuses_subagent_owned_session(self):
+        self._as_subagent()
+
+        async def run():
+            with self.assertRaises(ScheduleInputError) as caught:
+                await self.service.create(
+                    "root", {"prompt": "p", "title": "t", "after_seconds": 60})
+            self.assertEqual(caught.exception.code, "subagent_session")
+            self.assertEqual(caught.exception.message, _SUBAGENT_SESSION_MESSAGE)
+            # 拒绝发生在落库之前：表里没有该记录
+            self.assertEqual(await self.service.list({"sessionId": "root"}), [])
+        asyncio.run(run())
+
+    def test_update_returns_non_mutating_refusal(self):
+        self._as_subagent()
+
+        async def run():
+            result = await self.service.update(
+                {"sessionId": "root", "id": "schedule-none", "prompt": "x"})
+            self.assertEqual(result, {"code": "subagent_session",
+                                      "message": _SUBAGENT_SESSION_MESSAGE})
+        asyncio.run(run())
+
+    def test_top_level_session_is_not_refused(self):
+        async def run():
+            record = await self.service.create(
+                "root", {"prompt": "p", "title": "t", "after_seconds": 60})
+            self.assertEqual(record["kind"], "after")
+        asyncio.run(run())
+
+
+class ToolSubagentRefusalTest(ServiceHarness):
+    def _call(self, name, args):
+        return self.agent.tools.resolve(name).execute(args, ToolExec(agent=self.agent))
+
+    def test_all_tools_refuse_subagent_caller_before_validation(self):
+        self.agent.session.meta["delegationDepth"] = 1
+
+        async def run():
+            cases = (
+                # create 故意带非法选择器：拒绝必须先于参数校验（上游同序）
+                ("schedule_create", {"prompt": "p", "title": "t"}),
+                ("schedule_list", {}),
+                ("schedule_delete", {"id": "schedule-x"}),
+                ("schedule_update", {"id": "schedule-x", "prompt": "p"}),
+            )
+            for name, args in cases:
+                value = await self._call(name, args)
+                self.assertEqual(value, {"code": "subagent_session",
+                                         "message": _SUBAGENT_CALLER_MESSAGE}, name)
+        asyncio.run(run())
+
+    def test_error_schema_lists_subagent_session(self):
+        tool = self.agent.tools.resolve("schedule_create")
+        codes = [branch["properties"]["code"].get("const")
+                 for branch in tool.output["schema"]["oneOf"]
+                 if "code" in branch.get("properties", {})]
+        self.assertIn("subagent_session", codes)
 
 
 # ===== runtime =====

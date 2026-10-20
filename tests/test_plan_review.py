@@ -19,7 +19,7 @@ from miniharness.core.scope import Context
 from miniharness.core.session import Session
 from miniharness.core.session_store import install_sessions
 from miniharness.core.system_prompt import install_system_prompt
-from miniharness.core.tools import ToolExec, ToolRegistry
+from miniharness.core.tools import ToolExec, ToolRegistry, ToolResult, call_render
 from miniharness.interaction import (
     ASK_CANCELLED,
     UserQuestionError,
@@ -118,13 +118,18 @@ class ExitPlanModeTest(unittest.TestCase):
             _call(reg, {"plan": "# Plan"}, ToolExec(agent=loop))
         self.assertIn("no user-questions channel", str(cm.exception))
 
-    def test_dismissed_stays(self):
+    def test_dismissed_concludes_turn_without_approval(self):
         ctx, controller, reg, loop = _make()
         _with_answerer(ctx)
         controller.set(loop, True)
-        with self.assertRaises(ValueError) as cm:
-            _call(reg, {"plan": "# Plan"}, ToolExec(agent=loop))
-        self.assertIn("dismissed the plan review", str(cm.exception))
+        out = _call(reg, {"plan": "# Plan"}, ToolExec(agent=loop))
+        # 收回（dismiss）不是失败：回合就此结束、不花模型请求（上游 exec.concludeTurn()
+        # + {approved:false}）。mini 以结果携带 concludes_turn 表达同一契约。
+        self.assertIsInstance(out, ToolResult)
+        self.assertTrue(out.ok)
+        self.assertEqual(out.value, {"approved": False})
+        self.assertTrue(out.concludes_turn)
+        self.assertIn("dismissed the plan review", out.content[0]["text"])
         self.assertTrue(fold_plan_mode(loop.session.events))
 
     def test_keep_planning_feedback(self):
@@ -150,9 +155,14 @@ class ExitPlanModeTest(unittest.TestCase):
         out = _call(reg, {"plan": "# Plan"}, ToolExec(agent=loop))
         # execute 返回 canonical 值（上游 {approved:true}），不再直接返回文案
         self.assertEqual(out, {"approved": True})
-        # 模型可见文案经 Tool.render 分离（上游 output.render）
+        # 模型可见文案经 Tool.render 分离（上游 output.render：approved 真假两支）
         tool = reg.resolve(EXIT_PLAN_MODE)
-        self.assertIn("Plan approved", tool.render(out))
+        self.assertIn("Plan approved", call_render(tool, {"plan": "# Plan"}, out))
+        self.assertIn("dismissed the plan review",
+                      call_render(tool, {"plan": "# Plan"}, {"approved": False}))
+        approved_schema = tool.output["properties"]["approved"]
+        self.assertTrue(approved_schema["type"] == "boolean")
+        self.assertNotIn("const", approved_schema)  # 上游去 const:true，approved 可为 false
         # 批准只排队 silent 选择，durable 状态仍未关闭
         self.assertTrue(fold_plan_mode(loop.session.events))
         # 下一次被接受的 in-turn pre-step 提交关闭

@@ -332,7 +332,8 @@ class PiAiAdapter(LlmAdapter):
 
     async def stream(self, messages: list[dict], tools: list[dict],
                      signal: Any | None = None, session_id: Any = None,
-                     purpose: str | None = None) -> AsyncIterator[StreamChunk]:
+                     purpose: str | None = None,
+                     reasoning_effort: str | None = None) -> AsyncIterator[StreamChunk]:
         """按实例路由（provider/model）决议 profile 并走对应协议流。
 
         session_id/purpose 为协议面参数：上游 pi-ai 把 sessionId 交外部

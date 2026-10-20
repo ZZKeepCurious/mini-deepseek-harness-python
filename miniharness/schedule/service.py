@@ -4,6 +4,10 @@
 表（见 storage.py）。写操作经一条 asyncio FIFO 链串行化，冲突只回一个结果；
 提交后发 `schedule/changed` 并请求运行时重算。旧 `schedule/change` 会话事件仅
 用于历史告警（只读）。
+
+工具不在此挂载（对齐上游独立包 `dsh-tool-schedule`）：模型侧四工具经
+`schedule/tools.py` 的 `install_tool_schedule(ctx, service)` 装配。委派子代理拥有
+的会话经 `subagent_session` 拒绝（create 抛错、update 返非变更结果）。
 """
 from __future__ import annotations
 
@@ -46,7 +50,6 @@ class ScheduleService(Service):
         self._stopping = False
         self._disposed = False
         self._chain: asyncio.Future | None = None
-        self._attached: set = set()
         self._domain = None
         self._table = None
         self._runtime: ScheduleRuntime | None = None
@@ -88,31 +91,12 @@ class ScheduleService(Service):
 
     def _install_lifecycle(self) -> None:
         self.ctx.on("session/created", self._on_session_created, global_=True)
-        self.ctx.on("agent/created", self._on_agent_created)
-        agents = self.ctx.get("agents")
-        if agents is not None:
-            for agent in agents.roots():
-                self._attach(agent)
         from .archive_admission import install_schedule_archive_admission
         install_schedule_archive_admission(self.ctx, self)
         self.ctx.effect(lambda: self.dispose, "schedule.lifecycle()")
 
     def _tasks_snapshot(self) -> list:
         return [task for _key, task in self._table.entries()]
-
-    def _on_agent_created(self, payload: dict) -> None:
-        agent = payload.get("agent") if isinstance(payload, dict) else None
-        if agent is not None:
-            self._attach(agent)
-
-    def _attach(self, agent: Any) -> None:
-        if self._stopping or agent in self._attached:
-            return
-        from .tools import register_schedule_tools
-
-        agent.ctx.effect(
-            lambda: register_schedule_tools(self, agent), "schedule.tools()")
-        self._attached.add(agent)
 
     def _on_session_created(self, payload: dict) -> None:
         session = payload.get("session") if isinstance(payload, dict) else None
@@ -129,6 +113,38 @@ class ScheduleService(Service):
             self._warn(
                 f'Session "{session.session_id}" contains legacy reminders; recreate '
                 "active reminders with schedule_create.")
+
+    # ---------- 交付不可达的会话（对齐 index.ts:398-417） ----------
+
+    @staticmethod
+    def _delegation_depth_of(agent: Any) -> int:
+        """会话/agent 的委派深度；缺省 0（对齐 subagent/src/depth.ts delegationDepthOf）。
+
+        深度经会话 meta `delegationDepth` 承载（子会话由 continuation 写入）；不 import
+        L3 的 seams/subagent，按 meta 鸭子读取（同 core.working_cwd 先例）。
+        """
+        session = getattr(agent, "session", None)
+        meta = getattr(session, "meta", None)
+        depth = meta.get("delegationDepth") if isinstance(meta, dict) else None
+        if depth is None:
+            return 0
+        if not _domain._safe_int(depth) or depth < 0:
+            raise TypeError("agent delegationDepth must be a non-negative safe integer")
+        return depth
+
+    def _reminder_target_refusal(self, session_id: str) -> dict | None:
+        """某会话由委派子代理拥有 → 交付永不可达，返回稳定拒绝（否则 None）。
+
+        对齐上游 `reminderTargetRefusal`：create 抛 `subagent_session`，update 返回该
+        非变更结果；两种「可武装交付」的操作读同一事实而非各自重述。
+        """
+        agents = self.ctx.get("agents")
+        agent = agents.get(session_id) if agents is not None else None
+        if agent is None or self._delegation_depth_of(agent) == 0:
+            return None
+        return {"code": "subagent_session",
+                "message": ("This Session belongs to subagent routing, which never "
+                            "receives reminder delivery.")}
 
     # ---------- 公共管理面 ----------
 
@@ -170,6 +186,9 @@ class ScheduleService(Service):
                 "invalid_selector", "Exactly one reminder selector is required.")
 
         async def work() -> dict:
+            refusal = self._reminder_target_refusal(session_id)
+            if refusal is not None:
+                raise _domain.ScheduleInputError("subagent_session", refusal["message"])
             self._assert_signal(signal)
             await self._table.put(id_, {
                 "sessionId": session_id, "record": record, "status": "active",
@@ -231,6 +250,9 @@ class ScheduleService(Service):
         await self._ensure_domain()
 
         async def work() -> dict:
+            refusal = self._reminder_target_refusal(request["sessionId"])
+            if refusal is not None:
+                return refusal
             self._assert_signal(signal)
             current = self._table.get(request["id"])
             if current is None or current["sessionId"] != request["sessionId"]:
@@ -345,7 +367,6 @@ class ScheduleService(Service):
         if runtime is not None:
             runtime._stopping = True
             runtime._clear_timer()
-        self._attached.clear()
 
 
 def install_schedule(ctx: Context, config: dict | None = None) -> ScheduleService:

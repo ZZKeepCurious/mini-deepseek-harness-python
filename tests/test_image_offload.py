@@ -5,6 +5,7 @@
   * `packages/session/session-format-catalog/tests/catalog.spec.ts`（readHeader / 链）。
 """
 import unittest
+import types
 
 from miniharness.compaction import install_image_offload, offload_oldest_images
 from miniharness.core.session import (
@@ -166,6 +167,72 @@ class ExecutorTest(unittest.TestCase):
                    "failure": LlmFailure("RATE_LIMIT", "slow down")}
         outcome = ctx.waterfall("agent/request-error", payload)
         self.assertIs(outcome, payload)
+        self.assertEqual(_floor(session), [False])
+
+    def test_request_error_listener_defers_when_signal_aborted(self):
+        """`signal.aborted` 门（上游 index.ts:28）：已取消 → 委派下游、不记卸载决策。"""
+        from miniharness.core.scope import Context
+
+        ctx = Context(name="c")
+        install_image_offload(ctx)
+        session = Session("aborted")
+        session.append("user/message", _user([_img()]), surfaceOp="append")
+
+        class _Agent:
+            pass
+
+        agent = _Agent()
+        agent.session = session
+        payload = {"agent": agent,
+                   "failure": LlmFailure(IMAGE_OFFLOAD_REQUIRED, "need offload",
+                                         offload_images=1),
+                   "signal": types.SimpleNamespace(aborted=True)}
+        outcome = ctx.waterfall("agent/request-error", payload)
+        self.assertIs(outcome, payload)
+        self.assertEqual(_floor(session), [False])
+
+    def test_summary_error_listener_recovers_and_retries(self):
+        """摘要失败同码 → 记录卸载决策并返回真值（摘要重试；上游 index.ts:33-40）。"""
+        from miniharness.core.scope import Context
+
+        ctx = Context(name="c")
+        install_image_offload(ctx)
+        session = Session("summary")
+        session.append("user/message", _user([_img()]), surfaceOp="append")
+        seqs = [n["seq"] for n in session.surface_nodes()]
+        payload = {"session": session, "sourceEventSeqs": seqs,
+                   "error": LlmFailure(IMAGE_OFFLOAD_REQUIRED, "need offload",
+                                       offload_images=1)}
+        recovered = ctx.waterfall("compaction/summary-error", payload, base=lambda _p: False)
+        self.assertTrue(recovered)
+        self.assertEqual(_floor(session), [True])
+
+    def test_summary_error_listener_defers_unrelated_error(self):
+        from miniharness.core.scope import Context
+
+        ctx = Context(name="c")
+        install_image_offload(ctx)
+        session = Session("summary-pass")
+        session.append("user/message", _user([_img()]), surfaceOp="append")
+        payload = {"session": session, "sourceEventSeqs": [],
+                   "error": LlmFailure("RATE_LIMIT", "slow down")}
+        recovered = ctx.waterfall("compaction/summary-error", payload, base=lambda _p: False)
+        self.assertFalse(recovered)
+        self.assertEqual(_floor(session), [False])
+
+    def test_summary_error_listener_raises_when_aborted(self):
+        """已取消 → 原错误上抛（上游 `signal?.throwIfAborted()`）。"""
+        from miniharness.core.scope import Context
+
+        ctx = Context(name="c")
+        install_image_offload(ctx)
+        session = Session("summary-aborted")
+        session.append("user/message", _user([_img()]), surfaceOp="append")
+        error = LlmFailure(IMAGE_OFFLOAD_REQUIRED, "need offload", offload_images=1)
+        payload = {"session": session, "sourceEventSeqs": [], "error": error,
+                   "signal": types.SimpleNamespace(aborted=True)}
+        with self.assertRaises(LlmFailure):
+            ctx.waterfall("compaction/summary-error", payload, base=lambda _p: False)
         self.assertEqual(_floor(session), [False])
 
 

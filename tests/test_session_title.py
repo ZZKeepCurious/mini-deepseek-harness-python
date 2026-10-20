@@ -39,17 +39,34 @@ def _user_message(session, text, kind="user", seq=None):
 
 
 class _RecordingTitleAdapter(FakeLlmAdapter):
-    """记录每次 stream 的 (session_id, purpose) 的假适配器。"""
+    """记录每次 stream 的 (session_id, purpose) 的标题适配器。"""
 
     def __init__(self):
         super().__init__()
         self.requests = []
 
     async def stream(self, messages, tools, signal=None, session_id=None,
-                     purpose=None):
+                     purpose=None, reasoning_effort=None):
         self.requests.append((session_id, purpose))
         async for chunk in super().stream(messages, tools, signal,
-                                          session_id, purpose):
+                                          session_id, purpose,
+                                          reasoning_effort=reasoning_effort):
+            yield chunk
+
+
+class _EffortRecordingAdapter(FakeLlmAdapter):
+    """记录每次 stream 的 per-call reasoning_effort。"""
+
+    def __init__(self):
+        super().__init__()
+        self.efforts = []
+
+    async def stream(self, messages, tools, signal=None, session_id=None,
+                     purpose=None, reasoning_effort=None):
+        self.efforts.append(reasoning_effort)
+        async for chunk in super().stream(messages, tools, signal,
+                                          session_id, purpose,
+                                          reasoning_effort=reasoning_effort):
             yield chunk
 
 
@@ -247,6 +264,71 @@ class FirstPromptLlmProviderTest(unittest.TestCase):
         self.assertEqual(adapter.requests,
                          [(self.session.session_id, "session-title")])
         disposer()
+
+    def _install_effort_provider(self, effort, adapter=None):
+        return register_first_prompt_llm_provider(
+            self.ctx, adapter if adapter is not None else FakeLlmAdapter(), {
+                "targetWords": 5, "targetCjkCharacters": 10,
+                "maxInputBytes": 1000, "maxOutputTokens": 32, "timeoutMs": 1000,
+                "provider": "title-route", "model": "title-model",
+                "reasoningEffort": effort})
+
+    def test_reasoning_effort_rides_request_event_and_call(self):
+        """provider 自持的推理档位：per-call 覆盖适配器（上游 index.ts:257,274）。"""
+        adapter = _EffortRecordingAdapter()
+        disposer = self._install_effort_provider("high", adapter)
+        _user_message(self.session, "first input")
+        self.session.append("request/header", {
+            "header": {"config": {"provider": "deepseek-official",
+                                  "model": "deepseek-flash"},
+                       "tools": None, "adapterDefaults": None},
+            "reason": "initial"})
+        title = self.service.get(self.session)
+        self.assertEqual(title["source"]["kind"], "provider")
+        self.assertEqual(adapter.efforts, ["high"])
+        event = next(e for e in self.session.events
+                     if e["type"] == "session/title-llm-request")
+        self.assertEqual(event["data"]["reasoningEffort"], "high")
+        disposer()
+
+    def test_reasoning_effort_absent_leaves_key_out(self):
+        adapter = _RecordingTitleAdapter()
+        disposer = self._install_provider(adapter)
+        _user_message(self.session, "first input")
+        self.session.append("request/header", {
+            "header": {"config": {"provider": "deepseek-official",
+                                  "model": "deepseek-flash"},
+                       "tools": None, "adapterDefaults": None},
+            "reason": "initial"})
+        self.service.get(self.session)
+        event = next(e for e in self.session.events
+                     if e["type"] == "session/title-llm-request")
+        self.assertNotIn("reasoningEffort", event["data"])
+        disposer()
+
+    def test_reasoning_effort_rejects_blank(self):
+        with self.assertRaises(ValueError):
+            self._install_effort_provider("")
+
+    def test_provider_request_carries_current_title(self):
+        """提供者可据当前标题改写（上游 SessionTitleProviderRequest.currentTitle）。"""
+        captured = {}
+
+        def generate(request):
+            captured.update(request)
+            return {"title": "改写后的标题",
+                    "messageSeqs": [request["messages"][0]["seq"]]}
+
+        from miniharness.session_title import SessionTitleProvider
+
+        self.service.register(SessionTitleProvider("cap", "first-prompt", generate))
+        _user_message(self.session, "hello")
+        self.session.append("session/title", {
+            "title": "旧标题", "messageSeqs": [], "source": {"kind": "user"}})
+        title = self.service.refresh(self.session)
+        self.assertEqual(title["title"], "改写后的标题")
+        self.assertIsNotNone(captured.get("currentTitle"))
+        self.assertEqual(captured["currentTitle"]["title"], "旧标题")
 
     def test_first_prompt_selects_only_first_message(self):
         disposer = self._install_provider()

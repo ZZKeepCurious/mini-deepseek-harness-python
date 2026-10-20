@@ -12,11 +12,14 @@ from miniharness.context.agent_instructions import (
     baseline_instruction_state,
     candidate_scope_key,
     decode_scope_key,
-    dedup_instruction_files_by_directory,
+    dedup_instruction_files_by_candidate_group,
     descendant_dirs_between,
+    escape_project_display_path,
     find_project_root,
+    instruction_candidate_group,
     instruction_content_sha1,
     instruction_scope_key,
+    is_user_global_directory,
     load_baseline_instruction_set,
     render_agent_instruction_set,
     render_instruction_changes,
@@ -90,12 +93,37 @@ class TestDiscovery(unittest.TestCase):
             "cwd": self.deep, "dshHome": self.home, "maxBytes": 100_000,
             "projectRootMarkers": [".git"]})
         self.assertIsNotNone(result)
-        from miniharness.core.home_paths import resolve_dsh_home
-
         displayed = [file["displayPath"] for file in result["included"]]
-        self.assertEqual(displayed, [f"{resolve_dsh_home(self.home)}/AGENTS.md", "AGENTS.md",
+        # 被配置的根给环境变量名标签（上游 `rootDisplay`：`$DSH_HOME`）
+        self.assertEqual(displayed, ["$DSH_HOME/AGENTS.md", "AGENTS.md",
                                      os.path.join("packages", "app", "AGENTS.md")])
         self.assertEqual(result["observed"][-1]["content"], "nested")
+
+    def test_agents_home_root_and_cross_root_dedup(self):
+        """共享 agents 根是第二个 user-global 候选；与 harness 根同组去重（上游 files.ts:82-96）。"""
+        agents_home = os.path.join(self.root, "agents-home")
+        os.makedirs(agents_home)
+        self._write(os.path.join(self.home, "AGENTS.md"), "global")
+        self._write(os.path.join(agents_home, "AGENTS.md"), "  global  ")  # 去空白后与前者重复
+        result = load_baseline_instruction_set({
+            "cwd": self.deep, "dshHome": self.home, "agentsHome": agents_home,
+            "maxBytes": 100_000, "projectRootMarkers": [".git"]})
+        included = [file["displayPath"] for file in result["included"]]
+        # harness 根在前决定内容：两个根的同内容只渲染 harness 根那一个
+        self.assertEqual(included, ["$DSH_HOME/AGENTS.md"])
+        # 两个根分属两个 scope，但同属一个候选组
+        self.assertEqual(scope_for_display_path("$DSH_HOME/AGENTS.md"), "user-global")
+        self.assertEqual(scope_for_display_path("$DSH_AGENTS_HOME/AGENTS.md"), "agents-global")
+        self.assertFalse(is_user_global_directory("."))
+        self.assertEqual(instruction_candidate_group("agents-global"), "user-global")
+        self.assertEqual(instruction_candidate_group("packages"), "packages")
+
+    def test_escape_project_display_path_avoids_scope_collision(self):
+        self.assertEqual(escape_project_display_path("packages/app/AGENTS.md"),
+                         "packages/app/AGENTS.md")
+        self.assertEqual(escape_project_display_path("agents-global/AGENTS.md"),
+                         "." + os.sep + "agents-global/AGENTS.md")
+        self.assertEqual(escape_project_display_path("AGENTS.md"), "AGENTS.md")
 
     def test_budget_omits_broader_before_truncating_most_specific(self):
         self._write(os.path.join(self.proj, "AGENTS.md"), "P" * 2000)

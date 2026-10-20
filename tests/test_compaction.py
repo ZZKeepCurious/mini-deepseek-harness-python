@@ -312,6 +312,45 @@ class CompactSurfaceRegionTest(unittest.TestCase):
         self.assertEqual(last["type"], "compaction/end")
         self.assertIn("error", last["data"])
 
+    def test_summary_error_recovery_retries_and_succeeds(self):
+        """摘要失败经 `compaction/summary-error` 被恢复 → 重试并成功（上游 region.ts recover 循环）。"""
+        session = Session("c3")
+        _seed_history(session, n=20)
+        adapter = _SummaryAdapter("恢复后的摘要。", fail_times=1,
+                                  fail_code="IMAGE_OFFLOAD_REQUIRED")
+        agent = _agent(session, adapter)
+        seen = []
+
+        def recover(payload, next_fn):
+            seen.append(payload["error"].code)
+            self.assertEqual(payload["sourceEventSeqs"], payload["sourceEventSeqs"])
+            return True
+
+        agent.ctx.on("compaction/summary-error", recover)
+        nodes = session.surface_nodes()
+        result = asyncio.run(compact_surface_region(session, TokenMeter(), agent, resolve_config(),
+                                                    nodes[0]["seq"], nodes[-2]["seq"]))
+        self.assertEqual(seen, ["IMAGE_OFFLOAD_REQUIRED"])
+        self.assertEqual(adapter.calls, 2)  # 失败一次 + 重试一次
+        self.assertIn("compaction/summary", [e["type"] for e in session.events])
+        self.assertTrue(result["shadowedSeqs"])
+
+    def test_summary_error_without_recovery_propagates(self):
+        session = Session("c3")
+        _seed_history(session, n=2)
+        adapter = _SummaryAdapter(fail_times=1, fail_code="IMAGE_OFFLOAD_REQUIRED")
+        agent = _agent(session, adapter)
+
+        def recover(_payload, next_fn):
+            return next_fn()  # 无人接手 → 原错误上抛
+
+        agent.ctx.on("compaction/summary-error", recover)
+        nodes = session.surface_nodes()
+        with self.assertRaises(LlmFailure):
+            asyncio.run(compact_surface_region(session, TokenMeter(), agent, resolve_config(),
+                                               nodes[0]["seq"], nodes[0]["seq"]))
+        self.assertEqual(adapter.calls, 1)
+
     def test_unbalanced_boundary_rejected(self):
         session = Session("c3")
         session.append("turn/start", {"turn": 1})

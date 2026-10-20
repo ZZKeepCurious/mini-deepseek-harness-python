@@ -1,8 +1,13 @@
-"""Agent 作用域的 Schedule 管理工具（对齐 packages/schedule/schedule/src/tools.ts）。
+"""Agent 作用域的 Schedule 管理工具（对齐 packages/schedule/tool-schedule/src/index.ts）。
+
+上游把工具放在独立包 `dsh-tool-schedule`（preset 行 `tool-schedule`），服务包
+`dsh-schedule` 不挂工具；mini 同款拆分：`install_tool_schedule(ctx, service)` 是唯一的
+挂载入口（订阅 `agent/created` + 附着在场的 roots）。
 
 四工具注册进精确 agent 的 ToolRegistry，随 agent scope 拆解自动注销；
-render = JSON.stringify（canonical 值直接模型可见）。错误闭集为六个输入码 +
-internal_error；delete/update 未命中返回非错误的管理结果。
+render = JSON.stringify（canonical 值直接模型可见）。错误闭集为七个输入码 +
+internal_error；delete/update 未命中返回非错误的管理结果。委派子代理调用一律
+`subagent_session` 拒绝（工具层 + 服务层双门，service.py 的 `_reminder_target_refusal`）。
 """
 from __future__ import annotations
 
@@ -19,7 +24,7 @@ from .domain import (
     schedule_view,
 )
 
-__all__ = ["register_schedule_tools"]
+__all__ = ["install_tool_schedule", "register_schedule_tools"]
 
 _SELECTOR_KEYS = ("after_seconds", "at", "every_seconds", "daily", "weekly", "cron")
 
@@ -68,7 +73,8 @@ def _error_schema(code: str) -> dict:
 
 _ERROR_SCHEMAS = [_error_schema(code) for code in (
     "invalid_prompt", "invalid_selector", "invalid_rule", "invalid_time_zone",
-    "not_future", "time_out_of_range", "frequency_too_high", "internal_error",
+    "not_future", "time_out_of_range", "frequency_too_high", "subagent_session",
+    "internal_error",
 )]
 
 _CREATE_OUTPUT_SCHEMA = {"oneOf": [_VIEW_SCHEMA, *_ERROR_SCHEMAS]}
@@ -187,6 +193,25 @@ def _operation_error(error: BaseException) -> dict:
     return _internal_error()
 
 
+def _subagent_caller_refusal(agent: Any) -> dict | None:
+    """委派子代理不能使用提醒：每个工具在分派前拒绝（对齐 tool-schedule index.ts:228-238）。
+
+    不依赖挂载预设的工具过滤；深度经会话 meta 鸭子读取（同 service 的
+    `_delegation_depth_of`，避免 L2 引 L3 的 seams/subagent）。
+    """
+    session = getattr(agent, "session", None)
+    meta = getattr(session, "meta", None)
+    depth = meta.get("delegationDepth") if isinstance(meta, dict) else None
+    if depth is None:
+        return None
+    if not _domain._safe_int(depth) or depth < 0:
+        raise TypeError("agent delegationDepth must be a non-negative safe integer")
+    if depth == 0:
+        return None
+    return {"code": "subagent_session",
+            "message": "A delegated subagent cannot use reminders."}
+
+
 def _invalid_interval(every_seconds: Any) -> dict | None:
     if every_seconds is None:
         return None
@@ -274,6 +299,9 @@ def register_schedule_tools(service: Any, agent: Any) -> Any:
     async def create_execute(args: dict, exec_: Any):
         if exec_.agent is not agent:
             return _internal_error()
+        refusal = _subagent_caller_refusal(agent)
+        if refusal is not None:
+            return refusal
         invalid = _validate_create_args(args)
         if invalid is not None:
             return invalid
@@ -287,6 +315,9 @@ def register_schedule_tools(service: Any, agent: Any) -> Any:
     async def list_execute(_args: dict, exec_: Any):
         if exec_.agent is not agent:
             return _internal_error()
+        refusal = _subagent_caller_refusal(agent)
+        if refusal is not None:
+            return refusal
         try:
             records = await service.list({"sessionId": agent.session.session_id})
             now = _domain.now_ms()
@@ -301,6 +332,9 @@ def register_schedule_tools(service: Any, agent: Any) -> Any:
                     "message": "schedule_delete id must be non-empty without surrounding whitespace."}
         if exec_.agent is not agent:
             return _internal_error()
+        refusal = _subagent_caller_refusal(agent)
+        if refusal is not None:
+            return refusal
         try:
             return await service.delete(
                 {"sessionId": agent.session.session_id, "id": id_},
@@ -311,6 +345,9 @@ def register_schedule_tools(service: Any, agent: Any) -> Any:
     async def update_execute(args: dict, exec_: Any):
         if exec_.agent is not agent:
             return _internal_error()
+        refusal = _subagent_caller_refusal(agent)
+        if refusal is not None:
+            return refusal
         invalid = _validate_update_args(args)
         if invalid is not None:
             return invalid
@@ -406,5 +443,45 @@ def register_schedule_tools(service: Any, agent: Any) -> Any:
     def disposer() -> None:
         for dispose in reversed(disposers):
             dispose()
+
+    return disposer
+
+
+def install_tool_schedule(ctx: Any, service: Any = None) -> Any:
+    """按 agent 挂载 Schedule 四工具（对齐上游独立包 `dsh-tool-schedule` 的插件入口）。
+
+    服务包 `dsh-schedule` 不再自动挂工具：本入口订阅 `agent/created` 并把在场的
+    roots 立即附着，每个 agent 经 `agent.ctx.effect` 挂自己的工具集（agent scope
+    拆解即注销）。返回 dispose 监听器的 disposer。
+
+    @param ctx - 组装上下文（需 `ctx.schedule` 与 `ctx.agents`）。
+    @param service - 显式服务（缺省 `ctx.get('schedule')`）。
+    """
+    service = service if service is not None else ctx.get("schedule")
+    if service is None:
+        raise RuntimeError("tool-schedule: ctx.schedule is required (install_schedule)")
+    attached: set = set()
+
+    def attach(agent: Any) -> None:
+        if agent in attached:
+            return
+        agent.ctx.effect(
+            lambda: register_schedule_tools(service, agent), "schedule.tools()")
+        attached.add(agent)
+
+    def on_agent_created(payload: Any) -> None:
+        agent = payload.get("agent") if isinstance(payload, dict) else None
+        if agent is not None:
+            attach(agent)
+
+    dispose_listener = ctx.on("agent/created", on_agent_created)
+    agents = ctx.get("agents")
+    if agents is not None:
+        for agent in agents.roots():
+            attach(agent)
+
+    def disposer() -> None:
+        dispose_listener()
+        attached.clear()
 
     return disposer

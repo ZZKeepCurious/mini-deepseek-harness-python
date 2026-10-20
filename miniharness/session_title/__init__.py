@@ -321,7 +321,11 @@ class SessionTitleService(Service):
         if self.adapter is None:
             return None
         request = {"session": session, "messages": messages,
-                   "route": self._route_of(session)}
+                   "route": self._route_of(session),
+                   # 提供者可据当前标题改写（上游 SessionTitleProviderRequest.currentTitle，
+                   # session-title/src/index.ts:107,608-613）：无既有标题则省略键。
+                   **({} if fold_session_title(list(session.events)) is None
+                      else {"currentTitle": fold_session_title(list(session.events))})}
         result = provider.generate(request)
         validated = self._validate_result(provider, result, messages)
         if validated is None:
@@ -488,9 +492,13 @@ def register_first_prompt_llm_provider(ctx: Context, adapter: DeepSeekAdapter,
                                        config: dict | None = None) -> Callable[[], None]:
     """注册 first-prompt LLM 标题提供者（session-title-first-prompt-llm）。
 
+    策略归 provider 自有（上游把 `targetWords`/`targetCjkCharacters` 下放 provider
+    包 Config，共享 `session-title` 只留执行控制）：
+
     @param config - {targetWords, targetCjkCharacters, maxInputBytes,
-    maxOutputTokens, timeoutMs, provider?, model?}；provider/model 可缺省（走
-    请求路由），必须成对。
+    maxOutputTokens, timeoutMs, provider?, model?, reasoningEffort?}；provider/model
+    可缺省（走请求路由），必须成对；`reasoningEffort` 为 provider 自持的推理档位，
+    随每个标题请求发（缺省沿用适配器配置）。
     """
     from ..llm import LlmFailure as _LF  # noqa: F401
 
@@ -502,6 +510,9 @@ def register_first_prompt_llm_provider(ctx: Context, adapter: DeepSeekAdapter,
             raise ValueError(f"session-title-llm: {name} must be a positive integer")
     if (config.get("provider") is None) != (config.get("model") is None):
         raise ValueError("session-title-llm: provider and model must be supplied together")
+    effort = config.get("reasoningEffort")
+    if effort is not None and (not isinstance(effort, str) or effort == ""):
+        raise ValueError("session-title-llm: reasoningEffort must be a non-empty string")
 
     def generate(request: dict) -> dict:
         messages = request["messages"]
@@ -539,6 +550,10 @@ def _generate_with_llm(ctx: Context, adapter: DeepSeekAdapter, config: dict,
         "system": system,
         "messages": [{"seq": m["seq"], "text": m["text"]} for m in selected],
         "maxTokens": config["maxOutputTokens"],
+        # provider 自持的推理档位随请求落盘（上游 index.ts:274；读侧 v4 白名单见
+        # P0-1 / §2.117），缺省不落键。
+        **({} if config.get("reasoningEffort") is None
+           else {"reasoningEffort": config["reasoningEffort"]}),
     })
     messages = [{
         "id": f"title-{session.session_id}",
@@ -554,7 +569,8 @@ def _generate_with_llm(ctx: Context, adapter: DeepSeekAdapter, config: dict,
             # purpose='session-title'（deepseek 侧只映射 compaction 头）。
             stream = adapter.stream(
                 messages, [], session_id=session.session_id,
-                purpose="session-title")
+                purpose="session-title",
+                reasoning_effort=config.get("reasoningEffort"))
             async for chunk in stream:
                 assembler.push(chunk)
         except LlmFailure as error:

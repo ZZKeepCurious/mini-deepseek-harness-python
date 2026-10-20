@@ -356,6 +356,24 @@ class GoalDriverTest(unittest.TestCase):
         self.assertEqual(goals.get(loop)["roundsStarted"], 1)
         self.assertEqual(goals.get(loop)["phase"], "active")
 
+    def test_parked_queued_reservation_withdrawn_on_idle(self):
+        """parked 撤回（上游 index.ts:287-293）：仍停在 queued 的预约在 idle 到达时
+        不可能再运行 → 从 inbox 撤回该消息（免得后面的人类输入被搁浅），并按被弃
+        attempt 的 ref 落 pause。"""
+        _, goals, loop, driver, created = self._make(max_rounds=3)
+        message = create_message(
+            "user", [{"type": "text", "text": "stranded round"}],
+            {"kind": "goal", "goalId": created["id"], "revision": 1, "round": 1})
+        loop.inbox.append("next-turn", message)
+        driver._attempts[id(loop.session)] = {
+            "goalId": created["id"], "revision": 1, "round": 1,
+            "messageId": message["id"], "phase": "queued", "cancelled": False,
+        }
+        driver._pause_dropped(loop)
+        self.assertEqual(loop.inbox.next_turn, [])
+        self.assertNotIn(id(loop.session), driver._attempts)
+        self.assertEqual(goals.get(loop)["phase"], "paused")
+
     def test_driver_mode_auto_continues_on_idle(self):
         """driver 模式（async 表面）：goal/changed 触发首轮，idle 时自动续跑，
         到 round-limit 自动 block —— 无需宿主显式 continue_rounds()。"""

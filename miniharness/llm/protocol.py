@@ -486,7 +486,8 @@ class LlmAdapter:
 
     async def stream(self, messages: list[dict], tools: list[dict],
                      signal: Any | None = None, session_id: Any = None,
-                     purpose: str | None = None) -> AsyncIterator[StreamChunk]:
+                     purpose: str | None = None,
+                     reasoning_effort: str | None = None) -> AsyncIterator[StreamChunk]:
         """async 迭代器：逐 chunk 产出（对齐上游 async stream 迭代器）。
 
         signal 可选：协作式取消信号（_AbortProxy 形态，含 .aborted/.event）；

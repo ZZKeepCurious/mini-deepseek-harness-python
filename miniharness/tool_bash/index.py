@@ -5,6 +5,8 @@
     返回 `{kind:'promoted', jobId, timeoutMs, output}`；`run_in_background` 立即返回
     `{kind:'background', jobId}`。
   * 无 registry 时工具为纯前台，执行器 deadline 杀命令。
+  * 三态结果均带 **required `cwd`**（= 执行器解析后的 `spec.workdir`，
+    `resolveWorkdir(modelWorkdir, 会话有效工作目录)`），并作为 `presentation_meta`。
   * 前台结算投影为 `{kind:'foreground', exitCode, signal, timedOut, aborted,
     stopped?, timeoutMs, stdout, stderr, sandbox?}`；外部 kill 原因经 `stopped` 呈现。
   * 作业 owner 是调用方 agent id；后台进程经 `process_sources` 把非消耗观测流泵入
@@ -49,6 +51,7 @@ DEFAULT_CONFIG = {
 _BACKGROUND_OUTPUT_PROPERTIES = {
     "kind": {"type": "string", "required": True, "const": "background"},
     "jobId": {"type": "string", "required": True},
+    "cwd": {"type": "string", "required": True},
 }
 
 
@@ -83,12 +86,14 @@ def _output_schema() -> dict:
              "properties": dict(_BACKGROUND_OUTPUT_PROPERTIES)},
             {"type": "object", "additionalProperties": False, "properties": {
                 "kind": {"type": "string", "required": True, "const": "promoted"},
+                "cwd": {"type": "string", "required": True},
                 "jobId": {"type": "string", "required": True},
                 "timeoutMs": {"type": "number", "required": True},
                 "output": {"type": "string", "required": True},
             }},
             {"type": "object", "additionalProperties": False, "properties": {
                 "kind": {"type": "string", "required": True, "const": "foreground"},
+                "cwd": {"type": "string", "required": True},
                 "exitCode": {"required": True, "oneOf": [{"type": "integer"}, {"type": "null"}]},
                 "signal": {"required": True, "oneOf": [{"type": "string"}, {"type": "null"}]},
                 "timedOut": {"type": "boolean", "required": True},
@@ -108,8 +113,8 @@ def _output_schema() -> dict:
     }
 
 
-def _canonical(result: dict) -> dict:
-    """执行器结果 → 普通 JSON 数据（index.ts:187-210）。"""
+def _canonical(result: dict, cwd: str) -> dict:
+    """执行器结果 → 普通 JSON 数据（index.ts:187-210），带 canonical `cwd`。"""
     def output(stream: dict) -> dict:
         rendered = {"text": stream["text"], "truncated": stream["truncated"]}
         if stream.get("spillPath") is not None:
@@ -117,6 +122,7 @@ def _canonical(result: dict) -> dict:
         return rendered
 
     canonical = {
+        "cwd": cwd,
         "exitCode": result["exitCode"],
         "signal": result["signal"],
         "timedOut": result["timedOut"],
@@ -226,7 +232,7 @@ def _wait_on_job(jobs, attached: dict, owner, spec: dict, escalation_modes,
         # 准备阶段就到期：没有可保留的运行进程，按执行器 deadline 的 settled 空结果。
         _stop_and_settle(jobs, job_id, owner, "timed out during preparation")
         return {
-            "kind": "foreground", "exitCode": None, "signal": None,
+            "kind": "foreground", "cwd": spec["workdir"], "exitCode": None, "signal": None,
             "timedOut": True, "aborted": False, "timeoutMs": timeout_ms,
             "stdout": {"text": "", "truncated": False},
             "stderr": {"text": "", "truncated": False},
@@ -235,7 +241,7 @@ def _wait_on_job(jobs, attached: dict, owner, spec: dict, escalation_modes,
         read = jobs.read(job_id, owner)
         proc = attached["process"]()
         return {
-            "kind": "promoted", "jobId": job_id, "timeoutMs": timeout_ms,
+            "kind": "promoted", "cwd": spec["workdir"], "jobId": job_id, "timeoutMs": timeout_ms,
             "output": render_job_read(
                 ring_delta(read["chunks"]), read["lossy"],
                 read["job"].get("spillPaths") or [],
@@ -246,7 +252,7 @@ def _wait_on_job(jobs, attached: dict, owner, spec: dict, escalation_modes,
     if proc is None:
         raise RuntimeError(view.get("detail") or "bash job failed before producing a process")
     result = proc.result()
-    canonical = {"kind": "foreground", **_canonical(result)}
+    canonical = {"kind": "foreground", **_canonical(result, spec["workdir"])}
     stopped = attached["stopped"]()
     if stopped is not None:
         canonical["stopped"] = stopped
@@ -305,7 +311,7 @@ def create_bash_tool(ctx, shell, config: dict | None = None) -> Tool:
             spec = shell.resolve({**request, "onExpiry": "none"})
             attached = _start_job(shell, jobs, args["command"], owner, spec,
                                   escalation_modes, tool_call)
-            return {"kind": "background", "jobId": attached["id"]}
+            return {"kind": "background", "jobId": attached["id"], "cwd": spec["workdir"]}
         if promote:
             spec = shell.resolve({**request, "onExpiry": "none"})
             attached = None
@@ -324,7 +330,7 @@ def create_bash_tool(ctx, shell, config: dict | None = None) -> Tool:
         result = await asyncio.to_thread(execution.result)
         if result.get("aborted"):
             raise ToolAborted("tool call aborted")
-        return {"kind": "foreground", **_canonical(result)}
+        return {"kind": "foreground", **_canonical(result, spec["workdir"])}
 
     def render(args: dict, value: dict) -> list:
         if value["kind"] == "background":
@@ -376,6 +382,7 @@ def create_bash_tool(ctx, shell, config: dict | None = None) -> Tool:
         output={"schema": _output_schema()},
         execute=execute,
         render=render,
+        presentation_meta=lambda args, value: {"cwd": value["cwd"]},
     )
 
 

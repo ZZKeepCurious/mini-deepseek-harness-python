@@ -17,11 +17,47 @@ mini 简化标注：同步模型下摘要期间无并发 surface 变更（工具
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 from ..core.session import create_message, derive_event_message
 from .summarizer import frame_summary, summarize_with_adapter
 
 __all__ = ["compact_surface_region", "inspect_compaction_entry_state", "select_compactable_range"]
+
+
+def aborted(signal: Any) -> bool:
+    """取消信号是否已触发（鸭子读取 `aborted`/`is_set()`，零跨层 import）。
+
+    与 `shell.types.is_aborted` 同语义，但 compaction 属 L2、不得引 L3 的 shell。
+    """
+    if signal is None:
+        return False
+    value = getattr(signal, "aborted", None)
+    if value is not None:
+        return bool(value)
+    is_set = getattr(signal, "is_set", None)
+    return bool(is_set()) if callable(is_set) else False
+
+
+def _recover_summary_error(agent, session, source_event_seqs, error, signal) -> bool:
+    """提升 `compaction/summary-error` 恢复 waterfall；返回是否有监听者接手（可重试）。
+
+    对齐上游 compaction-basic/src/region.ts 的 `dependencies.recover(...)`：
+    `ctx.waterfall('compaction/summary-error', {session, sourceEventSeqs, error, signal}, () => false)`；
+    监听者返回真值 = 表面修复成功、重试摘要。
+    """
+    ctx = getattr(agent, "ctx", None)
+    if ctx is None:
+        return False
+    payload: dict = {
+        "session": session,
+        "sourceEventSeqs": list(source_event_seqs),
+        "error": error,
+    }
+    if signal is not None:
+        payload["signal"] = signal
+    return bool(ctx.waterfall("compaction/summary-error", payload,
+                              base=lambda _payload: False))
 
 
 def select_compactable_range(session, measurement: dict, retain_tokens: int):
@@ -65,12 +101,17 @@ def select_compactable_range(session, measurement: dict, retain_tokens: int):
             "end": surface_nodes[keep_from - 1]["seq"]}
 
 
-async def compact_surface_region(session, meter, agent, config: dict, start: int, end: int) -> dict:
+async def compact_surface_region(session, meter, agent, config: dict, start: int, end: int,
+                                 signal: Any = None) -> dict:
     """在一个选定 surface 区间上跑完整压缩事务（start/end 为当前 surface 上的 seq）。
 
     返回压缩结果 {compactionId, startSeq, summarySeq, endSeq, summary,
     shadowedRange, shadowedSeqs, shadowedTokenCount}。async：摘要经适配器
     async 迭代器（asyncio 化重构后唯一形态）。
+
+    摘要失败经 `compaction/summary-error` 恢复 waterfall（上游 compaction-basic/
+    region.ts 的 recover 循环）：已取消 → 原错误抛出；无人恢复 → 原错误抛出；
+    有人恢复（表面已被修复）→ 重选区间与输入后重试。
     """
     selection = _validate_surface_region(session, start, end)
     entry = inspect_compaction_entry_state(session.events)
@@ -94,7 +135,29 @@ async def compact_surface_region(session, meter, agent, config: dict, start: int
             raise ValueError("compaction: selected surface changed before summarization began")
         shadowed_tokens = sum(n["tokens"] for n in selected)
         input_ = _build_summarization_input(session, selection["shadowedSeqs"])
-        summary_result = await summarize_with_adapter(agent, config, input_)
+        while True:
+            try:
+                summary_result = await summarize_with_adapter(agent, config, input_)
+                break
+            except Exception as error:
+                # 取消落在恢复窗口 → 不发恢复 waterfall，原错误上抛（上游
+                # `if (signal?.aborted === true) throw error`）。
+                if aborted(signal):
+                    raise
+                if not _recover_summary_error(agent, session, selection["shadowedSeqs"],
+                                              error, signal):
+                    raise
+                # 表面可能已被恢复监听者修复：重选区间、重测预算、重建输入后重试。
+                selection = _validate_surface_region(session, start, end)
+                measurement = meter.measure(session)
+                selected = measurement["nodes"]
+                current = session.surface_nodes()
+                if len(selected) != len(current) or any(
+                        n["seq"] != c["seq"] for n, c in zip(selected, current)):
+                    raise ValueError(
+                        "compaction: selected surface changed before summarization began")
+                shadowed_tokens = sum(n["tokens"] for n in selected)
+                input_ = _build_summarization_input(session, selection["shadowedSeqs"])
 
         checkpoint = create_message(
             "user",

@@ -182,6 +182,40 @@ class ResolverCase(unittest.TestCase):
         self.assertEqual(candidates[0]["mention"],
                          format_session_reference_mention({"sessionId": "other", "label": "other"}))
 
+    def test_candidates_carry_display_title_and_subagent_label(self):
+        """label/displayTitle 双键（上游 projectedLabels）：无 title → id；subagent 的
+        label 优先作 displayTitle，mention 用 displayTitle（index.ts:268-275,300）。"""
+        from miniharness.core.session_store import install_sessions
+        from miniharness.session_projection import ProjectionDefinition
+
+        store = install_sessions(self.ctx)
+        store.create("other", {"meta": {"cwd": os.getcwd()}})
+        projections = self.ctx.get("sessionProjections")
+        projections.register(ProjectionDefinition(
+            "title", init=lambda _h, _i: "持久标题", apply=lambda state, _e: state,
+            view=lambda state: state))
+        projections.register(ProjectionDefinition(
+            "subagent", init=lambda _h, _i: {"label": "子代理标签"},
+            apply=lambda state, _e: state, view=lambda state: state))
+        label, display = self.resolver._projected_labels({"header": {"id": "other"}})
+        self.assertEqual(label, "持久标题")
+        self.assertEqual(display, "子代理标签")
+        # 无 title/subagent 回答的会话 → label = id、displayTitle = label
+        self.assertEqual(self.resolver._projected_labels({"header": {"id": "plain"}}),
+                         ("plain", "plain"))
+        candidates = self.resolver.list_candidates(self.agent, "")
+        self.assertEqual(candidates[0]["label"], "持久标题")
+        self.assertEqual(candidates[0]["displayTitle"], "子代理标签")
+        # 查询命中 displayTitle（子代理标签）而非 label
+        self.assertEqual(
+            self.resolver.list_candidates(self.agent, "子代理标签")[0]["sessionId"], "other")
+        remote = self.resolver.remote_export_candidates(self.agent, "")
+        self.assertEqual(remote[0]["mention"],
+                         format_session_reference_mention(
+                             {"sessionId": "other", "label": "子代理标签"}))
+        # 未挂投影的既有发现语义不变（label 回退 id）
+        self.assertEqual(remote[0]["label"], "持久标题")
+
     def test_default_budget_when_adapter_missing(self):
         bare = Context(name="session-reference-budget")
         self.addCleanup(bare.dispose)

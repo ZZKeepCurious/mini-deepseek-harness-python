@@ -466,6 +466,9 @@ class BashToolTest(unittest.TestCase):
 
         def resolve(self, request):
             spec = {**self.spec, **request}
+            # 执行器契约：ShellExecSpec.workdir 恒有值（LocalBashExecutor.resolve
+            # 同款回退），工具结果 required `cwd` 取自它。
+            spec.setdefault("workdir", os.getcwd())
             self.requests.append(spec)
             return spec
 
@@ -488,9 +491,26 @@ class BashToolTest(unittest.TestCase):
             self._exec_with_session(Session("s1"))))
         self.assertEqual(value["kind"], "foreground")
         self.assertEqual(value["exitCode"], 2)
+        # 三态结果 required `cwd` = 执行器解析后的 spec.workdir（对齐 index.ts:155-179）
+        self.assertEqual(value["cwd"], os.getcwd())
+        self.assertEqual(tool.presentation_meta({"command": "x"}, value), {"cwd": os.getcwd()})
         rendered = tool.render({"command": "x"}, value)[0]["text"]
         self.assertIn("boom", rendered)
         self.assertIn("[exit code: 2]", rendered)
+
+    def test_result_cwd_follows_resolved_workdir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Session("s1", meta={"cwd": tmp})
+            shell = self._FakeShell(settled_execution(0, "", ""))
+            tool = self._tool(shell)
+            value = asyncio.run(tool.execute(
+                {"command": "x", "description": "run x"},
+                self._exec_with_session(session)))
+            self.assertEqual(Path(value["cwd"]), Path(tmp))
+            relative = asyncio.run(tool.execute(
+                {"command": "x", "description": "run x", "workdir": "sub"},
+                self._exec_with_session(session)))
+            self.assertEqual(Path(relative["cwd"]), Path(tmp) / "sub")
 
     def test_denial_is_marker_not_tool_error(self):
         shell = self._FakeShell(settled_execution(
@@ -552,6 +572,7 @@ class BashPromotionTest(unittest.TestCase):
             value = _wait_on_job(registry, attached, None, spec, ())
             self.assertEqual(value["kind"], "promoted")
             self.assertEqual(value["jobId"], attached["id"])
+            self.assertEqual(value["cwd"], spec["workdir"])
             self.assertIn("moved to background job", render_promoted(value))
         finally:
             registry.kill(attached["id"], None, "test cleanup")
@@ -569,7 +590,28 @@ class BashPromotionTest(unittest.TestCase):
         attached = _start_job(shell, registry, "quick", None, spec, ())
         value = _wait_on_job(registry, attached, None, spec, ())
         self.assertEqual(value["kind"], "foreground")
+        self.assertEqual(value["cwd"], spec["workdir"])
         self.assertEqual(value["stdout"]["text"], "quick")
+
+    def test_background_result_carries_cwd(self):
+        """`run_in_background` 的 background 句柄带 required `cwd`（index.ts:505-509）。"""
+        ctx = Context(name="t")
+        registry = LocalJobRegistry(ctx)
+        registry.attach_controller("test", ctx)
+        self.addCleanup(ctx.dispose)
+        shell = LocalBashExecutor(ctx, {"program": [sys.executable, "-c"]})
+        tool = create_bash_tool(ctx, shell)
+        value = asyncio.run(tool.execute(
+            {"command": "import time; time.sleep(30)", "description": "sleep",
+             "run_in_background": True},
+            SimpleNamespace(agent=None, signal=None)))
+        self.assertEqual(value["kind"], "background")
+        self.assertEqual(Path(value["cwd"]), Path(os.getcwd()))
+        self.assertEqual(tool.presentation_meta({}, value), {"cwd": value["cwd"]})
+        registry.kill(value["jobId"], None, "test cleanup")
+        settled = registry.wait(value["jobId"], 10_000, None)
+        if settled["status"] not in ("running", "stopping"):
+            registry.remove(value["jobId"], None)
 
 
 class ShellEnvRegistryTest(unittest.TestCase):

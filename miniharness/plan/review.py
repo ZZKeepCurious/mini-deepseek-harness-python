@@ -30,7 +30,8 @@ import re
 from typing import Any, Callable
 
 from ..core.scope import Context
-from ..core.tools import Tool
+from ..core.session import deep_freeze
+from ..core.tools import Tool, ToolResult
 from ..interaction.user_questions import ASK_CANCELLED, UserQuestionError
 from .mode import PlanModeController, fold_plan_mode
 
@@ -60,6 +61,9 @@ EXIT_PLAN_MODE_DESCRIPTION = (
 
 #: 批准后的模型可见输出（上游 output.render，index.ts:319）。
 _APPROVED_TEXT = "Plan approved — plan mode exited; carry out the plan starting with your next step."
+#: 审查被收回（dismiss）后的模型可见输出（上游 output.render 的 false 分支，index.ts:319）。
+_DISMISSED_TEXT = ("The user dismissed the plan review to reply in their own words; "
+                   "plan mode remains active.")
 #: markdown `# ` 标题校验（上游 index.ts:327：/^#\s+\S/）。
 _HEADING_PATTERN = re.compile(r"^#\s+\S")
 
@@ -156,10 +160,16 @@ def install_plan_review(ctx: Context, controller: PlanModeController) -> None:
             })
         except UserQuestionError as error:
             if error.code == ASK_CANCELLED:
-                # 用户收回回合（dismiss）：保 plan mode，等其消息（上游 index.ts:325-330）
-                raise _exit_plan_mode_error(
-                    "The user dismissed the plan review to speak instead; stay in plan mode, "
-                    "stop here, and wait for their message.") from error
+                # 用户收回回合（dismiss）：不是失败——用户拿回回合说选项没覆盖的话，
+                # 回合就此结束（不再花一次模型请求）。上游 `exec.concludeTurn()` +
+                # 返回 {approved:false}（index.ts:331-341）；mini 以结果携带
+                # concludes_turn 表达同一契约，模型可见文案止于 render。
+                return ToolResult(
+                    ok=True,
+                    content=deep_freeze([{"type": "text", "text": _DISMISSED_TEXT}]),
+                    value={"approved": False},
+                    concludes_turn=True,
+                )
             raise  # ASK_ABORTED / NO_PROVIDER 等保持原消息透传（上游 throw cause）
         # 审查结果按 REVIEW_ID 过滤：恰好一条才取（上游 index.ts:336-343）
         review_items = [a for a in result.get("answers", []) if a.get("id") == REVIEW_ID]
@@ -179,9 +189,9 @@ def install_plan_review(ctx: Context, controller: PlanModeController) -> None:
         # canonical 值（上游 execute 返回 {approved:true}）；模型可见文案经 render 分离
         return {"approved": True}
 
-    def _render_approved(_value: Any) -> str:
-        # 上游 output.render（index.ts:319）：canonical {approved:true} → 模型可见文案
-        return _APPROVED_TEXT
+    def _render_exit(_args: Any, value: Any) -> str:
+        # 上游 output.render（index.ts:291-296）：approved 真假各一支模型可见文案。
+        return _APPROVED_TEXT if value.get("approved") else _DISMISSED_TEXT
 
     tools.register(Tool(
         name=EXIT_PLAN_MODE,
@@ -199,9 +209,9 @@ def install_plan_review(ctx: Context, controller: PlanModeController) -> None:
         output={
             "type": "object",
             "additionalProperties": False,
-            "properties": {"approved": {"type": "boolean", "const": True, "required": True}},
+            "properties": {"approved": {"type": "boolean", "required": True}},
         },
-        render=_render_approved,
+        render=_render_exit,
         present_call=lambda args: {
             "card": "generic",
             "title": (_first_heading(args.get("plan", "")) or "Plan"),

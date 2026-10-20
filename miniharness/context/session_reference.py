@@ -43,6 +43,9 @@ __all__ = [
 ]
 
 MAX_REFERENCES = 3
+
+#: 无 I/O 标签解析所读的两个投影键（上游 LABEL_KEYS，index.ts:67）。
+_LABEL_KEYS = ("title", "subagent")
 DEFAULT_CANDIDATE_LIMIT = 50
 DEFAULT_MAX_REFERENCE_BYTES = 65_536
 DEFAULT_REFERENCE_CONTEXT_FRACTION = 0.2
@@ -447,20 +450,23 @@ class SessionReferenceResolver(Service):
                                         "SESSION_REFERENCE_READ_FAILED")
         records = [record for record in query_service.list_sessions()
                    if (record.get("header") or {}).get("id") != agent.id]
-        labelled = [(index, record, self._projected_title(record)
-                     or (record.get("header") or {}).get("id"))
+        # 批量取标签（上游 projectedLabels：一次解析服务 + 逐条读投影快照）
+        labelled = [(index, record, *self._projected_labels(record))
                     for index, record in enumerate(records)]
-        filtered = [(index, record, label) for index, record, label in labelled
+        filtered = [(index, record, label, display_title)
+                    for index, record, label, display_title in labelled
                     if needle == ""
                     or needle in str((record.get("header") or {}).get("id", "")).lower()
                     or needle in str((record.get("header") or {}).get("cwd") or "").lower()
-                    or needle in str(label).lower()]
+                    or needle in str(label).lower()
+                    or needle in str(display_title).lower()]
         filtered.sort(key=lambda item: (
             _candidate_rank((item[1].get("header") or {}).get("cwd"), target_cwd), item[0]))
         result = []
-        for _index, record, label in filtered[:limit]:
+        for _index, record, label, display_title in filtered[:limit]:
             header = record.get("header") or {}
             candidate = {"sessionId": header.get("id"), "label": label,
+                         "displayTitle": display_title,
                          "sameWorkspace": header.get("cwd") is not None
                          and header.get("cwd") == target_cwd,
                          "createdAt": header.get("createdAt")}
@@ -469,20 +475,32 @@ class SessionReferenceResolver(Service):
             result.append(candidate)
         return result
 
-    def _projected_title(self, record: dict) -> str | None:
+    def _projected_labels(self, record: dict) -> tuple:
+        """一条记录的无 I/O 标签与展示标题（上游 projectedLabels，index.ts:252-278）。
+
+        两个投影键答：`title`（缺省 → 会话 id）与 `subagent`（subagent 的 `label`
+        优先作为展示标题）。两者都不读会话日志（此路径在每个 `@` 击键下运行）。
+        """
         header = record.get("header") or {}
+        session_id = header.get("id")
         sessions = self.ctx.get("sessions")
         projections = self.ctx.get("sessionProjections")
-        attached = sessions.get(header.get("id")) if sessions is not None else None
+        attached = sessions.get(session_id) if sessions is not None else None
+        snapshot = None
         if attached is not None and projections is not None:
-            snapshot = projections.snapshot(attached, ["title"])
-            title = snapshot.get("values", {}).get("title") if isinstance(snapshot, dict) else None
-            return title if title else None
-        return None
+            snapshot = projections.snapshot(attached, list(_LABEL_KEYS))
+        values = snapshot.get("values") if isinstance(snapshot, dict) else None
+        title = values.get("title") if isinstance(values, dict) else None
+        label = title if title else session_id
+        subagent = values.get("subagent") if isinstance(values, dict) else None
+        sub_label = subagent.get("label") if isinstance(subagent, dict) else None
+        display_title = label if sub_label is None else sub_label
+        return label, display_title
 
     def remote_export_candidates(self, agent: Any, query: str) -> list:
         return [{**candidate,
-                 "mention": format_session_reference_mention(candidate)}
+                 "mention": format_session_reference_mention(
+                     {**candidate, "label": candidate.get("displayTitle") or candidate["label"]})}
                 for candidate in self.list_candidates(agent, query or "", self.candidate_limit)]
 
     # ---------- 准备 ----------

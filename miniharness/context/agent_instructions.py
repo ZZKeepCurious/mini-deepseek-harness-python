@@ -19,24 +19,38 @@ import hashlib
 import os
 from typing import Any
 
-from ..core.home_paths import DSH_HOME_DIR_NAME, resolve_dsh_home
+from ..core.home_paths import (
+    AGENTS_HOME_ENV,
+    DEFAULT_AGENTS_HOME_DISPLAY,
+    DEFAULT_DSH_HOME_DISPLAY,
+    DSH_HOME_ENV,
+    agents_home_display,
+    dsh_home_display,
+    resolve_agents_home,
+    resolve_dsh_home,
+)
 from ..core.scope import Context
 from ..core.session.message import create_message, text_block
 from ..core.working_cwd import working_directory_of
 
 __all__ = [
+    "AGENTS_GLOBAL_DIRECTORY",
     "NAME",
+    "USER_GLOBAL_DIRECTORIES",
     "agent_instructions_message",
     "ancestor_chain",
     "candidate_scope_key",
     "decode_scope_key",
-    "dedup_instruction_files_by_directory",
+    "dedup_instruction_files_by_candidate_group",
     "descendant_dirs_between",
     "discover_baseline_instruction_files",
+    "escape_project_display_path",
     "find_project_root",
     "install_agent_instructions",
+    "instruction_candidate_group",
     "instruction_content_sha1",
     "instruction_scope_key",
+    "is_user_global_directory",
     "load_baseline_instruction_set",
     "reconcile_instruction_context",
     "render_agent_instruction_set",
@@ -54,6 +68,11 @@ DEFAULT_LOCAL_INSTRUCTION_FILE_CANDIDATES = ("AGENTS.local.md", "CLAUDE.local.md
 DEFAULT_MAX_SOURCE_BYTES = 1_048_576
 
 USER_GLOBAL_DIRECTORY = "user-global"
+#: 共享 agents 根的用户级 scope 目录名（上游 render.ts:105）。与 harness 根分属
+#: 两个 scope，但去重时同属一个候选组（见 `instruction_candidate_group`）。
+AGENTS_GLOBAL_DIRECTORY = "agents-global"
+#: 两个 user-global scope 的有序目录（发现/去重/协调同序：harness 根在前）。
+USER_GLOBAL_DIRECTORIES = (USER_GLOBAL_DIRECTORY, AGENTS_GLOBAL_DIRECTORY)
 USER_GLOBAL_FILE = "AGENTS.md"
 
 _SYSTEM_REMINDER_OPEN = "<system-reminder>"
@@ -71,6 +90,8 @@ _EMPTY_REPLACEMENT_INTRO = (
 _COMPACT_INTRO = "Workspace instructions were omitted or truncated to fit the configured byte budget."
 
 _RESERVED_PATH_SEGMENTS = frozenset({"", ".", ".."})
+#: 会被读成 user-global scope 的目录名（不得与项目目录名冲突）。
+_RESERVED_SCOPE_DIRECTORIES = frozenset(USER_GLOBAL_DIRECTORIES)
 _SCOPE_SEPARATOR = "\u0000"
 
 
@@ -83,17 +104,16 @@ def _resolve_instruction_candidates(candidates: Any, fallback: tuple) -> list:
             if name not in _RESERVED_PATH_SEGMENTS and "/" not in name and "\\" not in name]
 
 
-def _dsh_home_display(dsh_home: str) -> str:
-    default = os.path.join(os.path.expanduser("~"), DSH_HOME_DIR_NAME)
-    return "~/.dsh" if os.path.abspath(dsh_home) == os.path.abspath(default) else dsh_home
-
-
 def resolve_config(config: dict | None = None) -> dict:
     config = dict(config or {})
+    # 两个 user-global 根都由进程环境解析（对齐上游：行级 `dshHome` 字段已删除）；
+    # 组装方若已解析则经内部已解析键 `dshHome`/`agentsHome` 传入并在此归一。
     dsh_home = resolve_dsh_home(config.get("dshHome"))
+    agents_home = resolve_agents_home(config.get("agentsHome"))
     markers = config.get("projectRootMarkers")
     return {
         "dshHome": dsh_home,
+        "agentsHome": agents_home,
         "projectRootMarkers": list(markers) if markers is not None
         else list(DEFAULT_PROJECT_ROOT_MARKERS),
         "instructionFileCandidates": _resolve_instruction_candidates(
@@ -171,7 +191,8 @@ def descendant_dirs_between(root: str, touched_path: str) -> list:
 
 
 def relative_display(root: str, path: str) -> str:
-    return os.path.relpath(path, root)
+    """绝对指令路径 → 项目展示路径（对齐上游 `relativeDisplay`，含 scope 名避碰）。"""
+    return escape_project_display_path(os.path.relpath(path, root))
 
 
 def _stat_file(path: str, file_system: Any = None) -> dict:
@@ -202,12 +223,19 @@ def _discover_files(options: dict, file_system: Any = None) -> list:
         seen.add(file["absolutePath"])
         files.append(file)
 
-    user_global = os.path.join(resolved["dshHome"], USER_GLOBAL_FILE)
-    probe = _stat_file(user_global, file_system)
-    if probe["kind"] == "present":
-        add({"absolutePath": user_global,
-             "displayPath": f"{_dsh_home_display(resolved['dshHome'])}/AGENTS.md",
-             **{k: v for k, v in probe.items() if k != "kind"}})
+    user_global_roots = (
+        (USER_GLOBAL_DIRECTORY, resolved["dshHome"], dsh_home_display(resolved["dshHome"])),
+        (AGENTS_GLOBAL_DIRECTORY, resolved["agentsHome"],
+         agents_home_display(resolved["agentsHome"])),
+    )
+    for _scope, home, display in user_global_roots:
+        path = os.path.join(home, USER_GLOBAL_FILE)
+        probe = _stat_file(path, file_system)
+        if probe["kind"] == "present":
+            add({"absolutePath": path,
+                 "directory": _scope,
+                 "displayPath": f"{display}/{USER_GLOBAL_FILE}",
+                 **{k: v for k, v in probe.items() if k != "kind"}})
 
     cwd = os.path.abspath(options["cwd"])
     project_root = options.get("projectRoot")
@@ -231,12 +259,18 @@ def discover_baseline_instruction_files(options: dict) -> list:
             for file in _discover_files(options)]
 
 
-def dedup_instruction_files_by_directory(files: list) -> list:
+def dedup_instruction_files_by_candidate_group(files: list) -> list:
+    """按候选组去重（对齐上游 `dedupInstructionFilesByCandidateGroup`）。
+
+    两个 user-global 根同属一组（相同去空白内容只渲染最早者）；每个项目目录自成一
+    组。不同组即使内容相同也不合并。
+    """
     kept_digests: dict = {}
     kept: list = []
     for file in files:
-        directory = os.path.dirname(file["displayPath"])
-        digests = kept_digests.setdefault(directory, set())
+        directory = file.get("directory") or scope_for_display_path(file["displayPath"])
+        group = instruction_candidate_group(directory)
+        digests = kept_digests.setdefault(group, set())
         digest = trimmed_instruction_digest(file["content"])
         if digest in digests:
             continue
@@ -277,7 +311,7 @@ def load_baseline_instruction_set(options: dict, file_system: Any = None) -> dic
             if file.get("version") is not None:
                 entry["version"] = file["version"]
             loaded.append(entry)
-    deduped = dedup_instruction_files_by_directory(loaded)
+    deduped = dedup_instruction_files_by_candidate_group(loaded)
     replace = options.get("replacePreviousBaseline")
     if not deduped:
         if replace is not True:
@@ -294,10 +328,39 @@ def load_baseline_instruction_set(options: dict, file_system: Any = None) -> dic
 
 
 def scope_for_display_path(display_path: str) -> str:
-    if display_path in ("~/.dsh/AGENTS.md", "$DSH_HOME/AGENTS.md"):
+    if display_path in (f"{DEFAULT_DSH_HOME_DISPLAY}/{USER_GLOBAL_FILE}",
+                        f"${DSH_HOME_ENV}/{USER_GLOBAL_FILE}"):
         return USER_GLOBAL_DIRECTORY
+    if display_path in (f"{DEFAULT_AGENTS_HOME_DISPLAY}/{USER_GLOBAL_FILE}",
+                        f"${AGENTS_HOME_ENV}/{USER_GLOBAL_FILE}"):
+        return AGENTS_GLOBAL_DIRECTORY
     # node path.dirname 对裸文件名为 "."；Python os.path.dirname 为 ""，须归一。
     return os.path.dirname(display_path) or "."
+
+
+def is_user_global_directory(directory: str) -> bool:
+    """解码后的 scope 目录是否属于两个 user-global 根之一（上游 `isUserGlobalDirectory`）。"""
+    return directory in _RESERVED_SCOPE_DIRECTORIES
+
+
+def instruction_candidate_group(directory: str) -> str:
+    """一个 scope 目录的候选组键（上游 `instructionCandidateGroup`）。
+
+    harness 根与共享 agents 根是同一 user-global 候选组的有序候选（trimmed 内容
+    相同只渲染一次，且一个不可观测的候选保留整组的 last-good 状态）；每个项目目录
+    自成一组的组键即其目录。
+    """
+    return USER_GLOBAL_DIRECTORY if directory == AGENTS_GLOBAL_DIRECTORY else directory
+
+
+def escape_project_display_path(relative_path: str) -> str:
+    """把可能撞上 user-global scope 名的项目路径移出该命名空间（上游 `escapeProjectDisplayPath`）。
+
+    项目目录名恰为 `user-global`/`agents-global` 时，否则会被解析成全局根探测并在
+    去重时并入全局候选组；加前导 `.` 分量让它留在自己的项目 scope。
+    """
+    first = relative_path.replace("\\", "/").split("/", 1)[0]
+    return f".{os.sep}{relative_path}" if first in _RESERVED_SCOPE_DIRECTORIES else relative_path
 
 
 def candidate_scope_key(directory: str, candidate_name: str) -> str:
@@ -555,9 +618,13 @@ def baseline_instruction_state(files: list) -> dict:
 
 def _probe_scope(scope: str, project_root: str, resolved: dict, file_system: Any) -> dict:
     directory, candidate = decode_scope_key(scope)["directory"], decode_scope_key(scope)["candidateName"]
-    if directory == USER_GLOBAL_DIRECTORY:
-        base = resolved["dshHome"]
-        display = f"{_dsh_home_display(resolved['dshHome'])}/AGENTS.md"
+    if is_user_global_directory(directory):
+        if directory == AGENTS_GLOBAL_DIRECTORY:
+            base = resolved["agentsHome"]
+            display = f"{agents_home_display(resolved['agentsHome'])}/{USER_GLOBAL_FILE}"
+        else:
+            base = resolved["dshHome"]
+            display = f"{dsh_home_display(resolved['dshHome'])}/{USER_GLOBAL_FILE}"
     else:
         base = project_root if directory == "." else os.path.join(project_root, directory)
         display = None
@@ -595,6 +662,7 @@ def reconcile_instruction_context(agent: Any, resolved: dict, version_cache: dic
             target.add(candidate_scope_key(directory, candidate))
 
     baseline_scopes.add(candidate_scope_key(USER_GLOBAL_DIRECTORY, USER_GLOBAL_FILE))
+    baseline_scopes.add(candidate_scope_key(AGENTS_GLOBAL_DIRECTORY, USER_GLOBAL_FILE))
     for directory in ancestor_chain(project_root, cwd):
         add_dir_scopes(baseline_scopes, _relative_scope(project_root, directory))
     if options.get("includeBaselineScopes"):
@@ -611,8 +679,8 @@ def reconcile_instruction_context(agent: Any, resolved: dict, version_cache: dic
         if not options.get("includeBaselineScopes") and scope in baseline_scopes:
             continue
         directory = decode_scope_key(scope)["directory"]
-        if directory == USER_GLOBAL_DIRECTORY:
-            scopes.add(candidate_scope_key(USER_GLOBAL_DIRECTORY, USER_GLOBAL_FILE))
+        if is_user_global_directory(directory):
+            scopes.add(candidate_scope_key(directory, USER_GLOBAL_FILE))
         else:
             add_dir_scopes(scopes, directory)
     for touched in options.get("touchedPaths", []):
@@ -639,11 +707,22 @@ def reconcile_instruction_context(agent: Any, resolved: dict, version_cache: dic
         version_updates.append({"change": change})
 
     scopes_by_directory: dict = {}
-    for scope in scopes:
-        directory = decode_scope_key(scope)["directory"]
-        scopes_by_directory.setdefault(directory, []).append(scope)
+    # 两个 user-global 根同属一个候选组且须按 USER_GLOBAL_DIRECTORIES 序处理
+    # （harness 根在前决定内容去重）；项目 scopes 按稳定序处理。
+    _user_global_order = {name: index for index, name in enumerate(USER_GLOBAL_DIRECTORIES)}
 
-    for directory, directory_scopes in scopes_by_directory.items():
+    def _scope_order(scope: str):
+        directory = decode_scope_key(scope)["directory"]
+        if is_user_global_directory(directory):
+            return (0, _user_global_order[directory], "")
+        return (1, 0, scope)
+
+    for scope in sorted(scopes, key=_scope_order):
+        directory = decode_scope_key(scope)["directory"]
+        group = instruction_candidate_group(directory)
+        scopes_by_directory.setdefault(group, []).append(scope)
+
+    for group, directory_scopes in scopes_by_directory.items():
         probed: list = []
         for scope in directory_scopes:
             excluded = options.get("excludedBaselineScopes")
@@ -671,7 +750,7 @@ def reconcile_instruction_context(agent: Any, resolved: dict, version_cache: dic
                         versions.pop(candidate_scope, None)
                     else:
                         versions[candidate_scope] = state
-                kept_trimmed.pop(directory, None)
+                kept_trimmed.pop(group, None)
                 break
             if probe["kind"] == "absent":
                 if previous is None or previous["action"] == "remove":
@@ -686,7 +765,7 @@ def reconcile_instruction_context(agent: Any, resolved: dict, version_cache: dic
                     and previous is not None and previous["action"] != "remove"
                     and previous["path"] == cached["path"]
                     and previous["digest"] == cached["digest"]):
-                if register_kept_trimmed(directory, cached["trimmedDigest"]):
+                if register_kept_trimmed(group, cached["trimmedDigest"]):
                     push_removal(scope, previous["path"])
                 continue
             loaded = _read_bounded(file, resolved["maxSourceBytes"], file_system)
@@ -696,7 +775,7 @@ def reconcile_instruction_context(agent: Any, resolved: dict, version_cache: dic
                             "content": loaded, "version": file.get("version")}
             current_digest = instruction_content_sha1(loaded)
             trimmed = trimmed_instruction_digest(loaded)
-            if register_kept_trimmed(directory, trimmed):
+            if register_kept_trimmed(group, trimmed):
                 if previous is not None and previous["action"] != "remove":
                     push_removal(scope, previous["path"])
                 else:
@@ -788,6 +867,7 @@ def apply_agent_instructions(ctx: Context, config: dict | None = None) -> None:
         if not keep_visible:
             instructions = load_baseline_instruction_set({
                 "cwd": cwd, "dshHome": resolved["dshHome"],
+                "agentsHome": resolved["agentsHome"],
                 "projectRootMarkers": resolved["projectRootMarkers"],
                 "maxBytes": max_bytes, "maxSourceBytes": resolved["maxSourceBytes"],
                 "instructionFileCandidates": resolved["instructionFileCandidates"],

@@ -414,23 +414,30 @@ class DeepSeekAdapter(LlmAdapter):
         return [catalog_model_info(self.provider, model) for model in self._models]
 
     async def stream(self, messages, tools, signal=None,
-                     session_id=None, purpose=None):
+                     session_id=None, purpose=None, reasoning_effort=None):
         """async 迭代器（对齐上游 async stream）：httpx 异步传输 + Messages SSE。
 
         含图片且模型目录宣称 image 输入时走 image-capable 序列化（Files API
         file-id 优先、解析失败整请求回退 inline base64），否则走文本路径。
         session_id/purpose 映射为 x-deepseek-harness-session-id/-compact 头
         （adapter.ts:129-130）。
+        `reasoning_effort` 为 per-call 覆盖（上游 provider 自持的推理选择：标题
+        provider 等辅助请求按自己的档位发，缺省沿用实例配置）。
         """
+        if reasoning_effort is not None and reasoning_effort not in self.REASONING_EFFORTS:
+            raise ValueError(
+                f"invalid reasoning mode {reasoning_effort!r}; "
+                f"expected one of {self.REASONING_EFFORTS}")
         abort_event = getattr(signal, "event", None) if signal is not None else None
         if not any(content_has_image(message.get("content") or []) for message in messages):
-            body = self._build_body(messages, tools)
+            body = self._build_body(messages, tools, reasoning_effort=reasoning_effort)
             async for chunk in self._iter_request_chunks(
                     body, abort_event, session_id=session_id, purpose=purpose):
                 yield chunk
             return
         async for chunk in self._stream_images_impl(
-                messages, tools, abort_event, signal, session_id, purpose):
+                messages, tools, abort_event, signal, session_id, purpose,
+                reasoning_effort=reasoning_effort):
             yield chunk
 
     async def _iter_request_chunks(self, *args, **kwargs):
@@ -448,7 +455,8 @@ class DeepSeekAdapter(LlmAdapter):
             raise mapped from error
 
     async def _stream_images_impl(self, messages, tools, abort_event, signal,
-                                  session_id=None, purpose=None):
+                                  session_id=None, purpose=None,
+                                  reasoning_effort=None):
         model = next((entry for entry in self._models if entry.id == self._model), None)
         if model is None or "image" not in (model.inputModalities or ()):
             raise LlmFailure(
@@ -499,7 +507,8 @@ class DeepSeekAdapter(LlmAdapter):
             except FileResolutionFailure:
                 representation = {"kind": "base64"}
                 continue
-            body = self._build_body(projected, tools, image_parts=image_parts)
+            body = self._build_body(projected, tools, image_parts=image_parts,
+                                    reasoning_effort=reasoning_effort)
             retry_state = {"retry": False}
             async for chunk in self._iter_request_chunks(
                     body, abort_event, request_files, retry_state,
@@ -531,10 +540,13 @@ class DeepSeekAdapter(LlmAdapter):
             object_map[attachment_id] = version
         return version_map, object_map
 
-    def _build_body(self, messages, tools, image_parts=None) -> dict:
+    def _build_body(self, messages, tools, image_parts=None,
+                    reasoning_effort: str | None = None) -> dict:
         return serialize(
             messages, model=self._model, models=self._models,
-            reasoning_effort=self._reasoning_effort, thinking=self._thinking,
+            reasoning_effort=(reasoning_effort if reasoning_effort is not None
+                              else self._reasoning_effort),
+            thinking=self._thinking,
             max_tokens=self._max_tokens,
             default_max_tokens=self._connection.maxTokens,
             tools=tools, image_parts=image_parts)

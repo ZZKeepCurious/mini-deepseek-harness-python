@@ -56,7 +56,7 @@ from .domain import (
 from .runtime import ScheduleRuntime
 from .service import ScheduleService, install_schedule
 from .storage import schedule_domain, schedule_task_schema
-from .tools import register_schedule_tools
+from .tools import install_tool_schedule, register_schedule_tools
 from .update import resolve_schedule_update, retained_title
 from .types import (
     DEFAULT_DELIVERY_HISTORY_DAYS,
@@ -99,6 +99,7 @@ __all__ = [
     "delivery_history_page",
     "fold_schedule_events",
     "install_schedule",
+    "install_tool_schedule",
     "is_recurring_schedule_record",
     "normalize_weekdays",
     "parse_at_input",

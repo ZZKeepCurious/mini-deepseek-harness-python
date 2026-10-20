@@ -4,8 +4,10 @@
 
 当 image-capable 路由以 `IMAGE_OFFLOAD_REQUIRED` 拒绝请求时，插件记录一条
 `image/offload` 决策，选中当前请求顺序里最旧的 retained 输入 occurrence，
-并经 agent 或 compaction summary 的 request-error waterfall 重试。后续请求
-对这些 occurrence 发送占位文本（见 `core/session/projections.py`）。
+并经 agent 的 request-error waterfall 或 compaction 摘要失败的
+`compaction/summary-error` 恢复 waterfall 重试。后续请求对这些 occurrence
+发送占位文本（见 `core/session/projections.py`）。两条监听都在信号已取消时
+放手（request-error 委派下游；summary-error 原样上抛）。
 
 这是 durable surface 修复，不是 provider 重试：不消耗重试预算，也不落
 retry 事件。
@@ -17,6 +19,7 @@ from typing import Any
 from ..core.session import default_message_projections
 from ..core.session.surface import _surface_nodes, derive_event_message
 from ..llm.protocol import IMAGE_OFFLOAD_REQUIRED
+from .region import aborted
 
 __all__ = [
     "IMAGE_OFFLOAD_REQUIRED",
@@ -76,8 +79,13 @@ def install_image_offload(ctx) -> Any:
     """在 ctx 上安装图像卸载恢复监听（上游 apply）。
 
     监听 `agent/request-error`：`IMAGE_OFFLOAD_REQUIRED` 且携带
-    `offloadImages` 计数时，对当前 surface 输入节点记录一次 `image/offload`
-    决策并返回 `{kind:'retry'}`；无可卸载 occurrence 则委派下游（next）。
+    `offloadImages` 计数、且信号未取消时，对当前 surface 输入节点记录一次
+    `image/offload` 决策并返回 `{kind:'retry'}`；无可卸载 occurrence 或已取消
+    则委派下游（next）。
+
+    监听 `compaction/summary-error`：摘要失败同码且携带 `offloadImages` 时，对
+    失败请求的输入事件做同样的最旧 occurrence 卸载并返回真值（摘要重试）；已
+    取消则原样抛出（上游 `signal?.throwIfAborted()`）。
 
     @param ctx - 拥有监听器的插件上下文。
     @returns disposer。
@@ -89,7 +97,7 @@ def install_image_offload(ctx) -> Any:
                 or getattr(failure, "code", None) != IMAGE_OFFLOAD_REQUIRED):
             return next_fn()
         offload_count = getattr(failure, "offload_images", None)
-        if offload_count is None:
+        if offload_count is None or aborted(payload.get("signal")):
             return next_fn()
         nodes = agent.session.surface_nodes()
         if not offload_oldest_images(agent.session, [node["seq"] for node in nodes],
@@ -97,4 +105,28 @@ def install_image_offload(ctx) -> Any:
             return next_fn()
         return {"kind": "retry"}
 
-    return ctx.on("agent/request-error", on_request_error)
+    def on_summary_error(payload: dict, next_fn):
+        session = payload.get("session")
+        error = payload.get("error")
+        if (session is None or error is None
+                or getattr(error, "code", None) != IMAGE_OFFLOAD_REQUIRED):
+            return next_fn()
+        offload_count = getattr(error, "offload_images", None)
+        if offload_count is None:
+            return next_fn()
+        if aborted(payload.get("signal")):
+            # 上游 `signal?.throwIfAborted()`：取消落在此窗口即终止恢复，原错误上抛。
+            raise error
+        if not offload_oldest_images(session, list(payload.get("sourceEventSeqs") or []),
+                                     offload_count):
+            return next_fn()
+        return True
+
+    disposer = ctx.on("agent/request-error", on_request_error)
+    summary_disposer = ctx.on("compaction/summary-error", on_summary_error)
+
+    def dispose() -> None:
+        disposer()
+        summary_disposer()
+
+    return dispose

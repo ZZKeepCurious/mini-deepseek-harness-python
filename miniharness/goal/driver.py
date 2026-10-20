@@ -167,28 +167,44 @@ class GoalDriver:
                 attempt["cancelled"] = True
 
     def _pause_dropped(self, loop) -> None:
-        """pause fence（alpha.1）：pause 只钉在被弃 attempt 的确切 ref 上——
-        attempt 处于 queued/claimed 或已 cancelled，且 goalId+revision 与当前
-        live 目标均匹配、目标 active+armed 才落 pause。resume 会推高 revision，
-        故「宿主 pause 后立即 resume（被中止回合尚未收敛到 idle）」不会把已
-        复活的目标再次误杀。pause 失败 → warn + disarm（上游 catch 分支）。"""
-        attempt = self._attempts.get(self._sid(loop))
+        """idle 结算被弃 attempt（alpha.1 + parked 撤回，上游 index.ts:274-301）：
+
+        - **parked 撤回**：仍然 queued 的预约在 idle 到达时已不可能运行 → 从 inbox
+          撤回该消息，免得排在它后面的人类输入被搁浅；
+        - **pause fence**：pause 只钉在被弃 attempt 的确切 ref 上——attempt 处于
+          queued/claimed 或已 cancelled，且 goalId+revision 与当前 live 目标均匹配、
+          目标 active+armed 才落 pause。resume 会推高 revision，故「宿主 pause 后立即
+          resume（被中止回合尚未收敛到 idle）」不会把已复活的目标再次误杀。
+
+        pause/撤回失败 → warn + disarm（上游 catch 分支）。
+        """
+        sid = self._sid(loop)
+        attempt = self._attempts.get(sid)
         if attempt is None:
             return
-        if not (attempt["phase"] in ("queued", "claimed") or attempt["cancelled"]):
-            return
         view = self._goals.get(loop)
-        if (view is None or view["phase"] != "active" or view["activation"] != "armed"
-                or attempt["goalId"] != view["id"] or attempt["revision"] != view["revision"]):
+        pause = (
+            (attempt["phase"] in ("queued", "claimed") or attempt["cancelled"])
+            and view is not None and view["phase"] == "active"
+            and view["activation"] == "armed"
+            and attempt["goalId"] == view["id"]
+            and attempt["revision"] == view["revision"])
+        # 上游条件：pause 成立，或预约仍停在 queued（此时无论目标是否仍可驱动都要撤回）
+        if not (pause or attempt["phase"] == "queued"):
             return
-        self._attempts.pop(self._sid(loop), None)
+        self._attempts.pop(sid, None)
         try:
-            self._goals.pause(loop, {"id": view["id"], "revision": view["revision"]})
+            if attempt["phase"] == "queued":
+                inbox = getattr(loop, "inbox", None)
+                if inbox is not None:
+                    inbox.remove(attempt["messageId"])
+            if pause:
+                self._goals.pause(loop, {"id": view["id"], "revision": view["revision"]})
         except Exception as error:
             logger = getattr(self._ctx, "logger", None)
             if logger is not None and hasattr(logger, "warn"):
-                logger.warn(f'goal-round-driver: could not pause cancelled goal for agent '
-                            f'"{loop.id}": {error}')
+                logger.warn(f'goal-round-driver: could not settle cancelled goal round for '
+                            f'agent "{loop.id}": {error}')
             self._goals.disarm(loop)
 
     # ---------- 事件驱动续跑（driver 模式，对齐上游 goal-round-driver） ----------

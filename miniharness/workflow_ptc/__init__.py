@@ -145,22 +145,41 @@ class PtcWorkflowRun:
     # ---------- 内部驱动 ----------
 
     async def _drive(self) -> dict:
-        """跑 guest 程序并映射结局（host.ts:273-305）。"""
+        """跑 guest 程序并映射结局（host.ts:273-305）。
+
+        沙箱强制门（host.ts:287-289）：运行时不声明 `sandbox_mode`（无法强制文件
+        策略）而部署又挂了非 `danger-full-access` 的受限策略时拒绝开跑——工作流可
+        改动文件，不能强制就失败。未挂 sandboxPolicy 服务（无部署策略）视为无约束
+        放行（上游 policy 恒存在；mini 无策略服务 ≈ 未约束部署）。
+        """
         runtime = self._engine.ptc_runtime
         bindings = self._bindings()
         guest = self._engine.guest_program()
         program = guest + "\n\n" + self._init["body"]
         from ..ptc_runtime.types import PtcRunRequest
-        request = PtcRunRequest(
-            program=program,
-            bindings=[bindings],
-            cwd=working_directory_of(self.parent),
-            timeoutMs=None,
-            signal=self._abort_event,
-        )
         try:
+            cwd = working_directory_of(self.parent)
+            self._require_active()
+            policy = self.policy
+            mode = None if policy is None else policy.get("mode")
+            if runtime.sandbox_mode is None and mode is not None and mode != "danger-full-access":
+                return self._failure_outcome(
+                    f"workflow runtime cannot enforce the {mode} file policy")
+            request = PtcRunRequest(
+                program=program,
+                bindings=[bindings],
+                cwd=cwd,
+                timeoutMs=None,
+                signal=self._abort_event,
+                # 上游仅在运行时声明 sandboxMode 时传策略；mini 的 Python 运行时不
+                # 声明（显式策略会被它拒绝），故此键只在声明时出现。
+                **({} if runtime.sandbox_mode is None else {"sandboxPolicy": policy}),
+            )
             outcome = await runtime.run(runtime.resolve(request))
         except Exception as error:  # noqa: BLE001 - 基础设施故障折 error
+            # 取消落在驱动窗口：结算为 cancelled 而非基础设施 error（上游 host.ts:302-306）。
+            if self._cancel_reason is not None:
+                return self._cancelled_outcome()
             return self._failure_outcome(f"workflow execution failed: {error}")
         if outcome.error is not None:
             if self._cancel_reason is not None:

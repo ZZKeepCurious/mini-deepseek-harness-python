@@ -1,7 +1,7 @@
 """pwsh 工具（ctx.shell 的模型面消费者，对齐 packages/shell/tool-pwsh/src/index.ts）。
 
-与 tool-bash 同构（前台/提升/后台三态 + jobs 集成 + `kind:'pwsh'`），差异只在
-pwsh 方言：描述文本（`pwsh -Command`、原生 Windows 路径、`$env:`）、系统提示
+与 tool-bash 同构（前台/提升/后台三态 + jobs 集成 + `kind:'pwsh'` + required `cwd`），
+差异只在 pwsh 方言：描述文本（`pwsh -Command`、原生 Windows 路径、`$env:`）、系统提示
 节（`tool:pwsh`）、作业 kind `'pwsh'`、前台 canonical 恒带 `kind:'foreground'`。
 """
 from __future__ import annotations
@@ -38,6 +38,7 @@ DEFAULT_CONFIG = {
 _BACKGROUND_OUTPUT_PROPERTIES = {
     "kind": {"type": "string", "required": True, "const": "background"},
     "jobId": {"type": "string", "required": True},
+    "cwd": {"type": "string", "required": True},
 }
 
 
@@ -72,12 +73,14 @@ def _output_schema() -> dict:
              "properties": dict(_BACKGROUND_OUTPUT_PROPERTIES)},
             {"type": "object", "additionalProperties": False, "properties": {
                 "kind": {"type": "string", "required": True, "const": "promoted"},
+                "cwd": {"type": "string", "required": True},
                 "jobId": {"type": "string", "required": True},
                 "timeoutMs": {"type": "number", "required": True},
                 "output": {"type": "string", "required": True},
             }},
             {"type": "object", "additionalProperties": False, "properties": {
                 "kind": {"type": "string", "required": True, "const": "foreground"},
+                "cwd": {"type": "string", "required": True},
                 "exitCode": {"required": True, "oneOf": [{"type": "integer"}, {"type": "null"}]},
                 "signal": {"required": True, "oneOf": [{"type": "string"}, {"type": "null"}]},
                 "timedOut": {"type": "boolean", "required": True},
@@ -97,8 +100,8 @@ def _output_schema() -> dict:
     }
 
 
-def _canonical(result: dict) -> dict:
-    """执行器结果 → 普通 JSON 数据（含 kind:'foreground' 前缀）。"""
+def _canonical(result: dict, cwd: str) -> dict:
+    """执行器结果 → 普通 JSON 数据（含 kind:'foreground' 前缀 + canonical `cwd`）。"""
     def output(stream: dict) -> dict:
         rendered = {"text": stream["text"], "truncated": stream["truncated"]}
         if stream.get("spillPath") is not None:
@@ -107,6 +110,7 @@ def _canonical(result: dict) -> dict:
 
     canonical = {
         "kind": "foreground",
+        "cwd": cwd,
         "exitCode": result["exitCode"],
         "signal": result["signal"],
         "timedOut": result["timedOut"],
@@ -208,7 +212,7 @@ def _wait_on_job(jobs, attached: dict, owner, spec: dict, signal=None) -> dict:
     if view["status"] in ("running", "stopping") and attached["process"]() is None:
         _stop_and_settle(jobs, job_id, owner, "timed out during preparation")
         return {
-            "kind": "foreground", "exitCode": None, "signal": None,
+            "kind": "foreground", "cwd": spec["workdir"], "exitCode": None, "signal": None,
             "timedOut": True, "aborted": False, "timeoutMs": timeout_ms,
             "stdout": {"text": "", "truncated": False},
             "stderr": {"text": "", "truncated": False},
@@ -217,7 +221,7 @@ def _wait_on_job(jobs, attached: dict, owner, spec: dict, signal=None) -> dict:
         read = jobs.read(job_id, owner)
         proc = attached["process"]()
         return {
-            "kind": "promoted", "jobId": job_id, "timeoutMs": timeout_ms,
+            "kind": "promoted", "cwd": spec["workdir"], "jobId": job_id, "timeoutMs": timeout_ms,
             "output": render_job_read(
                 ring_delta(read["chunks"]), read["lossy"],
                 read["job"].get("spillPaths") or [],
@@ -228,7 +232,7 @@ def _wait_on_job(jobs, attached: dict, owner, spec: dict, signal=None) -> dict:
     if proc is None:
         raise RuntimeError(view.get("detail") or "pwsh job failed before producing a process")
     result = proc.result()
-    canonical = _canonical(result)
+    canonical = _canonical(result, spec["workdir"])
     stopped = attached["stopped"]()
     if stopped is not None:
         canonical["stopped"] = stopped
@@ -275,7 +279,7 @@ def create_pwsh_tool(ctx, shell, config: dict | None = None) -> Tool:
                 raise ToolAborted("tool call aborted")
             spec = shell.resolve({**request, "onExpiry": "none"})
             attached = _start_job(shell, jobs, args["command"], owner, spec, tool_call)
-            return {"kind": "background", "jobId": attached["id"]}
+            return {"kind": "background", "jobId": attached["id"], "cwd": spec["workdir"]}
         if promote:
             spec = shell.resolve({**request, "onExpiry": "none"})
             attached = None
@@ -293,7 +297,7 @@ def create_pwsh_tool(ctx, shell, config: dict | None = None) -> Tool:
         result = await asyncio.to_thread(execution.result)
         if result.get("aborted"):
             raise ToolAborted("tool call aborted")
-        return _canonical(result)
+        return _canonical(result, spec["workdir"])
 
     def render(args: dict, value: dict) -> list:
         if value["kind"] == "background":
@@ -347,6 +351,7 @@ def create_pwsh_tool(ctx, shell, config: dict | None = None) -> Tool:
         output={"schema": _output_schema()},
         execute=execute,
         render=render,
+        presentation_meta=lambda args, value: {"cwd": value["cwd"]},
     )
 
 
