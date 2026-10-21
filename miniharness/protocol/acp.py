@@ -745,6 +745,7 @@ class AcpServer:
             "model_control": None,
             "selection": self._initial_selection,
             "inflight": False,
+            "cancel_requested": False,
             "meter": TokenMeter(),
         }
         record["model_control"] = AcpModelControl(self._adapter,
@@ -983,6 +984,7 @@ class AcpServer:
             "model_control": None,
             "selection": self._initial_selection,
             "inflight": False,
+            "cancel_requested": False,
             "meter": TokenMeter(),
         }
         record["session"] = repair_and_replay(
@@ -1125,15 +1127,21 @@ class AcpServer:
         # onInboxClaimed → pinTurn；mini 单飞串行，无穿插切换）
         prompt_selection = record["model_control"].snapshot()
         record["inflight"] = True
+        record["cancel_requested"] = False
         try:
             message = create_message("user", content, {"kind": "user"})
             record["model_control"].pin_turn(prompt_selection)
             try:
-                record["loop"].followup(message)
+                if not record["cancel_requested"]:
+                    record["loop"].followup(message)
             finally:
                 record["model_control"].release_turn()
         finally:
             record["inflight"] = False
+        if record["cancel_requested"]:
+            # 显式取消（session/cancel）无论 turn 落哪个 reason 都以 'cancelled'
+            # 结算（上游 session.ts:537-540；aborted 本身只表示普通静默）。
+            return {"stopReason": "cancelled"}
         reason = self._last_turn_end(record["loop"])
         if reason is None:
             # turnless：无回合结束记录 → 'cancelled'（上游 index.ts:331 同语义）
@@ -1278,6 +1286,7 @@ class AcpServer:
         record = self._sessions.get(session_id)
         if record is None:
             return   # 未知 session no-op（上游同语义）
+        record["cancel_requested"] = True
         record["loop"].cancel()
 
     # ---------- 审批桥 ----------

@@ -542,6 +542,49 @@ unary `POST /api/account/<method>`；除 `getState`/`hasRunningAccountTasks` 外
   fold `agent-preset/selected` 整值替换，有 wire）——`session/projections` 与 control
   projection 帧暴露该单元。
 
+### 4.12 `goals` / `skills` / `fileReferences`（前端补全面）
+
+三个随前端功能面补入的 Host namespace：
+
+- `goals`（上游 `packages/goal/goal`，host plane + `goal-round-driver`）。unary
+  `POST /api/goals/<method>`，Agent 身份的 wire 名为 `agentId`：
+  - `goals/get`（`{args:{agentId}}`）→ `GoalView|null`（无当前目标 → null）。
+  - `goals/create`（`{args:{agentId, request:{objective, maxGoalRounds?}}}`）→
+    `{ref:{id, revision}}`（上游 `remoteExportCreate` 形状）。
+  - `goals/edit`（`{args:{agentId, ref, request:{objective?, maxGoalRounds?}}}`）→ `GoalView`。
+  - `goals/pause|resume|complete|clear`（`{args:{agentId, ref}}`）→ `GoalView`；`clear` 返回
+    tombstone `{id, revision}`（revision = 清空前 +1）。
+  - 域错误（stale revision / not found / invalid transition）折 `gateway/internal`，消息保留
+    `GoalError` 文本；命名空间未挂 → `gateway/invocation-unavailable`。
+- `skills/list`（上游 `packages/api/session-controller/src/skill-catalog.ts`）：
+  `{args:{request:{sessionId}}}` → `{skills:[{name, path?, description, whenToUse?,
+  modelInvocable}]}`，只列 user-invocable 条目；未知会话 → `session/not-found`，
+  request 形状错 → `gateway/arguments-invalid`。
+- `fileReferences/list`（上游 `session-controller/src/file-references.ts`）：
+  `{args:{agentId, query?}}` → `[{path, kind:'file'|'directory'}]`（目录带尾 `/`），由
+  `ctx.fileReferences` provider 排序；未挂 provider → `gateway/invocation-unavailable`。
+
+> 登记差异：`skills/list` 只服务 store 内会话与全局注册表（无 cold observation /
+> preset-scoped registry）；`goals/*` 对 cold 会话沿用 attach-on-demand 口径。
+> 见 `status/mini-harness/verified-diffs.md` §2.142。
+
+### 4.13 `llm` / `commands` / `directoryPicker`
+
+- `llm/listProviders`（`{args:{}}`）→ `[{id,name}]`（适配器路由；pi-ai 多 profile）。
+- `llm/listConfigurableProviders`（`{args:{}}`）→ 适配器声明的目录条目；未声明 → `[]`。
+- `llm/discoverModels`（`{args:{settingsNs, request:{provider?, baseURL?, api?, apiKey?}}}`）→
+  `[{id, name?, inputModalities?}]`；未知 provider/仅 baseURL → `llm/model-discovery-rejected`。
+- `commands/list`（`{args:{agentId}}`）→ `[{name, description, input?:{hint}}]`。
+- `commands/execute`（`{args:{agentId, line, submittedAttachments}}`）→
+  `{commandId, result}` 或 `null`（非命令行/未知命令）；命令未声明 `input.attachments` 时
+  非空附件结算为 `{kind:'error', text:'/<name> does not accept attachments'}`。
+- `directoryPicker/list`（`{args:{path?}}`）→ `{path, home, crumbs, entries, truncated}`
+  （只列直接子目录；`path` 缺省宿主 home；相对路径 → `directory-picker/unreadable`）。
+- `directoryPicker/createDirectory`（`{args:{path, name}}`）→ 新目录绝对路径；
+  已存在 → `directory-picker/exists`；非法段名 → `gateway/bad-request`。
+- `directoryPicker/pick`（`{args:{}}`）→ browse 载体恒 `directory-picker/unavailable`
+  `{capability:'browse'}`（native chooser 未组合）。
+
 ## 5. `$events/result`（HTTP unary 特判端点，`web/server.py` + `web/events.py`）
 `POST /api/$events/result`，body 为 `client-request` 全形，`payload` 恰：
 

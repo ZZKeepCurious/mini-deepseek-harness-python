@@ -308,7 +308,7 @@ class LocalFileReferenceService(FileReferenceService):
         if agent_ctx is None:
             return
 
-        def setup(scope):
+        def setup(scope, _config=None):
             prompt = scope.get("systemPrompt")
             if prompt is None:
                 return

@@ -172,6 +172,9 @@ def _v4_table() -> dict[str, dict]:
     table = dict(RELEASED_V3_EVENT_DISPOSITIONS)
     table["developer/message"] = _disposition(["turn", "step", "message"], ["headerSeq"])
     table["workspace/changes"] = _disposition(["turn"])
+    # 显式交付（packages/deliverables/tool-present/src/types.ts）：
+    # {turn, callId, files:[{path, description?}]}。
+    table["deliverables/presented"] = _disposition(["turn", "callId", "files"])
     # dsh-v0.2.1-rc.2 same-version 扩展（SESSION_FORMAT_VERSION 仍为 4）：
     # 3 条新事件 required-on-read，加入 v4 canonical 词表。
     # 工作目录变更（上游 working-directory/src/index.ts）：恰 {cwd}。

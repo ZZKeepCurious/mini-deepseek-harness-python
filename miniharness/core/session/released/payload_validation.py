@@ -108,6 +108,18 @@ def array_value(value: Any, label: str, validate: Callable[[Any, str], Any]) -> 
     return value
 
 
+def presented_files_value(value: Any, label: str) -> None:
+    """`deliverables/presented.files`：每项 {path, description?}。"""
+    def one(file: Any, file_label: str) -> None:
+        if not isinstance(file, dict):
+            raise fail(f"{file_label} must be an object")
+        exact_keys(file, ("path",), ("description",), file_label)
+        non_empty_string(file.get("path"), f"{file_label} path")
+        if file.get("description") is not None:
+            string_value(file.get("description"), f"{file_label} description")
+    array_value(value, label, one)
+
+
 def coordinate_pair(data: dict, label: str) -> None:
     count_value(data.get("turn"), f"{label} turn")
     count_value(data.get("step"), f"{label} step")
@@ -1290,6 +1302,10 @@ def assert_released_payload_semantics(event: dict, version: int) -> None:
         developer_message_value(data, label, version)
     elif etype == "workspace/changes":
         count_value(data.get("turn"), f"{label} turn")
+    elif etype == "deliverables/presented":
+        count_value(data.get("turn"), f"{label} turn")
+        non_empty_string(data.get("callId"), f"{label} callId")
+        presented_files_value(data.get("files"), f"{label} files")
     elif etype == "working-directory/change":
         working_directory_change_value(data, label)
     elif etype == "job/registered":

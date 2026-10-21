@@ -738,8 +738,10 @@ class InstallWebTest(unittest.TestCase):
         runtime = install_web(ctx, WebConfig())
         self.assertIs(ctx.get("web"), runtime)
         self.assertEqual(
-            [p.id for p in list(runtime._search_providers.values())], [DEEPSEEK_PROVIDER_ID])
-        self.assertEqual([p.id for p in list(runtime._fetch_providers.values())], ["http"])
+            [p.id for p in list(runtime._search_providers.values())],
+            [DEEPSEEK_PROVIDER_ID, "deepseek-search-api"])
+        self.assertEqual([p.id for p in list(runtime._fetch_providers.values())],
+                         ["http", "deepseek-fetch-api"])
         self.assertEqual(runtime.tool_config.search_timeout_ms, 60_000)
 
     def test_invalid_config_fails_loud(self):
@@ -862,6 +864,84 @@ class DeepSeekSearchProviderTest(unittest.TestCase):
             run(provider.search({"query": "q"}, signal))
         self.assertEqual(cm.exception.code, "WEB_ABORTED")
         self.assertEqual(str(cm.exception), "DeepSeek search aborted")
+
+
+class DeepSeekApiProviderTest(unittest.TestCase):
+    """`web-deepseek-api`：Search / Fetch 直连 provider 的 wire 映射与失败分类。"""
+
+    def _transport(self, handler):
+        import httpx
+        return httpx.MockTransport(handler)
+
+    def test_search_maps_sources(self):
+        from miniharness.web_tools.deepseek_api import DeepSeekSearchApiProvider
+
+        def handler(request):
+            import httpx
+            self.assertEqual(str(request.url), "https://api.example/v1/tools/search")
+            self.assertEqual(request.headers["authorization"], "Bearer secret")
+            body = json.loads(request.content)
+            self.assertEqual(body, {"query": "q", "count": 3, "need_content": False})
+            return httpx.Response(200, json={"results": [
+                {"url": "https://a", "title": "A", "snippet": "sa", "date": "2026-01-02"},
+                {"url": "https://b", "title": "", "snippet": "", "date": None},
+            ]})
+
+        provider = DeepSeekSearchApiProvider(lambda: {
+            "apiKey": "secret", "apiKeyEnv": "NOPE",
+            "baseURL": "https://api.example/v1/tools", "count": 10,
+        }, transport=self._transport(handler))
+        self.assertTrue(provider.available())
+        result = asyncio.run(provider.search({"query": "q", "maxResults": 3}))
+        self.assertEqual(result, {"sources": [
+            {"url": "https://a", "title": "A", "snippet": "sa",
+             "publishedAt": "2026-01-02"},
+            {"url": "https://b"},
+        ], "truncated": False})
+
+    def test_fetch_returns_text_body(self):
+        from miniharness.web_tools.deepseek_api import DeepSeekFetchApiProvider
+
+        def handler(request):
+            import httpx
+            self.assertEqual(str(request.url), "https://api.example/v1/tools/fetch")
+            self.assertEqual(json.loads(request.content), {"url": "https://page"})
+            return httpx.Response(200, json={"content": "# hello"})
+
+        provider = DeepSeekFetchApiProvider(lambda: {
+            "apiKey": "secret", "baseURL": "https://api.example/v1/tools",
+        }, transport=self._transport(handler))
+        result = asyncio.run(provider.fetch({"url": "https://page"}))
+        self.assertEqual(result, {
+            "url": "https://page", "statusCode": 200,
+            "body": {"kind": "text", "content": "# hello"}, "truncated": False})
+
+    def test_redirect_and_http_failures_are_provider_errors(self):
+        from miniharness.web_tools.deepseek_api import DeepSeekSearchApiProvider
+
+        def redirect(request):
+            import httpx
+            return httpx.Response(302, headers={"location": "https://elsewhere"})
+
+        provider = DeepSeekSearchApiProvider(lambda: {
+            "apiKey": "secret", "baseURL": "https://api.example/v1/tools", "count": 10,
+        }, transport=self._transport(redirect))
+        with self.assertRaises(WebError) as cm:
+            asyncio.run(provider.search({"query": "q"}))
+        self.assertEqual(cm.exception.code, "WEB_PROVIDER_ERROR")
+        self.assertIn("redirects are rejected", str(cm.exception))
+
+    def test_missing_credential_is_unavailable(self):
+        from miniharness.web_tools.deepseek_api import DeepSeekSearchApiProvider
+
+        provider = DeepSeekSearchApiProvider(lambda: {
+            "apiKey": None, "apiKeyEnv": "MINIHARNESS_TEST_MISSING_KEY",
+            "baseURL": "https://api.example/v1/tools", "count": 10,
+        })
+        self.assertFalse(provider.available())
+        with self.assertRaises(WebError) as cm:
+            asyncio.run(provider.search({"query": "q"}))
+        self.assertEqual(cm.exception.code, "WEB_PROVIDER_CREDENTIAL_MISSING")
 
 
 def _json_bytes(value):

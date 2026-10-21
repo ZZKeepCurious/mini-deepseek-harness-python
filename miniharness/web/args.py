@@ -258,10 +258,80 @@ _SPECS: dict[str, dict[str, tuple[str, bool]]] = {
     "credentials/unset": {
         "ref": (STR, True),
     },
+    # file-reference（packages/context/file-reference）经 session-controller 适配的
+    # `fileReferences` Remote：list 取 agentId + query（Agent lookup 的 wire 名是
+    # `agentId`，见 core/agent/src/index.ts:260）。
+    "fileReferences/list": {
+        "agentId": (STR, True),
+        "query": (STR, False),
+    },
     # session-reference（packages/context/session-reference）：Remote namespace candidates。
     "sessionReferenceResolver/candidates": {
         "agentId": (STR, True),
         "query": (STR, False),
+    },
+    # workspace-controller 的 `directoryPicker` Remote（host 目录选择；browse 载体）：
+    # list 取可选 path（缺省宿主 home）；createDirectory 取 path + name；pick 无入参。
+    "directoryPicker/list": {
+        "path": (STR, False),
+    },
+    "directoryPicker/createDirectory": {
+        "path": (STR, True),
+        "name": (STR, True),
+    },
+    "directoryPicker/pick": {},
+    # llm（packages/llm/llm）：`llm` Remote namespace。list* 无入参；
+    # discoverModels 取 settingsNs + request（signal 不上 wire）。
+    "llm/listProviders": {},
+    "llm/listConfigurableProviders": {},
+    "llm/discoverModels": {
+        "settingsNs": (STR, True),
+        "request": (OBJ, True),
+    },
+    # commands（packages/interaction/commands）：`commands` Remote namespace。
+    # list 取 agentId；execute 取 agentId + line + submittedAttachments（signal 不上 wire）。
+    "commands/list": {
+        "agentId": (STR, True),
+    },
+    "commands/execute": {
+        "agentId": (STR, True),
+        "line": (STR, True),
+        "submittedAttachments": (ARR, True),
+    },
+    # session-controller 的 `skills` Remote（packages/api/session-controller/src/skill-catalog.ts）：
+    # list 取单个 request 对象 `{sessionId}`。
+    "skills/list": {
+        "request": (OBJ, True),
+    },
+    # goal（packages/goal/goal）：`goals` Remote namespace。agent 参数 wire 名
+    # `agentId`；get 取 agent，create 取 request，其余取 ref（+edit 的 request）。
+    "goals/get": {
+        "agentId": (STR, True),
+    },
+    "goals/create": {
+        "agentId": (STR, True),
+        "request": (OBJ, True),
+    },
+    "goals/edit": {
+        "agentId": (STR, True),
+        "ref": (OBJ, True),
+        "request": (OBJ, True),
+    },
+    "goals/pause": {
+        "agentId": (STR, True),
+        "ref": (OBJ, True),
+    },
+    "goals/resume": {
+        "agentId": (STR, True),
+        "ref": (OBJ, True),
+    },
+    "goals/complete": {
+        "agentId": (STR, True),
+        "ref": (OBJ, True),
+    },
+    "goals/clear": {
+        "agentId": (STR, True),
+        "ref": (OBJ, True),
     },
     # job-controller（packages/api/job-controller）：`job` Remote namespace。
     "job/list": {

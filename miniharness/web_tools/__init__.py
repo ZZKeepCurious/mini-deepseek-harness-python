@@ -19,6 +19,11 @@ from dataclasses import dataclass, field
 
 from ..core.scope import Context
 from .fetch_http import HttpFetchProvider, build_http_limits
+from .deepseek_api import (
+    DEEPSEEK_WEB_API_BASE_URL,
+    DeepSeekFetchApiProvider,
+    DeepSeekSearchApiProvider,
+)
 from .fetch_tool import web_fetch_section_text, web_fetch_tool
 from .runtime import WebRuntime, WebRuntimeConfig
 from .search_deepseek import (
@@ -73,6 +78,12 @@ class WebConfig:
     search_max_tokens: int = DEEPSEEK_DEFAULT_MAX_TOKENS
     search_max_uses: int = DEEPSEEK_DEFAULT_MAX_USES
     fetch_http_config: dict | None = field(default=None)
+    # DeepSeek Search / Fetch API providers（web-deepseek-api）。默认注册但不选中：
+    # base 组合默认仍是 Messages 搜索 + 本地 HTTP 抓取。
+    deepseek_api_key: str | None = None
+    deepseek_api_key_env: str = "DEEPSEEK_API_KEY"
+    deepseek_api_base_url: str = DEEPSEEK_WEB_API_BASE_URL
+    deepseek_api_count: int = 10
 
 
 def install_web(ctx: Context, config: WebConfig | None = None) -> WebRuntime:
@@ -90,8 +101,19 @@ def install_web(ctx: Context, config: WebConfig | None = None) -> WebRuntime:
     _assert_positive_integer("fetchMaxOutputChars", cfg.fetch_max_output_chars)
 
     runtime = WebRuntime(WebRuntimeConfig(cfg.search_provider, cfg.fetch_provider))
+    if not (isinstance(cfg.deepseek_api_count, int) and not isinstance(cfg.deepseek_api_count, bool)
+            and 1 <= cfg.deepseek_api_count <= 50):
+        raise ValueError("web-deepseek-api: count must be an integer in 1..50")
+    api_options = {
+        "apiKey": cfg.deepseek_api_key,
+        "apiKeyEnv": cfg.deepseek_api_key_env,
+        "baseURL": cfg.deepseek_api_base_url,
+        "count": cfg.deepseek_api_count,
+    }
     runtime.register_search_provider(DeepSeekSearchProvider(_search_options(cfg)))
     runtime.register_fetch_provider(HttpFetchProvider(build_http_limits(cfg.fetch_http_config)))
+    runtime.register_search_provider(DeepSeekSearchApiProvider(lambda: dict(api_options)))
+    runtime.register_fetch_provider(DeepSeekFetchApiProvider(lambda: dict(api_options)))
     ctx.provide("web", runtime)
     runtime.tool_config = cfg
     return runtime

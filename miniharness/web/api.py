@@ -319,7 +319,8 @@ class WebApi:
     """
 
     def __init__(self, ctx: Context, adapter: LlmAdapter, tools: ToolRegistry | None = None,
-                 cwd: str | None = None, roster: Any = None):
+                 cwd: str | None = None, roster: Any = None,
+                 schedule_root: str | None = None):
         self.ctx = ctx
         self.adapter = adapter
         self.tools = tools if tools is not None else ToolRegistry(ctx)
@@ -329,6 +330,21 @@ class WebApi:
         if self.store is None:
             self.store = SessionStore(ctx)
         install_agents(ctx)
+        # 上游 base 在 host plane 挂 goal 域 + goal-round-driver（web-app 只把
+        # command-goal/tool-goal 下放到 preset）。缺省装配保证 `goals/*` Remote
+        # 与 preset 的 `goal` 工具有宿主服务可依。
+        if ctx.get("goals") is None:
+            from ..goal import install_goal_driver, install_goals
+            install_goal_driver(ctx, install_goals(ctx))
+        # 上游 base 挂 commands 服务（`/`命令面）；web-app 的预设负责具体命令。
+        if ctx.get("commands") is None:
+            from ..commands import install_commands
+            install_commands(ctx)
+        # 上游 base 挂 storage、web-app 挂 schedule + preset 的 tool-schedule。
+        # 生产入口（launcher）显式给 root；测试/嵌入不传则保持不写用户主目录。
+        if schedule_root is not None:
+            from ..schedule import install_host_schedule
+            install_host_schedule(ctx, root=schedule_root)
         # sessionProjections 注册表 + telemetry 投影单元：session/projections 读面与
         # session/control 的 projection 帧都要求注册表在场（对齐上游 control.ts
         # 构造注入 `ctx.sessionProjections`）。已装则幂等复用。
@@ -345,6 +361,11 @@ class WebApi:
         if ctx.get("systemPrompt") is None:
             from ..core.system_prompt import install_system_prompt
             install_system_prompt(ctx)
+        # 上游 base 挂 skill-filesystem（catalog/provider）；mini 的 install_skills
+        # 幂等装配注册表 + filesystem provider + 提示词节，保证 `skills/list` 有源。
+        if ctx.get("skills") is None:
+            from ..skills import install_skills
+            install_skills(ctx)
         if ctx.get("fs") is None:
             from ..fs import install_local_fs
             install_local_fs(ctx, {"cwd": self.cwd})
@@ -412,6 +433,23 @@ class WebApi:
         "credentials/describe": "credentials_describe",
         "credentials/set": "credentials_set",
         "credentials/unset": "credentials_unset",
+        "fileReferences/list": "file_references_list",
+        "commands/list": "commands_list",
+        "commands/execute": "commands_execute",
+        "directoryPicker/list": "directory_picker_list",
+        "directoryPicker/createDirectory": "directory_picker_create_directory",
+        "directoryPicker/pick": "directory_picker_pick",
+        "llm/listProviders": "llm_list_providers",
+        "llm/listConfigurableProviders": "llm_list_configurable_providers",
+        "llm/discoverModels": "llm_discover_models",
+        "skills/list": "skills_list",
+        "goals/get": "goals_get",
+        "goals/create": "goals_create",
+        "goals/edit": "goals_edit",
+        "goals/pause": "goals_pause",
+        "goals/resume": "goals_resume",
+        "goals/complete": "goals_complete",
+        "goals/clear": "goals_clear",
         "sessionReferenceResolver/candidates": "session_reference_candidates",
         "job/kill": "job_kill",
         "agentPresets/list": "agent_presets_list",
@@ -794,7 +832,263 @@ class WebApi:
         self._remote_call(
             lambda: self._credentials_controller().unset(payload.get("ref")))
 
-    # ---------- session-reference 域（context 组的 candidates Remote 面） ----------
+    # ---------- directoryPicker 域（workspace-controller 的 browse 载体） ----------
+
+    @staticmethod
+    def _fully_qualified_directory_path(path: Any) -> bool:
+        """绝对且不依赖进程当前盘符的目录路径（上游 `fullyQualified`）。"""
+        if not isinstance(path, str) or path == "":
+            return False
+        if os.name != "nt":
+            return os.path.isabs(path)
+        import re
+
+        return bool(os.path.isabs(path) and (
+            re.match(r"^[A-Za-z]:[\\/]", path)
+            or re.match(r"^[\\/]{2}[^\\/]+[\\/]+[^\\/]+", path)))
+
+    def directory_picker_list(self, payload: dict) -> dict:
+        """`directoryPicker/list`：一层目录 + 从根到该层的面包屑。"""
+        home = os.path.expanduser("~")
+        path = payload.get("path")
+        path = home if path is None else path
+        if not self._fully_qualified_directory_path(path):
+            raise _Reject("directory-picker/unreadable",
+                          f"directory path must be fully qualified: {path!r}",
+                          {"path": path})
+        try:
+            rows = []
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    try:
+                        if not entry.is_dir():
+                            continue
+                    except OSError:
+                        continue
+                    rows.append({"name": entry.name, "path": os.path.join(path, entry.name),
+                                 "hidden": entry.name.startswith(".")})
+        except OSError as error:
+            raise _Reject("directory-picker/unreadable",
+                          f"directory cannot be listed: {error}", {"path": path})
+        rows.sort(key=lambda row: row["name"].casefold())
+        truncated = len(rows) > 1000
+        rows = rows[:1000]
+        crumbs = []
+        current = path
+        while True:
+            parent = os.path.dirname(current)
+            name = current if parent == current else os.path.basename(current)
+            crumbs.insert(0, {"name": name, "path": current, "hidden": False})
+            if parent == current:
+                break
+            current = parent
+        return {"path": path, "home": home, "crumbs": crumbs,
+                "entries": rows, "truncated": truncated}
+
+    def directory_picker_create_directory(self, payload: dict) -> str:
+        path = payload.get("path")
+        name = payload.get("name")
+        if (not isinstance(name, str) or name.strip() == "" or name in (".", "..")
+                or "/" in name or "\\" in name):
+            raise _Reject("gateway/bad-request",
+                          "host.createDirectory requires a single non-blank path segment name",
+                          {})
+        if not self._fully_qualified_directory_path(path):
+            raise _Reject("directory-picker/create-failed",
+                          f"parent directory must be fully qualified: {path!r}",
+                          {"path": path})
+        target = os.path.join(path, name)
+        try:
+            os.mkdir(target)
+        except FileExistsError as error:
+            raise _Reject("directory-picker/exists",
+                          f"directory already exists: {target}", {"path": target}) from error
+        except OSError as error:
+            raise _Reject("directory-picker/create-failed",
+                          f"directory cannot be created: {error}", {"path": target}) from error
+        return target
+
+    def directory_picker_pick(self, payload: dict) -> None:
+        """mini 组合的是 browse 载体；native chooser 不可用（上游同码）。"""
+        raise _Reject("directory-picker/unavailable",
+                      'directoryPicker.pick needs the native capability; '
+                      'the composed picker serves "browse"',
+                      {"capability": "browse"})
+
+    # ---------- llm 域（packages/llm/llm 的 `llm` Remote namespace） ----------
+
+    def _llm_routes(self) -> list[str]:
+        """适配器拥有的 provider 路由（pi-ai 多 profile；单路由适配器一条）。"""
+        profiles = getattr(self.adapter, "profiles", None)
+        if isinstance(profiles, dict) and profiles:
+            return list(profiles)
+        provider = getattr(self.adapter, "provider", None)
+        return [provider] if isinstance(provider, str) and provider else []
+
+    def llm_list_providers(self, payload: dict) -> list:
+        return [{"id": route, "name": route} for route in self._llm_routes()]
+
+    def llm_list_configurable_providers(self, payload: dict) -> list:
+        """适配器声明的可配置目录；未声明 → 空数组（不臆造 settings 命名空间）。"""
+        declared = getattr(self.adapter, "configurable_providers", None)
+        if declared is None:
+            return []
+        rows = declared() if callable(declared) else declared
+        return [dict(row) for row in rows]
+
+    def llm_discover_models(self, payload: dict) -> list:
+        """`llm/discoverModels`：按 provider 路由取适配器已知目录。
+
+        上游按 settingsNs 查询已注册的 discovery；mini 无 discovery 注册表，
+        由注入适配器自己的目录回答（DeepSeek 的 `available_models`），未知
+        provider / 仅给 baseURL → `llm/model-discovery-rejected`。
+        载体差异：`name`/`inputModalities` 由适配器目录派生；无 contextWindow/
+        maxTokens 披露时省略。
+        """
+        request = payload.get("request") or {}
+        provider = request.get("provider")
+        available = getattr(self.adapter, "available_models", None)
+        if (not isinstance(provider, str) or provider == ""
+                or provider not in self._llm_routes() or available is None):
+            raise _Reject(
+                "llm/model-discovery-rejected",
+                f'llm: no model discovery for provider {provider!r}',
+                {"settingsNs": payload.get("settingsNs"),
+                 **({"provider": provider} if isinstance(provider, str) else {})})
+        models = self._remote_call(available)
+        return [
+            {
+                "id": info["model"],
+                **({"name": info["name"]} if info.get("name") is not None else {}),
+                **({"inputModalities": info["input_modalities"]}
+                   if info.get("input_modalities") is not None else {}),
+            }
+            for info in models
+        ]
+
+    # ---------- commands 域（packages/interaction/commands 的 `commands` Remote namespace） ----------
+
+    def _commands(self):
+        registry = self.ctx.get("commands")
+        if registry is None:
+            raise _Reject("gateway/invocation-unavailable",
+                          "commands namespace is not mounted in this deployment", {})
+        return registry
+
+    def commands_list(self, payload: dict) -> list:
+        self.resolve_terminal_agent(payload.get("agentId"))
+        return self._remote_call(lambda: self._commands().descriptors())
+
+    def commands_execute(self, payload: dict) -> dict | None:
+        agent = self.resolve_terminal_agent(payload.get("agentId"))
+        return self._remote_call(lambda: self._commands().execute(
+            agent, payload.get("line"), payload.get("submittedAttachments")))
+
+    # ---------- skills 域（session-controller 的 `skills` Remote namespace） ----------
+
+    def skills_list(self, payload: dict) -> dict:
+        """`skills/list`：一条会话可见的 user-invocable skill 元数据。
+
+        对齐 `api/session-controller/src/skill-catalog.ts`：按会话当前工作目录
+        （working-directory 投影，缺省 header cwd）取 catalog，只回
+        `isUserInvocable` 的条目，不加载正文。载体差异：mini 无 cold session
+        observation / preset-scoped registry，只服务 store 内会话与全局注册表。
+        """
+        from ..skills import is_model_invocable, is_user_invocable
+
+        request = payload.get("request") or {}
+        session_id = request.get("sessionId")
+        if not isinstance(session_id, str) or session_id == "":
+            raise _Reject("gateway/arguments-invalid",
+                          "request.sessionId must be a non-empty string", {})
+        session = self.store.get(session_id)
+        if session is None:
+            raise _Reject("session/not-found", f'session "{session_id}" not found',
+                          {"sessionId": session_id})
+        registry = self.ctx.get("skills")
+        if registry is None:
+            raise _Reject("gateway/invocation-unavailable",
+                          "skills namespace is not mounted in this deployment", {})
+        working_directory = self.ctx.get("workingDirectory")
+        cwd = (working_directory.get(session) if working_directory is not None
+               else (session.meta or {}).get("cwd"))
+        skills = self._remote_call(lambda: registry.list({"cwd": cwd}))
+        return {"skills": [
+            {
+                "name": skill["name"],
+                **({"path": skill["path"]} if skill.get("path") is not None else {}),
+                "description": skill["description"],
+                **({"whenToUse": skill["whenToUse"]} if skill.get("whenToUse") is not None else {}),
+                "modelInvocable": is_model_invocable(skill),
+            }
+            for skill in skills if is_user_invocable(skill)
+        ]}
+
+    # ---------- goal 域（packages/goal/goal 的 `goals` Remote namespace） ----------
+
+    def _goals(self):
+        goals = self.ctx.get("goals")
+        if goals is None:
+            raise _Reject("gateway/invocation-unavailable",
+                          "goals namespace is not mounted in this deployment", {})
+        return goals
+
+    def goals_get(self, payload: dict) -> dict | None:
+        agent = self.resolve_terminal_agent(payload.get("agentId"))
+        return self._remote_call(lambda: self._goals().get(agent))
+
+    def goals_create(self, payload: dict) -> dict:
+        """`goals/create`：上游 `remoteExportCreate` 只回 `{ref:{id,revision}}`。"""
+        agent = self.resolve_terminal_agent(payload.get("agentId"))
+        view = self._remote_call(
+            lambda: self._goals().create(agent, payload.get("request")))
+        return {"ref": {"id": view["id"], "revision": view["revision"]}}
+
+    def goals_edit(self, payload: dict) -> dict:
+        agent = self.resolve_terminal_agent(payload.get("agentId"))
+        return self._remote_call(lambda: self._goals().edit(
+            agent, payload.get("ref"), payload.get("request")))
+
+    def goals_pause(self, payload: dict) -> dict:
+        agent = self.resolve_terminal_agent(payload.get("agentId"))
+        return self._remote_call(
+            lambda: self._goals().pause(agent, payload.get("ref")))
+
+    def goals_resume(self, payload: dict) -> dict:
+        agent = self.resolve_terminal_agent(payload.get("agentId"))
+        return self._remote_call(
+            lambda: self._goals().resume(agent, payload.get("ref")))
+
+    def goals_complete(self, payload: dict) -> dict:
+        agent = self.resolve_terminal_agent(payload.get("agentId"))
+        return self._remote_call(
+            lambda: self._goals().complete(agent, payload.get("ref")))
+
+    def goals_clear(self, payload: dict) -> dict:
+        agent = self.resolve_terminal_agent(payload.get("agentId"))
+        return self._remote_call(
+            lambda: self._goals().clear(agent, payload.get("ref")))
+
+    # ---------- file-reference / session-reference 域（context 组的 Remote 面） ----------
+
+    def _file_references(self):
+        service = self.ctx.get("fileReferences")
+        if service is None:
+            raise _Reject("gateway/invocation-unavailable",
+                          "fileReferences namespace is not mounted in this deployment",
+                          {})
+        return service
+
+    def file_references_list(self, payload: dict) -> list:
+        """`fileReferences/list`：一条 Agent 工作目录下的路径候选。
+
+        对齐 `api/session-controller/src/file-references.ts` 的 Remote 适配面——
+        wire 参数为 `agentId`（Agent lookup 的 wire 名）+ `query`；返回
+        `{path, kind}` 候选（目录带尾 `/`）。
+        """
+        agent = self.resolve_terminal_agent(payload.get("agentId"))
+        return self._remote_call(lambda: self._file_references().list(
+            agent, payload.get("query") or ""))
 
     def _session_reference_resolver(self):
         resolver = self.ctx.get("sessionReferenceResolver")
@@ -1546,36 +1840,76 @@ class WebApi:
             raise _Reject("gateway/bad-request", "allowMigration must be a boolean", {})
         source = self.store.get(session_id)
         if source is None:
-            # allowMigration=false 的迁移预检（上游 index.ts:444-450）：源非 live 且
-            # 存储制品需迁移 → 拒绝，要求先打开源会话完成迁移；allowMigration 缺省 true。
+            # allowMigration=false + 迁移预检（上游 index.ts:444-450）：源非 live 且
+            # 存储层是迁移件 → 拒绝，要求先打开源会话完成迁移（allowMigration 缺省 true）。
             if allow_migration is False and self._stored_needs_migration(session_id):
                 raise _Reject("session/migration-required",
                               "Open the source Session to complete migration before forking",
                               {"sessionId": session_id})
-            raise _Reject("session/not-found", f'session "{session_id}" not found',
-                          {"sessionId": session_id})
+            return self._fork_cold(session_id, at_seq)
         events = list(source.events)
-        if at_seq is None:
-            boundary = self._latest_completed_prefix_boundary(events)
-            if boundary is None:
-                raise _Reject("session/fork-unavailable",
-                              f'session "{session_id}" has no completed turn to fork from',
-                              {"sessionId": session_id})
-        else:
-            boundary = at_seq
-            if boundary >= len(events) or events[boundary].get("seq") != boundary:
-                last_seq = events[-1]["seq"] if events else "none"
-                raise _Reject(
-                    "session/fork-unavailable",
-                    f'event {at_seq} does not exist in session "{session_id}" '
-                    f"(last seq: {last_seq})",
-                    {"sessionId": session_id})
+        boundary = self._fork_boundary(session_id, events, at_seq)
         try:
             child = self.store.fork(source, boundary)
         except SessionForkError as error:
             raise _Reject("session/fork-unavailable", str(error),
                           {"sessionId": session_id}) from error
         return {"sessionId": child.session_id}
+
+    def _fork_cold(self, session_id: str, at_seq: int | None) -> dict:
+        """冷（非 live）源会话分叉：从持久化读前缀，直接建 live 子会话。
+
+        上游 `commands.fork` 对冷可读前缀同样分叉；mini 的 `SessionStore.fork`
+        只接受 live 源，故这里读 `sessionPersistence.inspect` 后以
+        `build_fork_seed` 构造与 live 路径相同的 seed/meta，再走 `store.create`。
+        """
+        from ..core.session.repair import build_fork_seed
+
+        persistence = self.ctx.get("sessionPersistence")
+        if persistence is None:
+            raise _Reject("session/not-found", f'session "{session_id}" not found',
+                          {"sessionId": session_id})
+        try:
+            inspected = persistence.inspect(session_id)
+        except FileNotFoundError as error:
+            raise _Reject("session/not-found", f'session "{session_id}" not found',
+                          {"sessionId": session_id}) from error
+        events = list(inspected.get("events") or [])
+        if not events:
+            raise _Reject("session/not-found", f'session "{session_id}" not found',
+                          {"sessionId": session_id})
+        boundary = self._fork_boundary(session_id, events, at_seq)
+        meta: dict[str, Any] = {"parentSession": session_id, "isSeeded": True}
+        header_meta = inspected.get("meta") or {}
+        if isinstance(header_meta.get("cwd"), str):
+            meta["cwd"] = header_meta["cwd"]
+        try:
+            child = self.store.create(None, {
+                "seed": build_fork_seed(events, boundary),
+                "meta": meta,
+                "inheritedEventCount": boundary + 1,
+            })
+        except SessionForkError as error:
+            raise _Reject("session/fork-unavailable", str(error),
+                          {"sessionId": session_id}) from error
+        return {"sessionId": child.session_id}
+
+    def _fork_boundary(self, session_id: str, events: list, at_seq: int | None) -> int:
+        if at_seq is None:
+            boundary = self._latest_completed_prefix_boundary(events)
+            if boundary is None:
+                raise _Reject("session/fork-unavailable",
+                              f'session "{session_id}" has no completed turn to fork from',
+                              {"sessionId": session_id})
+            return boundary
+        if at_seq >= len(events) or events[at_seq].get("seq") != at_seq:
+            last_seq = events[-1]["seq"] if events else "none"
+            raise _Reject(
+                "session/fork-unavailable",
+                f'event {at_seq} does not exist in session "{session_id}" '
+                f"(last seq: {last_seq})",
+                {"sessionId": session_id})
+        return at_seq
 
     @staticmethod
     def _latest_completed_prefix_boundary(events) -> int | None:

@@ -50,7 +50,7 @@ class TestErrorCodeSet(unittest.TestCase):
         # dsh-v0.2.1-rc.2 session-controller 新增 session/migration-required）
         # dsh-v0.2.1-rc.2 gateway/remote-access 新增 gateway/interactions-forbidden
         # + gateway/peer-disposed + remote-access/denied（声明的兜底码，mini 组合暂无生产者）
-        self.assertEqual(len(RPC_ERROR_CODES), 63)
+        self.assertEqual(len(RPC_ERROR_CODES), 68)
 
     def test_known_codes_present(self):
         for code in ("gateway/bad-request", "session/not-found", "session/model-unavailable",

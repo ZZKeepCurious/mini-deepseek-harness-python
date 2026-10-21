@@ -337,10 +337,15 @@ class ClaudeCodeBridge:
     run_fn 可注入（测试不依赖 shell）；默认 subprocess 执行。
     """
 
-    def __init__(self, raw_config: Any, vars: dict | None = None):
+    def __init__(self, raw_config: Any, vars: dict | None = None,
+                 working_directory: Any = None):
         self.parsed = parse_claude_code_config(raw_config, vars)
         self.skipped = self.parsed["skipped"]
         self.vars = dict(vars) if vars else {}
+        # dsh-v0.2.1：hook 的 cwd/CLAUDE_PROJECT_DIR 取会话**当前**工作目录
+        # （working-directory 投影），不再是 header.cwd 的固定快照。载体差异：
+        # mini 同步桥取投影 `get`（零 I/O），上游 async 走 `ensure`。
+        self.working_directory = working_directory
 
     def pre_step(self, prompt_text: str, session=None, run_fn: Callable | None = None) -> dict | None:
         """UserPromptSubmit → pre-step 决策：deny → {'kind':'reject'}；否则 None（委派）。"""
@@ -424,6 +429,9 @@ class ClaudeCodeBridge:
     def _run_point(self, point: str, match_query: str, payload: dict,
                    session, run_fn: Callable | None) -> dict:
         turn = self._last_turn(session)
+        workdir = self._workdir(session)
+        # 上游 runPoint 对每个 hook 的 payload 统一注入 `cwd`（base 不再带）。
+        payload = {**payload, "cwd": workdir if workdir is not None else os.getcwd()}
         outputs: list[dict] = []
         for group in self.parsed["config"].get(point, []):
             if not matches_matcher(group.get("matcher"), match_query, "claude-code"):
@@ -449,16 +457,28 @@ class ClaudeCodeBridge:
                 outputs.append(output)
         return merge_hook_outputs(outputs)
 
+    def _workdir(self, session) -> str | None:
+        """会话当前工作目录：working-directory 投影优先，否则 header cwd。
+
+        `working_directory` 未注入时（纯协议单元载体）退回 `session.meta['cwd']`，
+        与 P0-2 的同步投影消费口径一致（不发起 `ensure` I/O）。
+        """
+        if session is None:
+            return None
+        if self.working_directory is not None:
+            return self.working_directory.get(session)
+        if isinstance(getattr(session, "meta", None), dict):
+            return session.meta.get("cwd")
+        return None
+
     def _runner(self, session):
         """默认 runner：注入 cwd / CLAUDE_PROJECT_DIR env（上游 index.ts runPoint）。
 
-        workdir = session.header.cwd（mini：meta['cwd']）；projectDir = 配置
-        projectDir ?? workdir；hookEnv = {CLAUDE_PROJECT_DIR: projectDir}。
-        run_fn 注入契约保持 (hook, payload)，cwd/env 经闭包带入。
+        workdir = 会话当前工作目录；projectDir = 配置 projectDir ?? workdir；
+        hookEnv = {CLAUDE_PROJECT_DIR: projectDir}。run_fn 注入契约保持
+        (hook, payload)，cwd/env 经闭包带入。
         """
-        workdir = None
-        if session is not None and isinstance(getattr(session, "meta", None), dict):
-            workdir = session.meta.get("cwd")
+        workdir = self._workdir(session)
         project_dir = self.vars.get("projectDir") or workdir
         env = {"CLAUDE_PROJECT_DIR": project_dir} if project_dir is not None else None
         return lambda hook, payload: _run_default(hook, payload, cwd=workdir, env=env)

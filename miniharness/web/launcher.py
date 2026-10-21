@@ -84,7 +84,8 @@ def _resolve_bind(host: str | None, port: int | None) -> tuple[str, int]:
 
 
 def build_app(adapter: Any, tools: Any, ctx: Context | None = None,
-              token: str | None = None, roster: Any = None) -> FastAPI:
+              token: str | None = None, roster: Any = None,
+              schedule_root: str | None = None) -> FastAPI:
     """纯装配：上下文 + 适配器 + 工具 → 可挂载的 FastAPI 应用。
 
     返回前把 WebApi/GatewayStreams 挂到 root ctx（供测试/launcher 复用，
@@ -94,13 +95,14 @@ def build_app(adapter: Any, tools: Any, ctx: Context | None = None,
     组）；未提供时 web profile 部署的 preset 面不可用（见装配缺口修复）。
     """
     ctx = ctx or Context(name="web")
-    api = WebApi(ctx, adapter, tools, roster=roster)
+    api = WebApi(ctx, adapter, tools, roster=roster, schedule_root=schedule_root)
     return create_app(api, api.gateway, token=token)
 
 
 def run_web(adapter: Any, tools: Any, ctx: Context | None = None,
             host: str | None = None, port: int | None = None,
-            token: str | None = None, roster: Any = None) -> None:
+            token: str | None = None, roster: Any = None,
+            schedule_root: str | None = None) -> None:
     """构建应用并阻塞监听（`--profile web` 的进程级入口）。
 
     生产纪律：监听**非回环**地址（任何非 loopback 字面量，含具体网卡 IP）时
@@ -115,5 +117,9 @@ def run_web(adapter: Any, tools: Any, ctx: Context | None = None,
         raise ValueError(
             f"listening on non-loopback host {host!r} requires a web token "
             "(pass token= or set MINIHARNESS_WEB_TOKEN)")
-    app = build_app(adapter, tools, ctx, token=resolved_token, roster=roster)
+    if schedule_root is None:
+        from ..core.home_paths import dsh_home_path
+        schedule_root = dsh_home_path("storages")
+    app = build_app(adapter, tools, ctx, token=resolved_token, roster=roster,
+                    schedule_root=schedule_root)
     uvicorn.run(app, host=host, port=port, log_level="info", **uvicorn_options())

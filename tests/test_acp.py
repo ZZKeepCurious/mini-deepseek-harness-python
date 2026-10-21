@@ -123,6 +123,39 @@ class TestAcpPrompt(unittest.TestCase):
                          .session.events[-1]["type"], "turn/end")
 
 
+class _CancellingAdapter(FakeLlmAdapter):
+    """首个流块发出前触发显式 session/cancel 的适配器（取消路径测试载体）。"""
+
+    def __init__(self):
+        super().__init__()
+        self.server = None
+
+    async def stream(self, messages, tools, signal=None, session_id=None,
+                     purpose=None, reasoning_effort=None):
+        self.server.cancel(session_id)
+        async for chunk in super().stream(messages, tools, signal, session_id,
+                                          purpose, reasoning_effort):
+            yield chunk
+
+
+class TestAcpCancellation(unittest.TestCase):
+    def test_explicit_cancel_settles_cancelled(self):
+        adapter = _CancellingAdapter()
+        server = AcpServer(adapter=adapter)
+        adapter.server = server
+        session_id = server.new_session(_CWD)["sessionId"]
+        result = server.prompt(session_id, [{"type": "text", "text": "go"}])
+        # 显式取消无论 turn 落 aborted 还是 completed，都以 cancelled 结算
+        self.assertEqual(result["stopReason"], "cancelled")
+
+    def test_next_prompt_clears_cancellation(self):
+        server = AcpServer()
+        session_id = server.new_session(_CWD)["sessionId"]
+        server.cancel(session_id)
+        result = server.prompt(session_id, [{"type": "text", "text": "go"}])
+        self.assertEqual(result["stopReason"], "end_turn")
+
+
 class TestStopReasonMapping(unittest.TestCase):
     def test_mapping_table(self):
         cases = [

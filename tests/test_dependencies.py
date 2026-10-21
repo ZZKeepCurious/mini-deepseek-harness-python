@@ -93,6 +93,7 @@ LAYER_UNITS = [
     ("telemetry", 2),
     ("session_log_deepseek", 2),
     ("schedule", 2),
+    ("deliverables", 2),
     ("session_query", 2),
     ("todo", 2),
     ("spill", 2),

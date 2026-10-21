@@ -277,6 +277,42 @@ class TestBridge(unittest.TestCase):
         run_fn = fake_run(stdout='{"continue": false, "stopReason": "paused"}')
         self.assertIsNone(bridge.stop(run_fn=run_fn))   # 无权限决策 → 委派
 
+    def test_payload_carries_session_cwd(self):
+        session = Session("hook-cwd")
+        session.meta["cwd"] = os.path.abspath("work")
+        calls = []
+        bridge = ClaudeCodeBridge({
+            "PreToolUse": [{"hooks": [{"type": "command", "command": "x"}]}],
+        })
+
+        def run_fn(hook, payload):
+            calls.append(payload)
+            return {"exitCode": 0, "stdout": "", "stderr": ""}, 0
+
+        bridge.pre_tool("Bash", session=session, run_fn=run_fn)
+        self.assertEqual(calls[0]["cwd"], os.path.abspath("work"))
+
+    def test_payload_cwd_follows_working_directory_projection(self):
+        session = Session("hook-cwd-effective")
+        session.meta["cwd"] = os.path.abspath("work")
+        effective = os.path.abspath(os.path.join("work", "sub"))
+
+        class _WorkingDirectory:
+            def get(self, _session):
+                return effective
+
+        calls = []
+        bridge = ClaudeCodeBridge(
+            {"PreToolUse": [{"hooks": [{"type": "command", "command": "x"}]}]},
+            working_directory=_WorkingDirectory())
+
+        def run_fn(hook, payload):
+            calls.append(payload)
+            return {"exitCode": 0, "stdout": "", "stderr": ""}, 0
+
+        bridge.pre_tool("Bash", session=session, run_fn=run_fn)
+        self.assertEqual(calls[0]["cwd"], effective)
+
     def test_audit_pair_logged_turn_enclosed(self):
         session = Session("hook-test")
         session.append("turn/start", {"turn": 1})

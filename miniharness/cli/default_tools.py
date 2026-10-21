@@ -69,4 +69,10 @@ def default_tools(ctx: Context) -> ToolRegistry:
     if ctx.get("workingDirectory") is not None:
         from ..working_directory import register_working_directory_tool
         register_working_directory_tool(ctx, reg)
+    # deliverables/tool-present：fs + 投影 + 工作目录齐备时挂 `present`。
+    if (ctx.get("fs") is not None and ctx.get("sessionProjections") is not None
+            and ctx.get("workingDirectory") is not None
+            and reg.resolve("present") is None):
+        from ..deliverables import register_present_tool
+        register_present_tool(reg, ctx)
     return reg

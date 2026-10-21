@@ -177,6 +177,24 @@ class CommandRegistry:
         except Exception:  # noqa: BLE001 - 通知失败不影响注册（上游各自 contain）
             pass
 
+    def descriptors(self) -> list[dict]:
+        """有效命令的 handler-free 视图（按 name 排序；上游 CommandDescriptor）。
+
+        `input` 只在声明了 input hint 时出现（`{hint}`）；mini 无
+        `input.attachments` 声明面，故不产该键。
+        """
+        rows: list[dict] = []
+        for name in self.names():
+            entry = self._commands[name]
+            row: dict[str, Any] = {
+                "name": name,
+                "description": entry["description"],
+            }
+            if entry["input_hint"] is not None:
+                row["input"] = {"hint": entry["input_hint"]}
+            rows.append(row)
+        return rows
+
     def dispatch(self, agent: Any, text: str, signal: AbortSignal | None = None) -> dict | None:
         """执行一行命令输入；非命令行/未知命令返回 None。
 
@@ -186,6 +204,24 @@ class CommandRegistry:
         handler 抛错 → 结算为 kind:'error' + 渲染失败。`command/done` 配对收尾。
         返回归一化的 {kind, text}。
         """
+        outcome = self._run(agent, text, (), signal)
+        return None if outcome is None else outcome[1]
+
+    def execute(self, agent: Any, text: str, submitted_attachments: Any = (),
+                signal: AbortSignal | None = None) -> dict | None:
+        """Remote 面执行（上游 `execute`）：返回 `{commandId, result}`。
+
+        非命令行/未知命令 → None。mini 无 `input.attachments` 声明面，任何非空
+        `submittedAttachments` 都按上游「未声明即拒绝」结算为 error（command/run
+        与 command/done 仍配对落盘）。
+        """
+        outcome = self._run(agent, text, submitted_attachments or (), signal)
+        if outcome is None:
+            return None
+        return {"commandId": outcome[0], "result": outcome[1]}
+
+    def _run(self, agent: Any, text: str, submitted_attachments: Any,
+             signal: AbortSignal | None) -> tuple[str, dict] | None:
         parsed = parse_command(text)
         if parsed is None:
             return None
@@ -207,6 +243,13 @@ class CommandRegistry:
         if entry["record_input"]:
             run_data["args"] = raw
         session.append("command/run", run_data)
+        if submitted_attachments:
+            result = {"kind": "error",
+                      "text": f"/{name} does not accept attachments"}
+            session.append("command/done", {
+                "commandId": command_id, "kind": "error", "text": result["text"],
+            })
+            return command_id, result
         invocation = CommandInvocation(
             command_id=command_id, agent=agent, raw_input=raw, signal=signal)
         try:
@@ -216,7 +259,7 @@ class CommandRegistry:
                 "commandId": command_id, "kind": "error",
                 "text": str(error),
             })
-            return {"kind": "error", "text": str(error)}
+            return command_id, {"kind": "error", "text": str(error)}
         result = _normalize_result(name, output)
         done_data: dict[str, Any] = {"commandId": command_id, "kind": result["kind"]}
         if "text" in result:
@@ -224,7 +267,7 @@ class CommandRegistry:
         if result["kind"] == "success" and result.get("sourceEventSeq") is not None:
             done_data["sourceEventSeq"] = result["sourceEventSeq"]
         session.append("command/done", done_data)
-        return dict(result)
+        return command_id, dict(result)
 
 
 def _normalize_result(command: str, value: Any) -> dict:
@@ -258,7 +301,10 @@ def _normalize_result(command: str, value: Any) -> dict:
 
 
 def install_commands(ctx: Context) -> CommandRegistry:
-    """提供 ctx 服务 `commands`（可选服务：plan/goal 经 inject 鸭子类型注册）。"""
+    """提供 ctx 服务 `commands`（幂等；plan/goal 经 inject 鸭子类型注册）。"""
+    existing = ctx.get("commands")
+    if existing is not None:
+        return existing
     registry = CommandRegistry(ctx)
     ctx.provide("commands", registry)
     return registry

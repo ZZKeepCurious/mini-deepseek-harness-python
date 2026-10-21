@@ -219,10 +219,18 @@ def _is_finite(value: Any) -> bool:
 
 
 def validate_runtime_skill(skill: dict) -> None:
-    """运行时注册校验（对齐上游 validateRuntimeSkill）。"""
+    """运行时注册校验（上游 validateRuntimeSkill + SkillRegistration 类型面）。
+
+    上游 `SkillRegistration` 要求 `source`/`content`；Python 无类型强制，故在
+    注册边界补字符串校验，避免注册成功后 `list()` 因缺键崩成 gateway/internal。
+    """
     _validate_name(skill.get("name"), "runtime skill")
     if not isinstance(skill.get("description"), str) or skill["description"] == "":
         raise ValueError(f'skill "{skill["name"]}" requires a description')
+    if not isinstance(skill.get("source"), str) or skill["source"] == "":
+        raise ValueError(f'skill "{skill["name"]}" requires a non-empty source')
+    if not isinstance(skill.get("content"), str):
+        raise ValueError(f'skill "{skill["name"]}" content must be a string')
     _validate_invocation(skill.get("invocation"), f'runtime skill "{skill["name"]}"')
 
 

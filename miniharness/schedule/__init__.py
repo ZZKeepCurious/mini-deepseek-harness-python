@@ -57,6 +57,22 @@ from .runtime import ScheduleRuntime
 from .service import ScheduleService, install_schedule
 from .storage import schedule_domain, schedule_task_schema
 from .tools import install_tool_schedule, register_schedule_tools
+
+
+def install_host_schedule(ctx, config: dict | None = None, root: str | None = None):
+    """生产 host 装配：storage（`dshHomePath('storages')`）+ schedule 服务 + 工具。
+
+    上游 base 挂 `storage-json`，web-app 挂 `schedule` 与 preset 的 tool-schedule。
+    mini 在 host ctx 上一次性装配三者（幂等）；`root` 显式给出时覆盖缺省根。
+    """
+    from ..core.home_paths import dsh_home_path
+    from ..storage import install_storage
+
+    if ctx.get("storage") is None:
+        install_storage(ctx, root if root is not None else dsh_home_path("storages"))
+    service = install_schedule(ctx, config)
+    install_tool_schedule(ctx, service)
+    return service
 from .update import resolve_schedule_update, retained_title
 from .types import (
     DEFAULT_DELIVERY_HISTORY_DAYS,
@@ -98,6 +114,7 @@ __all__ = [
     "decode_stored_title",
     "delivery_history_page",
     "fold_schedule_events",
+    "install_host_schedule",
     "install_schedule",
     "install_tool_schedule",
     "is_recurring_schedule_record",
