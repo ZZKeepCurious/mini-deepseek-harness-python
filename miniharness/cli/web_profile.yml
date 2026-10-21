@@ -29,6 +29,11 @@ plugins:
     module: miniharness.cli.plugins.fs
   - id: subprocess
     module: miniharness.cli.plugins.subprocess
+  - id: workspace-changes
+    module: miniharness.cli.plugins.workspace_changes
+    inject:
+      - fs
+      - subprocess
   - id: credentials
     module: miniharness.cli.plugins.credentials
   - id: workspaces

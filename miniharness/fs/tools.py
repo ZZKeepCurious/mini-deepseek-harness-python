@@ -484,7 +484,7 @@ async def _write_execute(ctx: Context, gate: FsSandboxGate, args: dict, exec: An
     fs = ctx.get("fs")
     target = await fs.resolve(input_["filePath"], _session_resolve_options(
         exec, policy.get("workspaceRoot") if policy else None))
-    intent = ctx.waterfall("fs/write-intent", (target, exec), base=lambda payload: None)
+    intent = await ctx.awaterfall("fs/write-intent", (target, exec), base=lambda payload: None)
     try:
         outcome = await fs.write_text(target, input_["content"], intent,
                                       getattr(exec, "signal", None), policy)
@@ -526,7 +526,7 @@ async def _edit_execute(ctx: Context, gate: FsSandboxGate, args: dict, exec: Any
     target = await fs.resolve(input_["filePath"], _session_resolve_options(
         exec, policy.get("workspaceRoot") if policy else None))
     try:
-        intent = ctx.waterfall("fs/edit-intent", (target, exec), base=lambda payload: None)
+        intent = await ctx.awaterfall("fs/edit-intent", (target, exec), base=lambda payload: None)
         outcome = await fs.edit_text(
             target, FsEditRequest(input_["oldString"], input_["newString"], input_["replaceAll"]),
             intent, getattr(exec, "signal", None), policy)

@@ -95,6 +95,7 @@ LAYER_UNITS = [
     ("session_log_deepseek", 2),
     ("schedule", 2),
     ("deliverables", 2),
+    ("workspace_changes", 2),
     ("session_query", 2),
     ("todo", 2),
     ("spill", 2),
