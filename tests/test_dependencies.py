@@ -60,6 +60,7 @@ LAYER_UNITS = [
     ("core.tools", 1),
     ("guard", 1),
     ("core.system_prompt", 1),
+    ("core.agent_default_model", 1),
     ("llm", 1),
     ("boot", 1),
     ("attachment", 1),

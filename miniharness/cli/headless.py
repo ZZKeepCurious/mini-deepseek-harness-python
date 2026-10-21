@@ -14,7 +14,8 @@
 简化说明（有意保留）：上游 runner 经 Cordis 服务（agents / sessions / agentDefaultModel）
 创建 Agent；mini 经 sessions.prepare + loop.publish() 走同一服务面
 （enter + announce + agent/session-start，店成员资格归 loop、dispose 即 detach），
-但 Agent 本体仍是 Session + AgentLoop 直连（载体差异，契约不变）。
+并挂载 `agentDefaultModel`（默认取适配器当前路由）；但 Agent 本体仍是
+Session + AgentLoop 直连、模型请求由单一适配器持有（载体差异，契约不变）。
 """
 from __future__ import annotations
 
@@ -131,6 +132,14 @@ def run_headless(
     tools = tools or default_tools(ctx)
     store = install_sessions(ctx)
     install_agents(ctx)
+    if ctx.get("agentDefaultModel") is None:
+        from ..core.agent_default_model import install_agent_default_model
+        info = adapter.resolve_model_info()
+        install_agent_default_model(
+            ctx,
+            provider=info.get("provider") or "unknown",
+            model=info.get("model") or "unknown",
+        )
     # 缺省 id 随机 uuid（上游 headless index.ts:112 `session-${randomUUID()}`，
     # 122 bit 熵；此前 12 hex = 48 bit 为分歧，已对齐）
     # 三段式（对齐上游 agent-loop 工厂：prepare → 构造 loop → publish）：

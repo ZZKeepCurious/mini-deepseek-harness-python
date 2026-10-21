@@ -403,6 +403,35 @@ class TestSessionSelectModel(WebApiTest):
         self.assertEqual(value["groups"][0]["models"], [{"id": "fake-model", "name": "fake-model"}])
         self.assertEqual(value["failures"], [])
 
+    def test_catalog_reads_agent_default_model(self):
+        from miniharness.core.agent_default_model import install_agent_default_model
+        ctx = Context(name="web-api-default-model")
+        self.addCleanup(ctx.dispose)
+        install_agent_default_model(ctx, provider="fake", model="preferred")
+        api = WebApi(ctx, _fake())
+        value = self._value(api.dispatch("session.modelCatalog", "rid", {}))
+        self.assertEqual(value["default"],
+                         {"provider": "fake", "model": "preferred"})
+
+    def test_select_model_saves_default_through_editor(self):
+        entry = type("Entry", (), {})()
+        entry.options = {"id": "agent-default-model",
+                         "config": {"provider": "fake", "model": "fake-model"}}
+
+        class _Editor:
+            def edit(self, target, change):
+                target.options["config"] = change(
+                    dict(target.options.get("config") or {}), {})
+
+        self.ctx.fiber.entry = entry
+        self.ctx.provide("configEditor", _Editor())
+        session_id = self._value(self._create())["sessionId"]
+        self._value(self.api.dispatch("session.selectModel", "rid", {
+            "sessionId": session_id, "provider": "fake", "model": "fake-model",
+        }))
+        self.assertEqual(entry.options["config"],
+                         {"provider": "fake", "model": "fake-model"})
+
     def test_select_model_adapter_route(self):
         session_id = self._value(self._create())["sessionId"]
         value = self._value(self.api.dispatch("session.selectModel", "rid", {

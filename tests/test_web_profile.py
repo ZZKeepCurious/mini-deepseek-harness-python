@@ -29,7 +29,7 @@ from miniharness.preset.presets import default_roster
 from miniharness.settings.forms import SettingsForms, install_settings_forms
 
 EXPECTED_ENTRY_IDS = [
-    "system-prompt", "web", "user-questions", "sandbox-policy",
+    "system-prompt", "agent-default-model", "web", "user-questions", "sandbox-policy",
     "terminal-controller", "fs", "subprocess", "credentials", "workspaces",
     "workspace-controller", "workspace-files", "session-projections",
     "working-directory",

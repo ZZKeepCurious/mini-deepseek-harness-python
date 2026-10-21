@@ -6,3 +6,4 @@ from .scope import *  # noqa: F401,F403
 from .tools import *  # noqa: F401,F403
 from .session import *  # noqa: F401,F403
 from .agent_loop import *  # noqa: F401,F403
+from .agent_default_model import *  # noqa: F401,F403

@@ -330,6 +330,17 @@ class WebApi:
         if self.store is None:
             self.store = SessionStore(ctx)
         install_agents(ctx)
+        # 上游 base 默认挂 agent-default-model（入口创建 Agent 时的部署默认）。
+        # 生产入口的 profile 条目已装则复用；直接构造 WebApi（测试/嵌入）按
+        # 适配器的当前路由补装，保存面仍是 no-op（无 profile entry）。
+        if ctx.get("agentDefaultModel") is None:
+            from ..core.agent_default_model import install_agent_default_model
+            info = adapter.resolve_model_info()
+            install_agent_default_model(
+                ctx,
+                provider=info.get("provider") or "unknown",
+                model=info.get("model") or "unknown",
+            )
         # 上游 base 在 host plane 挂 goal 域 + goal-round-driver（web-app 只把
         # command-goal/tool-goal 下放到 preset）。缺省装配保证 `goals/*` Remote
         # 与 preset 的 `goal` 工具有宿主服务可依。
@@ -544,6 +555,9 @@ class WebApi:
         return session.meta.get("origin") == "subagent"
 
     def _selection(self) -> dict:
+        default = self.ctx.get("agentDefaultModel")
+        if default is not None:
+            return default.current_selection()
         info = self.adapter.resolve_model_info()
         return {"provider": info.get("provider") or "unknown",
                 "model": info.get("model") or "unknown"}
@@ -1423,7 +1437,8 @@ class WebApi:
         """`session/selectModel`：安装会话级模型选择（上游 commands.ts selectModel）。
 
         dsh-v0.2.0-rc.2：默认保存改为 fire-and-forget（保存失败不再让 RPC 失败）；
-        mini 的保存即 advisory `_selections` 记录，天然不抛错（载体等价）。
+        会话级记录写 `_selections`，部署默认经 `ctx.agentDefaultModel`
+        持久化（无 profile entry 时 no-op）。
         先过 `modelAvailable` 门（未列 → `session/model-unavailable`）。
         """
         session_id = _require_id(payload, "sessionId")
@@ -1443,6 +1458,16 @@ class WebApi:
         if reasoning_effort is not None:
             resolved["reasoningEffort"] = reasoning_effort
         self._selections[session.session_id] = resolved
+        default = self.ctx.get("agentDefaultModel")
+        if default is not None:
+            try:
+                default.save_selection(resolved)
+            except Exception as error:  # noqa: BLE001 - fire-and-forget 契约：只告警
+                logger = self.ctx.logger
+                if logger is not None:
+                    logger.warn(
+                        "web: model selection changed for the Session but the "
+                        f"default was not saved: {error}")
         return {"selected": resolved}
 
     def model_catalog(self, payload: dict) -> dict:
@@ -1499,7 +1524,9 @@ class WebApi:
         default_effort = ((model.get("reasoning") or {}).get("defaultEffort"))
         if default_effort is not None:
             selection["reasoningEffort"] = default_effort
-        self._selections["__default__"] = selection
+        default = self.ctx.get("agentDefaultModel")
+        if default is not None:
+            default.save_selection(selection)
 
     # ---------- workspace 路径 ----------
 

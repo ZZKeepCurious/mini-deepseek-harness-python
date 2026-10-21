@@ -10,6 +10,11 @@
 plugins:
   - id: system-prompt
     module: miniharness.cli.plugins.system_prompt
+  - id: agent-default-model
+    module: miniharness.cli.plugins.agent_default_model
+    config:
+      provider: deepseek-official
+      model: deepseek-chat
   - id: web
     module: miniharness.cli.plugins.web
   - id: user-questions
