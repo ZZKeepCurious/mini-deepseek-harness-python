@@ -416,6 +416,8 @@ class WebApi:
         "session/projections": "projections",
         "session/workspacePathApplications": "workspace_path_applications",
         "pluginInventory/list": "plugin_inventory",
+        "pluginManager/listPlugins": "plugin_manager_list",
+        "pluginManager/setPluginEnabled": "plugin_manager_set_enabled",
         "terminal/environment": "terminal_environment",
         "terminal/shells": "terminal_shells",
         "terminal/list": "terminal_list",
@@ -625,6 +627,22 @@ class WebApi:
         if service is not None:
             return service.list()
         return build_inventory(self.ctx, self.roster)
+
+    # ---------- pluginManager 域（packages/boot/plugin-manager 的 mini 子集） ----------
+
+    def _plugin_manager(self):
+        service = self.ctx.get("pluginManager")
+        if service is None:
+            raise _Reject("gateway/invocation-unavailable",
+                          "plugin manager is not installed", {})
+        return service
+
+    def plugin_manager_list(self, payload: dict) -> list[dict]:
+        return self._plugin_manager().list_plugins()
+
+    def plugin_manager_set_enabled(self, payload: dict) -> dict:
+        return self._plugin_manager().set_plugin_enabled(
+            payload["id"], payload["enabled"])
 
     # ---------- terminal 域（terminal-controller 的 Remote 方法面） ----------
     #

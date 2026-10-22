@@ -336,6 +336,7 @@ def _web_main(host: str | None = None, port: int | None = None) -> None:
 
     from ..boot import boot
     from ..boot.config_editor import install_config_editor
+    from ..boot.plugin_manager import install_plugin_manager
     from ..boot.profile import (
         PROFILE_TEMPLATES,
         init_profile,
@@ -376,6 +377,7 @@ def _web_main(host: str | None = None, port: int | None = None) -> None:
 
     editor = install_config_editor(ctx, profile_dir=profile_dir,
                                    patch_path=profile.patch_path, home=home)
+    install_plugin_manager(ctx, editor)
     install_settings_forms(ctx, config_editor=editor, profile_home=home)
     install_settings_controller(ctx, roster=roster)
     # ctx.agentPresets 声明式注册表（roster 提供活组合解析面）：子代理

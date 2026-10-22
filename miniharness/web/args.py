@@ -133,6 +133,14 @@ _SPECS: dict[str, dict[str, tuple[str, bool]]] = {
     },
     "session/control": {},
     "pluginInventory/list": {},
+    # plugin-manager（packages/boot/plugin-manager）：mini 只提供 Loader 条目的
+    # 列举与启用/停用；安装/卸载/市场依赖 npm/pnpm 载体，未提供（见
+    # status/mini-harness/verified-diffs.md）。
+    "pluginManager/listPlugins": {},
+    "pluginManager/setPluginEnabled": {
+        "id": (STR, True),
+        "enabled": (BOOL, True),
+    },
     # terminal-controller（packages/api/terminal-controller）：agent 参数的 wire 名
     # 是 `agentId`（dsh-agent 的 typert lookup wire，见 core/agent/src/index.ts:260），
     # list 取 `sessionId`（index.ts:141）。

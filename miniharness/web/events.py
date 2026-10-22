@@ -237,6 +237,7 @@ class RemoteEventRegistry:
         self._disposers.append(_forward_emit(ctx, self, "credentials/record-updated"))
         self._disposers.append(_forward_emit(ctx, self, "credentials/reference-updated"))
         self._disposers.append(_forward_emit(ctx, self, "schedule/changed"))
+        self._disposers.append(_forward_emit(ctx, self, "plugin-manager/changed"))
 
     def has_live_client(self) -> bool:
         """是否存在活跃的 `$events` 客户端流（上游 gateway index.ts:284 hasLiveClient）。

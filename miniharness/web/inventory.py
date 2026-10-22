@@ -117,6 +117,8 @@ def build_inventory(ctx: Context, roster: Any = None) -> dict:
     snapshot: dict = {"entries": entries_snapshot(ctx)}
     if roster is not None:
         snapshot["agentPresets"] = composition_inventory(roster)
+    if ctx.get("pluginManager") is not None:
+        snapshot["managementAvailable"] = True
     return snapshot
 
 

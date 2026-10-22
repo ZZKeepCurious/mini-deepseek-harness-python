@@ -994,6 +994,7 @@ class TestDispatch(WebApiTest):
             "session/prompt", "session/attachment", "session/updateQueue",
             "session/cancel", "session/page", "session/projections",
             "session/workspacePathApplications", "pluginInventory/list",
+            "pluginManager/listPlugins", "pluginManager/setPluginEnabled",
             "terminal/environment", "terminal/shells", "terminal/list",
             "terminal/create", "terminal/rename", "terminal/close",
             "workspace/create", "workspace/initializeDefault", "workspace/rename",
