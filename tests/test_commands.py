@@ -226,5 +226,70 @@ class CommandRegistryTest(unittest.TestCase):
         self.assertIs(seen["signal"], signal)
 
 
+class CommandAttachmentsTest(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+
+        from miniharness.attachment.file_uploads import install_file_uploads
+        from miniharness.attachment.store import LocalAttachmentStore
+
+        self.ctx = Context(name="commands-attachments")
+        self.addCleanup(self.ctx.dispose)
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = LocalAttachmentStore(root=self._tmp.name, limits=None)
+        self.ctx.provide("attachments", self.store)
+        self.uploads = install_file_uploads(self.ctx)
+        self.registry = install_commands(self.ctx)
+        self.agent = _agent()
+
+    def _stage_file(self, session_id="c1"):
+        from miniharness.attachment.types import SaveFileAttachment
+        ref = self.store.save_file(SaveFileAttachment(data=b"note\n", name="note.txt"))
+        return self.uploads.stage(session_id, ref)["receiptId"]
+
+    def test_file_receipt_admitted_in_order(self):
+        receipt = self._stage_file()
+        seen = {}
+
+        def handler(inv):
+            seen["attachments"] = inv.attachments
+            return {"kind": "success", "text": "ok"}
+
+        self.registry.register("show", "show", handler, accepts_attachments=True)
+        result = self.registry.execute(
+            self.agent, "/show hi", [{"type": "file", "receiptId": receipt}])
+        self.assertEqual(result["result"], {"kind": "success", "text": "ok"})
+        block = seen["attachments"][0]
+        self.assertEqual(block["type"], "file")
+        self.assertEqual(block["attachment"]["name"], "note.txt")
+
+    def test_unknown_receipt_settles_error(self):
+        self.registry.register("show", "show", lambda inv: {"kind": "success"},
+                               accepts_attachments=True)
+        result = self.registry.execute(
+            self.agent, "/show", [{"type": "file", "receiptId": "missing"}])
+        self.assertEqual(result["result"]["kind"], "error")
+        self.assertEqual(result["result"]["text"],
+                         "File upload receipt is unknown for this session.")
+
+    def test_command_without_declaration_rejects_attachments(self):
+        receipt = self._stage_file()
+        called = []
+        self.registry.register("plain", "plain",
+                               lambda inv: called.append(True) or {"kind": "success"})
+        result = self.registry.execute(
+            self.agent, "/plain", [{"type": "file", "receiptId": receipt}])
+        self.assertEqual(result["result"],
+                         {"kind": "error", "text": "/plain does not accept attachments"})
+        self.assertEqual(called, [])
+
+    def test_attachment_capable_descriptor(self):
+        self.registry.register("show", "show", lambda inv: {"kind": "success"},
+                               input_hint="<x>", accepts_attachments=True)
+        row = next(r for r in self.registry.descriptors() if r["name"] == "show")
+        self.assertEqual(row["input"], {"hint": "<x>", "attachments": True})
+
+
 if __name__ == "__main__":
     unittest.main()

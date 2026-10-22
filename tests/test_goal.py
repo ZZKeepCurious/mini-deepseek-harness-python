@@ -731,6 +731,29 @@ class TestGoalCommands(unittest.TestCase):
         self.assertEqual(out["kind"], "success")
         self.assertIn("created", out["text"].lower())
 
+    def test_execute_create_submits_attachments(self):
+        created = {"id": "g1", "revision": 1, "phase": "active", "objective": "test",
+                    "roundsStarted": 0, "maxGoalRounds": 5, "activation": "armed"}
+        goals = SimpleNamespace(get=lambda agent: None,
+                                create=lambda agent, spec: created)
+        captured = []
+        agent = SimpleNamespace(agent="a", followup=lambda msg: captured.append(msg))
+        block = {"type": "file", "attachment": {"attachmentId": "att-1",
+                                                "name": "note.txt", "bytes": 3}}
+        out = _execute_goal_command(goals, agent, "new goal", (block,))
+        self.assertEqual(out["kind"], "success")
+        self.assertEqual(captured[0]["content"][0], block)
+        self.assertEqual(captured[0]["content"][1]["type"], "text")
+
+    def test_execute_attachments_rejected_for_non_objective(self):
+        goals = SimpleNamespace(get=lambda agent: {"phase": "active", "id": "g1",
+                                                   "revision": 1})
+        out = _execute_goal_command(
+            goals, SimpleNamespace(agent="a"), "pause",
+            ({"type": "file", "attachment": {}},))
+        self.assertEqual(out["kind"], "error")
+        self.assertIn("Attachments only accompany", out["text"])
+
     def test_execute_create_already_active(self):
         current = {"id": "g1", "revision": 1, "phase": "active", "objective": "old",
                     "roundsStarted": 0, "maxGoalRounds": 5, "activation": "armed"}

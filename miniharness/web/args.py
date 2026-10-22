@@ -141,6 +141,12 @@ _SPECS: dict[str, dict[str, tuple[str, bool]]] = {
         "id": (STR, True),
         "enabled": (BOOL, True),
     },
+    # fileUploads（packages/client/file-upload）：base64 回退载体；原始字节走
+    # `POST /api/session/uploadFileBinary`（无信封，不经本表）。
+    "fileUploads/upload": {
+        "agentId": (STR, True),
+        "request": (OBJ, True),
+    },
     # terminal-controller（packages/api/terminal-controller）：agent 参数的 wire 名
     # 是 `agentId`（dsh-agent 的 typert lookup wire，见 core/agent/src/index.ts:260），
     # list 取 `sessionId`（index.ts:141）。

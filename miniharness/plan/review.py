@@ -31,6 +31,7 @@ from typing import Any, Callable
 
 from ..core.scope import Context
 from ..core.session import deep_freeze
+from ..core.session.message import create_message, text_block
 from ..core.tools import Tool, ToolResult
 from ..interaction.user_questions import ASK_CANCELLED, UserQuestionError
 from .mode import PlanModeController, fold_plan_mode
@@ -88,6 +89,9 @@ def _plan_command_handler(controller: PlanModeController) -> Callable:
     def handler(invocation: Any) -> dict:
         agent = invocation.agent
         message = invocation.raw_input.strip()
+        attachments = invocation.attachments
+        if message == "off" and attachments:
+            return {"kind": "error", "text": "Attachments cannot accompany /plan off."}
         if message == "off":
             outcome = controller.set(agent, False)
             if outcome == "committed":
@@ -104,8 +108,12 @@ def _plan_command_handler(controller: PlanModeController) -> Callable:
                 else "Plan mode is already inactive.",
             }
         outcome = controller.set(agent, True)
-        if message != "":
-            agent.steer(message)
+        if message != "" or attachments:
+            agent.steer(create_message(
+                "user",
+                [*attachments, *([text_block(message)] if message != "" else [])],
+                {"kind": "user"},
+            ))
         return {
             "kind": "success",
             "text": "Plan mode on. Use /plan off to leave."
@@ -235,4 +243,5 @@ def install_plan_review(ctx: Context, controller: PlanModeController) -> None:
         "Enter or leave plan mode",
         _plan_command_handler(controller),
         input_hint="[off|message]",
+        accepts_attachments=True,
     )

@@ -57,6 +57,7 @@ from .stream_protocol import (
     parse_remote_event_result_payload,
 )
 from .streams import GatewayStreams, RemoteStreamError
+from .upload import UPLOAD_FILE_BINARY_PATH, handle_file_upload_http
 
 __all__ = ["create_app"]
 
@@ -112,6 +113,12 @@ def create_app(api: WebApi, gateway: GatewayStreams,
                   openapi_url=None)
     if resolved_token is not None:
         app.add_middleware(TokenGateMiddleware, token=resolved_token)
+
+    @app.api_route(UPLOAD_FILE_BINARY_PATH,
+                   methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"])
+    async def upload_file_binary(request: Request) -> Response:
+        """原始字节上传（无信封；先于 `/api/{path}` 兜底注册）。"""
+        return await handle_file_upload_http(api, request)
 
     @app.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH",
                                                 "OPTIONS", "HEAD"])

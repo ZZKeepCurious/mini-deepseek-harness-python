@@ -39,9 +39,11 @@ from typing import Any
 
 from ..attachment.admission import admit_encoded_images
 from ..attachment.error import AttachmentError
+from ..attachment.file_uploads import install_file_uploads
 from ..attachment.types import (
     AttachmentId,
     Dimensions,
+    EncodedFileAttachment,
     EncodedImageAttachment,
     ImageAttachmentRef,
 )
@@ -49,7 +51,7 @@ from ..core.agent_loop.agent import AgentLoop
 from ..core.agent_loop.resident_loop import run_on_resident
 from ..core.scope import Context
 from ..core.session import SESSION_FORMAT_VERSION, Session, thaw
-from ..core.session.message import create_message, image_block, text_block
+from ..core.session.message import create_message, file_block, image_block, text_block
 from ..core.session.surface import derive_event_message
 from ..core.session_store import SessionForkError, SessionStore
 from ..core.agents import install_agents
@@ -385,6 +387,7 @@ class WebApi:
         if self.tools.resolve("working_directory") is None:
             register_working_directory_tool(ctx, self.tools)
         self.attachments = ctx.get("attachments")
+        self.file_uploads = install_file_uploads(ctx)
         self._agents: dict[str, AgentLoop] = {}
         # selectModel 记录（advisory：单适配器部署回落恒单模型，不驱动路由）
         self._selections: dict[str, dict] = {}
@@ -418,6 +421,7 @@ class WebApi:
         "pluginInventory/list": "plugin_inventory",
         "pluginManager/listPlugins": "plugin_manager_list",
         "pluginManager/setPluginEnabled": "plugin_manager_set_enabled",
+        "fileUploads/upload": "file_uploads_upload",
         "terminal/environment": "terminal_environment",
         "terminal/shells": "terminal_shells",
         "terminal/list": "terminal_list",
@@ -643,6 +647,52 @@ class WebApi:
     def plugin_manager_set_enabled(self, payload: dict) -> dict:
         return self._plugin_manager().set_plugin_enabled(
             payload["id"], payload["enabled"])
+
+    # ---------- fileUploads（packages/client/file-upload 的 base64 回退） ----------
+
+    def file_uploads_upload(self, payload: dict) -> dict:
+        """持久化一个 canonical base64 文件并在接收会话下签收 receipt。"""
+        agent_id = _require_id(payload, "agentId")
+        request = payload.get("request")
+        if not isinstance(request, dict) or not isinstance(request.get("data"), str):
+            raise _Reject("gateway/bad-request", "request must carry canonical base64 data", {})
+        name = request.get("name")
+        if name is not None and not isinstance(name, str):
+            raise _Reject("gateway/bad-request", "request.name must be a string", {})
+        self._upload_target(agent_id)
+        attachments = self.attachments
+        if attachments is None:
+            raise _Reject("session/attachment-invalid",
+                          "file uploads are unavailable: this deployment mounts no "
+                          "attachment service",
+                          {"reason": "ATTACHMENT_UNAVAILABLE"})
+        try:
+            ref = attachments.admit_encoded_file(EncodedFileAttachment(
+                data=request["data"], name=name))
+        except AttachmentError as error:
+            raise _Reject("session/attachment-invalid", error.message,
+                          {"reason": error.code}) from error
+        except Exception as error:  # noqa: BLE001 - 其余落盘失败折 gateway/internal
+            raise _Reject("gateway/internal",
+                          f"failed to store file upload: {error}", {}) from error
+        if self.store.get(agent_id) is None:
+            raise _Reject("session/not-found",
+                          f'session "{agent_id}" was disposed before its file upload completed',
+                          {"sessionId": agent_id})
+        return self.file_uploads.stage(agent_id, ref)
+
+    def _upload_target(self, session_id: str) -> None:
+        session = self.store.get(session_id)
+        if session is None:
+            raise _Reject("session/not-found", f'session "{session_id}" not found',
+                          {"sessionId": session_id})
+        if self._subagent_owned(session):
+            raise _Reject("subagent/attachment-invalid",
+                          "subagent conversations do not accept file uploads",
+                          {"reason": "SUBAGENT_FILE_UNSUPPORTED"})
+        if self._agent_for(session_id) is None:
+            raise _Reject("session/not-found", f'session "{session_id}" not found',
+                          {"sessionId": session_id})
 
     # ---------- terminal 域（terminal-controller 的 Remote 方法面） ----------
     #
@@ -1604,13 +1654,16 @@ class WebApi:
             raise _Reject("gateway/bad-request",
                           "content must be a non-empty array of PromptContentPart", {})
         for part in content:
-            if not isinstance(part, dict) or part.get("type") not in ("text", "image"):
-                raise _Reject("gateway/bad-request", "each content part must be a text or image object", {})
+            if not isinstance(part, dict) or part.get("type") not in ("text", "image", "file"):
+                raise _Reject("gateway/bad-request",
+                              "each content part must be a text, image, or file object", {})
             if part["type"] == "text" and not isinstance(part.get("text"), str):
                 raise _Reject("gateway/bad-request", "text part must carry a string text", {})
             if part["type"] == "image" and not (isinstance(part.get("mediaType"), str)
                                                 and isinstance(part.get("data"), str)):
                 raise _Reject("gateway/bad-request", "image part must carry mediaType and data", {})
+            if part["type"] == "file" and not isinstance(part.get("receiptId"), str):
+                raise _Reject("gateway/bad-request", "file part must carry a string receiptId", {})
         # 空内容门（上游 commands.ts hasPromptContent：无非空白文本且无非文本
         # part → gateway/bad-request）
         if not any(part["type"] != "text" or part["text"].strip() for part in content):
@@ -1633,13 +1686,27 @@ class WebApi:
         loop = found[1]
 
         refs: list[ImageAttachmentRef] | None = None
+        file_refs: dict[str, Any] = {}
+        binding = None
         try:
+            for part in content:
+                if part["type"] != "file":
+                    continue
+                receipt_id = part["receiptId"]
+                if receipt_id in file_refs:
+                    continue
+                ref = self.file_uploads.resolve(session_id, receipt_id)
+                if ref is None:
+                    raise _Reject("session/attachment-invalid",
+                                  "File was not uploaded for this session.",
+                                  {"reason": "FILE_NOT_STAGED"})
+                file_refs[receipt_id] = ref
+            if file_refs:
+                binding = self.file_uploads.bind_prompt(
+                    session_id, list(file_refs), request_id)
             if any(part["type"] == "image" for part in content):
                 refs = self._admit_prompt_images(content)
-            if refs is None:
-                blocks = [text_block(part["text"]) for part in content]
-            else:
-                blocks = self._content_with_blocks(content, refs)
+            blocks = self._content_blocks(content, refs, file_refs)
             source: dict[str, Any] = {"kind": "user", "rpcId": request_id}
             if canonical_time_zone is not None:
                 source["clientTimeZone"] = canonical_time_zone
@@ -1648,12 +1715,20 @@ class WebApi:
                 loop.steer(message)
             else:
                 loop.followup(message)
+            if binding is not None:
+                binding.commit()
         except AttachmentError as error:
+            if binding is not None:
+                binding.rollback()
             raise _Reject("session/attachment-invalid", error.message,
                           {"reason": error.code}) from error
         except _Reject:
+            if binding is not None:
+                binding.rollback()
             raise
         except Exception as error:  # noqa: BLE001 - 其余 admit/落盘失败折叠 agent-busy
+            if binding is not None:
+                binding.rollback()
             raise _Reject("session/agent-busy", "prompt rejected",
                           {"reason": str(error)}) from error
         return {"accepted": True}
@@ -1677,13 +1752,16 @@ class WebApi:
         return admit_encoded_images(self.attachments, images)
 
     @staticmethod
-    def _content_with_blocks(content: list, refs: list[ImageAttachmentRef]) -> list:
+    def _content_blocks(content: list, refs: list[ImageAttachmentRef] | None,
+                        file_refs: dict[str, Any]) -> list:
         blocks = []
         index = 0
         for part in content:
             if part["type"] == "image":
                 blocks.append(image_block(refs[index].to_dict()))
                 index += 1
+            elif part["type"] == "file":
+                blocks.append(file_block(file_refs[part["receiptId"]].to_dict()))
             else:
                 blocks.append(text_block(part["text"]))
         return blocks
@@ -1734,6 +1812,9 @@ class WebApi:
                                                       for part in action["content"]]})
         elif kind == "remove":
             agent.inbox.remove(item_id)
+            request_id = (message.get("source") or {}).get("rpcId")
+            if isinstance(request_id, str):
+                self.file_uploads.retire_prompt(session_id, request_id)
         else:
             agent.inbox.remove(item_id)
             agent.steer(message)

@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from .domain import GoalError
+from ..core.session.message import create_message, text_block
 
 __all__ = ["GOAL_USAGE", "install_goal_commands", "parse_goal_command"]
 
@@ -77,8 +78,26 @@ def _missing_goal(action: str) -> dict:
     }
 
 
-def _execute_goal_command(goals, agent: Any, raw_input: str) -> dict:
+def _submit_objective_attachments(agent: Any, attachments: tuple) -> None:
+    """把附件作为一条模型可见 user 消息放进目标下一轮（上游 submitObjectiveAttachments）。"""
+    if not attachments:
+        return
+    agent.followup(create_message(
+        "user",
+        [*attachments, text_block("Reference attachments for the goal objective.")],
+        {"kind": "user"},
+    ))
+
+
+def _execute_goal_command(goals, agent: Any, raw_input: str,
+                          attachments: tuple = ()) -> dict:
     command = parse_goal_command(raw_input)
+    if attachments and command["kind"] not in ("create", "edit"):
+        return {
+            "kind": "error",
+            "text": "Attachments only accompany a goal objective: "
+                    "/goal <objective> or /goal edit <objective>.",
+        }
     try:
         current = goals.get(agent)
         kind = command["kind"]
@@ -94,17 +113,20 @@ def _execute_goal_command(goals, agent: Any, raw_input: str) -> dict:
                 return {"kind": "error",
                         "text": f"A goal is already {_phase_label(current['phase'])}. "
                                 "Use /goal edit <objective> to change it or /goal clear before replacing it."}
-            return _render_goal("Goal created",
-                                goals.create(agent, {"objective": command["objective"]}))
+            created = goals.create(agent, {"objective": command["objective"]})
+            _submit_objective_attachments(agent, attachments)
+            return _render_goal("Goal created", created)
         if kind == "edit":
             if current is None:
                 return _missing_goal("edit")
             if current["phase"] == "complete":
-                return _render_goal("Goal created",
-                                    goals.create(agent, {"objective": command["objective"]}))
-            return _render_goal("Goal updated",
-                                goals.edit(agent, {"id": current["id"], "revision": current["revision"]},
-                                           {"objective": command["objective"]}))
+                replaced = goals.create(agent, {"objective": command["objective"]})
+                _submit_objective_attachments(agent, attachments)
+                return _render_goal("Goal created", replaced)
+            edited = goals.edit(agent, {"id": current["id"], "revision": current["revision"]},
+                                {"objective": command["objective"]})
+            _submit_objective_attachments(agent, attachments)
+            return _render_goal("Goal updated", edited)
         if kind == "pause":
             if current is None:
                 return _missing_goal("pause")
@@ -138,6 +160,8 @@ def install_goal_commands(ctx, goals) -> Callable | None:
     return commands.register(
         "goal",
         "set or view the goal for a long-running task",
-        lambda inv: _execute_goal_command(goals, inv.agent, inv.raw_input),
+        lambda inv: _execute_goal_command(
+            goals, inv.agent, inv.raw_input, inv.attachments),
         input_hint="[<objective>|clear|edit <objective>|pause|resume]",
+        accepts_attachments=True,
     )

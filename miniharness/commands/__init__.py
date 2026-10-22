@@ -34,8 +34,12 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from .brand import CommandDefinitionId, CommandId
+from ..attachment.admission import admit_encoded_images
+from ..attachment.error import AttachmentError
+from ..attachment.types import EncodedImageAttachment
 from ..core.scope import Context
 from ..core.session import Session
+from ..core.session.message import file_block, image_block
 
 __all__ = [
     "AbortSignal",
@@ -105,6 +109,56 @@ class CommandInvocation:
     agent: Any
     raw_input: str
     signal: AbortSignal
+    attachments: tuple = ()
+
+
+def _admit_command_attachments(ctx: Context, agent: Any,
+                               submitted: Any) -> tuple:
+    """受理命令附带的图片与已上传文件收据，保持提交顺序（上游 index.ts:493-531）。"""
+    uploads = ctx.get("fileUploads")
+    session_id = agent.session.session_id
+    for part in submitted:
+        if not isinstance(part, dict) or part.get("type") not in ("image", "file"):
+            raise AttachmentError(
+                "Command attachments must be image or file submissions.",
+                "INVALID_ATTACHMENT_REF")
+        if part["type"] == "image" and not (
+                isinstance(part.get("mediaType"), str)
+                and isinstance(part.get("data"), str)):
+            raise AttachmentError(
+                "Image attachments must carry mediaType and data.",
+                "INVALID_ATTACHMENT_REF")
+        if part["type"] == "file" and not isinstance(part.get("receiptId"), str):
+            raise AttachmentError(
+                "File attachments must carry a receiptId.",
+                "INVALID_ATTACHMENT_REF")
+    files: dict[str, Any] = {}
+    for part in submitted:
+        if part["type"] != "file":
+            continue
+        receipt_id = part.get("receiptId")
+        if not isinstance(receipt_id, str) or receipt_id in files:
+            continue
+        ref = uploads.resolve(session_id, receipt_id) if uploads is not None else None
+        if ref is None:
+            raise AttachmentError(
+                "File upload receipt is unknown for this session.", "ATTACHMENT_NOT_FOUND")
+        files[receipt_id] = ref
+    images = [
+        EncodedImageAttachment(mediaType=part["mediaType"], data=part["data"],
+                              name=part.get("name"))
+        for part in submitted if isinstance(part, dict) and part.get("type") == "image"
+    ]
+    refs = admit_encoded_images(ctx.get("attachments"), images) if images else []
+    blocks: list[dict] = []
+    image_index = 0
+    for part in submitted:
+        if part["type"] == "image":
+            blocks.append(image_block(refs[image_index].to_dict()))
+            image_index += 1
+        else:
+            blocks.append(file_block(files[part["receiptId"]].to_dict()))
+    return tuple(blocks)
 
 
 def parse_command(text: str) -> tuple[str, str] | None:
@@ -130,7 +184,8 @@ class CommandRegistry:
         self._command_seq = 0
 
     def register(self, name: str, description: str, handler: Callable,
-                 input_hint: str | None = None, record_input: bool = True) -> Callable:
+                 input_hint: str | None = None, record_input: bool = True,
+                 accepts_attachments: bool = False) -> Callable:
         """注册命令；返回 disposer。元数据非法 / 重复注册 = fail loud（上游
         normalizeDefinition 同款校验，index.ts:151-189）。"""
         self._ctx._assert_alive()
@@ -146,6 +201,8 @@ class CommandRegistry:
             raise TypeError(f'command "/{name}" input hint must be a non-empty string')
         if not isinstance(record_input, bool):
             raise TypeError(f'command "/{name}" recordInput must be a boolean')
+        if not isinstance(accepts_attachments, bool):
+            raise TypeError(f'command "/{name}" acceptsAttachments must be a boolean')
         if name in self._commands:
             raise RuntimeError(f"command /{name} is already registered")
         self._commands[name] = {
@@ -153,6 +210,7 @@ class CommandRegistry:
             "handler": handler,
             "input_hint": input_hint,
             "record_input": record_input,
+            "accepts_attachments": accepts_attachments,
         }
         self._notify_change()
 
@@ -180,8 +238,8 @@ class CommandRegistry:
     def descriptors(self) -> list[dict]:
         """有效命令的 handler-free 视图（按 name 排序；上游 CommandDescriptor）。
 
-        `input` 只在声明了 input hint 时出现（`{hint}`）；mini 无
-        `input.attachments` 声明面，故不产该键。
+        `input` 按声明组合：`hint` 与/或 `attachments:true`（上游
+        CommandInputDescriptor）。
         """
         rows: list[dict] = []
         for name in self.names():
@@ -190,8 +248,13 @@ class CommandRegistry:
                 "name": name,
                 "description": entry["description"],
             }
+            input_: dict[str, Any] = {}
             if entry["input_hint"] is not None:
-                row["input"] = {"hint": entry["input_hint"]}
+                input_["hint"] = entry["input_hint"]
+            if entry["accepts_attachments"]:
+                input_["attachments"] = True
+            if input_:
+                row["input"] = input_
             rows.append(row)
         return rows
 
@@ -243,15 +306,30 @@ class CommandRegistry:
         if entry["record_input"]:
             run_data["args"] = raw
         session.append("command/run", run_data)
-        if submitted_attachments:
-            result = {"kind": "error",
-                      "text": f"/{name} does not accept attachments"}
+
+        def settle_error(text: str) -> tuple[str, dict]:
             session.append("command/done", {
-                "commandId": command_id, "kind": "error", "text": result["text"],
+                "commandId": command_id, "kind": "error", "text": text,
             })
-            return command_id, result
+            return command_id, {"kind": "error", "text": text}
+
+        attachments: tuple = ()
+        if submitted_attachments:
+            if not entry["accepts_attachments"]:
+                return settle_error(f"/{name} does not accept attachments")
+            if self._ctx.get("attachments") is None:
+                return settle_error(
+                    f"/{name}: attachments are unavailable because no attachment store is composed")
+            try:
+                attachments = _admit_command_attachments(
+                    self._ctx, agent, submitted_attachments)
+            except AttachmentError as error:
+                return settle_error(error.message)
+            if signal.aborted:
+                raise _abort_error(signal)
         invocation = CommandInvocation(
-            command_id=command_id, agent=agent, raw_input=raw, signal=signal)
+            command_id=command_id, agent=agent, raw_input=raw, signal=signal,
+            attachments=attachments)
         try:
             output = entry["handler"](invocation)
         except Exception as error:  # noqa: BLE001 - 抛错的 handler 结算为 error（上游同语义）

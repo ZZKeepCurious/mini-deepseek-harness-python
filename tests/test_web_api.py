@@ -963,6 +963,52 @@ class TestSessionAttachment(WebApiTest):
             "sessionId": "session-nope", "attachmentId": "att-1"}))
         self.assertEqual(error["code"], "session/not-found")
 
+    def _upload_encoded(self, session_id, data=b"hello file\n", name="note.txt"):
+        return self._value(self.api.dispatch("fileUploads/upload", "up1", {
+            "agentId": session_id,
+            "request": {"data": base64.b64encode(data).decode("ascii"),
+                        "name": name}}))
+
+    def test_encoded_upload_stages_receipt_and_prompt_resolves_file(self):
+        session_id = self._value(self._create())["sessionId"]
+        uploaded = self._upload_encoded(session_id)
+        self.assertEqual(uploaded["file"]["name"], "note.txt")
+        self.assertEqual(uploaded["file"]["bytes"], 11)
+        receipt_id = uploaded["receiptId"]
+
+        async def go():
+            response = self.api.dispatch("session.prompt", "fp1", {
+                "sessionId": session_id, "mode": "queue", "requestId": "req-file",
+                "content": [{"type": "file", "receiptId": receipt_id},
+                            {"type": "text", "text": "read this"}]})
+            self.assertEqual(self._value(response), {"accepted": True})
+            await self.api._agents[session_id].when_idle_async()
+
+        _run(go())
+        user = next(ev for ev in self.api.store.get(session_id).events
+                    if ev["type"] == "user/message")
+        block = user["data"]["content"][0]
+        self.assertEqual(block["type"], "file")
+        self.assertEqual(block["attachment"]["name"], "note.txt")
+        self.assertEqual(block["attachment"]["bytes"], 11)
+        self.assertIsNone(self.api.file_uploads.resolve(session_id, receipt_id))
+
+    def test_prompt_rejects_foreign_receipt(self):
+        first = self._value(self._create(session_id="session-one"))["sessionId"]
+        second = self._value(self._create(session_id="session-two"))["sessionId"]
+        receipt_id = self._upload_encoded(first)["receiptId"]
+        error = self._error(self.api.dispatch("session.prompt", "fp2", {
+            "sessionId": second, "mode": "queue", "requestId": "req-foreign",
+            "content": [{"type": "file", "receiptId": receipt_id}]}))
+        self.assertEqual(error["code"], "session/attachment-invalid")
+        self.assertEqual(error["details"], {"reason": "FILE_NOT_STAGED"})
+        self.assertIsNotNone(self.api.file_uploads.resolve(first, receipt_id))
+
+    def test_encoded_upload_unknown_session(self):
+        error = self._error(self.api.dispatch("fileUploads/upload", "up2", {
+            "agentId": "session-nope", "request": {"data": "aGk="}}))
+        self.assertEqual(error["code"], "session/not-found")
+
 
 class TestAttachmentUnavailable(WebApiTest):
     def test_referenced_without_service(self):
@@ -995,6 +1041,7 @@ class TestDispatch(WebApiTest):
             "session/cancel", "session/page", "session/projections",
             "session/workspacePathApplications", "pluginInventory/list",
             "pluginManager/listPlugins", "pluginManager/setPluginEnabled",
+            "fileUploads/upload",
             "terminal/environment", "terminal/shells", "terminal/list",
             "terminal/create", "terminal/rename", "terminal/close",
             "workspace/create", "workspace/initializeDefault", "workspace/rename",

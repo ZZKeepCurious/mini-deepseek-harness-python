@@ -7,6 +7,7 @@
 import asyncio
 import json
 import os
+import tempfile
 import unittest
 
 from miniharness.core.scope import Context
@@ -130,6 +131,77 @@ class WebSocketMuxTest(unittest.TestCase):
         data = resp.json()
         self.assertFalse(data["result"]["ok"])
         self.assertEqual(data["result"]["error"]["code"], "gateway/internal")
+
+
+@unittest.skipUnless(_HAVE_TC, "fastapi TestClient unavailable")
+class FileUploadHttpTest(unittest.TestCase):
+    """原始字节上传路由（`packages/client/file-upload/src/http-route.ts`）。"""
+
+    def setUp(self):
+        from miniharness.attachment.store import LocalAttachmentStore
+        self.ctx = Context(name="web-upload-test")
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.ctx.provide("attachments", LocalAttachmentStore(
+            root=self._tmp.name, limits=None))
+        self.api = WebApi(self.ctx, _fake())
+        self.client = TestClient(create_app(self.api, self.api.gateway))
+        created = self.api.dispatch("session.create", "rc", {"cwd": os.getcwd()})
+        self.session_id = created["result"]["value"]["sessionId"]
+
+    def tearDown(self):
+        self.client.close()
+        self.ctx.dispose()
+
+    def _upload(self, body=b"hello file\n", *, session_id=None, name="note.txt",
+                content_type="application/octet-stream"):
+        query = f"?sessionId={session_id if session_id is not None else self.session_id}"
+        if name is not None:
+            query += f"&name={name}"
+        return self.client.post("/api/session/uploadFileBinary" + query,
+                                content=body,
+                                headers={"content-type": content_type})
+
+    def test_streamed_upload_returns_receipt(self):
+        response = self._upload()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"],
+                         "application/json; charset=utf-8")
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        result = response.json()
+        self.assertTrue(result["ok"], result.get("error"))
+        value = result["value"]
+        self.assertEqual(value["file"]["name"], "note.txt")
+        self.assertEqual(value["file"]["bytes"], 11)
+        self.assertTrue(value["receiptId"])
+        ref = self.api.file_uploads.resolve(self.session_id, value["receiptId"])
+        self.assertIsNotNone(ref)
+        self.assertEqual(b"".join(self.api.attachments.read_file_stream(ref)),
+                         b"hello file\n")
+
+    def test_get_method_not_allowed(self):
+        response = self.client.get("/api/session/uploadFileBinary?sessionId=x")
+        self.assertEqual(response.status_code, 405)
+        self.assertEqual(response.headers["allow"], "POST")
+
+    def test_requires_octet_stream(self):
+        response = self._upload(content_type="application/json")
+        self.assertEqual(response.status_code, 415)
+        self.assertEqual(response.text, "content type must be application/octet-stream")
+
+    def test_requires_session_id(self):
+        response = self.client.post(
+            "/api/session/uploadFileBinary", content=b"x",
+            headers={"content-type": "application/octet-stream"})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.text, "sessionId is required")
+
+    def test_unknown_session_business_error(self):
+        response = self._upload(session_id="session-nope")
+        self.assertEqual(response.status_code, 200)
+        result = response.json()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "session/not-found")
 
 
 if __name__ == "__main__":

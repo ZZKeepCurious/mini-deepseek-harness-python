@@ -91,6 +91,7 @@ RPC_ERROR_CODES = frozenset({
     "session/writer-held",
     "settings/conflict",
     "settings/rejected",
+    "subagent/attachment-invalid",
     "subagent/catalog-diagnostic",
     "subagent/not-found",
     "subagent/unauthorized",
