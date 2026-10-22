@@ -67,7 +67,7 @@ web 半（传输层 + 浏览器前端）的 wire 面与上游一致：两信封 
 
 - **subprocess 接缝服务**：`miniharness/subprocess/`——`ctx.subprocess`（`resolve_executable`/`terminal_environment`/`scrubbed_parent_env` 收编既有实现，无复制）。**载体差异**：Windows Job/systemd scope/execve runner 平台专属 containment 无 Python 等价（Popen 近似）；spill 以内存缓冲承载。
 
-- **账户域**：`miniharness/deepseek_account/`——`ctx.deepseekAccount` 服务定义 + `LocalAccountService`（恒 signed-out、getProfile/Balance → null、startSignIn 因无浏览器 fail loud）+ `account/*` Remote wire。**载体差异**：浏览器 PKCE + Platform HTTP 是浏览器宿主载体（触发条件：引入浏览器客户端时实现平台域）。
+- **账户域**：`miniharness/deepseek_account/`——`ctx.deepseekAccount` 服务定义 + `PlatformAccount`（浏览器 PKCE attempt 状态机、固定宿主 `/oauth/callback`、Platform profile/wallet/bonus/logout、durable grant/device）+ `LocalAccountService`（无 credentials/authorization 服务时的 signed-out 兜底）+ `account/*` Remote wire（含 `startSignIn`/`cancelSignIn`）。**载体差异**：authorization 接缝为同步调用 + daemon worker 线程/Event 等待浏览器回调；上游异步 AbortSignal 组合。
 
 - **工作目录（working-directory）**：`miniharness/working_directory/`（L2）——`ctx.workingDirectory` 服务（`get`/`ensure`/`set`）+ `workingDirectory` 投影单元 + 系统提示 context `working-directory:current`（order=100、required、interpolate=false）+ `system-prompt/assemble` prepend 准入 + 模型工具 `working_directory({cd?})`；可变、durable 的当前执行目录从不可变项目身份 `header.cwd` 分离，失效（目录被删）恢复原项目并落通知。全部 cwd 消费者（fs/lsp/persistent-shell/skill/context/workflow-ptc/run_code/bash/pwsh/terminal-controller）经共享 `core/working_cwd.working_directory_of` 读取，避免 L1 模块反向依赖 L2 服务。**载体差异**：消费者取同步投影态而非上游逐次 `ensure`（准入期已覆盖校验）；生命周期拆解同步化。
 

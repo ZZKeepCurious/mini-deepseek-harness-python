@@ -276,9 +276,16 @@ class ImportDirectionTest(unittest.TestCase):
                     # settings-controller}）；运行面在各自控制器，不得反向 import cli
                     continue
                 if src_unit == "cli" and dst_unit == "deepseek_account":
-                    # §5 显式例外（单方向）：web profile 组装 account 服务
-                    # （上游 web-app compose deepseek-account-platform）；
-                    # deepseek_account 不得反向 import cli
+                    # ��5 ��ʽ���⣨�����򣩣�web profile ��װ account ����
+                    # ������ web-app compose deepseek-account-platform����
+                    # deepseek_account ���÷��� import cli
+                    continue
+                if src_unit == "deepseek_account" and dst_unit == "seams":
+                    # ��5 ��ʽ���⣨�����򣩣�deepseek-account-platform ��
+                    # credentials/authorization seam ���У��� upstream
+                    # deepseek-account-platform/src/index.ts:85
+                    # `static inject = ['credentials', 'authorization']`����
+                    # seams ���÷��� import deepseek_account
                     continue
                 if src_unit == "shell" and dst_unit == "seams":
                     # §5 显式例外（单方向）：bash-sandbox 是 ctx.sandbox 的消费者

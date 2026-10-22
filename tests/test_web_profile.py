@@ -30,7 +30,8 @@ from miniharness.settings.forms import SettingsForms, install_settings_forms
 
 EXPECTED_ENTRY_IDS = [
     "system-prompt", "agent-default-model", "web", "user-questions", "sandbox-policy",
-    "terminal-controller", "fs", "subprocess", "workspace-changes", "credentials", "workspaces",
+    "terminal-controller", "fs", "subprocess", "workspace-changes", "credentials",
+    "authorization", "workspaces",
     "workspace-controller", "workspace-files", "session-projections",
     "working-directory",
     "usage-stats", "turn-outline", "command-feedback", "message-feedback",

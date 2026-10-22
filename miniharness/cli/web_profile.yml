@@ -36,6 +36,8 @@ plugins:
       - subprocess
   - id: credentials
     module: miniharness.cli.plugins.credentials
+  - id: authorization
+    module: miniharness.cli.plugins.authorization
   - id: workspaces
     module: miniharness.cli.plugins.workspaces
   - id: workspace-controller

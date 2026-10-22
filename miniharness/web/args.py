@@ -426,6 +426,14 @@ _SPECS: dict[str, dict[str, tuple[str, bool]]] = {
         "client": (OBJ, True),
     },
     "account/hasRunningAccountTasks": {},
+    "account/startSignIn": {
+        "client": (OBJ, True),
+        "callbackOrigin": (STR, True),
+        "loginSource": (STR, True),
+    },
+    "account/cancelSignIn": {
+        "attemptId": (STR, True),
+    },
     "account/signOut": {
         "client": (OBJ, True),
     },

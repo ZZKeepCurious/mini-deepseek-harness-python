@@ -3,8 +3,8 @@
 对齐上游 `packages/credentials/deepseek-account`（Service Definition）+ 
 `packages/api/account-controller`（Remote namespace `account/*`）。
 
-载体差异（登记）：浏览器 PKCE + Platform HTTP 是浏览器宿主载体——mini 以
-本地落空实现（恒 signed-out）承载服务面；startSignIn 因无浏览器 fail loud。
+本文件覆盖服务面与 Remote 路由（本地落空实现 + 假账户服务）；Platform
+浏览器 PKCE 全链路见 `tests/test_account_platform.py`。
 """
 import asyncio
 import unittest
@@ -21,7 +21,8 @@ from miniharness.web.api import WebApi
 
 class DeepSeekAccountServiceTest(unittest.TestCase):
     def test_error_codes(self):
-        self.assertEqual(SIGN_IN_ERROR_CODES, ("network", "protocol", "expired", "storage"))
+        self.assertEqual(SIGN_IN_ERROR_CODES,
+                         ("no-response", "network", "protocol", "expired", "storage"))
 
     def test_get_state_signed_out(self):
         ctx = Context(name="acct")
@@ -48,7 +49,9 @@ class DeepSeekAccountServiceTest(unittest.TestCase):
         try:
             svc = install_deepseek_account(ctx)
             with self.assertRaises(RuntimeError):
-                svc.start_sign_in("en", "http://127.0.0.1:3080", "web")
+                svc.start_sign_in(
+                    {"version": "1", "locale": "en", "timezoneOffsetSeconds": 0},
+                    "http://127.0.0.1:3080", "web")
         finally:
             ctx.dispose()
 
@@ -119,6 +122,25 @@ class AccountControllerWireTest(unittest.TestCase):
         value = self._value(self.api.dispatch(
             "account/hasRunningAccountTasks", "r3d", {}))
         self.assertFalse(value)
+
+    def test_start_sign_in_route_without_platform(self):
+        error = self._error(self.api.dispatch(
+            "account/startSignIn", "r3e",
+            {"client": _CLIENT, "callbackOrigin": "http://127.0.0.1:3080",
+             "loginSource": "web"}))
+        self.assertEqual(error["code"], "gateway/internal")
+
+    def test_start_sign_in_rejects_unknown_login_source(self):
+        error = self._error(self.api.dispatch(
+            "account/startSignIn", "r3f",
+            {"client": _CLIENT, "callbackOrigin": "http://127.0.0.1:3080",
+             "loginSource": "cli"}))
+        self.assertEqual(error["code"], "gateway/bad-request")
+
+    def test_cancel_sign_in_route(self):
+        value = self._value(self.api.dispatch(
+            "account/cancelSignIn", "r3g", {"attemptId": "missing"}))
+        self.assertEqual(value["status"], "signed-out")
 
     def test_sign_out_route(self):
         value = self._value(self.api.dispatch(

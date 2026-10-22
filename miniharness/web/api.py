@@ -489,6 +489,8 @@ class WebApi:
         "account/getUnnotifiedBonuses": "account_get_unnotified_bonuses",
         "account/ackBonusNotified": "account_ack_bonus_notified",
         "account/hasRunningAccountTasks": "account_has_running_account_tasks",
+        "account/startSignIn": "account_start_sign_in",
+        "account/cancelSignIn": "account_cancel_sign_in",
         "account/signOut": "account_sign_out",
     }
 
@@ -2286,13 +2288,13 @@ class WebApi:
         timezoneOffsetSeconds}` 入参（Host 据此派生 Platform 请求头）；mini 落空
         实现无 Platform 载体，metadata 被接受但未消费（触发条件登记）。
         """
-        self._account_client_metadata(payload)
-        return self._remote_call(lambda: self._deepseek_account().get_profile())
+        client = self._account_client_metadata(payload)
+        return self._remote_call(lambda: self._deepseek_account().get_profile(client))
 
     def account_get_balance(self, payload: dict):
         """`account/getBalance`：Platform 余额（未登录/无 grant → null）。"""
-        self._account_client_metadata(payload)
-        return self._remote_call(lambda: self._deepseek_account().get_balance())
+        client = self._account_client_metadata(payload)
+        return self._remote_call(lambda: self._deepseek_account().get_balance(client))
 
     def account_get_unnotified_bonuses(self, payload: dict):
         """`account/getUnnotifiedBonuses`：未展示的已发放 bonus（无 grant → null）。
@@ -2300,22 +2302,22 @@ class WebApi:
         dsh-v0.2.0-rc.2 新 RPC。mini 落空实现无 Platform/bonus 数据 → 无 grant 时
         诚实地返回 null（上游同码：accountId + bonuses 批次或 null）。
         """
-        self._account_client_metadata(payload)
+        client = self._account_client_metadata(payload)
         service = self._deepseek_account()
         method = getattr(service, "get_unnotified_bonuses", None)
         if method is None:
             return None
-        return self._remote_call(lambda: method())
+        return self._remote_call(lambda: method(client))
 
     def account_ack_bonus_notified(self, payload: dict) -> bool:
         """`account/ackBonusNotified`：记录一条 bonus 已展示（无账户 → false）。"""
-        self._account_client_metadata(payload)
+        client = self._account_client_metadata(payload)
         service = self._deepseek_account()
         method = getattr(service, "ack_bonus_notified", None)
         if method is None:
             return False
         return bool(self._remote_call(
-            lambda: method(payload.get("accountId"), payload.get("orderId"))))
+            lambda: method(payload.get("accountId"), payload.get("orderId"), client)))
 
     def account_has_running_account_tasks(self, payload: dict) -> bool:
         """`account/hasRunningAccountTasks`：是否有 running 任务在账户路由上。
@@ -2330,10 +2332,34 @@ class WebApi:
         agents = registry.list() if registry is not None else list(self._agents.values())
         return any(is_running_account_task(agent) for agent in agents)
 
+    def account_start_sign_in(self, payload: dict) -> dict:
+        """`account/startSignIn`：发起或复用浏览器 PKCE 登录尝试。"""
+        client = self._account_client_metadata(payload)
+        login_source = payload.get("loginSource")
+        if login_source not in ("web", "desktop"):
+            raise _Reject("gateway/bad-request",
+                          "loginSource must be 'web' or 'desktop'", {})
+        callback_origin = payload.get("callbackOrigin")
+        if not isinstance(callback_origin, str):
+            raise _Reject("gateway/bad-request",
+                          "callbackOrigin must be a string", {})
+        return self._remote_call(lambda: self._deepseek_account().start_sign_in(
+            client, callback_origin, login_source))
+
+    def account_cancel_sign_in(self, payload: dict) -> dict:
+        """`account/cancelSignIn`：取消指定的本地登录尝试。"""
+        attempt_id = payload.get("attemptId")
+        if not isinstance(attempt_id, str):
+            raise _Reject("gateway/bad-request",
+                          "attemptId must be a string", {})
+        return self._remote_call(lambda: self._deepseek_account().cancel_sign_in(
+            attempt_id))
+
     def account_sign_out(self, payload: dict) -> dict:
         """`account/signOut`：移除本地 grant 并在后台向 Platform 撤销。"""
-        self._account_client_metadata(payload)
-        return self._remote_call(lambda: self._deepseek_account().sign_out())
+        client = self._account_client_metadata(payload)
+        return self._remote_call(
+            lambda: self._deepseek_account().sign_out(client))
 
     @staticmethod
     def _account_client_metadata(payload: dict) -> dict:

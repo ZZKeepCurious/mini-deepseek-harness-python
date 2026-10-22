@@ -36,6 +36,7 @@ from typing import Any
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
+from starlette.concurrency import run_in_threadpool
 
 from .api import WebApi
 from .args import canonical_endpoint
@@ -117,8 +118,22 @@ def create_app(api: WebApi, gateway: GatewayStreams,
     @app.api_route(UPLOAD_FILE_BINARY_PATH,
                    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"])
     async def upload_file_binary(request: Request) -> Response:
-        """原始字节上传（无信封；先于 `/api/{path}` 兜底注册）。"""
+        """原始字节上传：无信封；优先于 `/api/{path}` 注册。"""
         return await handle_file_upload_http(api, request)
+
+    @app.get("/oauth/callback")
+    async def account_oauth_callback(request: Request) -> Response:
+        """浏览器 PKCE 回调：不经 token gate，把结果交给已启动的账户尝试。"""
+        service = api.ctx.get("deepseekAccount")
+        handler = getattr(service, "handle_callback", None)
+        if handler is None:
+            return Response("not found", status_code=404)
+        query: dict[str, list[str]] = {}
+        for name, value in request.query_params.multi_items():
+            query.setdefault(name, []).append(value)
+        status, headers, body = await run_in_threadpool(
+            handler, request.method, request.url.path, query)
+        return Response(body, status_code=status, headers=headers)
 
     @app.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH",
                                                 "OPTIONS", "HEAD"])

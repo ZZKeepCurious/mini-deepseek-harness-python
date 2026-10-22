@@ -465,8 +465,8 @@ by deltas」。
 ### 4.8 `account`（账户 Remote 面）
 
 `account` namespace（上游 `packages/api/account-controller`，dsh-v0.2.0-rc.2）。
-unary `POST /api/account/<method>`；除 `getState`/`hasRunningAccountTasks` 外，
-`getProfile`/`getBalance`/`getUnnotifiedBonuses`/`ackBonusNotified`/`signOut` 均带
+unary `POST /api/account/<method>`；除 `getState`/`hasRunningAccountTasks`/`cancelSignIn` 外，
+`getProfile`/`getBalance`/`getUnnotifiedBonuses`/`ackBonusNotified`/`signOut`/`startSignIn` 均带
 `client: AccountClientMetadata{version:string, locale:string, timezoneOffsetSeconds:number}`
 （Host 据此派生 Platform 请求头）。
 
@@ -475,13 +475,20 @@ unary `POST /api/account/<method>`；除 `getState`/`hasRunningAccountTasks` 外
 - `account/getUnnotifiedBonuses`（带 client）→ `AccountBonusBatch|null`（无 grant → null）。
 - `account/ackBonusNotified`（`{accountId, orderId, client}`）→ boolean；无账户 → false。
 - `account/hasRunningAccountTasks`（`{args:{}}`）→ boolean（mini 单适配器无账户路由 → false）。
+- `account/startSignIn`（`{client, callbackOrigin, loginSource:'web'|'desktop'}`）→
+  当前 attempt view；`callbackOrigin` 只接受 loopback `http://localhost|127.0.0.1|[::1]:port`，
+  返回的 `authorizeUrl` 指向 Platform 授权页。
+- `account/cancelSignIn`（`{attemptId}`）→ 当前 attempt view；仅 `committing` 前可取消，
+  未知 id no-op。
 - `account/signOut`（带 client）→ `AccountView`。
 - `account/watchExpiry`（Remote 流，`{args:{}}`）：无重放地订阅 `deepseek-account/session-expired`，
   订阅期间每事件产一帧 `'session-expired'`；命名空间未挂 → `gateway/invocation-unavailable`。
 
-> 载体差异（登记）：浏览器 PKCE 登录与 Platform HTTP 是浏览器宿主载体，mini 以本地
-> 落空实现（恒 signed-out）承载服务面；`startSignIn`/`cancelSignIn` 不挂载。四个
-> 账户 RPC 的 `client` 元数据被接受但未消费（无 Platform 载体）。
+浏览器回调是固定宿主路由 `GET /oauth/callback?state=<state>&code=<code>`（不在
+`/api` 下，因而不经 token gate）：成功 302 到 Platform `authorized_url`（web 追加
+`login_source=web`），非法 state/phase → 400，无活动 attempt/重复回调 → 410。
+无 `credentials`+`authorization`（且无显式 `platformOrigin`）时由本地落空实现承载，
+返回 signed-out 且 `startSignIn` fail loud。
 
 ### 4.9 `schedule`（Host 全局提醒 Remote 面）
 

@@ -1,18 +1,19 @@
-"""deepseek-account 域（Service Definition + 本地落空实现）。
+"""deepseek-account 域（Service Definition + 本地/Platform 实现）。
 
 上游 `packages/credentials/deepseek-account/src/index.ts`——抽象
 `DeepSeekAccount` 服务（getState/getProfile/getBalance/startSignIn/
 cancelSignIn/signOut/watch/resolveToken/rejectToken/getPlatformSession）。
-实际 OAuth + Platform HTTP 实现在 `deepseek-account-platform`（浏览器 PKCE +
-Platform 档案/余额 + grant 存储），是**浏览器宿主载体**。
+浏览器 PKCE 与 Platform HTTP 实现在 `deepseek-account-platform`：
+`platform.py` 承载 attempt 状态机、`/oauth/callback` 与 Platform 档案/余额/
+grant 存储。
 
-功能对标迁移（黄金法则 #5）：服务面可移植——`ctx.deepseekAccount` 抽象 + 一个
-**本地落空实现**（无浏览器 grant 时的诚实默认）：缺省 `status='signed-out'`、
-getProfile/getBalance 返回 null、startSignIn 因无浏览器载体 fail loud。
+`install_deepseek_account` 在存在 `credentials` + `authorization`（或显式
+`platform_origin`）时装配 `PlatformAccount`；否则退回 `LocalAccountService`
+这一诚实默认（signed-out、profile/balance 为 null、startSignIn fail loud）。
+
 dsh-v0.2.0-rc.2 增补：`resolve_token(base_url)` / `reject_token(token)` 凭据
 seam，以及 `deepseek-account/signed-out` / `session-expired` /
-`model-sign-in-required` 事件。浏览器 PKCE + Platform HTTP 是宿主/传输载体
-差异（同 browser-use），登记触发条件：引入浏览器客户端时实现平台域。
+`model-sign-in-required` 事件。
 
 类型（types.ts:5-79）：AccountView（status/links/attempt）、SignInAttemptView、
 AccountLinks、AccountProfile、AccountWallet、AccountDetails、SignInErrorCode、
@@ -35,7 +36,7 @@ __all__ = [
 ]
 
 #: 安全失败码闭集（types.ts:17）。
-SIGN_IN_ERROR_CODES = ("network", "protocol", "expired", "storage")
+SIGN_IN_ERROR_CODES = ("no-response", "network", "protocol", "expired", "storage")
 
 
 def AccountLinks() -> dict:
@@ -54,13 +55,13 @@ class DeepSeekAccount(Service):
     def get_state(self) -> dict:
         raise NotImplementedError
 
-    def get_profile(self):
+    def get_profile(self, client: dict | None = None):
         raise NotImplementedError
 
-    def get_balance(self):
+    def get_balance(self, client: dict | None = None):
         raise NotImplementedError
 
-    def start_sign_in(self, locale: str, callback_origin: str,
+    def start_sign_in(self, client: dict, callback_origin: str,
                       login_source: str) -> dict:
         raise NotImplementedError
 
@@ -97,10 +98,10 @@ class LocalAccountService(DeepSeekAccount):
         return {"status": "credential-stored" if self._token is not None else "signed-out",
                 "links": AccountLinks(), "attempt": None}
 
-    def get_profile(self):
+    def get_profile(self, client: dict | None = None):
         return None
 
-    def get_balance(self):
+    def get_balance(self, client: dict | None = None):
         return None
 
     def resolve_token(self, base_url: str) -> str | None:
@@ -112,7 +113,7 @@ class LocalAccountService(DeepSeekAccount):
         self._token = None
         self.ctx.emit("deepseek-account/session-expired")
 
-    def start_sign_in(self, locale: str, callback_origin: str,
+    def start_sign_in(self, client: dict, callback_origin: str,
                       login_source: str) -> dict:
         raise RuntimeError(
             "deepseek-account: browser sign-in is unavailable in this deployment "
@@ -121,7 +122,7 @@ class LocalAccountService(DeepSeekAccount):
     def cancel_sign_in(self, attempt_id: str) -> dict:
         return self.get_state()
 
-    def sign_out(self) -> dict:
+    def sign_out(self, client: dict | None = None) -> dict:
         self._token = None
         self.ctx.emit("deepseek-account/signed-out")
         return self.get_state()
@@ -143,8 +144,21 @@ def is_running_account_task(agent: Any) -> bool:
 
 
 def install_deepseek_account(ctx: Context, *,
-                             token: str | None = None) -> DeepSeekAccount:
-    """装配 `ctx.deepseekAccount`（本地落空实现；幂等，重复装返回既有实例）。
+                             token: str | None = None,
+                             platform_origin: str | None = None,
+                             allow_loopback_http: bool = False,
+                             rewrite_browser_origin: bool = False,
+                             inference_origin: str = "https://api.deepseek.com",
+                             desktop_platform: str | None = None,
+                             embedded_page_dist: str = "",
+                             request_headers: dict[str, str] | None = None,
+                             account_request_headers: dict[str, str] | None = None,
+                             request_timeout_ms: int = 30_000,
+                             balance_timeout_ms: int = 30_000,
+                             logout_max_retries: int = 5,
+                             logout_retry_delay_ms: int = 1_000,
+                             attempt_timeout_ms: int = 600_000) -> DeepSeekAccount:
+    """装配 `ctx.deepseekAccount`（Platform 或本地落空实现；幂等，重复装返回既有实例）。
 
     同时镜像上游 `account-tasks.ts`：某回合以 ACCOUNT_SIGN_IN_REQUIRED 失败时
     在事件总线发布 `deepseek-account/model-sign-in-required`；账户签出
@@ -154,7 +168,26 @@ def install_deepseek_account(ctx: Context, *,
     existing = ctx.get("deepseekAccount")
     if existing is not None:
         return existing
-    service = LocalAccountService(ctx, token=token)
+    if platform_origin is not None or (ctx.get("credentials") is not None
+                                       and ctx.get("authorization") is not None):
+        from .platform import PlatformAccount
+        service = PlatformAccount(
+            ctx,
+            platform_origin_value=platform_origin or "https://platform.deepseek.com",
+            allow_loopback_http=allow_loopback_http,
+            rewrite_browser_origin=rewrite_browser_origin,
+            inference_origin=inference_origin,
+            desktop_platform=desktop_platform,
+            embedded_page_dist=embedded_page_dist,
+            request_headers=request_headers,
+            account_request_headers=account_request_headers,
+            request_timeout_ms=request_timeout_ms,
+            balance_timeout_ms=balance_timeout_ms,
+            logout_max_retries=logout_max_retries,
+            logout_retry_delay_ms=logout_retry_delay_ms,
+            attempt_timeout_ms=attempt_timeout_ms)
+    else:
+        service = LocalAccountService(ctx, token=token)
 
     def on_agent_error(payload: Any) -> None:
         error = payload.get("error") if isinstance(payload, dict) else None

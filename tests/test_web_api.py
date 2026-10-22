@@ -1069,7 +1069,8 @@ class TestDispatch(WebApiTest):
             "schedule/delete", "schedule/update",
             "account/getState", "account/getProfile", "account/getBalance",
             "account/getUnnotifiedBonuses", "account/ackBonusNotified",
-            "account/hasRunningAccountTasks", "account/signOut"}))
+            "account/hasRunningAccountTasks", "account/startSignIn",
+            "account/cancelSignIn", "account/signOut"}))
 
     def test_bad_payload_shape(self):
         error = self._error(self.api.dispatch("session.list", "rid", "nope"))
