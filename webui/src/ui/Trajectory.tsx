@@ -10,7 +10,6 @@
 // / trajectory-search-index).
 
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
 import type { EventEnvelope } from "../wire";
 import {
   OVERSCAN_ROWS,
@@ -22,6 +21,9 @@ import {
 } from "../trajectory/model";
 import type { TrajectoryRow } from "../trajectory/model";
 import { TrajectorySearchIndex } from "../trajectory/search";
+import { Highlight } from "./Highlight";
+import { MarkdownText } from "./MarkdownText";
+import { ToolCallView } from "./tools/ToolCallView";
 
 interface Props {
   events: EventEnvelope[];
@@ -193,46 +195,27 @@ function RowView({
         <span className="who">{row.role}</span>
         {row.blocks.map((blk, i) => (
           <div key={i} className={blk.type === "reasoning" ? "block reasoning" : "block"}>
-            <Highlight text={blk.text} terms={terms} />
+            {row.role === "assistant" ? (
+              <MarkdownText
+                text={blk.text}
+                variant={blk.type === "reasoning" ? "compact" : "body"}
+                highlightTerms={terms}
+              />
+            ) : (
+              <Highlight text={blk.text} terms={terms} />
+            )}
           </div>
         ))}
       </div>
     );
   }
   return (
-    <div className={`vrow tool${row.isError ? " error" : ""}${matched ? " hit" : ""}`}>
-      <div className="tool-call2">
-        <span className="label">{row.isError ? "工具错误:" : "工具:"}</span> {row.name}(
-        <Highlight text={row.arguments} terms={terms} />)
-      </div>
-      {row.result && (
-        <div className="tool-result2">
-          <Highlight text={row.result} terms={terms} />
-        </div>
-      )}
+    <div className={`vrow tool-row${matched ? " hit" : ""}`}>
+      <ToolCallView row={row} terms={terms} />
     </div>
   );
 }
 
 function buildTerms(query: string): string[] {
   return query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
-}
-
-function escapeRe(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function Highlight({ text, terms }: { text: string; terms: string[] }) {
-  if (!text) return null;
-  if (terms.length === 0) return <>{text}</>;
-  const re = new RegExp(`(${terms.map(escapeRe).join("|")})`, "gi");
-  const parts = text.split(re);
-  const nodes: ReactNode[] = [];
-  for (let i = 0; i < parts.length; i++) {
-    const part = parts[i];
-    if (!part) continue;
-    const isMatch = i % 2 === 1;
-    nodes.push(isMatch ? <mark key={i}>{part}</mark> : <span key={i}>{part}</span>);
-  }
-  return <>{nodes}</>;
 }

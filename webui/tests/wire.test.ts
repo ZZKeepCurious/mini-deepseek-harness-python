@@ -166,9 +166,11 @@ describe("RemoteMuxConnection", () => {
     const first = handle.next();
     // flush an open frame
     void Promise.resolve();
-    const parsed = JSON.parse(sock.sent[0]) as { type: string; streamId: number; endpoint: string };
+    const parsed = JSON.parse(sock.sent[0]) as { type: string; streamId: string; endpoint: string };
     expect(parsed.type).toBe("open");
     expect(parsed.endpoint).toBe("session/follow");
+    expect(typeof parsed.streamId).toBe("string");
+    expect(parsed.streamId.length).toBeGreaterThan(0);
     expect(parsed.streamId).toBe(handle.streamId);
 
     sock.serverSend({ type: "item", streamId: handle.streamId, value: { type: "snapshot", records: [] } });
@@ -190,7 +192,7 @@ describe("RemoteMuxConnection", () => {
     void Promise.resolve();
     sock.sent.length = 0;
     handle.close();
-    const cancel = JSON.parse(sock.sent[0]) as { type: string; streamId: number };
+    const cancel = JSON.parse(sock.sent[0]) as { type: string; streamId: string };
     expect(cancel).toEqual({ type: "cancel", streamId: handle.streamId });
   });
 
@@ -223,7 +225,7 @@ describe("RemoteMuxConnection", () => {
     const handle = conn.openStream("session/follow", { args: {} });
     const p = handle.next();
     void Promise.resolve();
-    const parsed = JSON.parse(FakeWebSocket.instances[0].sent[0]) as { streamId: number };
+    const parsed = JSON.parse(FakeWebSocket.instances[0].sent[0]) as { streamId: string };
     FakeWebSocket.instances[0].serverSend({
       type: "error",
       streamId: parsed.streamId,
@@ -245,7 +247,7 @@ describe("RemoteMuxConnection", () => {
     const handle = conn.openStream("session/follow", { args: {} });
     handle.send({ seq: 1 });
     handle.send("text");
-    const frames = sock.sent.map((text) => JSON.parse(text) as { type: string; streamId: number });
+    const frames = sock.sent.map((text) => JSON.parse(text) as { type: string; streamId: string });
     expect(frames.map((f) => f.type)).toEqual(["open", "item", "item"]);
     expect(frames[1]).toEqual({ type: "item", streamId: handle.streamId, value: { seq: 1 } });
     expect(frames[2]).toEqual({ type: "item", streamId: handle.streamId, value: "text" });
@@ -263,7 +265,7 @@ describe("RemoteMuxConnection", () => {
     const handle = conn.openStream("session/follow", { args: {} });
     sock.sent.length = 0;
     handle.send(undefined);
-    expect(sock.sent[0]).toBe(`{"type":"item","streamId":${handle.streamId}}`);
+    expect(sock.sent[0]).toBe(`{"type":"item","streamId":${JSON.stringify(handle.streamId)}}`);
   });
 
   it("rejects uplink items that are not lossless JSON values", () => {
@@ -296,7 +298,7 @@ describe("RemoteMuxConnection", () => {
     sock.sent.length = 0;
     handle.endUplink();
     handle.endUplink();
-    expect(sock.sent).toEqual([`{"type":"end","streamId":${handle.streamId}}`]);
+    expect(sock.sent).toEqual([`{"type":"end","streamId":${JSON.stringify(handle.streamId)}}`]);
     expect(() => handle.send(1)).toThrow(/uplink was ended/);
   });
 

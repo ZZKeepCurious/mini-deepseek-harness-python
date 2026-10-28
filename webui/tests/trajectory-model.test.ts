@@ -17,7 +17,7 @@ import {
   windowedRows,
 } from "../src/trajectory/model";
 import type { TrajectoryRow } from "../src/trajectory/model";
-import { assistantMsg, bigTurn, standardSession, toolCall, userMsg } from "./fixtures";
+import { assistantMsg, bigTurn, standardSession, toolCall, toolResult, userMsg } from "./fixtures";
 
 describe("groupRows", () => {
   it("projects a two-turn session into turn/message/tool rows", () => {
@@ -35,10 +35,12 @@ describe("groupRows", () => {
     expect(tool).toMatchObject({
       kind: "tool",
       key: "tool:4",
+      callId: "call-1",
       name: "git",
       arguments: '{"cmd":"status"}',
       result: "clean",
       isError: false,
+      meta: null,
     });
   });
 
@@ -58,6 +60,23 @@ describe("groupRows", () => {
   it("defaults to turn 1 when no turn/start marker is present", () => {
     const rows = groupRows([userMsg(1, "a"), assistantMsg(2, "b")]);
     expect(rows.every((r) => r.turn === 1)).toBe(true);
+  });
+
+  it("joins results by callId when calls and results are not adjacent", () => {
+    const rows = groupRows([
+      toolCall(1, "grep", '{"pattern":"a"}', "c1"),
+      toolCall(2, "todo_write", '{"todos":[]}', "c2"),
+      toolResult(3, "match", false, "c1", { truncated: false }),
+      toolResult(4, "failed", true, "c2"),
+    ]);
+    const tools = rows.filter((row) => row.kind === "tool");
+    expect(tools[0]).toMatchObject({
+      callId: "c1",
+      result: "match",
+      isError: false,
+      meta: { truncated: false },
+    });
+    expect(tools[1]).toMatchObject({ callId: "c2", result: "failed", isError: true });
   });
 
   it("keeps a lone tool/call with an empty result when no pair follows", () => {

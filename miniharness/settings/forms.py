@@ -39,7 +39,7 @@ from . import (
     _merge,
     _set_path,
     _unset_path,
-    redact_secrets,
+    redact_secrets as redact_secret_values,
 )
 
 __all__ = [
@@ -198,11 +198,11 @@ class SettingsForms(Service):
             if user:
                 namespace["user"] = user
             if redact_secrets:
-                namespace["value"], views = redact_secrets(value, secrets)
+                namespace["value"], views = redact_secret_values(value, secrets)
                 if "base" in namespace:
-                    namespace["base"], _ = redact_secrets(namespace["base"], secrets)
+                    namespace["base"], _ = redact_secret_values(namespace["base"], secrets)
                 if "user" in namespace:
-                    namespace["user"], _ = redact_secrets(namespace["user"], secrets)
+                    namespace["user"], _ = redact_secret_values(namespace["user"], secrets)
                 namespace["secrets"] = views
             namespaces.append(namespace)
         for entry_id, previous in list(self._revisions.items()):

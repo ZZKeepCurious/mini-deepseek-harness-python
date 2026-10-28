@@ -10,6 +10,10 @@ import {
   RemoteEventClient,
   TrajectoryBuffer,
   applyControlFrame,
+  createTerminalServices,
+  createWorkspaceServices,
+  type TerminalServices,
+  type WorkspaceServices,
   type EventEnvelope,
   type SessionProjections,
   type SessionSummary,
@@ -26,6 +30,9 @@ export interface HostInfo {
   home: string;
 }
 
+export type EmitListener = (args: unknown[]) => void;
+export type EmitSubscribe = (event: string, listener: EmitListener) => () => void;
+
 export interface UseBackend {
   ready: boolean;
   host: HostInfo | null;
@@ -39,12 +46,16 @@ export interface UseBackend {
   approvals: PendingApproval[];
   projections: SessionProjections;
   jobs: Record<string, unknown[]>;
+  terminal: TerminalServices;
+  workspace: WorkspaceServices;
   refresh: () => Promise<void>;
   createSession: (cwd?: string) => Promise<string | undefined>;
   selectSession: (id: string) => void;
   sendPrompt: (text: string) => Promise<void>;
+  updateQueue: (itemId: string, action: Record<string, unknown>) => Promise<void>;
   askApproval: (approval: PendingApproval, allowed: boolean, sessionId: string) => Promise<void>;
   cancelSession: (id: string) => Promise<void>;
+  onEmit: EmitSubscribe;
 }
 
 export function useBackend(): UseBackend {
@@ -57,6 +68,28 @@ export function useBackend(): UseBackend {
   if (!bufRef.current) bufRef.current = new TrajectoryBuffer();
   const selectedRef = useRef<string | null>(null);
   const projectionsRef = useRef<SessionProjections>({});
+  const terminal = useMemo(
+    () =>
+      createTerminalServices({
+        openStream: (endpoint, payload) => {
+          const mux = muxRef.current;
+          if (!mux) throw new Error("remote.mux is not connected");
+          return mux.openStream(endpoint, payload);
+        },
+      }),
+    [],
+  );
+  const workspace = useMemo(
+    () =>
+      createWorkspaceServices({
+        openStream: (endpoint, payload) => {
+          const mux = muxRef.current;
+          if (!mux) throw new Error("remote.mux is not connected");
+          return mux.openStream(endpoint, payload);
+        },
+      }),
+    [],
+  );
 
   const [ready, setReady] = useState(false);
   const [host, setHost] = useState<HostInfo | null>(null);
@@ -67,6 +100,21 @@ export function useBackend(): UseBackend {
   const [, bump] = useState(0);
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
   const [running, setRunning] = useState(false);
+
+  const emitListeners = useRef(new Map<string, Set<EmitListener>>());
+
+  const onEmit = useCallback<EmitSubscribe>((event, listener) => {
+    const listeners = emitListeners.current;
+    let bucket = listeners.get(event);
+    if (bucket === undefined) {
+      bucket = new Set();
+      listeners.set(event, bucket);
+    }
+    bucket.add(listener);
+    return () => {
+      bucket.delete(listener);
+    };
+  }, []);
 
   const selected = selectedId;
 
@@ -159,6 +207,11 @@ export function useBackend(): UseBackend {
       onReady: (clientId, home) => {
         setHost({ clientId, home });
         setReady(true);
+      },
+      onEmit: (event, args) => {
+        const bucket = emitListeners.current.get(event);
+        if (bucket === undefined) return;
+        for (const listener of [...bucket]) listener(args);
       },
       onWaterfall: (f) => {
         const tool = (f.request?.toolName as string | undefined) ?? (f.request?.name as string | undefined) ?? "";
@@ -263,6 +316,15 @@ export function useBackend(): UseBackend {
     }
   }, [selected]);
 
+  const updateQueue = useCallback(async (itemId: string, action: Record<string, unknown>) => {
+    if (!selected) return;
+    try {
+      await rpc("session/updateQueue", { sessionId: selected, itemId, action });
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }, [selected]);
+
   const askApproval = useCallback(
     async (approval: PendingApproval, allowed: boolean, sessionId: string) => {
       const events = eventsRef.current;
@@ -302,15 +364,20 @@ export function useBackend(): UseBackend {
       approvals,
       projections: projectionsRef.current,
       jobs: jobsRef.current,
+      terminal,
+      workspace,
       refresh,
       createSession,
       selectSession,
       sendPrompt,
+      updateQueue,
       askApproval,
       cancelSession,
+      onEmit,
     };
   }, [
     ready, host, connected, sessions, error, selected, trajectory, running,
-    approvals, refresh, createSession, selectSession, sendPrompt, askApproval, cancelSession,
+    approvals, terminal, workspace, refresh, createSession, selectSession, sendPrompt, updateQueue,
+    askApproval, cancelSession, onEmit,
   ]);
 }

@@ -28,12 +28,36 @@ export function assistantMsg(seq: number, text: string, reasoning?: string): Eve
   return ev(seq, "assistant/message", { message: { role: "assistant", content } });
 }
 
-export function toolCall(seq: number, name: string, args: string): EventEnvelope {
-  return ev(seq, "tool/call", { name, arguments: args });
+export function toolCall(
+  seq: number,
+  name: string,
+  args: string,
+  callId = "call-1",
+): EventEnvelope {
+  return ev(seq, "tool/call", { turn: 1, step: 1, callId, name, arguments: args });
 }
 
-export function toolResult(seq: number, content: string, isError = false): EventEnvelope {
-  return ev(seq, "tool/result", { content, isError });
+export function toolResult(
+  seq: number,
+  content: string,
+  isError = false,
+  callId = "call-1",
+  meta?: Record<string, unknown>,
+): EventEnvelope {
+  const data: Record<string, unknown> = {
+    turn: 1,
+    step: 1,
+    message: {
+      id: `result-${callId}`,
+      role: "tool",
+      toolCallId: callId,
+      content: [{ type: "text", text: content }],
+      source: { kind: "tool", callId },
+    },
+  };
+  if (isError) data.error = { name: "ToolError", code: "TOOL_ERROR" };
+  if (meta !== undefined) data.meta = meta;
+  return ev(seq, "tool/result", data);
 }
 
 // A two-turn session with a merged tool call, a reasoning block and a couple of

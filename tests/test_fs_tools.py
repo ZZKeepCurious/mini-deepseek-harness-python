@@ -122,6 +122,10 @@ class FsToolsTestCase(unittest.IsolatedAsyncioTestCase):
             {"file_path": "e.txt", "old_string": "alpha", "new_string": "A",
              "replace_all": True}, self._exec())
         self.assertEqual(value["after"], "A beta A")
+        meta = self.tools["edit"].presentation_meta({"file_path": "e.txt"}, value)
+        self.assertEqual(meta["operation"], "update")
+        self.assertTrue(meta["diffs"])
+        self.assertEqual(meta["diffs"][0]["path"], "e.txt")
 
     async def test_edit_argument_validation(self):
         with self.assertRaisesRegex(ValueError, "must differ"):

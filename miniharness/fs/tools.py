@@ -514,6 +514,8 @@ def apply_edit_tool(ctx: Context, gate: FsSandboxGate) -> Tool:
         execute=lambda args, exec: _edit_execute(ctx, gate, args, exec),
         render=lambda args, value: [{"type": "text", "text": format_edit_output(
             value["path"], bool(args.get("replace_all", False)))}],
+        presentation_meta=lambda args, value: fs_diff_meta(
+            args["file_path"], value["before"], value["after"], "update"),
     )
     ctx.get("tools").register(tool)
     return tool

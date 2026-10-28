@@ -1,9 +1,4 @@
-// ControlPanel — right pane: live control for the selected session.
-// Queue = inbox projection (pending next-turn/next-step user messages); jobs =
-// job-controller `job/list` roster rows. Both come from the rc.1 wire
-// (projection frames + job/list stream), superseding the retired queue/jobs
-// control frames.
-
+import { useState } from "react";
 import type { JobView } from "../wire";
 
 interface Props {
@@ -11,9 +6,11 @@ interface Props {
   jobs: unknown[];
   running: boolean;
   sessionId: string | null;
+  onQueueEdit: (itemId: string, text: string) => void;
+  onQueueRemove: (itemId: string) => void;
+  onQueueSteer: (itemId: string) => void;
 }
 
-/** Extract the first text block of a pending user message for the row label. */
 function messageText(item: unknown): string {
   const it = (item ?? {}) as Record<string, unknown>;
   const content = Array.isArray(it.content) ? (it.content as unknown[]) : [];
@@ -24,7 +21,22 @@ function messageText(item: unknown): string {
   return String(it.id ?? "");
 }
 
-export function ControlPanel({ queue, jobs, running, sessionId }: Props) {
+function messageId(item: unknown): string | null {
+  const it = (item ?? {}) as Record<string, unknown>;
+  return typeof it.id === "string" && it.id !== "" ? it.id : null;
+}
+
+export function ControlPanel({
+  queue,
+  jobs,
+  running,
+  sessionId,
+  onQueueEdit,
+  onQueueRemove,
+  onQueueSteer,
+}: Props) {
+  const [editing, setEditing] = useState<{ itemId: string; text: string } | null>(null);
+
   return (
     <div className="panel">
       <div className="panel-header">
@@ -38,12 +50,72 @@ export function ControlPanel({ queue, jobs, running, sessionId }: Props) {
           <>
             <div className="panel-header" style={{ fontSize: 12 }}>队列</div>
             {queue.length === 0 && <div className="empty dim">队列空</div>}
-            {queue.map((item, i) => (
-              <div className="row" key={i}>
-                <span>{messageText(item)}</span>
-                <span className="dim">pending</span>
-              </div>
-            ))}
+            {queue.map((item, i) => {
+              const itemId = messageId(item);
+              const text = messageText(item);
+              const isEditing = itemId !== null && editing?.itemId === itemId;
+              return (
+                <div className="queue-row" key={itemId ?? i}>
+                  {isEditing ? (
+                    <div className="queue-editor">
+                      <textarea
+                        className="input"
+                        aria-label="编辑队列消息"
+                        rows={2}
+                        value={editing.text}
+                        onChange={(event) => setEditing({ itemId: editing.itemId, text: event.target.value })}
+                      />
+                      <div className="queue-actions">
+                        <button
+                          type="button"
+                          className="btn small"
+                          onClick={() => {
+                            const next = editing.text.trim();
+                            if (next === "") return;
+                            onQueueEdit(editing.itemId, next);
+                            setEditing(null);
+                          }}
+                        >
+                          保存
+                        </button>
+                        <button type="button" className="btn small ghost" onClick={() => setEditing(null)}>
+                          取消
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <span className="queue-text">{text}</span>
+                      {itemId !== null && (
+                        <span className="queue-actions">
+                          <button
+                            type="button"
+                            className="btn small ghost"
+                            onClick={() => setEditing({ itemId, text })}
+                          >
+                            编辑
+                          </button>
+                          <button
+                            type="button"
+                            className="btn small ghost"
+                            onClick={() => onQueueSteer(itemId)}
+                          >
+                            插话
+                          </button>
+                          <button
+                            type="button"
+                            className="btn small danger"
+                            onClick={() => onQueueRemove(itemId)}
+                          >
+                            删除
+                          </button>
+                        </span>
+                      )}
+                    </>
+                  )}
+                </div>
+              );
+            })}
             <div className="panel-header" style={{ fontSize: 12 }}>作业</div>
             {jobs.length === 0 && <div className="empty dim">无作业</div>}
             {jobs.map((job, i) => {

@@ -68,6 +68,13 @@ class TestSettingsForms(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ns["base"], {"greeting": "hi", "service_name": "greeter"})
         self.assertNotIn("user", ns)
 
+    def test_describe_redacted_uses_secret_helper(self):
+        # 控制器读面恒传 redact_secrets=True；此时参数名与同名辅助函数不得互相遮蔽。
+        described = self.forms.describe(redact_secrets=True)
+        ns = described["namespaces"][0]
+        self.assertEqual(ns["value"], {"greeting": "hi", "service_name": "greeter"})
+        self.assertEqual(ns["secrets"], [])
+
     async def test_update_persists_via_config_editor(self):
         await self.forms.update("greeter", {"greeting": "yo"})
         self.assertEqual(self.ctx.get("greeter")("x"), "yo, x!")

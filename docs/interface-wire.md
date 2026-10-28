@@ -23,6 +23,7 @@
 | unary RPC | `POST /api/<endpoint>` | `WebApi.ROUTES` 全部 69 个 unary 端点（`session/*` 17 个 + `terminal`/`workspace`/`workspaceFiles`/`settings`/`credentials`/`schedule`/`account`/`agentPresets` 等各域端点）+ `$events/result` 特判 | 401* / 404 / 415 / 400 / 500 / 200 |
 | Remote 流 | `WS /api/remote.mux` | `GatewayStreams.stream_kinds` 全部 11 条流：`$events` + `session/follow`/`session/control` + `terminal/retain`/`terminal/attach` + `workspace/follow` + `workspaceFiles/changes` + `job/list`/`job/follow` + `account/watchExpiry` + `userQuestions/attachWait` | HTTP 401*（升级拒绝）/ WS 关闭码 1003 / 1008 / 1011 |
 | 会话导出 | `GET /api/session.export` | 会话日志 zip 下载 | 401* / 200 / 400 / 404 / 501 / 500 |
+| 文件展示 | `GET`/`HEAD /api/file?path=` | 认证后的绝对路径有界读取（图片/文档） | 401* / 200 / 400 / 403 / 404 / 413 / 499 / 500 |
 | SPA 静态 | `GET`/`HEAD /{path}`（非 `/api/`） | `webui/dist/` 或 `web/static/` 产物承载 | 403 / 200 / 404 / 405 |
 
 `*` 401 仅在配置了认证 token 时出现（见 §1.1）；未配置 token = 无门（回环开发形态）。
@@ -182,7 +183,8 @@ client `connection/src/client/rpc.ts` 按 `/` 切两段）；`web/args.canonical
 ## 4. Remote 流（`WS /api/remote.mux`，`web/mux.py` + `web/stream_protocol.py` + `web/uplink.py`）
 
 单一路径承载**全部** Remote 流：一条连接上可并行多条逻辑流，每条由客户端自编的 `streamId`
-标识（非空字符串即可），彼此隔离——单流失败只发该流的 `error` 帧，不关连接、不波及其它流。
+标识（非空字符串即可——上游 `stream-client.ts:120` 用 `randomUUID()`；数字 id 属字段形状非法，
+关 WS 1008），彼此隔离——单流失败只发该流的 `error` 帧，不关连接、不波及其它流。
 帧分两个方向：浏览器上行四型（`open`/`item`/`end`/`cancel`），宿主下行三型（`item`/`end`/
 `error`），两向都要求字段集合精确匹配（客户端帧违例关 WS 1008）。三条长期流——会话历史流
 `session/follow`、宿主控制流 `session/control`、远程事件流 `$events`——共用「重连即重投完整
@@ -237,6 +239,9 @@ client `connection/src/client/rpc.ts` 按 `/` 切两段）；`web/args.canonical
   建立目标监听（目录须在工作区内），成功给 `{kind:'ready'}`，随后命中目标的失效重 stat
   产出 `{kind:'change', change:{absolutePath, version}}`（目标已删除则 `{absolutePath, absent:true}`）；
   watch 不可用 → `workspace-file/watch-unsupported`，目录越界 → `workspace-file/outside-workspace`。
+  前端（`webui/src/wire/workspace.ts` `createWorkspaceServices().watch`）为根目录与每个展开目录
+  各开一条流（上游 `ui-sidebar-files` 的 `DirectoryNode` 同构），`change` 帧只触发**该层**重列，
+  同层请求在途时合并为一次后续读取。
   同 ns 的 unary `readBytes` 取 `options:{range?:{offset,length}, baseFile?}`，服务值为原生字节、
   wire 层走 §3.1 的二进制附件。
 
@@ -398,6 +403,10 @@ by deltas」。
   recover the current screen`）；重连开新代次从 `snapshot` 恢复当前屏幕。
 - 错误：未知 `agentId` → `session/not-found`；身份缺失/已关闭 → `terminal/unavailable`；
   命名空间未挂载 → `gateway/invocation-unavailable`。
+- 前端：`webui/src/wire/terminal.ts` 的 `createTerminalServices` 组装 unary 调用与
+  `retain`/`attach` 两条流；`TerminalConnection` 管写/尺寸上行队列（按 `ack` 序号放行，
+  `read-only`/`not-running` 呈现为拒绝态），`TerminalScreen` 用 xterm 渲染 `snapshot.screen`
+  与 `output.data`，`TerminalPanel` 管多终端 tab 与 shell 选择。
 
 ### 4.6 `workspace/follow`（工作区投影流）
 
@@ -592,6 +601,36 @@ unary `POST /api/account/<method>`；除 `getState`/`hasRunningAccountTasks`/`ca
 - `directoryPicker/pick`（`{args:{}}`）→ browse 载体恒 `directory-picker/unavailable`
   `{capability:'browse'}`（native chooser 未组合）。
 
+### 4.14 `settings` / `credentials` / `permissionPresets`（配置面）
+
+- `settings/describe`（`{args:{}}`）→ `{writable, hasDocument, namespaces:[...]}`；每个
+  namespace `{ns, autoGenerate, schema, value, applies:'live', revision, base?, user?,
+  secrets:[{path,set}]}`。读面恒脱敏：secret 路径（上游 schema `role('secret')`）从
+  `value`/`base`/`user` 剥离，只在 `secrets` 里报是否已设置；mini 无 schemastery，
+  `schema` 恒 `{}`（前端按值类型渲染表单）。
+- `settings/update`（`{args:{ns, patch, expectedRevision?}}`）、`settings/replace`
+  （`{args:{ns, section, expectedRevision?}}`）、`settings/mutate`
+  （`{args:{ns, ops:[{op:'set',path,value}|{op:'unset',path}], expectedRevision?}}`）
+  成功均回写后的 namespace 视图；`expectedRevision` 与读到的 `revision` 不符 →
+  `settings/conflict` `details:{ns, expected, actual}`；其余拒绝（含未知 `ns`）→
+  `settings/rejected` `details:{ns}`。写经 `config-editor` 持久化 profile
+  `cordis.patch.yml`，在场插件按 live 语义重新装配。
+- `settings/openSettingsDocument`（`{args:{}}`）→ 上游回 `{opened:true}`；mini 无原生桌面
+  打开器（`native-command` 无对应物），恒 `gateway/internal`
+  `path open failed: no native desktop opener is available in this deployment`
+  ——前端如实展示部署能力，不伪造成功。
+- `settings/document-updated` 经 `$events` 转发 `[ns, revision]`（`web/events.py`）。
+- `credentials/describe`（`{args:{refs}}`；≤64 个、`^[A-Za-z_][A-Za-z0-9_]*$`，越界 →
+  `gateway/bad-request`）→ `{<ref>:{configured, source?, writable}}`。`credentials/set`
+  （`{args:{ref, value}}`，value 必须非空字符串）与 `credentials/unset`（`{args:{ref}}`）
+  成功后无值返回；拒绝恒 `credential/rejected` `details:{ref}`。值只进不出，任何读面都
+  不回显已存密钥。
+- `permissionPresets/catalog`（`{args:{}}`）→ `{options, defaultOptions, defaultPreset}`
+  （进程级：全部预设 / 可作新会话缺省的子集 / 当前缺省）。会话内当前预设走
+  `session/projections.permissions.currentValue`，不在此读面。新会话缺省由
+  `permission-presets` 命名空间的 `defaultPreset` 字段决定（组合条目必须透传该键，
+  否则写入持久化却不生效）。
+
 ## 5. `$events/result`（HTTP unary 特判端点，`web/server.py` + `web/events.py`）
 `POST /api/$events/result`，body 为 `client-request` 全形，`payload` 恰：
 
@@ -649,7 +688,24 @@ outcome 归一（`APPROVAL_OUTCOMES = {allowed-once, rejected, cancelled, unavai
   （parentSession BFS + seen-set 去重）→ 媒体 `media/<attachmentId>.<ext>`；压缩等级 0-9。
 - 错误正文统一私有外壳（`session log export failed to prepare the stored artifact`），不泄路径细节。
 
-## 9. 错误语义速查
+## 9. 文件展示（`GET`/`HEAD /api/file`，`web/media.py`）
+
+对齐 `packages/api/session-controller/src/media-references.ts`。连接层先认证，`ctx.fs`
+提供执行世界路径与访问策略，`ctx.attachments.image_limits.maxImageBytes` 提供字节上限。
+
+- query：`path` 必须非空且为宿主绝对路径；缺失/空 → 400 `missing path`，
+  含 NUL 或相对路径 → 400 `absolute path required`。
+- `GET`：经 `fs.resolve` + `fs.read_bytes(path, maxBytes)` 返回原始字节；`HEAD`：
+  只做 `stat`，`file` 之外（目录等）→ 403 `not a regular file`。
+- 成功头：`Content-Type`（按路径 MIME，未知 `application/octet-stream`）、`Content-Length`、
+  `Cache-Control: private, no-store`、`X-Content-Type-Options: nosniff`、
+  `Content-Security-Policy: sandbox; default-src 'none'`。
+- `FsError` 映射：`FS_NOT_FOUND` 404、`FS_NOT_REGULAR_FILE`/`FS_PERMISSION_DENIED`/
+  `FS_SANDBOX_DENIED` 403、`FS_TOO_LARGE` 413、`FS_ABORTED` 499，其余 500；错误体
+  为错误码文本（`HEAD` 无体）。
+- 前端只拼 `/api/file?path=`（有 token 时追加 `&token=`），不解析 Python 内部。
+
+## 10. 错误语义速查
 
 1. 业务错误恒 200 + `server-response` + `result.ok=false`（unary 与 `$events/result` 同则）。
 2. 载体层 404/415/400/500 只在信封/HTTP 层面，不代表业务状态。
@@ -657,7 +713,7 @@ outcome 归一（`APPROVAL_OUTCOMES = {allowed-once, rejected, cancelled, unavai
 4. 审批 fail-closed：非 APPROVAL_OUTCOMES 合法值一律 `unavailable`，绝不误放行。
 5. 事件 `seq` 严格递增、0 基（`seq == 追加前日志长度`）；未知事件类型持久化读路径 fail-closed（除非带 `ignorable: true` 豁免放行），不做静默吞掉。
 
-## 10. 与前端实现的映射
+## 11. 与前端实现的映射
 
 `webui/src/wire/` 约定客户端层对应本章节：
 
@@ -670,8 +726,15 @@ outcome 归一（`APPROVAL_OUTCOMES = {allowed-once, rejected, cancelled, unavai
 | `follow.ts` | §4.1 snapshot/event 帧 + seq 去重（`TrajectoryBuffer`） |
 | `control.ts` | §4.2 的 baseline/projection 帧——`applyControlFrame` 折叠成逐会话投影 map（baseline 全量替换 / projection 逐键替换），队列经 `inboxQueue()` 从 `inbox` 投影展开（next-turn + next-step） |
 | `jobs.ts` | §4.7 `job/list` roster 流（`{type:'rows', jobs:[JobView]}` 整集替换）+ `JobView` 形状（`isJobListFrame`） |
+| `workspace.ts` | unary `workspaceFiles/list|stat|read`（scope = `workspaceFileScopeId`）+ `/api/file` 绝对路径 URL |
+| `composer.ts` | §4.12 `commands/list|execute`、`skills/list`、`fileReferences/list`、`sessionReferenceResolver/candidates` + §3.1 原字节上传 `POST /api/session/uploadFileBinary` + §1 `session/prompt`（queue/steer） |
+| `settings.ts` | §4.14 `settings/describe|update|replace|mutate|openSettingsDocument` + `settings/conflict` 投影 + `settings/document-updated` 订阅 |
+| `credentials.ts` | §4.14 `credentials/describe|set|unset`（值只进不出） |
+| `permissions.ts` | §4.14 `permissionPresets/catalog` + 新会话缺省所在命名空间常量 |
+| `terminal.ts` | §4.5 终端 unary（`environment`/`shells`/`create`/`rename`/`close`/`list`）+ `retain`/`attach` 流 |
 | `types.ts` | §2 信封 + §3.1 附件描述符 + 事件/消息/会话类型（镜像 core 模型） |
 
 测试：`webui/tests/wire.test.ts` + `webui/tests/wire-binary.test.ts`（vitest，mock fetch/WS；
-后者走 node 环境解析 multipart）+ `tests/test_web_*.py`（后端约定全组）；
+后者走 node 环境解析 multipart）+ `webui/tests/settings.test.tsx`（设置/凭据约定与对话框）+
+`tests/test_web_*.py`（后端约定全组）；
 后端静态承载新增 `tests/test_web_frontend.py` `test_webui_dist_build`（Vite 形态 dist）。

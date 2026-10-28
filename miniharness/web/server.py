@@ -50,6 +50,7 @@ from .envelope import (
     rpc_result_ok,
 )
 from .frontend import DIST_INDEX, DIST_ROOT, serve_static
+from .media import MEDIA_FILE_PATH, handle_file_request
 from .mux import RemoteStreamMuxConnection
 from .uplink import DEFAULT_STREAM_INBOX_BYTES
 from .stream_protocol import (
@@ -120,6 +121,11 @@ def create_app(api: WebApi, gateway: GatewayStreams,
     async def upload_file_binary(request: Request) -> Response:
         """原始字节上传：无信封；优先于 `/api/{path}` 注册。"""
         return await handle_file_upload_http(api, request)
+
+    @app.api_route(MEDIA_FILE_PATH, methods=["GET", "HEAD"])
+    async def media_file(request: Request) -> Response:
+        """Authenticated bounded file display: GET/HEAD `/api/file?path=`."""
+        return await handle_file_request(api, request)
 
     @app.get("/oauth/callback")
     async def account_oauth_callback(request: Request) -> Response:

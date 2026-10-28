@@ -8,22 +8,23 @@
 //   server → client: {type:'item', streamId, value} | {type:'error', streamId, error}
 //                    | {type:'end', streamId}
 // item.value is always present (null is a legal wire value); error is terminal
-// (no trailing end frame). streamId is monotonic (backend allocates; client
-// numbers its own opens).
+// (no trailing end frame). streamId is a non-empty string minted by the client
+// for each open (upstream `stream-client.ts` uses `randomUUID()`); the gateway
+// rejects numeric ids as a protocol violation.
 
 import { webToken } from "./auth";
 import { isRemoteUplinkItem } from "./json-value";
 
-export type MuxOpen = { type: "open"; streamId: number; endpoint: string; payload: unknown };
-export type MuxItemClient = { type: "item"; streamId: number; value?: unknown };
-export type MuxEndClient = { type: "end"; streamId: number };
-export type MuxCancel = { type: "cancel"; streamId: number };
+export type MuxOpen = { type: "open"; streamId: string; endpoint: string; payload: unknown };
+export type MuxItemClient = { type: "item"; streamId: string; value?: unknown };
+export type MuxEndClient = { type: "end"; streamId: string };
+export type MuxCancel = { type: "cancel"; streamId: string };
 
 export type MuxClientFrame = MuxOpen | MuxItemClient | MuxEndClient | MuxCancel;
 
-export type MuxItem = { type: "item"; streamId: number; value: unknown };
-export type MuxError = { type: "error"; streamId: number; error: { code?: string; message?: string } };
-export type MuxEnd = { type: "end"; streamId: number };
+export type MuxItem = { type: "item"; streamId: string; value: unknown };
+export type MuxError = { type: "error"; streamId: string; error: { code?: string; message?: string } };
+export type MuxEnd = { type: "end"; streamId: string };
 
 export type MuxServerFrame = MuxItem | MuxError | MuxEnd;
 
@@ -45,7 +46,7 @@ export interface MuxClientOptions {
  * go out behind the `open` frame.
  */
 export interface StreamHandle {
-  readonly streamId: number;
+  readonly streamId: string;
   /** Send one uplink item; the Host validates it against the method's uplink codec. */
   send: (item: unknown) => void;
   /** Half-close the uplink, so the Host's uplink iteration ends. Idempotent. */
@@ -56,14 +57,17 @@ export interface StreamHandle {
   next: () => Promise<MuxServerFrame>;
 }
 
-let lastStreamId = 0;
-function nextStreamId(): number {
-  return ++lastStreamId;
+let fallbackStreamCounter = 0;
+function nextStreamId(): string {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  return `stream-${Date.now().toString(36)}-${(++fallbackStreamCounter).toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2)}`;
 }
 
 export class RemoteMuxConnection {
   private ws: WebSocket | null = null;
-  private pending: Map<number, (frame: MuxServerFrame) => void> = new Map();
+  private pending: Map<string, (frame: MuxServerFrame) => void> = new Map();
   private terminators: Set<(error: Error) => void> = new Set();
   private readonly url: string;
   private readonly WebSocketImpl: typeof WebSocket;
@@ -211,7 +215,7 @@ export class RemoteMuxConnection {
     this.ws.send(JSON.stringify(frame));
   }
 
-  private cancel(streamId: number): void {
+  private cancel(streamId: string): void {
     try {
       this.send({ type: "cancel", streamId } satisfies MuxCancel);
     } catch {

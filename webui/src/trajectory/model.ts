@@ -50,10 +50,12 @@ export interface ToolRow {
   key: string;
   turn: number;
   seq: number;
+  callId: string;
   name: string;
   arguments: string;
   result: string;
   isError: boolean;
+  meta: Record<string, unknown> | null;
   height: number;
 }
 
@@ -144,14 +146,42 @@ function stringOf(value: unknown): string {
   return typeof value === "string" ? value : JSON.stringify(value);
 }
 
+function toolResultOf(ev: EventEnvelope): {
+  callId: string;
+  text: string;
+  isError: boolean;
+  meta: Record<string, unknown> | null;
+} {
+  const d = dataOf(ev);
+  const message = asRecord(d.message);
+  const source = asRecord(message?.source);
+  const content = message?.content ?? d.content;
+  const text = Array.isArray(content)
+    ? messageText(content)
+    : stringOf(content);
+  return {
+    callId: stringOf(d.callId) || stringOf(message?.toolCallId) || stringOf(source?.callId),
+    text,
+    isError: d.error !== undefined && d.error !== null
+      ? true
+      : d.isError === true || message?.isError === true,
+    meta: asRecord(d.meta),
+  };
+}
+
 // Project the followed event log into display rows. Consecutive tool/call +
 // tool/result pairs fold into a single tool row; turn/end only closes the
 // active turn without emitting a row.
 export function groupRows(events: readonly EventEnvelope[]): TrajectoryRow[] {
   const rows: TrajectoryRow[] = [];
+  const results = new Map<string, ReturnType<typeof toolResultOf>>();
+  for (const ev of events) {
+    if (ev.type !== "tool/result") continue;
+    const result = toolResultOf(ev);
+    if (result.callId !== "") results.set(result.callId, result);
+  }
   let turn = 1;
-  for (let i = 0; i < events.length; i++) {
-    const ev = events[i];
+  for (const ev of events) {
     const d = dataOf(ev);
     if (ev.type === "turn/start") {
       const t = Number(d.turn ?? 0);
@@ -177,27 +207,22 @@ export function groupRows(events: readonly EventEnvelope[]): TrajectoryRow[] {
       continue;
     }
     if (ev.type === "tool/call") {
+      const callId = stringOf(d.callId);
       const name = stringOf(d.name) || "?";
       const args = stringOf(d.arguments);
-      let result = "";
-      let isError = false;
-      const next = events[i + 1];
-      if (next && next.type === "tool/result") {
-        const n = dataOf(next);
-        result = stringOf(n.content);
-        isError = Boolean(n.isError);
-        i += 1;
-      }
+      const result = callId === "" ? undefined : results.get(callId);
       rows.push({
         kind: "tool",
         key: `tool:${ev.seq}`,
         turn,
         seq: ev.seq,
+        callId,
         name,
         arguments: args,
-        result,
-        isError,
-        height: toolHeight(args, result),
+        result: result?.text ?? "",
+        isError: result?.isError ?? false,
+        meta: result?.meta ?? null,
+        height: toolHeight(args, result?.text ?? ""),
       });
       continue;
     }

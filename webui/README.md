@@ -9,7 +9,17 @@
 
 ## 功能面
 
-会话列表 / 新建、Trajectory（虚拟化窗口 + Overview 折叠跳转 + 全文搜索）、审批瀑布、队列/作业面板
+会话列表 / 新建、Chat/Trajectory 双 tab、Trajectory（虚拟化窗口 + Overview 折叠跳转 + 全文搜索）、
+MarkdownText（GFM 表格/代码、KaTeX 数学、安全外链、经 `/api/file` 的本地图片、搜索高亮）、
+Composer（草稿持久化、14 行封顶、空白聚焦与选区恢复、`/` 命令、`@` 文件/会话引用、附件上传、
+忙时 queue/steer）、工具卡（Bash/PowerShell 命令与输出、grep/glob 分组匹配与截断提示、
+todo 计数/状态、read 行窗口、write/edit diff、web 搜索/抓取、图片元数据、未知工具通用回退）、
+工作区文件树（`workspaceFiles/changes` 逐层实时刷新）与 text/markdown/code/image/PDF 预览、
+xterm 终端（多 tab、shell 选择、重命名/关闭、写与尺寸 ack、断连重连）、
+右侧栏 Console/Files/Terminal 三 tab 与 per-session 布局（宽度拖拽/键盘、收起、<768px 自动全屏、
+中央「侧栏」展开按钮）、设置对话框（常规页权限缺省预设与完全权限确认门、浏览器外观/排版/发送偏好、
+按值类型渲染的插件命名空间表单；写入带 revision 围栏、冲突后重读、`settings/document-updated` 自动刷新、
+密钥只显存在性）、审批瀑布、队列编辑/插话/删除与作业面板
 （rc.1 数据源：队列 = `session/control` 投影帧折叠出的 `inbox` 投影、作业 = `job/list` roster 流）。
 
 ## 环境要求
@@ -26,7 +36,7 @@
 | `pnpm build` | `tsc --noEmit` + `vite build` → `dist/` |
 | `pnpm preview` | 本地预览 `dist/` 产物（不代理 `/api`，完整运行请走后端承载） |
 | `pnpm typecheck` | 仅类型检查 |
-| `pnpm test` / `pnpm test:watch` | vitest 测试（wire 层 + trajectory 模型/搜索/组件，mock fetch/WS） |
+| `pnpm test` / `pnpm test:watch` | vitest 测试（wire 层 + trajectory 模型/搜索/组件 + markdown 渲染 + composer/queue/tool-card/files/terminal/right-dock/settings 交互，mock fetch/WS） |
 
 ## 启动方式
 
@@ -68,9 +78,12 @@ MINIHARNESS_WEBUI_DIST=webui/dist python -m miniharness.cli --profile web
 
 ```
 webui/
-├── src/wire/      # 约定客户端层（纯 TS，可单测）：rpc / mux / json-value / follow / control / jobs / events / auth
-├── src/app/       # React 编排 hooks（useBackend）
-├── src/ui/        # 无状态展示组件（SessionList / Trajectory / ApprovalPanel / ControlPanel）
+├── src/wire/      # 约定客户端层（纯 TS，可单测）：rpc / mux / json-value / follow / control / jobs / events / auth / composer / workspace / terminal / settings / credentials / permissions
+├── src/app/       # React 编排 hooks（useBackend / useSettings / usePreferences）+ 浏览器偏好（uiPreferences）+ 右侧栏布局（rightDock：校验/夹取/持久化）
+├── src/composer/  # Composer 与触发词/候选纯函数（triggers）
+├── src/trajectory/ # 虚拟行模型、搜索索引、tool 结果解析（tool-views）
+├── src/ui/        # 无状态展示组件（SessionList / Trajectory / ChatView / MarkdownText / ApprovalPanel / ControlPanel / FilesPanel / DocumentPreview / TerminalPanel / TerminalScreen / RightDock / SettingsDialog / SettingsGeneral / SettingsNamespaceForm）
+├── src/ui/tools/   # ToolCallView：shell / search / todo / read / diff / web / image / 通用回退
 ├── tests/         # vitest 单测（jsdom，mock fetch/WS；wire-binary.test.ts 走 node 环境解析 multipart）
 ├── vite.config.ts # dev 代理 + 构建 + vitest 配置
 └── index.html     # Vite 入口
@@ -82,6 +95,12 @@ webui/
 `send(item)` 发一条上行项（先过 `json-value.ts` 的无损 JSON 校验，失败即本地抛错）、
 `endUplink()` 半关上行、`close()` 取消本流、`next()` 取下一帧下行。终态帧（`error`/`end`）
 或连接断开后 `send()` 抛错——对齐上游「终态即停 pump / 断连 `failAll` 终结全部流」。
+
+每次 `open` 的 `streamId` 由客户端铸**非空字符串**（`crypto.randomUUID()`，无 crypto 时退化为
+时间戳+计数器）；上游 `stream-client.ts:120` 用 `randomUUID()`，数字 id 会被网关按协议违例关 WS 1008。
+
+xterm 只在 `src/ui/TerminalScreen.tsx` 静态引入，`TerminalPanel` 动态加载它，因此构建会把 xterm
+单独切块；引导态/错误态的组件测试不会拉入终端模拟器。
 
 ## 测试与类型检查
 

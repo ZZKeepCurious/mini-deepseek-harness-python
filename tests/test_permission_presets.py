@@ -271,5 +271,51 @@ class PermissionPresetWebWireTest(unittest.TestCase):
             ctx2.dispose()
 
 
+class PermissionPresetPluginTest(unittest.TestCase):
+    """web 组合条目 config 透传。
+
+    设置对话框「权限」行读写的是 `permission-presets.defaultPreset`
+    （settings/forms.py 把整节 profile 配置交给插件）。插件丢弃该键会让
+    写入持久化却不生效，故这里钉住组合条目的透传面。
+    """
+
+    def _install(self, name, **config):
+        from miniharness.cli.plugins.permission_presets import apply
+        ctx = Context(name=name)
+        self.addCleanup(ctx.dispose)
+        install_sessions(ctx)
+        install_session_projections(ctx)
+        SandboxPolicyService(ctx, {"mode": "workspace-write"})
+        ctx.provide("approval", ApprovalService(ctx))
+        apply(ctx, **config)
+        return ctx, ctx.get("permissionPresets")
+
+    def test_default_preset_reaches_the_service(self):
+        ctx, svc = self._install("perm-plugin-default", defaultPreset="read-only")
+        self.assertEqual(svc.catalog()["defaultPreset"], "read-only")
+        session = ctx.get("sessions").create(
+            "pd1", {"meta": {"cwd": os.getcwd()}})
+        self.assertEqual(svc.current(session), "read-only")
+        self.assertEqual([e["type"] for e in session.events],
+                         ["permission/preset", "sandbox/mode", "approval/policy"])
+        self.assertEqual(session.events[0]["data"]["preset"], "read-only")
+        self.assertEqual(session.events[1]["data"]["mode"], "read-only")
+        self.assertEqual(session.events[2]["data"]["policy"], "ask")
+
+    def test_default_preset_absent_keeps_composition_default(self):
+        _, svc = self._install("perm-plugin-absent")
+        self.assertEqual(svc.catalog()["defaultPreset"], "workspace-write")
+        self.assertEqual([o["value"] for o in svc.catalog()["options"]],
+                         ["read-only", "workspace-write", "danger-full-access"])
+
+    def test_configured_preset_table_passes_through(self):
+        table = {"read-only": {"sandbox": "read-only", "approval": "never"}}
+        _, svc = self._install("perm-plugin-table",
+                               presets=table, defaultPreset="read-only")
+        self.assertEqual(svc.names, ["read-only"])
+        self.assertEqual(svc.resolve("read-only")["approval"], "never")
+        self.assertEqual(svc.catalog()["defaultPreset"], "read-only")
+
+
 if __name__ == "__main__":
     unittest.main()
