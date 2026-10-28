@@ -3,6 +3,7 @@ import type { EventEnvelope } from "../wire";
 import { groupRows } from "../trajectory/model";
 import { MarkdownText } from "./MarkdownText";
 import { ToolCallView } from "./tools/ToolCallView";
+import { TurnNotice } from "./TurnNotice";
 
 interface Props {
   events: EventEnvelope[];
@@ -22,6 +23,11 @@ export function ChatView({ events, running }: Props) {
         {rows.map((row) => {
           if (row.kind === "turn") return null;
           if (row.kind === "summary") return null;
+          if (row.kind === "notice") {
+            return (
+              <TurnNotice key={row.key} notice={row.notice} failure={row.failure} />
+            );
+          }
           if (row.kind === "tool") {
             return (
               <div className="chat-tool" key={row.key}>

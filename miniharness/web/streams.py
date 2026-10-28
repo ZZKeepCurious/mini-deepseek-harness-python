@@ -14,6 +14,8 @@
   * `workspace/follow` —— 工作区投影流：一个 `baseline` 帧后跟有序
     `upsert`/`remove`/`order`/`archived`/`pinned` 增量。
   * `workspaceFiles/changes` —— 文件观察流：`{kind:'ready'}` 后跟 `{kind:'change'}`。
+  * `account/watch`   —— 安全账户投影流：首个当前 `AccountView` 帧后只在投影变化时
+    再给一帧（上游 account-controller `watch` 的重连语义）。
   * `$events`         —— 远程事件流（`web/events.py` RemoteEventRegistry），承载
     api-session/* 转发源 + 审批瀑布 + 用户提问瀑布（`web/approvals.py` /
     `web/questions.py` bridge）。
@@ -186,6 +188,7 @@ class GatewayStreams:
             "workspaceFiles/changes": "workspace_changes",
             "job/list": "job_list",
             "job/follow": "job_follow",
+            "account/watch": "account_watch",
             "account/watchExpiry": "account_watch_expiry",
             "userQuestions/attachWait": "user_questions_attach_wait",
         }
@@ -256,6 +259,8 @@ class GatewayStreams:
         if kind == "job_follow":
             return _with_uplink(
                 self._job_follow(payload["args"], invocation), invocation)
+        if kind == "account_watch":
+            return _with_uplink(self._account_watch(invocation), invocation)
         if kind == "account_watch_expiry":
             return _with_uplink(
                 self._account_watch_expiry(invocation), invocation)
@@ -647,6 +652,33 @@ class GatewayStreams:
         async for frame in service.attach_wait(
                 agent, args.get("callId"), invocation.signal):
             yield frame
+
+    # ---------- account/watch（安全账户投影流） ----------
+
+    async def _account_watch(self, invocation: StreamInvocation):
+        """`account/watch`：当前投影一帧，之后每次投影变化一帧（上游 account-controller）。
+
+        上游 `watch` 由账户服务推送；mini 账户服务未声明订阅面，这里以短轮询
+        读取同一投影并在深度相等门控下发布，重开流重新投递当前投影（无游标）。
+        无 account 命名空间 → invocation-unavailable。
+        """
+        service = self.ctx.get("deepseekAccount")
+        if service is None:
+            raise RemoteStreamError(
+                "gateway/invocation-unavailable",
+                "typert gateway: account/watch: account namespace is not mounted")
+        signal = invocation.signal
+        last = service.get_state()
+        yield last
+        while not self._is_aborted(signal):
+            await asyncio.sleep(FOLLOW_POLL_INTERVAL)
+            if self._is_aborted(signal):
+                return
+            current = service.get_state()
+            if current == last:
+                continue
+            last = current
+            yield current
 
     # ---------- account/watchExpiry（凭据过期通知流） ----------
 

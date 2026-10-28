@@ -1,10 +1,13 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useBackend } from "./useBackend";
+import { useAccount } from "./useAccount";
+import { useQuotaNotice } from "./useQuotaNotice";
 import { usePreferences } from "./usePreferences";
 import { useSettings } from "./useSettings";
 import {
   applyPreferences,
   loadPreferences,
+  resolvedTheme,
   watchSystemTheme,
 } from "./uiPreferences";
 import webuiPackage from "../../package.json";
@@ -22,12 +25,16 @@ import { composerServices } from "../wire/composer";
 import { SessionList } from "../ui/SessionList";
 import { Trajectory } from "../ui/Trajectory";
 import { ChatView } from "../ui/ChatView";
+import { AccountMenu } from "../ui/AccountMenu";
+import { AccountSection } from "../ui/AccountSection";
 import { ApprovalPanel } from "../ui/ApprovalPanel";
 import { ControlPanel } from "../ui/ControlPanel";
 import { DocumentPreview } from "../ui/DocumentPreview";
 import { FilesPanel } from "../ui/FilesPanel";
+import { QuotaNotice } from "../ui/QuotaNotice";
 import { RightDock } from "../ui/RightDock";
 import { SettingsDialog } from "../ui/SettingsDialog";
+import type { SettingsSection } from "../ui/SettingsDialog";
 import { Composer } from "../composer/Composer";
 
 const TerminalPanel = lazy(() =>
@@ -40,7 +47,16 @@ export function App() {
   const bk = useBackend();
   const settings = useSettings(bk.onEmit);
   const { preferences, update: updatePreferences } = usePreferences();
+  const colorScheme = resolvedTheme(preferences.theme);
+  const account = useAccount({
+    openStream: bk.openStream,
+    subscribe: bk.onEmit,
+    version: webuiPackage.version,
+    colorScheme,
+  });
+  const quota = useQuotaNotice(bk.liveTrajectory);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsEntry, setSettingsEntry] = useState<SettingsSection | undefined>(undefined);
   const [view, setView] = useState<View>("chat");
   const [previewPath, setPreviewPath] = useState<string | null>(null);
   const [dock, setDock] = useState<DockLayout>(() => defaultDockLayout());
@@ -248,11 +264,27 @@ export function App() {
         )}
         <span>{bk.connected ? "已连接" : "未连接"}</span>
         <span>{bk.sessions.length} 会话</span>
+        <AccountMenu
+          account={account}
+          colorScheme={colorScheme}
+          settingsOpen={settingsOpen}
+          onOpenSettings={() => {
+            setSettingsEntry(undefined);
+            setSettingsOpen(true);
+          }}
+          onAddApiKey={() => {
+            setSettingsEntry("plugins");
+            setSettingsOpen(true);
+          }}
+        />
         <button
           type="button"
           className="btn small ghost settings-open"
           aria-label="设置"
-          onClick={() => setSettingsOpen(true)}
+          onClick={() => {
+            setSettingsEntry(undefined);
+            setSettingsOpen(true);
+          }}
         >
           设置
         </button>
@@ -266,7 +298,21 @@ export function App() {
         onPreference={updatePreferences}
         onClose={() => setSettingsOpen(false)}
         version={webuiPackage.version}
+        accountSection={
+          account.view?.status === "credential-stored" ? (
+            <AccountSection account={account} colorScheme={colorScheme} />
+          ) : undefined
+        }
+        initialSection={settingsEntry}
       />
+      {quota.notice !== null && (
+        <QuotaNotice
+          code={quota.notice.code}
+          signedIn={account.view?.status === "credential-stored"}
+          topUpUrl={account.view?.links.topUpUrl}
+          onDismiss={quota.dismiss}
+        />
+      )}
     </div>
   );
 }

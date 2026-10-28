@@ -17,6 +17,8 @@ import {
   windowedRows,
 } from "../src/trajectory/model";
 import type { TrajectoryRow } from "../src/trajectory/model";
+import { turnEndFailure } from "../src/trajectory/model";
+import type { EventEnvelope } from "../src/wire";
 import { assistantMsg, bigTurn, standardSession, toolCall, toolResult, userMsg } from "./fixtures";
 
 describe("groupRows", () => {
@@ -208,5 +210,86 @@ describe("big session windowing", () => {
     expect(mid.topPad).toBeGreaterThan(0);
     expect(mid.bottomPad).toBeGreaterThan(0);
     expect(mid.topPad + mid.bottomPad).toBeLessThan(win.totalHeight);
+  });
+});
+
+// One turn/end event with an explicit reason, at the turn's closing position.
+function closing(seq: number, turn: number, reason: unknown): EventEnvelope {
+  return { type: "turn/end", seq, data: { turn, reason } };
+}
+
+describe("turn/end notices", () => {
+  it("renders the output-token cap as one notice after the turn's messages", () => {
+    const rows = groupRows([
+      { type: "turn/start", seq: 1, data: { turn: 3 } },
+      userMsg(2, "再写长一点"),
+      assistantMsg(3, "已经写到这里"),
+      closing(4, 3, { kind: "max-tokens" }),
+    ]);
+    expect(rows[rows.length - 1]).toMatchObject({
+      kind: "notice",
+      key: "notice:4",
+      turn: 3,
+      notice: "max-tokens",
+      failure: null,
+      height: 54,
+    });
+  });
+
+  it("keeps the provider failure of an errored turn", () => {
+    const rows = groupRows([
+      { type: "turn/start", seq: 1, data: { turn: 1 } },
+      closing(2, 1, {
+        kind: "error",
+        error: { code: "QUOTA", message: "insufficient balance" },
+      }),
+    ]);
+    expect(rows[rows.length - 1]).toMatchObject({
+      kind: "notice",
+      notice: "error",
+      failure: { code: "QUOTA", message: "insufficient balance" },
+    });
+    expect(turnEndFailure(closing(2, 1, {
+      kind: "error",
+      error: { code: "QUOTA", message: "insufficient balance" },
+    }))).toEqual({ code: "QUOTA", message: "insufficient balance" });
+  });
+
+  it("treats a sign-out abort as a stopped account task", () => {
+    const rows = groupRows([
+      closing(1, 1, {
+        kind: "aborted",
+        reason: { kind: "hook", reason: "deepseek-account/signed-out" },
+      }),
+    ]);
+    expect(rows[0]).toMatchObject({
+      kind: "notice",
+      notice: "stopped",
+      failure: { code: "ACCOUNT_SIGNED_OUT" },
+    });
+  });
+
+  it("treats restart recovery as interrupted and ignores ordinary endings", () => {
+    const interrupted = groupRows([closing(1, 1, { kind: "interrupted" })]);
+    expect(interrupted[0]).toMatchObject({
+      kind: "notice",
+      notice: "stopped",
+      failure: { code: "INTERRUPTED" },
+    });
+
+    for (const reason of [
+      { kind: "completed" },
+      { kind: "blocked" },
+      { kind: "aborted", reason: { kind: "user" } },
+      undefined,
+    ]) {
+      const rows = groupRows([closing(1, 1, reason)]);
+      expect(rows.filter((row) => row.kind === "notice")).toEqual([]);
+    }
+  });
+
+  it("reports a failure for consumers outside the row model only for errored turns", () => {
+    expect(turnEndFailure(closing(1, 1, { kind: "max-tokens" }))).toBeNull();
+    expect(turnEndFailure(userMsg(2, "hello"))).toBeNull();
   });
 });

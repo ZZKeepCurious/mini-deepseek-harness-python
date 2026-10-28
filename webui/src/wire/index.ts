@@ -12,3 +12,5 @@ export * from "./terminal";
 export * from "./settings";
 export * from "./credentials";
 export * from "./permissions";
+export * from "./account";
+export * from "./session";

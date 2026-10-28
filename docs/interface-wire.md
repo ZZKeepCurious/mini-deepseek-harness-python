@@ -21,7 +21,7 @@
 | 通道 | 载体 | 覆盖范围 | 载体状态码 |
 |---|---|---|---|
 | unary RPC | `POST /api/<endpoint>` | `WebApi.ROUTES` 全部 69 个 unary 端点（`session/*` 17 个 + `terminal`/`workspace`/`workspaceFiles`/`settings`/`credentials`/`schedule`/`account`/`agentPresets` 等各域端点）+ `$events/result` 特判 | 401* / 404 / 415 / 400 / 500 / 200 |
-| Remote 流 | `WS /api/remote.mux` | `GatewayStreams.stream_kinds` 全部 11 条流：`$events` + `session/follow`/`session/control` + `terminal/retain`/`terminal/attach` + `workspace/follow` + `workspaceFiles/changes` + `job/list`/`job/follow` + `account/watchExpiry` + `userQuestions/attachWait` | HTTP 401*（升级拒绝）/ WS 关闭码 1003 / 1008 / 1011 |
+| Remote 流 | `WS /api/remote.mux` | `GatewayStreams.stream_kinds` 全部 12 条流：`$events` + `session/follow`/`session/control` + `terminal/retain`/`terminal/attach` + `workspace/follow` + `workspaceFiles/changes` + `job/list`/`job/follow` + `account/watch`/`account/watchExpiry` + `userQuestions/attachWait` | HTTP 401*（升级拒绝）/ WS 关闭码 1003 / 1008 / 1011 |
 | 会话导出 | `GET /api/session.export` | 会话日志 zip 下载 | 401* / 200 / 400 / 404 / 501 / 500 |
 | 文件展示 | `GET`/`HEAD /api/file?path=` | 认证后的绝对路径有界读取（图片/文档） | 401* / 200 / 400 / 403 / 404 / 413 / 499 / 500 |
 | SPA 静态 | `GET`/`HEAD /{path}`（非 `/api/`） | `webui/dist/` 或 `web/static/` 产物承载 | 403 / 200 / 404 / 405 |
@@ -226,9 +226,9 @@ client `connection/src/client/rpc.ts` 按 `/` 切两段）；`web/args.canonical
   判别联合，codec = `decode_terminal_input`），故 `GatewayStreams.uplink_codecs()` 出厂只含该项
   ——声明点即 typert 生成的描述符 `uplink.codec`（`packages/typert/protocol/src/types.ts:355-357`，
   上游同样只由 terminal-controller 的类型图生成）。
-- `endpoint` 全集（`GatewayStreams.stream_kinds`，十一条）：`$events`、`session/follow`、
+- `endpoint` 全集（`GatewayStreams.stream_kinds`，十二条）：`$events`、`session/follow`、
   `session/control`、`terminal/retain`、`terminal/attach`、`workspace/follow`、
-  `workspaceFiles/changes`、`job/list`、`job/follow`、`account/watchExpiry`、
+  `workspaceFiles/changes`、`job/list`、`job/follow`、`account/watch`、`account/watchExpiry`、
   `userQuestions/attachWait`；未知 endpoint → `error` 帧
   `gateway/invocation-unavailable`
   （消息 `typert gateway: <endpoint>: no active Remote method exports this endpoint`）。
@@ -490,6 +490,10 @@ unary `POST /api/account/<method>`；除 `getState`/`hasRunningAccountTasks`/`ca
 - `account/cancelSignIn`（`{attemptId}`）→ 当前 attempt view；仅 `committing` 前可取消，
   未知 id no-op。
 - `account/signOut`（带 client）→ `AccountView`。
+- `account/watch`（Remote 流，`{args:{}}`）：首帧当前 `AccountView`，随后仅在投影变化时
+  再发一帧；无游标，重开流即当前投影。上游 `account-controller/src/index.ts:119` 委托账户
+  服务的推送迭代，mini 账户服务未声明订阅面，以短轮询同一投影 + 深度相等门控发布
+  （`web/streams.py` `_account_watch`）。命名空间未挂 → `gateway/invocation-unavailable`。
 - `account/watchExpiry`（Remote 流，`{args:{}}`）：无重放地订阅 `deepseek-account/session-expired`，
   订阅期间每事件产一帧 `'session-expired'`；命名空间未挂 → `gateway/invocation-unavailable`。
 
@@ -723,10 +727,12 @@ outcome 归一（`APPROVAL_OUTCOMES = {allowed-once, rejected, cancelled, unavai
 | `mux.ts` | §4 客户端 open/item/end/cancel 帧（`StreamHandle.send`/`endUplink`/`close`/`next`）+ item/end/error 消费（流队列 + waiter；断连即 `failAll` 终结本连接全部流） |
 | `json-value.ts` | §4 上行项无损 JSON 校验（`isRemoteUplinkItem`，同上游 typert `isRemoteUplinkItem`） |
 | `events.ts` | §4.3 `$events` ready/emit/waterfall/cancel + §5 结算（settled 集合 fail-closed） |
-| `follow.ts` | §4.1 snapshot/event 帧 + seq 去重（`TrajectoryBuffer`） |
+| `follow.ts` | §4.1 snapshot/event 帧 + seq 去重（`TrajectoryBuffer`；`pushHistory`/`pushLive` 分离历史快照与实时追加，`liveEvents()` 供帧级额度提示） |
 | `control.ts` | §4.2 的 baseline/projection 帧——`applyControlFrame` 折叠成逐会话投影 map（baseline 全量替换 / projection 逐键替换），队列经 `inboxQueue()` 从 `inbox` 投影展开（next-turn + next-step） |
 | `jobs.ts` | §4.7 `job/list` roster 流（`{type:'rows', jobs:[JobView]}` 整集替换）+ `JobView` 形状（`isJobListFrame`） |
 | `workspace.ts` | unary `workspaceFiles/list|stat|read`（scope = `workspaceFileScopeId`）+ `/api/file` 绝对路径 URL |
+| `account.ts` | §4.8 `account/watch` 流 + `getState`/`getProfile`/`getBalance`/`getUnnotifiedBonuses`/`ackBonusNotified`/`hasRunningAccountTasks`/`startSignIn`/`cancelSignIn`/`signOut` 与 `AccountClientMetadata` |
+| `session.ts` | §4.1 `session/initializeDefaultModel`（登录成功沿） |
 | `composer.ts` | §4.12 `commands/list|execute`、`skills/list`、`fileReferences/list`、`sessionReferenceResolver/candidates` + §3.1 原字节上传 `POST /api/session/uploadFileBinary` + §1 `session/prompt`（queue/steer） |
 | `settings.ts` | §4.14 `settings/describe|update|replace|mutate|openSettingsDocument` + `settings/conflict` 投影 + `settings/document-updated` 订阅 |
 | `credentials.ts` | §4.14 `credentials/describe|set|unset`（值只进不出） |
@@ -736,5 +742,6 @@ outcome 归一（`APPROVAL_OUTCOMES = {allowed-once, rejected, cancelled, unavai
 
 测试：`webui/tests/wire.test.ts` + `webui/tests/wire-binary.test.ts`（vitest，mock fetch/WS；
 后者走 node 环境解析 multipart）+ `webui/tests/settings.test.tsx`（设置/凭据约定与对话框）+
+`webui/tests/account.test.tsx`（账号流、赠金、额度提示与设置分节）+
 `tests/test_web_*.py`（后端约定全组）；
 后端静态承载新增 `tests/test_web_frontend.py` `test_webui_dist_build`（Vite 形态 dist）。

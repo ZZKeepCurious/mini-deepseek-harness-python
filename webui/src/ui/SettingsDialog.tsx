@@ -3,13 +3,13 @@
 // this build can actually operate.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { KeyboardEvent } from "react";
+import type { KeyboardEvent, ReactNode } from "react";
 import type { UseSettings } from "../app/useSettings";
 import type { UiPreferences } from "../app/uiPreferences";
 import { SettingsGeneral } from "./SettingsGeneral";
 import { SettingsNamespaceForm } from "./SettingsNamespaceForm";
 
-export type SettingsSection = "general" | "plugins";
+export type SettingsSection = "account" | "general" | "plugins";
 
 export interface SettingsDialogProps {
   open: boolean;
@@ -18,9 +18,14 @@ export interface SettingsDialogProps {
   onPreference: (patch: Partial<UiPreferences>) => void;
   onClose: () => void;
   version: string;
+  /** Account section exported by the account feature; absent while signed out. */
+  accountSection?: ReactNode;
+  /** Section the next open starts on; the general section when absent. */
+  initialSection?: SettingsSection;
 }
 
 const SECTIONS: { id: SettingsSection; label: string }[] = [
+  { id: "account", label: "账号与余额" },
   { id: "general", label: "常规" },
   { id: "plugins", label: "内置插件" },
 ];
@@ -32,28 +37,38 @@ export function SettingsDialog({
   onPreference,
   onClose,
   version,
+  accountSection,
+  initialSection,
 }: SettingsDialogProps) {
-  const [section, setSection] = useState<SettingsSection>("general");
+  const [section, setSection] = useState<SettingsSection>(initialSection ?? "general");
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
+  const signedIn = accountSection !== undefined;
 
   useEffect(() => {
     if (!open) return;
-    setSection("general");
+    setSection(initialSection ?? "general");
     closeRef.current?.focus();
-  }, [open]);
+  }, [initialSection, open]);
 
   useEffect(() => {
     if (open) return;
     setExpanded({});
   }, [open]);
 
+  useEffect(() => {
+    // Signing out removes the account section; the selected id no longer names a destination.
+    if (!signedIn && section === "account") setSection("general");
+  }, [section, signedIn]);
+
   const toggle = useCallback((ns: string) => {
     setExpanded((current) => ({ ...current, [ns]: !current[ns] }));
   }, []);
 
   if (!open) return null;
+
+  const sections = signedIn ? SECTIONS : SECTIONS.filter((item) => item.id !== "account");
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
     if (event.key === "Escape") {
@@ -81,7 +96,7 @@ export function SettingsDialog({
       >
         <nav className="settings-nav" aria-label="设置分区">
           <div className="settings-nav-title">设置</div>
-          {SECTIONS.map((item) => (
+          {sections.map((item) => (
             <button
               key={item.id}
               type="button"
@@ -124,6 +139,8 @@ export function SettingsDialog({
                 配置已被其他客户端修改（revision {String(settings.conflict.actual ?? "?")}），已刷新，请重试。
               </div>
             )}
+
+            {section === "account" && accountSection}
 
             {section === "general" && (
               <SettingsGeneral

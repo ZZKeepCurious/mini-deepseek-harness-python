@@ -17,6 +17,7 @@ import {
   type EventEnvelope,
   type SessionProjections,
   type SessionSummary,
+  type StreamHandle,
 } from "../wire";
 
 export interface PendingApproval {
@@ -41,6 +42,8 @@ export interface UseBackend {
   error: string | null;
   selectedId: string | null;
   trajectory: EventEnvelope[];
+  /** Events appended live after the followed history snapshot; paging never enters it. */
+  liveTrajectory: EventEnvelope[];
   hasMore: boolean;
   running: boolean;
   approvals: PendingApproval[];
@@ -48,6 +51,8 @@ export interface UseBackend {
   jobs: Record<string, unknown[]>;
   terminal: TerminalServices;
   workspace: WorkspaceServices;
+  /** Open one `remote.mux` logical stream against the live connection. */
+  openStream: (endpoint: string, payload: unknown) => StreamHandle;
   refresh: () => Promise<void>;
   createSession: (cwd?: string) => Promise<string | undefined>;
   selectSession: (id: string) => void;
@@ -90,6 +95,11 @@ export function useBackend(): UseBackend {
       }),
     [],
   );
+  const openStream = useCallback((endpoint: string, payload: unknown): StreamHandle => {
+    const mux = muxRef.current;
+    if (!mux) throw new Error("remote.mux is not connected");
+    return mux.openStream(endpoint, payload);
+  }, []);
 
   const [ready, setReady] = useState(false);
   const [host, setHost] = useState<HostInfo | null>(null);
@@ -141,12 +151,12 @@ export function useBackend(): UseBackend {
               header: Record<string, unknown>;
             };
             // SessionHistoryRecord 包装（上游 entryFor）：{type:'event', event} 解包
-            buf.push(snap.records.map((r) => r.event));
+            buf.pushHistory(snap.records.map((r) => r.event));
             setRunning(Boolean(snap.header?.running));
             bump((n) => n + 1);
           } else if (item?.type === "event") {
             const ev = (item as unknown as { event: EventEnvelope }).event;
-            buf.push([ev]);
+            buf.pushLive([ev]);
             bump((n) => n + 1);
           }
         } else if (frame.type === "end" || frame.type === "error") {
@@ -349,6 +359,7 @@ export function useBackend(): UseBackend {
   }, []);
 
   const trajectory = bufRef.current ? bufRef.current.events() : [];
+  const liveTrajectory = bufRef.current ? bufRef.current.liveEvents() : [];
 
   return useMemo(() => {
     return {
@@ -359,6 +370,7 @@ export function useBackend(): UseBackend {
       error,
       selectedId: selected,
       trajectory,
+      liveTrajectory,
       hasMore: false,
       running,
       approvals,
@@ -366,6 +378,7 @@ export function useBackend(): UseBackend {
       jobs: jobsRef.current,
       terminal,
       workspace,
+      openStream,
       refresh,
       createSession,
       selectSession,
@@ -376,8 +389,8 @@ export function useBackend(): UseBackend {
       onEmit,
     };
   }, [
-    ready, host, connected, sessions, error, selected, trajectory, running,
-    approvals, terminal, workspace, refresh, createSession, selectSession, sendPrompt, updateQueue,
+    ready, host, connected, sessions, error, selected, trajectory, liveTrajectory, running,
+    approvals, terminal, workspace, openStream, refresh, createSession, selectSession, sendPrompt, updateQueue,
     askApproval, cancelSession, onEmit,
   ]);
 }

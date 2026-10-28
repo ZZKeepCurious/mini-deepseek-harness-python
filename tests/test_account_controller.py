@@ -169,6 +169,43 @@ class AccountControllerWireTest(unittest.TestCase):
             ctx2.dispose()
 
 
+class AccountWatchTest(unittest.TestCase):
+    def test_watch_emits_current_projection_then_changes(self):
+        """`account/watch`：首个当前投影帧，之后只在投影变化时再发帧。"""
+        async def go():
+            ctx = Context(name="acct-watch")
+            try:
+                service = install_deepseek_account(ctx, token="tok")
+                api = WebApi(ctx, FakeLlmAdapter())
+                gen = api.gateway.open_stream("account/watch", {"args": {}})
+                first = await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+                self.assertEqual(first["status"], "credential-stored")
+                pending = asyncio.ensure_future(gen.__anext__())
+                await asyncio.sleep(0.15)
+                self.assertFalse(pending.done())   # 无变化不重复发帧
+                service.sign_out()
+                changed = await asyncio.wait_for(pending, timeout=1.0)
+                self.assertEqual(changed["status"], "signed-out")
+                await gen.aclose()
+            finally:
+                ctx.dispose()
+        asyncio.run(go())
+
+    def test_watch_requires_mounted_namespace(self):
+        async def go():
+            ctx = Context(name="acct-watch-absent")
+            try:
+                api = WebApi(ctx, FakeLlmAdapter())
+                gen = api.gateway.open_stream("account/watch", {"args": {}})
+                with self.assertRaises(RuntimeError) as caught:
+                    await gen.__anext__()
+                self.assertEqual(caught.exception.code, "gateway/invocation-unavailable")
+                await gen.aclose()
+            finally:
+                ctx.dispose()
+        asyncio.run(go())
+
+
 class AccountWatchExpiryTest(unittest.TestCase):
     def test_watch_expiry_emits_on_session_expired(self):
         """`account/watchExpiry`：无重放，订阅期间的 session-expired 产出一帧。"""

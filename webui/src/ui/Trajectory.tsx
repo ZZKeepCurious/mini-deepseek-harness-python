@@ -24,6 +24,7 @@ import { TrajectorySearchIndex } from "../trajectory/search";
 import { Highlight } from "./Highlight";
 import { MarkdownText } from "./MarkdownText";
 import { ToolCallView } from "./tools/ToolCallView";
+import { TurnNotice } from "./TurnNotice";
 
 interface Props {
   events: EventEnvelope[];
@@ -187,6 +188,13 @@ function RowView({
           · {row.count} 条消息{row.toolCount > 0 ? ` · ${row.toolCount} 工具` : ""}
         </span>
       </button>
+    );
+  }
+  if (row.kind === "notice") {
+    return (
+      <div className={`vrow notice-row${matched ? " hit" : ""}`}>
+        <TurnNotice notice={row.notice} failure={row.failure} />
+      </div>
     );
   }
   if (row.kind === "message") {

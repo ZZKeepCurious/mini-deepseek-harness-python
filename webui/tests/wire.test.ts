@@ -435,14 +435,34 @@ describe("RemoteEventClient ($events)", () => {
 describe("TrajectoryBuffer (session/follow)", () => {
   it("dedups by seq and orders ascending", () => {
     const buf = new TrajectoryBuffer();
-    buf.push([
+    buf.pushHistory([
       { type: "user", seq: 2, data: {} },
       { type: "user", seq: 1, data: {} },
     ]);
-    buf.push([{ type: "user", seq: 2, data: {} }]); // duplicate ignored
+    buf.pushLive([{ type: "user", seq: 2, data: {} }]); // duplicate ignored
     const events = buf.events();
     expect(events.map((e) => e.seq)).toEqual([1, 2]);
     expect(events).toHaveLength(2);
+  });
+
+  it("keeps history snapshot records out of the live append view", () => {
+    const buf = new TrajectoryBuffer();
+    buf.pushHistory([
+      { type: "user", seq: 1, data: {} },
+      { type: "user", seq: 2, data: {} },
+    ]);
+    expect(buf.liveEvents()).toEqual([]);
+
+    buf.pushLive([{ type: "user", seq: 3, data: {} }]);
+    expect(buf.liveEvents().map((e) => e.seq)).toEqual([3]);
+
+    // A snapshot that now covers an event makes it history, not news.
+    buf.reset();
+    buf.pushHistory([
+      { type: "user", seq: 1, data: {} },
+      { type: "user", seq: 3, data: {} },
+    ]);
+    expect(buf.liveEvents()).toEqual([]);
   });
 });
 

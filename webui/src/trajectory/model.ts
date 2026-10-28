@@ -15,6 +15,7 @@ export const DEFAULT_VIEWPORT_HEIGHT = 480;
 
 export const H_TURN = 22;
 export const H_SUMMARY = 26;
+export const H_NOTICE = 54;
 export const H_MESSAGE_BASE = 34;
 export const H_MESSAGE_LINE = 17;
 export const H_TOOL_BASE = 30;
@@ -69,7 +70,28 @@ export interface SummaryRow {
   height: number;
 }
 
-export type TrajectoryRow = TurnRow | MessageRow | ToolRow | SummaryRow;
+/** Display-safe turn failure: a provider code when present and a message never derived from credentials. */
+export interface TurnFailure {
+  code?: string;
+  message: string;
+}
+
+/**
+ * Terminal turn feedback mirroring the upstream Chat nodes `turn-max-tokens`
+ * and `turn-error`: the provider stopped at the output-token cap, the turn
+ * failed with an error reason, or a restored turn was closed by recovery.
+ */
+export interface NoticeRow {
+  kind: "notice";
+  key: string;
+  turn: number;
+  seq: number;
+  notice: "max-tokens" | "error" | "stopped";
+  failure: TurnFailure | null;
+  height: number;
+}
+
+export type TrajectoryRow = TurnRow | MessageRow | ToolRow | SummaryRow | NoticeRow;
 
 export interface RowWindow {
   start: number;
@@ -169,9 +191,69 @@ function toolResultOf(ev: EventEnvelope): {
   };
 }
 
+// Classify a turn/end reason into the terminal notice it renders, mirroring
+// upstream turn-error `endFailure` and turn-max-tokens: completed, blocked and
+// plugin-merged endings have no notice; a user/parent cancellation shows none.
+function failureOf(reason: unknown): TurnFailure | null {
+  const record = asRecord(reason);
+  if (record?.kind !== "error") return null;
+  const failure = asRecord(record.error);
+  const code = typeof failure?.code === "string" ? failure.code : undefined;
+  return {
+    ...(code === undefined ? {} : { code }),
+    message: typeof failure?.message === "string" ? failure.message : "",
+  };
+}
+
+/**
+ * The recorded failure of a failed turn, for consumers outside the row model
+ * (the frame-wide quota notice reads it from the live append).
+ */
+export function turnEndFailure(ev: EventEnvelope): TurnFailure | null {
+  if (ev.type !== "turn/end") return null;
+  return failureOf(dataOf(ev).reason);
+}
+
+function noticeOf(reason: unknown): { notice: NoticeRow["notice"]; failure: TurnFailure | null } | null {
+  const record = asRecord(reason);
+  if (record === null) return null;
+  switch (record.kind) {
+    case "max-tokens":
+      return { notice: "max-tokens", failure: null };
+    case "error":
+      return { notice: "error", failure: failureOf(reason) };
+    case "aborted": {
+      const cause = asRecord(record.reason);
+      if (cause?.kind === "hook" && cause.reason === "deepseek-account/signed-out") {
+        return {
+          notice: "stopped",
+          failure: {
+            code: "ACCOUNT_SIGNED_OUT",
+            message: "Stopped because you signed out of DeepSeek.",
+          },
+        };
+      }
+      return null;
+    }
+    case "interrupted":
+      return {
+        notice: "stopped",
+        failure: {
+          code: "INTERRUPTED",
+          message: "The DSH process exited before this turn finished.",
+        },
+      };
+    default:
+      // Merge-extensible TurnEndReason: completed, blocked, forked and every
+      // plugin-contributed ending render no notice row.
+      return null;
+  }
+}
+
 // Project the followed event log into display rows. Consecutive tool/call +
-// tool/result pairs fold into a single tool row; turn/end only closes the
-// active turn without emitting a row.
+// tool/result pairs fold into a single tool row; a turn/end that carries a
+// terminal failure or the output-token cap emits one notice row at the turn's
+// closing position (upstream turn-error / turn-max-tokens Conversation nodes).
 export function groupRows(events: readonly EventEnvelope[]): TrajectoryRow[] {
   const rows: TrajectoryRow[] = [];
   const results = new Map<string, ReturnType<typeof toolResultOf>>();
@@ -189,7 +271,23 @@ export function groupRows(events: readonly EventEnvelope[]): TrajectoryRow[] {
       rows.push({ kind: "turn", key: `turn:${turn}`, turn, height: H_TURN });
       continue;
     }
-    if (ev.type === "turn/end") continue;
+    if (ev.type === "turn/end") {
+      const t = Number(d.turn ?? 0);
+      if (Number.isFinite(t) && t > 0) turn = t;
+      const notice = noticeOf(d.reason);
+      if (notice !== null) {
+        rows.push({
+          kind: "notice",
+          key: `notice:${ev.seq}`,
+          turn,
+          seq: ev.seq,
+          notice: notice.notice,
+          failure: notice.failure,
+          height: H_NOTICE,
+        });
+      }
+      continue;
+    }
     const msg = messageOf(ev);
     if (msg) {
       const blocks = blocksOf(msg.content);

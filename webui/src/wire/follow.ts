@@ -48,16 +48,43 @@ export function unwrapFollowRecords(records: FollowRecord[]): EventEnvelope[] {
 export class TrajectoryBuffer {
   private bySeq = new Map<number, EventEnvelope>();
   private max: number;
+  /** Highest seq a history snapshot delivered; live appends always follow it. */
+  private historyThrough = -Infinity;
 
   constructor(max = 10000) {
     this.max = max;
   }
 
+  /** Drop the followed log when the next stream opens for another session. */
   reset(): void {
     this.bySeq.clear();
+    this.historyThrough = -Infinity;
   }
 
-  push(events: EventEnvelope[]): void {
+  /** Load history snapshot records; they are not live news. */
+  pushHistory(events: EventEnvelope[]): void {
+    this.push(events);
+    for (const event of events) {
+      if (typeof event?.seq === "number" && event.seq > this.historyThrough) {
+        this.historyThrough = event.seq;
+      }
+    }
+  }
+
+  /** Append events the Host committed after the snapshot. */
+  pushLive(events: EventEnvelope[]): void {
+    this.push(events);
+  }
+
+  /**
+   * @returns events appended after the last history snapshot, in seq order;
+   * paging and replacement snapshots stay out of it.
+   */
+  liveEvents(): EventEnvelope[] {
+    return this.events().filter((event) => event.seq > this.historyThrough);
+  }
+
+  private push(events: EventEnvelope[]): void {
     for (const ev of events) {
       if (typeof ev?.seq === "number" && !this.bySeq.has(ev.seq)) {
         this.bySeq.set(ev.seq, ev);

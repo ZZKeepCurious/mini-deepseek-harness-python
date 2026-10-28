@@ -437,6 +437,7 @@ _SPECS: dict[str, dict[str, tuple[str, bool]]] = {
     "account/signOut": {
         "client": (OBJ, True),
     },
+    "account/watch": {},
     "account/watchExpiry": {},
     # schedule（packages/schedule/schedule）：Remote namespace `schedule`，
     # list/history/delete/update 取 sessionId（+ id 等），catalog 无入参。

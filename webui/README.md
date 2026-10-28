@@ -19,7 +19,10 @@ xterm 终端（多 tab、shell 选择、重命名/关闭、写与尺寸 ack、�
 右侧栏 Console/Files/Terminal 三 tab 与 per-session 布局（宽度拖拽/键盘、收起、<768px 自动全屏、
 中央「侧栏」展开按钮）、设置对话框（常规页权限缺省预设与完全权限确认门、浏览器外观/排版/发送偏好、
 按值类型渲染的插件命名空间表单；写入带 revision 围栏、冲突后重读、`settings/document-updated` 自动刷新、
-密钥只显存在性）、审批瀑布、队列编辑/插话/删除与作业面板
+密钥只显存在性）、账号面（状态栏账号菜单、登录/退出、平台登录 tab 归属、赠金到账通知、
+账号与余额设置分节：档案/充值余额/赠金余额/用量与充值链接；`account/watch` 投影流驱动）、
+对话终止提示（输出 token 上限 / 失败代码 / 登录失效中断）与帧级额度提示（仅实时追加触发，
+登录后给充值入口）、审批瀑布、队列编辑/插话/删除与作业面板
 （rc.1 数据源：队列 = `session/control` 投影帧折叠出的 `inbox` 投影、作业 = `job/list` roster 流）。
 
 ## 环境要求
@@ -36,7 +39,7 @@ xterm 终端（多 tab、shell 选择、重命名/关闭、写与尺寸 ack、�
 | `pnpm build` | `tsc --noEmit` + `vite build` → `dist/` |
 | `pnpm preview` | 本地预览 `dist/` 产物（不代理 `/api`，完整运行请走后端承载） |
 | `pnpm typecheck` | 仅类型检查 |
-| `pnpm test` / `pnpm test:watch` | vitest 测试（wire 层 + trajectory 模型/搜索/组件 + markdown 渲染 + composer/queue/tool-card/files/terminal/right-dock/settings 交互，mock fetch/WS） |
+| `pnpm test` / `pnpm test:watch` | vitest 测试（wire 层 + trajectory 模型/搜索/组件 + markdown 渲染 + composer/queue/tool-card/files/terminal/right-dock/settings/account 交互，mock fetch/WS） |
 
 ## 启动方式
 
@@ -78,11 +81,11 @@ MINIHARNESS_WEBUI_DIST=webui/dist python -m miniharness.cli --profile web
 
 ```
 webui/
-├── src/wire/      # 约定客户端层（纯 TS，可单测）：rpc / mux / json-value / follow / control / jobs / events / auth / composer / workspace / terminal / settings / credentials / permissions
-├── src/app/       # React 编排 hooks（useBackend / useSettings / usePreferences）+ 浏览器偏好（uiPreferences）+ 右侧栏布局（rightDock：校验/夹取/持久化）
+├── src/wire/      # 约定客户端层（纯 TS，可单测）：rpc / mux / json-value / follow / control / jobs / events / auth / composer / workspace / terminal / settings / credentials / permissions / account / session
+├── src/app/       # React 编排 hooks（useBackend / useSettings / usePreferences / useAccount / useQuotaNotice）+ 浏览器偏好（uiPreferences）+ 右侧栏布局（rightDock）+ 账号辅助（bonusNotices / browserLogin / accountAvatar / authorizeUrl / formatBalance）
 ├── src/composer/  # Composer 与触发词/候选纯函数（triggers）
 ├── src/trajectory/ # 虚拟行模型、搜索索引、tool 结果解析（tool-views）
-├── src/ui/        # 无状态展示组件（SessionList / Trajectory / ChatView / MarkdownText / ApprovalPanel / ControlPanel / FilesPanel / DocumentPreview / TerminalPanel / TerminalScreen / RightDock / SettingsDialog / SettingsGeneral / SettingsNamespaceForm）
+├── src/ui/        # 无状态展示组件（SessionList / Trajectory / ChatView / MarkdownText / ApprovalPanel / ControlPanel / FilesPanel / DocumentPreview / TerminalPanel / TerminalScreen / RightDock / SettingsDialog / SettingsGeneral / SettingsNamespaceForm / AccountMenu / AccountSection / AccountAvatar / SignInDialog / SignOutDialog / BonusNotice / QuotaNotice / TurnNotice）
 ├── src/ui/tools/   # ToolCallView：shell / search / todo / read / diff / web / image / 通用回退
 ├── tests/         # vitest 单测（jsdom，mock fetch/WS；wire-binary.test.ts 走 node 环境解析 multipart）
 ├── vite.config.ts # dev 代理 + 构建 + vitest 配置

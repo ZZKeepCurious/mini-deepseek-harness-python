@@ -34,6 +34,15 @@ export function rowSources(row: TrajectoryRow): string[] {
   if (row.kind === "summary") {
     return [`turn ${row.turn}`, "summary", row.preview];
   }
+  if (row.kind === "notice") {
+    return [
+      `turn ${row.turn}`,
+      "notice",
+      row.notice,
+      row.failure?.code ?? "",
+      row.failure?.message ?? "",
+    ];
+  }
   return [`turn ${row.turn}`, "turn"];
 }
 
