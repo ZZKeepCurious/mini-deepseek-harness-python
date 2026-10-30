@@ -18,6 +18,7 @@ from miniharness.core.tools import ToolRegistry
 from miniharness.interaction import install_user_questions, register_ask_user_question
 from miniharness.llm.fake import FakeLlmAdapter
 from miniharness.web.api import WebApi
+from miniharness.web.questions import _project_request
 from miniharness.web.stream_protocol import parse_remote_event_result_payload
 
 
@@ -174,6 +175,28 @@ class QuestionBridgeTest(unittest.TestCase):
                              {"name": "UserQuestionError", "code": "ASK_ABORTED"})
 
         _run(go())
+
+
+class ProjectRequestWaitTest(unittest.TestCase):
+    def test_projects_timed_wait_next_to_questions(self):
+        request = _project_request({
+            "questions": [{"id": "q", "question": "?"}],
+            "wait": {"callId": "c1", "timed": True},
+        }, "s1")
+        self.assertEqual(request, {
+            "questions": [{"id": "q", "question": "?"}],
+            "agent": "s1",
+            "wait": {"callId": "c1", "timed": True},
+        })
+
+    def test_omits_wait_when_the_host_did_not_name_one(self):
+        request = _project_request({
+            "questions": [{"id": "q", "question": "?"}],
+        }, "s1")
+        self.assertEqual(request, {
+            "questions": [{"id": "q", "question": "?"}],
+            "agent": "s1",
+        })
 
 
 class UserQuestionsWireTest(unittest.TestCase):

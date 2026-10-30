@@ -1,27 +1,15 @@
-"""web 用户提问桥：`user-questions/request` 瀑布 → `$events` 转发 + 结算。
+"""web 用户提问桥：`user-questions/request` 瀑布 → `$events` waterfall。
 
-对齐上游 `packages/interaction/user-questions` 的远程应答者（bundle/web-app
-cordis.patch.yml:350-351 挂 ui-user-questions）+ `packages/api/remotes` 的
-Remote 转发（remote-events.ts:37 `user-questions/request` waterfall）：
+对齐上游 `packages/api/remotes` 的 `user-questions/request` 转发 +
+`packages/api/gateway` 的 request 投影（去掉 Agent 对象与 signal，agent 写成
+id）。服务 `ask()` 走 `ctx.awaterfall`；本桥挂在会话 loop 的 ctx 上，把请求
+投递给 `$events` 客户端，经 `$events/result` 结算：
 
-  * UserQuestionService 的无应答者瀑布投递经本桥转发给所有 `$events` 客户端；
-    request 只带 `{questions, agent}`（agent 投影为 id，wire 简化标注见
-    verified-diffs）。首个客户端经 HTTP `$events/result` 结算
-    （registry.invoke 返回 kind/value）：
-      'result'   → 原样 value（canonical answers）
-      'next'     → 委托 `nxt()`（上游 last-resort 转发到下一 answerer）
-      'rejected' → 还原 wire 错误：`{name, message, code}` 形状恢复为域错误
-                   （ASK_CANCELLED 等）抛回服务面；无 code 形状 → RuntimeError
-      'cancelled'→ ASK_ABORTED（registry.dispose 全量结算）
-      asyncio 取消 → ASK_ABORTED
-
-mini 简化（须标注）：上游应答者持久挂在 Agent-scoped answerer waterfall 上并
-与 AbortSignal 竞争（signal 中断即 abort 请求）；mini 的桥 `install(loop)` 每
-loop 注册一次 async answerer，signal 竞争交由其按序 Awaitable（事件循环）承担
-——同 approval 桥（web/approvals.py）的 wire 上异步投递。wire 不含 `signal`
-（不可序列化）：客户端取消由 `$events` cancel 帧承载——调用方取消（回合 cancel）
-经 `RemoteEventRegistry.invoke` 的 CancelledError 分支向客户端发 cancel 帧
-（等价上游 signal 中止客户端 pending），网关 dispose 则全量 'cancelled'。
+  * `result` value → 原样回给 ask（`{answers:[...]}`）
+  * `next` → 委托 `nxt()`（链尾无应答者则 NO_PROVIDER）
+  * `rejected` 带 UserQuestionError 形状 → 还原为域错误
+  * `rejected` 无 code → RuntimeError（消息透传）
+  * `cancelled` / dispose → ASK_ABORTED
 """
 from __future__ import annotations
 
@@ -31,27 +19,46 @@ from typing import Any
 from ..interaction.user_questions import (
     UserQuestionError,
     aborted_question,
+    restore_user_question_error,
 )
+from .stream_protocol import is_remote_json_value
 
 __all__ = ["RemoteQuestionBridge"]
 
 
-def _restore_wire_error(value: Any) -> BaseException:
-    """把客户端 rejected 载荷还原为可抛异常（域形状 → UserQuestionError）。"""
-    if (isinstance(value, dict)
-            and isinstance(value.get("name"), str)
-            and isinstance(value.get("message"), str)
-            and isinstance(value.get("code"), str)):
-        return UserQuestionError(value["message"], value["code"], cause=value)
-    message = value.get("message") if isinstance(value, dict) else None
-    return RuntimeError(message if isinstance(message, str) else str(value))
+def _agent_id(payload: dict, session_id: str) -> str:
+    agent = payload.get("agent")
+    identity = getattr(agent, "id", None)
+    if isinstance(identity, str) and identity != "":
+        return identity
+    session = getattr(agent, "session", None)
+    session_identity = getattr(session, "session_id", None)
+    if isinstance(session_identity, str) and session_identity != "":
+        return session_identity
+    return session_id
+
+
+def _project_request(payload: dict, agent_id: str) -> dict:
+    """Host 请求 → wire：去掉 agent 对象与 signal，agent 写成 id。"""
+    questions = payload.get("questions")
+    if not is_remote_json_value(questions):
+        raise TypeError("user-questions/request questions must be lossless JSON")
+    request = {"questions": questions, "agent": agent_id}
+    wait = payload.get("wait")
+    if wait is not None:
+        if not is_remote_json_value(wait):
+            raise TypeError("user-questions/request wait must be lossless JSON")
+        request["wait"] = wait
+    if not is_remote_json_value(request):
+        raise TypeError("user-questions/request is not lossless JSON data")
+    return request
 
 
 class RemoteQuestionBridge:
-    """ctx.userQuestions 服务 → `$events` user-questions/request 瀑布的双向桥。
+    """`user-questions/request` → `$events` waterfall 的双向桥。
 
-    `GatewayStreams` 构造时创建（`streams.questions`）；每个会话 loop attach 时
-    经 `install(loop)` 在 loop 的 ctx 上注册 async answerer。
+    `GatewayStreams` 构造时创建（`streams.questions`）；每个会话 loop attach
+    时经 `install(loop)` 在 loop 的 ctx 上注册 async waterfall 应答者。
     """
 
     def __init__(self, streams: Any):
@@ -59,36 +66,35 @@ class RemoteQuestionBridge:
         self.api = streams.api
         self._disposers: list[Any] = []
 
-    # ---------- 装配 ----------
-
     def install(self, loop: Any) -> None:
-        """在 loop 的 ctx 上注册 async user-questions/request answerer。"""
         session_id = loop.session.session_id
         ctx = loop.ctx
 
-        async def answer(request: dict, nxt: Any) -> Any:
-            wire = {"questions": request["questions"]}
-            agent = request.get("agent")
-            if agent is not None:
-                wire["agent"] = agent.id
+        async def answer(payload: dict, nxt: Any) -> Any:
+            agent_id = _agent_id(payload, session_id)
+            request = _project_request(payload, agent_id)
             try:
                 kind, value = await self.streams.events.invoke(
-                    "user-questions/request", session_id, wire,
-                    signal=request.get("signal"))
+                    "user-questions/request",
+                    agent_id,
+                    request,
+                    signal=payload.get("signal"),
+                )
             except asyncio.CancelledError:
                 raise aborted_question() from None
-            if kind == "result":
-                return value
+            if kind == "cancelled":
+                raise aborted_question(value)
             if kind == "next":
                 return await nxt()
             if kind == "rejected":
-                raise _restore_wire_error(value)
-            # 'cancelled'（registry.dispose 全量结算）与未知帧：一律按中止处理
-            raise aborted_question()
+                restored = restore_user_question_error(value)
+                if isinstance(restored, UserQuestionError):
+                    raise restored
+                message = value.get("message") if isinstance(value, dict) else str(value)
+                raise RuntimeError(message)
+            return value
 
         self._disposers.append(ctx.on("user-questions/request", answer))
-
-    # ---------- 生命周期 ----------
 
     def dispose(self) -> None:
         for fn in reversed(self._disposers):
