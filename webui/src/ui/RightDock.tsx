@@ -19,6 +19,7 @@ interface Props {
 
 const VIEWS: Array<{ id: RightView; label: string }> = [
   { id: "console", label: "控制台" },
+  { id: "schedule", label: "日程" },
   { id: "files", label: "文件" },
   { id: "terminal", label: "终端" },
 ];

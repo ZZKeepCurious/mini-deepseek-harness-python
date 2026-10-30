@@ -1,4 +1,4 @@
-"""web 远程事件流：`$events` 注册表 + api-session/* 转发源 + 审批瀑布结算。
+"""web 远程事件流：`$events` 注册表 + api-session/* 转发源 + 审批/提问瀑布结算。
 
 对齐上游 `packages/api/gateway/src/index.ts` 的 remote-event 子系统 +
 `packages/api/session-controller` 的 api-session/* 事件 + `packages/api/remotes/`：
@@ -15,14 +15,16 @@
       agent/error     → api-session/error（sessionId, failure.message）
       user/message(source.user) → api-session/activity（sessionId, event.time）
   * 瀑布（waterfall）模式：审批问询经 `invoke('approval/request', agentId,
-    request)` 投递为 waterfall 帧，首个客户端的 `$events/result` 结算；无应答
-    时挂起，`dispose()` 全量 'cancelled'（对齐 closeRemoteEvents）。projected
-    request 由 `tools/ask` 闸门映射（上游由 last-resort 转发，mini 的同步 core
-    ApprovalService 是独立教学面，见 AGENTS.md 标注）。
+    request)`、用户提问经 `invoke('user-questions/request', agentId, request)`
+    （`web/questions.py`）投递为 waterfall 帧，首个客户端的 `$events/result`
+    结算；无应答时挂起，`dispose()` 全量 'cancelled'（对齐 closeRemoteEvents）。
+    审批 projected request 由 `tools/ask` 闸门映射（上游由 last-resort 转发，
+    mini 的同步 core ApprovalService 是独立教学面，见 AGENTS.md 标注）。
 
-mini 简化（须同步 verified-diffs §3.4）：只转发 api-session/* + approval/request
-两个族；Remote 事件 wire 的 agentId 对 root 常驻 agent 取会话 id（`api._agents`
-按 session 挂接，无子代理下游；`is_remote_event_agent_id` 仅做非空格式校验）。
+mini 简化（须同步 verified-diffs §3.4）：emit 转发 api-session/*；waterfall 由
+`approval/request` 与 `user-questions/request` 调用；Remote 事件 wire 的 agentId
+对 root 常驻 agent 取会话 id（`api._agents` 按 session 挂接，无子代理下游；
+`is_remote_event_agent_id` 仅做非空格式校验）。
 """
 from __future__ import annotations
 
@@ -238,6 +240,10 @@ class RemoteEventRegistry:
         self._disposers.append(_forward_emit(ctx, self, "credentials/reference-updated"))
         self._disposers.append(_forward_emit(ctx, self, "schedule/changed"))
         self._disposers.append(_forward_emit(ctx, self, "plugin-manager/changed"))
+        # remote-events.ts:47（mode emit）：目录变化让两处权限选择器丢弃已显示的选项
+        # 并重读（ui-permission-presets/src/client/catalog.ts:46）。
+        self._disposers.append(
+            _forward_emit(ctx, self, "permission-presets/catalog-changed"))
 
     def has_live_client(self) -> bool:
         """是否存在活跃的 `$events` 客户端流（上游 gateway index.ts:284 hasLiveClient）。

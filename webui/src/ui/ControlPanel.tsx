@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { JobView } from "../wire";
+import { isJobKillable } from "../wire/jobs";
 
 interface Props {
   queue: unknown[];
@@ -9,6 +10,8 @@ interface Props {
   onQueueEdit: (itemId: string, text: string) => void;
   onQueueRemove: (itemId: string) => void;
   onQueueSteer: (itemId: string) => void;
+  onJobKill: (jobId: string) => void;
+  onJobPreview?: (jobId: string) => Promise<string | null>;
 }
 
 function messageText(item: unknown): string {
@@ -34,8 +37,11 @@ export function ControlPanel({
   onQueueEdit,
   onQueueRemove,
   onQueueSteer,
+  onJobKill,
+  onJobPreview,
 }: Props) {
   const [editing, setEditing] = useState<{ itemId: string; text: string } | null>(null);
+  const [jobPreview, setJobPreview] = useState<Record<string, string>>({});
 
   return (
     <div className="panel">
@@ -120,12 +126,53 @@ export function ControlPanel({
             {jobs.length === 0 && <div className="empty dim">无作业</div>}
             {jobs.map((job, i) => {
               const j = (job ?? {}) as Partial<JobView>;
+              const jobId = typeof j.id === "string" && j.id !== "" ? j.id : null;
+              const killable = isJobKillable(j.status);
+              const status = String(j.status ?? "");
+              const detail =
+                typeof j.progress === "string" && j.progress !== ""
+                  ? j.progress
+                  : typeof j.detail === "string" && j.detail !== ""
+                    ? j.detail
+                    : null;
+              const preview = jobId !== null ? jobPreview[jobId] : undefined;
               return (
-                <div className="row" key={i}>
-                  <span>{j.label ?? j.id ?? i}</span>
-                  <span className={`badge ${String(j.status ?? "idle")}`}>
-                    {String(j.status ?? "")}
-                  </span>
+                <div className="job-row-block" key={jobId ?? i}>
+                  <div className="row job-row">
+                    <span className="job-label">{j.label ?? jobId ?? i}</span>
+                    <span className="job-meta">
+                      {detail !== null && <span className="dim job-detail">{detail}</span>}
+                      <span className={`badge ${status || "idle"}`}>{status}</span>
+                      {jobId !== null && onJobPreview !== undefined && (
+                        <button
+                          type="button"
+                          className="btn small ghost"
+                          aria-label={`预览作业输出 ${j.label ?? jobId}`}
+                          onClick={() => {
+                            void onJobPreview(jobId).then((text) => {
+                              if (text === null) return;
+                              setJobPreview((current) => ({ ...current, [jobId]: text }));
+                            });
+                          }}
+                        >
+                          输出
+                        </button>
+                      )}
+                      {jobId !== null && killable && (
+                        <button
+                          type="button"
+                          className="btn small danger"
+                          aria-label={`终止作业 ${j.label ?? jobId}`}
+                          onClick={() => onJobKill(jobId)}
+                        >
+                          终止
+                        </button>
+                      )}
+                    </span>
+                  </div>
+                  {preview !== undefined && (
+                    <pre className="job-preview dim">{preview}</pre>
+                  )}
                 </div>
               );
             })}

@@ -11,6 +11,12 @@ import { PERMISSION_SETTINGS_NS } from "../wire";
 import type { UseSettings } from "../app/useSettings";
 import type { UiPreferences } from "../app/uiPreferences";
 import {
+  displayPermissionPreset,
+  requiresRiskConfirmation,
+  riskCopyFor,
+} from "../app/permissionPresets";
+import { RiskConfirmation } from "./RiskConfirmation";
+import {
   CODE_FONT_SIZE_MAX,
   CODE_FONT_SIZE_MIN,
   FONT_SIZE_MAX,
@@ -34,24 +40,8 @@ const THEME_LABELS: Record<ThemePreference, string> = {
   system: "跟随系统",
 };
 
-const PRESET_LABELS: Record<string, string> = {
-  "read-only": "仅可查看",
-  "workspace-write": "工作区内修改",
-  "danger-full-access": "完全权限",
-};
-
-const FULL_ACCESS_PRESET = "danger-full-access";
-
-function titleCase(value: string): string {
-  if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(value)) return value;
-  return value
-    .split("-")
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(" ");
-}
-
 function presetLabel(option: PermissionOption): string {
-  return PRESET_LABELS[option.value] ?? titleCase(option.name || option.value);
+  return displayPermissionPreset(option.value, option.name);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -70,7 +60,7 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 function PermissionRow({ settings }: { settings: UseSettings }) {
-  const [confirming, setConfirming] = useState(false);
+  const [confirming, setConfirming] = useState<string | null>(null);
   const [acknowledged, setAcknowledged] = useState(false);
   const catalog = settings.permissionCatalog;
   const view = settings.snapshot?.namespaces.find((item) => item.ns === PERMISSION_SETTINGS_NS);
@@ -81,7 +71,7 @@ function PermissionRow({ settings }: { settings: UseSettings }) {
 
   useEffect(() => {
     if (writable) return;
-    setConfirming(false);
+    setConfirming(null);
     setAcknowledged(false);
   }, [writable]);
 
@@ -93,9 +83,11 @@ function PermissionRow({ settings }: { settings: UseSettings }) {
   const label = (() => {
     const option = options.find((item) => item.value === current);
     if (option !== undefined) return presetLabel(option);
-    if (current !== "") return titleCase(current);
+    if (current !== "") return displayPermissionPreset(current, current);
     return settings.loading ? "加载中" : "不可用";
   })();
+
+  const risk = confirming === null ? null : riskCopyFor(confirming, "settings");
 
   return (
     <>
@@ -113,9 +105,9 @@ function PermissionRow({ settings }: { settings: UseSettings }) {
             onChange={(event) => {
               const next = event.currentTarget.value;
               if (next === current) return;
-              if (next === FULL_ACCESS_PRESET) {
+              if (requiresRiskConfirmation(next)) {
                 setAcknowledged(false);
-                setConfirming(true);
+                setConfirming(next);
                 return;
               }
               write(next);
@@ -130,46 +122,29 @@ function PermissionRow({ settings }: { settings: UseSettings }) {
           </select>
         </div>
       </div>
-      {confirming && (
-        <div className="settings-risk" role="alertdialog" aria-label="确认启用完全权限">
-          <div className="settings-risk-title">确认启用完全权限？</div>
-          <p className="settings-risk-desc">
-            启用完全权限后，新会话将减少确认步骤，并且可以直接执行更多操作，包括敏感操作、文件修改或外部命令。
-            仅建议在你信任后续任务时使用。
-          </p>
-          <label className="settings-risk-ack">
-            <input
-              type="checkbox"
-              checked={acknowledged}
-              onChange={(event) => setAcknowledged(event.currentTarget.checked)}
-            />
-            我已了解风险，并愿意继续
-          </label>
-          <div className="settings-risk-actions">
-            <button
-              type="button"
-              className="btn small ghost"
-              onClick={() => {
-                setAcknowledged(false);
-                setConfirming(false);
-              }}
-            >
-              取消
-            </button>
-            <button
-              type="button"
-              className="btn small danger"
-              disabled={!acknowledged || busy}
-              onClick={() => {
-                setAcknowledged(false);
-                setConfirming(false);
-                write(FULL_ACCESS_PRESET);
-              }}
-            >
-              启用完全权限
-            </button>
-          </div>
-        </div>
+      {confirming !== null && risk !== null && (
+        <RiskConfirmation
+          open
+          title={risk.title}
+          description={risk.description}
+          acknowledgeLabel={risk.acknowledgeLabel}
+          cancelLabel={risk.cancelLabel}
+          closeLabel="关闭"
+          confirmLabel={risk.confirmLabel}
+          acknowledged={acknowledged}
+          disabled={busy}
+          onAcknowledgedChange={setAcknowledged}
+          onCancel={() => {
+            setAcknowledged(false);
+            setConfirming(null);
+          }}
+          onConfirm={() => {
+            const value = confirming;
+            setAcknowledged(false);
+            setConfirming(null);
+            write(value);
+          }}
+        />
       )}
     </>
   );

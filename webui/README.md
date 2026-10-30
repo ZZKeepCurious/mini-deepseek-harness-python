@@ -9,7 +9,7 @@
 
 ## 功能面
 
-会话列表 / 新建、Chat/Trajectory 双 tab、Trajectory（虚拟化窗口 + Overview 折叠跳转 + 全文搜索）、
+会话列表 / 新建（`~` 路径、分叉/归档、创建拒绝重试）、Chat/Trajectory 双 tab、Trajectory（虚拟化窗口 + Overview 折叠跳转 + 全文搜索）、
 MarkdownText（GFM 表格/代码、KaTeX 数学、安全外链、经 `/api/file` 的本地图片、搜索高亮）、
 Composer（草稿持久化、14 行封顶、空白聚焦与选区恢复、`/` 命令、`@` 文件/会话引用、附件上传、
 忙时 queue/steer）、工具卡（Bash/PowerShell 命令与输出、grep/glob 分组匹配与截断提示、
@@ -22,7 +22,7 @@ xterm 终端（多 tab、shell 选择、重命名/关闭、写与尺寸 ack、�
 密钥只显存在性）、账号面（状态栏账号菜单、登录/退出、平台登录 tab 归属、赠金到账通知、
 账号与余额设置分节：档案/充值余额/赠金余额/用量与充值链接；`account/watch` 投影流驱动）、
 对话终止提示（输出 token 上限 / 失败代码 / 登录失效中断）与帧级额度提示（仅实时追加触发，
-登录后给充值入口）、审批瀑布、队列编辑/插话/删除与作业面板
+登录后给充值入口）、审批瀑布、计划芯片（窄视口 `/plan off`）与目标栏（`goals/get` + 暂停/恢复/编辑/清除）、计划审查（`user-questions/request` 收窄后批准 / 讨论修改）、通用提问卡（分页/单选/多选/自定义/跳过、timed 倒计时 / 慢慢回答 / hide 座 / 超时后 RPC 作答）与 `/goal` 命令结果卡、队列编辑/插话/删除与作业面板
 （rc.1 数据源：队列 = `session/control` 投影帧折叠出的 `inbox` 投影、作业 = `job/list` roster 流）。
 
 ## 环境要求
@@ -39,7 +39,7 @@ xterm 终端（多 tab、shell 选择、重命名/关闭、写与尺寸 ack、�
 | `pnpm build` | `tsc --noEmit` + `vite build` → `dist/` |
 | `pnpm preview` | 本地预览 `dist/` 产物（不代理 `/api`，完整运行请走后端承载） |
 | `pnpm typecheck` | 仅类型检查 |
-| `pnpm test` / `pnpm test:watch` | vitest 测试（wire 层 + trajectory 模型/搜索/组件 + markdown 渲染 + composer/queue/tool-card/files/terminal/right-dock/settings/account 交互，mock fetch/WS） |
+| `pnpm test` / `pnpm test:watch` | vitest 测试（wire 层 + trajectory 模型/搜索/组件 + markdown 渲染 + composer/queue/tool-card/files/terminal/right-dock/settings/account/plan/goal/plan-review/question-composer/command-card 交互，mock fetch/WS） |
 
 ## 启动方式
 
@@ -81,11 +81,11 @@ MINIHARNESS_WEBUI_DIST=webui/dist python -m miniharness.cli --profile web
 
 ```
 webui/
-├── src/wire/      # 约定客户端层（纯 TS，可单测）：rpc / mux / json-value / follow / control / jobs / events / auth / composer / workspace / terminal / settings / credentials / permissions / account / session
-├── src/app/       # React 编排 hooks（useBackend / useSettings / usePreferences / useAccount / useQuotaNotice）+ 浏览器偏好（uiPreferences）+ 右侧栏布局（rightDock）+ 账号辅助（bonusNotices / browserLogin / accountAvatar / authorizeUrl / formatBalance）
-├── src/composer/  # Composer 与触发词/候选纯函数（triggers）
+├── src/wire/      # 约定客户端层（纯 TS，可单测）：rpc / mux / json-value / follow / control / jobs / events / auth / composer / workspace / terminal / settings / credentials / permissions / account / session / goals / plan / questions / plan-review / question-draft
+├── src/app/       # React 编排 hooks（useBackend / useSettings / usePreferences / useAccount / useQuotaNotice / useGoal）+ 浏览器偏好（uiPreferences）+ 右侧栏布局（rightDock）+ 账号辅助（bonusNotices / browserLogin / accountAvatar / authorizeUrl / formatBalance）
+├── src/composer/  # Composer 与触发词/候选纯函数（triggers）+ PlanChip
 ├── src/trajectory/ # 虚拟行模型、搜索索引、tool 结果解析（tool-views）
-├── src/ui/        # 无状态展示组件（SessionList / Trajectory / ChatView / MarkdownText / ApprovalPanel / ControlPanel / FilesPanel / DocumentPreview / TerminalPanel / TerminalScreen / RightDock / SettingsDialog / SettingsGeneral / SettingsNamespaceForm / AccountMenu / AccountSection / AccountAvatar / SignInDialog / SignOutDialog / BonusNotice / QuotaNotice / TurnNotice）
+├── src/ui/        # 无状态展示组件（SessionList（workspace 分组）/ SubagentPanel / HistoryPager / MessageFeedbackButtons / Trajectory / ChatView / MarkdownText / ApprovalPanel / ControlPanel / SchedulePanel / FilesPanel / DocumentPreview / TerminalPanel / TerminalScreen / RightDock / SettingsDialog / SettingsGeneral / SettingsNamespaceForm / AccountMenu / AccountSection / AccountAvatar / SignInDialog / SignOutDialog / BonusNotice / QuotaNotice / TurnNotice / GoalBar / PlanReviewPanel / QuestionComposer / CommandCard）
 ├── src/ui/tools/   # ToolCallView：shell / search / todo / read / diff / web / image / 通用回退
 ├── tests/         # vitest 单测（jsdom，mock fetch/WS；wire-binary.test.ts 走 node 环境解析 multipart）
 ├── vite.config.ts # dev 代理 + 构建 + vitest 配置

@@ -101,7 +101,23 @@ export class TrajectoryBuffer {
     return [...this.bySeq.values()].sort((a, b) => a.seq - b.seq);
   }
 
+  earliestSeq(): number | null {
+    if (this.bySeq.size === 0) return null;
+    return Math.min(...this.bySeq.keys());
+  }
+
   get size(): number {
     return this.bySeq.size;
   }
+}
+
+export function unwrapPageRecords(records: unknown): EventEnvelope[] {
+  if (!Array.isArray(records)) return [];
+  const out: EventEnvelope[] = [];
+  for (const entry of records) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const row = entry as { type?: unknown; event?: EventEnvelope };
+    if (row.type === "event" && row.event !== undefined) out.push(row.event);
+  }
+  return out;
 }

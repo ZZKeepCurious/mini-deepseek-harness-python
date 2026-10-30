@@ -43,6 +43,15 @@ export function rowSources(row: TrajectoryRow): string[] {
       row.failure?.message ?? "",
     ];
   }
+  if (row.kind === "command") {
+    return [
+      `turn ${row.turn}`,
+      "command",
+      row.name,
+      row.outcome?.kind ?? "running",
+      row.outcome?.text ?? "",
+    ];
+  }
   return [`turn ${row.turn}`, "turn"];
 }
 

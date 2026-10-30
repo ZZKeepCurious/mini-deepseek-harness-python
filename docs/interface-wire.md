@@ -13,7 +13,7 @@
 >
 > 载体实现：`web/server.py`（FastAPI）；语法层：`web/envelope.py` + `web/stream_protocol.py`；
 > 域实现：`web/api.py` + `web/streams.py` + `web/events.py` + `web/approvals.py` +
-> `web/downloads.py` + `web/frontend.py`。教程对照：`docs/chapters/07-external-entry-points.md`
+> `web/questions.py` + `web/downloads.py` + `web/frontend.py`。教程对照：`docs/chapters/07-external-entry-points.md`
 > §7.5（按实现顺序讲解）；本文件是**约定的权威速查**，不讲实现细节。
 
 ## 1. 通道总览与载体状态码
@@ -137,7 +137,7 @@ client `connection/src/client/rpc.ts` 按 `/` 切两段）；`web/args.canonical
 
 | 端点 | 轮廓 | 典型业务错误码 |
 |---|---|---|
-| `session/list` | 会话清单（附 running 位） | —（gateway/bad-request 守卫） |
+| `session/list` | 会话清单（附 running 位）；前端 `SessionList` 把 `cwd` 的 home 前缀折 `~`，title 留原文 | —（gateway/bad-request 守卫） |
 | `session/search` | 按查询过滤会话 | gateway/bad-request |
 | `session/create` | 新建会话（`cwd` 或 `workspaceId` 二选一、`sessionId` 可注入幂等、`agentPreset` 可选） | gateway/bad-request / workspace/not-found / agent-preset/conflict / session/conflict / gateway/internal |
 | `session/selectModel` | 设置模型 + `reasoningEffort`（先过模型可用性门） | gateway/bad-request / session/not-found / session/model-unavailable |
@@ -319,12 +319,25 @@ client `connection/src/client/rpc.ts` 按 `/` 切两段）；`web/args.canonical
 - emit 转发源（api-session/* 族）：`session/created → api-session/added`（初始 list row）、
   `session/disposed → api-session/removed`、`agent/status → api-session/status`（running 位）、
   `agent/error → api-session/error`、user `user/message → api-session/activity`。
+- 前端：`webui/src/wire/session-roster.ts` + `useBackend` 消费 `api-session/added|removed|status`
+  增量维护会话列表；`SubagentPanel` 按 `parentSessionId` 列子会话并跳转。
+- 历史分页：`session/page`（`throughSeq` + `beforeSeq`）+ follow 快照 `hasMore` →
+  Chat/Trajectory「加载更早消息」（`unwrapPageRecords`）。
 - 无重命名转发（`API_REMOTE_FORWARDED_EVENTS`，dsh-v0.2.0-rc.2）：`settings/document-updated`
   （`[ns, revision]`）、`deepseek-account/session-expired`、`deepseek-account/model-sign-in-required`、
-  `credentials/record-updated`/`credentials/reference-updated`（`[subject]`）、`schedule/changed`。
+  `credentials/record-updated`/`credentials/reference-updated`（`[subject]`）、`schedule/changed`、
+  `plugin-manager/changed`、`permission-presets/catalog-changed`（后两者无参数：`mode: 'emit'`，
+  只表示「缓存失效，请重读」，见 `remote-events.ts:43-47`）。
 - `hasLiveClient`：仅当某条 `$events` 流的 signal 未中止时为 true（裸 socket 不计）。
-- waterfall：审批问询 `event="approval/request"`、`agentId=<会话 id>`、`request={toolName}`；
-  由首个客户端的 `$events/result` 结算（§5）。
+- waterfall：审批问询 `event="approval/request"`、`agentId=<会话 id>`、
+  `request={toolName, callId?, reason?, displayReason?}`（上游 `ApprovalRequest`）：
+  `callId` 取本次工具执行（前端据此把审批挂到对应工具卡片），`reason`/`displayReason`
+  是闸门决策 `kind:'ask'` 自带的审批理由（`reason` 为审计原文，`displayReason` 为
+  `{zh, en}` 本地化副本，两者可省）。由首个客户端的 `$events/result` 结算（§5）。
+- waterfall 提问：`event="user-questions/request"`、`agentId=<会话 id>`、
+  `request={questions, agent, wait?}`（`agent` 写成 id，见 §6.1；timed 带
+  `wait:{callId, timed}`）。`planReviewOf` 命中时前端渲染计划审查；未命中走通用
+  `QuestionComposer`（含 timed 倒计时 / hide / continued RPC）。
 
 ### 4.4 重连语义与心跳（三流统一约定）
 
@@ -436,6 +449,8 @@ by deltas」。
   `order`，再 `archived`，最后 `pinned`（上游 `feed.ts` 的 `changed`）。`archived`/`pinned`
   都是全量替换（不是增量 diff）。
 - 断连期间的增量不重放：重连即新代次重发 `baseline`，消费者按「重开即全量」收敛（§4.4）。
+- 前端：`webui/src/wire/workspaces.ts` 折叠 roster；`SessionList` 用 `archivedSessionIds`
+  过滤活跃会话，归档/取消归档走 `workspace/archiveSession|unarchiveSession`。
 
 ### 4.7 `job/list` / `job/follow`（后台作业 roster 与输出流）
 
@@ -519,6 +534,8 @@ unary `POST /api/account/<method>`；除 `getState`/`hasRunningAccountTasks`/`ca
   → 提交的记录、无操作/查找失败结果，或 `ScheduleToolError`。
 - `schedule/changed` 经 `$events` 转发（无 args；任务集变更时客户端重取目录）。
 - 命名空间未挂 → `gateway/invocation-unavailable`。
+- 前端：`webui/src/wire/schedule.ts` + `useSchedules` + 右侧栏 `SchedulePanel`（按会话
+  `schedule/list`、删除走 `schedule/delete`、监听 `schedule/changed`）。
 
 ### 4.10 `userQuestions`（timed 提问 Remote 面）
 
@@ -673,6 +690,28 @@ outcome 归一（`APPROVAL_OUTCOMES = {allowed-once, rejected, cancelled, unavai
 
 前端应答 value 取 `{"kind":"allowed-once"|"rejected", "sessionId"?, "approvalId"?}`。
 
+## 6.1 用户提问桥（`user-questions/request` waterfall，`web/questions.py`）
+
+接线：会话 loop 的 `user-questions/request` → 投影去掉 Agent 对象与 signal，`agent` 写成
+id → `$events` waterfall → 浏览器经 `$events/result` 结算。
+
+| 汇合 | 结果 |
+|---|---|
+| `result` | 原样 `{answers:[...]}` 回给 `ask()` |
+| `next` | 委托 `nxt()`（链尾无应答者则 `NO_PROVIDER`） |
+| `rejected` 带 UserQuestionError 形状 | 还原为域错误 |
+| `rejected` 无 `code` | `RuntimeError`（消息透传） |
+| `cancelled` / dispose | `ASK_ABORTED` |
+
+前端：`$events` 按 event 名分流审批与提问；审批 > 计划审查 > 通用提问 takeover。
+`planReviewOf` 收窄单问 + detail + approve 命中 + 至多一个 decline + 非 multi-select；
+命中则 `PlanReviewPanel`（批准 = asker label，讨论修改 = dismiss `ASK_CANCELLED`）。
+未命中走 `QuestionComposer`：分页、单选自动前进、多选、自定义 textarea、跳过、推荐
+徽章；答案编码见 `encodeQuestionAnswers`。named `wait` 建 `QuestionCard`：倒计时属卡片
+（focus 暂停、编辑/Take time 无限期）、`userQuestions/attachWait` 认领 Host 期限、
+超时 `ASK_TIMED_OUT` 后等投影 `continued` 再走 `userQuestions/answer`；有 `callId` 关
+闭 = hide（「打开提问」座），无名关闭 = `ASK_CANCELLED`。
+
 ## 7. SPA 静态承载（`web/frontend.py`）
 
 - `DIST_ROOT` 默认 `web/static/`（教学参照），经 **`MINIHARNESS_WEBUI_DIST`** env 可指向产品化
@@ -729,10 +768,24 @@ outcome 归一（`APPROVAL_OUTCOMES = {allowed-once, rejected, cancelled, unavai
 | `events.ts` | §4.3 `$events` ready/emit/waterfall/cancel + §5 结算（settled 集合 fail-closed） |
 | `follow.ts` | §4.1 snapshot/event 帧 + seq 去重（`TrajectoryBuffer`；`pushHistory`/`pushLive` 分离历史快照与实时追加，`liveEvents()` 供帧级额度提示） |
 | `control.ts` | §4.2 的 baseline/projection 帧——`applyControlFrame` 折叠成逐会话投影 map（baseline 全量替换 / projection 逐键替换），队列经 `inboxQueue()` 从 `inbox` 投影展开（next-turn + next-step） |
-| `jobs.ts` | §4.7 `job/list` roster 流（`{type:'rows', jobs:[JobView]}` 整集替换）+ `JobView` 形状（`isJobListFrame`） |
+| `jobs.ts` | §4.7 `job/list` roster 流（`{type:'rows', jobs:[JobView]}` 整集替换）+ `JobView` 形状（`isJobListFrame`）+ `job/kill` 辅助（`isJobKillable`、`jobKillArgs`） |
+| `schedule.ts` | §4.9 `schedule/list|delete`（`ScheduleRecord` 解析/排序/展示、`loadSessionSchedules`、`deleteSessionSchedule`；`schedule/changed` 由 `useSchedules` 订阅重读） |
+| `session-roster.ts` | §4.3 `api-session/*` 补丁 + `session/list` 行解析（`upsertSessionSummary`、`childSessionsOf`、`parentSessionOf`） |
+| `subagents.ts` | 子代理侧栏 re-export（`shortSessionId` 等） |
+| `workspace-tree.ts` | `workspace/follow` roster → `SessionList` 分组（`groupSessionsByWorkspace`） |
+| `feedback.ts` | `messageFeedback/list|put|delete` 解析与 RPC 封装 |
+| `job-follow.ts` | `job/follow` 输出预览（`readJobOutputPreview`，控制台「输出」） |
 | `workspace.ts` | unary `workspaceFiles/list|stat|read`（scope = `workspaceFileScopeId`）+ `/api/file` 绝对路径 URL |
+| `workspaces.ts` | §4.6 `workspace/follow` roster 折叠（baseline / upsert / remove / order / archived / pinned） |
+| `home-path.ts` | `session/list` 的 `cwd` home 前缀折 `~` |
 | `account.ts` | §4.8 `account/watch` 流 + `getState`/`getProfile`/`getBalance`/`getUnnotifiedBonuses`/`ackBonusNotified`/`hasRunningAccountTasks`/`startSignIn`/`cancelSignIn`/`signOut` 与 `AccountClientMetadata` |
 | `session.ts` | §4.1 `session/initializeDefaultModel`（登录成功沿） |
+| `goals.ts` | §4.12 `goals/get|create|edit|pause|resume|complete|clear`（`GoalView`；写方法 CAS `expectedVersion`） |
+| `plan.ts` | session 投影 `plan` fold：`pending` 优先于 `active`；chip 目标 = `pending ? !active : active` |
+| `questions.ts` | §4.3 `user-questions/request` waterfall + §6.1 提问桥（`QuestionItem` / `Answer`） |
+| `plan-review.ts` | `planReviewOf` 收窄 + `planSummaryOf`（标题/首段纯文本） |
+| `question-draft.ts` | 通用提问草稿与答案编码（推荐后缀、skip/custom/multi） |
+| `question-wait.ts` | timed/named `wait`：`QuestionCard` 倒计时、hide/cancel、`attachWait`/`continued` 通道 |
 | `composer.ts` | §4.12 `commands/list|execute`、`skills/list`、`fileReferences/list`、`sessionReferenceResolver/candidates` + §3.1 原字节上传 `POST /api/session/uploadFileBinary` + §1 `session/prompt`（queue/steer） |
 | `settings.ts` | §4.14 `settings/describe|update|replace|mutate|openSettingsDocument` + `settings/conflict` 投影 + `settings/document-updated` 订阅 |
 | `credentials.ts` | §4.14 `credentials/describe|set|unset`（值只进不出） |
@@ -743,5 +796,6 @@ outcome 归一（`APPROVAL_OUTCOMES = {allowed-once, rejected, cancelled, unavai
 测试：`webui/tests/wire.test.ts` + `webui/tests/wire-binary.test.ts`（vitest，mock fetch/WS；
 后者走 node 环境解析 multipart）+ `webui/tests/settings.test.tsx`（设置/凭据约定与对话框）+
 `webui/tests/account.test.tsx`（账号流、赠金、额度提示与设置分节）+
+`webui/tests/{wire-goals.test.ts,plan-fold.test.ts,goal-bar.test.tsx,plan-chip.test.tsx,plan-review.test.ts,plan-review-panel.test.tsx,command-card.test.tsx,question-draft.test.ts,question-composer.test.tsx,question-wait.test.ts}`（目标 wire / plan fold / GoalBar / PlanChip / 计划审查 / 命令卡 / 通用提问 / timed wait）+
 `tests/test_web_*.py`（后端约定全组）；
 后端静态承载新增 `tests/test_web_frontend.py` `test_webui_dist_build`（Vite 形态 dist）。

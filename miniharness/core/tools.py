@@ -317,6 +317,26 @@ def execution_mode(tool: Tool | None, args: dict) -> str:
 
 # ---------- 执行管线 ----------
 
+def _ask_payload(tool_name: str, frozen_args: Any, decision: Any,
+                 exec_: "ToolExec | None" = None) -> dict[str, Any]:
+    """`tools/ask` 闸门载荷：工具名/入参 + 本次调用身份 + 决策附带的审批理由。
+
+    上游 ask 闸门经 `ApprovalService.request` 把执行身份（callId）与
+    `reason`/`displayReason` 一并带进 `approval/request`
+    （tools/src/index.ts:1752-1759）；mini 的闸门是 waterfall，故在闸门载荷上
+    保留同样的可选字段，供 answerer（web 审批桥）原样转发。
+    """
+    payload: dict[str, Any] = {"tool": tool_name, "args": frozen_args}
+    if exec_ is not None:
+        payload["exec"] = exec_
+    if isinstance(decision, dict):
+        if decision.get("reason") is not None:
+            payload["reason"] = decision["reason"]
+        if decision.get("displayReason") is not None:
+            payload["displayReason"] = decision["displayReason"]
+    return payload
+
+
 def pipeline_policy(
     ctx: Context, tool: Tool, frozen_args: Any,
     exec_: ToolExec | None = None,
@@ -344,7 +364,8 @@ def pipeline_policy(
             return decision["result"]
         return ToolResult(ok=False, is_error=True, error="denied by tools/pre-execute")
     if verdict == "ask":
-        approved = ctx.waterfall("tools/ask", {"tool": tool.name, "args": frozen_args})
+        approved = ctx.waterfall(
+            "tools/ask", _ask_payload(tool.name, frozen_args, decision, exec_))
         if approved is not True:
             return ToolResult(ok=False, is_error=True, error="approval refused")
 
@@ -380,7 +401,8 @@ async def pipeline_policy_async(
             return decision["result"]
         return ToolResult(ok=False, is_error=True, error="denied by tools/pre-execute")
     if verdict == "ask":
-        approved = await ctx.awaterfall("tools/ask", {"tool": tool.name, "args": frozen_args})
+        approved = await ctx.awaterfall(
+            "tools/ask", _ask_payload(tool.name, frozen_args, decision, exec_))
         if approved is not True:
             return ToolResult(ok=False, is_error=True, error="approval refused")
 

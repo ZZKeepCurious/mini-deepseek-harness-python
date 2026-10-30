@@ -92,15 +92,16 @@ export class RemoteEventClient {
 
   /**
    * Answer a pending waterfall via POST /api/$events/result. outcome mirrors the
-   * backend's APPROVAL_OUTCOMES handling: allowed-once is the only grant;
-   * everything else (rejected/cancelled/unavailable) is fail-closed.
+   * backend's APPROVAL_OUTCOMES handling: a `result` value is the bare decision
+   * string (`allowed-once` is the only grant); everything else (rejected,
+   * cancelled, unavailable) is fail-closed.
    */
   async resolve(
     eventId: string,
     outcome:
-      | { kind: "result"; value: { kind: string; [key: string]: unknown } }
+      | { kind: "result"; value: unknown }
       | { kind: "next" }
-      | { kind: "rejected"; error: { name: string; message: string } }
+      | { kind: "rejected"; error: { name: string; message: string; code?: string } }
   ): Promise<boolean> {
     if (this.settled.has(eventId)) return false;
     const clientId = this.clientId;

@@ -1,9 +1,10 @@
 """web 审批桥测试：`tools/ask` 闸门 → `$events` approval/request waterfall → `$events/result`。
 
 对齐上游 `packages/interaction/user-approval` + `packages/api/remotes`：审批问询
-经 `$events` 流投递（waterfall 帧，agentId + request{toolName}），首个客户端经
-`$events/result`（解析 `parse_remote_event_result_payload` 走 `gateway.receive_result`）
-结算。`RemoteApprovalBridge.install` 把 async tools/ask answerer 挂在 loop.ctx，
+经 `$events` 流投递（waterfall 帧，agentId + request{toolName, callId?, reason?,
+displayReason?}），首个客户端经 `$events/result`（解析
+`parse_remote_event_result_payload` 走 `gateway.receive_result`）结算。
+`RemoteApprovalBridge.install` 把 async tools/ask answerer 挂在 loop.ctx，
 每次问询自落审计对 approval/asked + approval/decided。
 """
 import asyncio
@@ -48,8 +49,13 @@ class ApprovalBridgeTest(unittest.TestCase):
         self.assertTrue(response["result"]["ok"])
         return response["result"]["value"]["sessionId"]
 
-    def _arm_ask(self, loop):
-        loop.ctx.on("tools/pre-execute", lambda payload, nxt: {"kind": "ask"})
+    def _arm_ask(self, loop, reason=None, display_reason=None):
+        decision = {"kind": "ask"}
+        if reason is not None:
+            decision["reason"] = reason
+        if display_reason is not None:
+            decision["displayReason"] = display_reason
+        loop.ctx.on("tools/pre-execute", lambda payload, nxt: decision)
 
     async def _prompt(self, sid):
         response = self.api.dispatch("session.prompt", "rp", {
@@ -101,7 +107,9 @@ class ApprovalBridgeTest(unittest.TestCase):
             waterfall = await self._next_waterfall(gen)
             self.assertEqual(waterfall["event"], "approval/request")
             self.assertEqual(waterfall["agentId"], sid)
-            self.assertEqual(waterfall["request"], {"toolName": "echo"})
+            self.assertEqual(
+                waterfall["request"],
+                {"toolName": "echo", "callId": "call_0"})
             self._settle(client_id, waterfall["eventId"],
                          {"kind": "result", "value": "allowed-once"})
             await prompt
@@ -109,9 +117,56 @@ class ApprovalBridgeTest(unittest.TestCase):
             audit = self._audit(sid)
             self.assertEqual(len(audit), 2)
             self.assertEqual(audit[0]["data"]["toolName"], "echo")
+            self.assertEqual(audit[0]["data"]["callId"], "call_0")
             self.assertEqual(audit[1]["data"]["outcome"], "allowed-once")
             self.assertTrue(self._tool_result_present(sid))
             self.assertFalse(self._tool_result_is_error(sid))
+
+        _run(go())
+
+    def test_ask_reason_and_display_reason_forwarded(self):
+        """ask 决策的 reason/displayReason 进 waterfall request 与审计对。"""
+        async def go():
+            sid = self._create()
+            self._arm_ask(
+                self.api._agents[sid],
+                reason="writes outside the workspace",
+                display_reason={"en": "Allow writing outside the workspace?",
+                                "zh": "允许写入工作区之外吗？"})
+            gen, client_id = await self._open_events(self.api.gateway)
+            prompt = asyncio.create_task(self._prompt(sid))
+            waterfall = await self._next_waterfall(gen)
+            self.assertEqual(waterfall["request"], {
+                "toolName": "echo",
+                "callId": "call_0",
+                "reason": "writes outside the workspace",
+                "displayReason": {"en": "Allow writing outside the workspace?",
+                                  "zh": "允许写入工作区之外吗？"},
+            })
+            self._settle(client_id, waterfall["eventId"],
+                         {"kind": "result", "value": "allowed-once"})
+            await prompt
+            await gen.aclose()
+            audit = self._audit(sid)
+            self.assertEqual(audit[0]["data"]["reason"], "writes outside the workspace")
+
+        _run(go())
+
+    def test_ask_non_string_value_fails_closed(self):
+        """outcome.value 非裸字符串（旧前端发对象）→ 'unavailable' 而非崩溃。"""
+        async def go():
+            sid = self._create()
+            self._arm_ask(self.api._agents[sid])
+            gen, client_id = await self._open_events(self.api.gateway)
+            prompt = asyncio.create_task(self._prompt(sid))
+            waterfall = await self._next_waterfall(gen)
+            self._settle(client_id, waterfall["eventId"],
+                         {"kind": "result", "value": {"kind": "allowed-once"}})
+            await prompt
+            await gen.aclose()
+            audit = self._audit(sid)
+            self.assertEqual(audit[1]["data"]["outcome"], "unavailable")
+            self.assertTrue(self._tool_result_is_error(sid))
 
         _run(go())
 

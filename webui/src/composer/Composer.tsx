@@ -7,23 +7,38 @@ import type {
   PromptPart,
   SkillDescriptor,
 } from "../wire/composer";
+import type { PermissionCatalog, PermissionSelection } from "../wire";
+import type { PlanSelection } from "../wire/plan";
 import {
+  detectPermissionArguments,
   detectTrigger,
   fileCandidates,
   formatFileMention,
   formatSessionMention,
   parseSlashLine,
+  permissionCandidates,
   replaceRange,
   sessionCandidates,
   slashCandidates,
 } from "./triggers";
 import type { MenuCandidate } from "./triggers";
 import { usePreferences } from "../app/usePreferences";
+import { requiresRiskConfirmation, riskCopyFor } from "../app/permissionPresets";
+import { PermissionSelect } from "./PermissionSelect";
+import { PlanChip } from "./PlanChip";
+import { RiskConfirmation } from "../ui/RiskConfirmation";
 
 interface Props {
   sessionId: string | null;
   running: boolean;
   services: ComposerServices;
+  /** Session `permissions` projection value; null when the capability is absent. */
+  permission?: PermissionSelection | null;
+  permissionCatalog?: PermissionCatalog | null;
+  /** Folded `plan` unit; null when neither the projection nor the log is available. */
+  plan?: PlanSelection | null;
+  /** Turn plan mode off (`/plan off`). Return a failure string to show on the chip. */
+  onExitPlan?: () => Promise<string | null>;
 }
 
 interface Selection {
@@ -96,7 +111,15 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function Composer({ sessionId, running, services }: Props) {
+export function Composer({
+  sessionId,
+  running,
+  services,
+  permission = null,
+  permissionCatalog = null,
+  plan = null,
+  onExitPlan,
+}: Props) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -120,8 +143,17 @@ export function Composer({ sessionId, running, services }: Props) {
   const busyMode: PromptMode = preferences.busyEnter === "steer" ? "steer" : "queue";
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [permissionConfirm, setPermissionConfirm] = useState<string | null>(null);
+  const [permissionAcknowledged, setPermissionAcknowledged] = useState(false);
 
   const hit = useMemo(() => detectTrigger(draft, caret), [draft, caret]);
+  const permissionHit = useMemo(
+    () =>
+      sessionId === null || permissionCatalog === null
+        ? null
+        : detectPermissionArguments(draft, caret),
+    [caret, draft, permissionCatalog, sessionId],
+  );
 
   const loadCatalogs = useCallback(async (): Promise<Catalog> => {
     if (sessionId === null) return EMPTY_CATALOG;
@@ -161,6 +193,8 @@ export function Composer({ sessionId, running, services }: Props) {
     setMenuLoading(false);
     setAttachments([]);
     setError(null);
+    setPermissionAcknowledged(false);
+    setPermissionConfirm(null);
     catalogCache.current = null;
     if (sessionId !== null) void loadCatalogs();
   }, [loadCatalogs, sessionId]);
@@ -170,10 +204,30 @@ export function Composer({ sessionId, running, services }: Props) {
   }, [caret, draft, sessionId]);
 
   useEffect(() => {
-    if (hit === null || hit.trigger !== "/" || sessionId === null) return;
+    if (hit === null || hit.trigger !== "/" || sessionId === null || permissionHit !== null) return;
     setCandidates(slashCandidates(commands, skills, hit.query));
     setMenuIndex(0);
-  }, [commands, hit, sessionId, skills]);
+  }, [commands, hit, permissionHit, sessionId, skills]);
+
+  useEffect(() => {
+    if (permissionHit === null) return;
+    // A complete preset value is the argued command path: the line already
+    // names its target, so Enter must run it as typed instead of accepting a
+    // menu row (the risk gate belongs to the pickers, not the typed command).
+    if (permissionCatalog?.options.some((option) => option.value === permissionHit.query) === true) {
+      setCandidates([]);
+      setMenuLoading(false);
+      return;
+    }
+    const next = permissionCandidates(
+      permissionCatalog?.options ?? [],
+      permission?.currentValue ?? null,
+      permissionHit.query,
+    );
+    setCandidates(next);
+    setMenuIndex(Math.max(0, next.findIndex((candidate) => candidate.active === true)));
+    setMenuLoading(false);
+  }, [permission, permissionCatalog, permissionHit]);
 
   useEffect(() => {
     if (hit === null || hit.trigger !== "@" || sessionId === null) {
@@ -214,11 +268,11 @@ export function Composer({ sessionId, running, services }: Props) {
   }, [hit, services, sessionId]);
 
   useEffect(() => {
-    if (hit?.trigger !== "@" && hit?.trigger !== "/") {
+    if (hit?.trigger !== "@" && hit?.trigger !== "/" && permissionHit === null) {
       setCandidates([]);
       setMenuLoading(false);
     }
-  }, [hit]);
+  }, [hit, permissionHit]);
 
   useEffect(() => {
     const el = menuRef.current?.querySelector('[aria-selected="true"]');
@@ -227,7 +281,9 @@ export function Composer({ sessionId, running, services }: Props) {
     }
   }, [candidates, menuIndex]);
 
-  const menuOpen = hit !== null && (menuLoading || candidates.length > 0);
+  const menuOpen = permissionHit !== null
+    ? candidates.length > 0
+    : hit !== null && (menuLoading || candidates.length > 0);
   const activeIndex = Math.min(menuIndex, Math.max(0, candidates.length - 1));
 
   const focusComposer = () => {
@@ -264,6 +320,17 @@ export function Composer({ sessionId, running, services }: Props) {
   };
 
   const pick = (candidate: MenuCandidate) => {
+    if (candidate.kind === "permission") {
+      if (requiresRiskConfirmation(candidate.value)) {
+        setCandidates([]);
+        setMenuLoading(false);
+        setPermissionAcknowledged(false);
+        setPermissionConfirm(candidate.value);
+        return;
+      }
+      void executePermission(candidate.value);
+      return;
+    }
     if (candidate.kind === "command" || candidate.kind === "skill") {
       applyInsertion(`/${candidate.value} `);
       return;
@@ -304,6 +371,25 @@ export function Composer({ sessionId, running, services }: Props) {
       el.setSelectionRange(0, 0);
     }
   };
+
+  /** Run one `/permission <preset>` switch through the session command path. */
+  const executePermission = async (value: string): Promise<void> => {
+    if (sessionId === null) return;
+    setError(null);
+    try {
+      const execution = await services.executeCommand(sessionId, `/permission ${value}`, []);
+      if (execution === null) return;
+      if (execution.result.kind === "error") {
+        setError(execution.result.text ?? "命令执行失败");
+      }
+      clearDraft();
+    } catch (cause) {
+      setError(errorMessage(cause));
+    }
+  };
+
+  const permissionRisk =
+    permissionConfirm === null ? null : riskCopyFor(permissionConfirm, "session");
 
   const submit = async () => {
     if (sessionId === null || submitting) return;
@@ -430,7 +516,12 @@ export function Composer({ sessionId, running, services }: Props) {
       }}
     >
       {menuOpen && (
-        <div className="composer-menu" role="listbox" aria-label="Trigger suggestions" ref={menuRef}>
+        <div
+          className="composer-menu"
+          role="listbox"
+          aria-label={permissionHit !== null ? "/permission 匹配项" : "Trigger suggestions"}
+          ref={menuRef}
+        >
           {menuLoading && candidates.length === 0 && (
             <div className="composer-menu-status" role="status">
               加载候选中…
@@ -446,7 +537,8 @@ export function Composer({ sessionId, running, services }: Props) {
                   type="button"
                   role="option"
                   aria-selected={selected}
-                  className={`composer-menu-row${selected ? " active" : ""}`}
+                  aria-current={candidate.active === true ? "true" : undefined}
+                  className={`composer-menu-row${selected ? " active" : ""}${candidate.active === true ? " current" : ""}`}
                   onMouseDown={(event) => event.preventDefault()}
                   onMouseEnter={() => setMenuIndex(index)}
                   onClick={() => pick(candidate)}
@@ -528,6 +620,15 @@ export function Composer({ sessionId, running, services }: Props) {
           style={{ maxHeight: "calc(14 * 1.5em + 20px)", overflowY: "auto" }}
         />
         <div className="composer-toolbar">
+          <PermissionSelect
+            selection={permission}
+            catalog={permissionCatalog}
+            locked={disabled}
+            onSelect={executePermission}
+          />
+          {onExitPlan !== undefined && (
+            <PlanChip plan={plan} locked={disabled} onExit={onExitPlan} />
+          )}
           <input
             ref={fileInputRef}
             type="file"
@@ -581,6 +682,32 @@ export function Composer({ sessionId, running, services }: Props) {
           </button>
         </div>
       </div>
+
+      {permissionConfirm !== null && permissionRisk !== null && (
+        <RiskConfirmation
+          open
+          title={permissionRisk.title}
+          description={permissionRisk.description}
+          acknowledgeLabel={permissionRisk.acknowledgeLabel}
+          cancelLabel={permissionRisk.cancelLabel}
+          closeLabel="关闭"
+          confirmLabel={permissionRisk.confirmLabel}
+          acknowledged={permissionAcknowledged}
+          disabled={disabled}
+          onAcknowledgedChange={setPermissionAcknowledged}
+          onCancel={() => {
+            setPermissionAcknowledged(false);
+            setPermissionConfirm(null);
+            focusComposer();
+          }}
+          onConfirm={() => {
+            const value = permissionConfirm;
+            setPermissionAcknowledged(false);
+            setPermissionConfirm(null);
+            void executePermission(value);
+          }}
+        />
+      )}
     </div>
   );
 }

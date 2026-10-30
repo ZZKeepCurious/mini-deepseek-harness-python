@@ -25,13 +25,17 @@ import { Highlight } from "./Highlight";
 import { MarkdownText } from "./MarkdownText";
 import { ToolCallView } from "./tools/ToolCallView";
 import { TurnNotice } from "./TurnNotice";
+import { CommandCard } from "./CommandCard";
+import { HistoryPager } from "./HistoryPager";
 
 interface Props {
   events: EventEnvelope[];
   running: boolean;
+  historyHasMore?: boolean;
+  onLoadEarlier?: () => void;
 }
 
-export function Trajectory({ events, running }: Props) {
+export function Trajectory({ events, running, historyHasMore = false, onLoadEarlier }: Props) {
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const [viewport, setViewport] = useState({ top: 0, height: 480 });
   const [collapsed, setCollapsed] = useState<ReadonlySet<number>>(() => new Set());
@@ -147,6 +151,9 @@ export function Trajectory({ events, running }: Props) {
         ))}
       </div>
       <div className="trajectory-scroll" ref={scrollerRef} onScroll={setViewportFromEl}>
+        {onLoadEarlier !== undefined && (
+          <HistoryPager hasMore={historyHasMore} onLoad={onLoadEarlier} />
+        )}
         {win.topPad > 0 && <div style={{ height: win.topPad }} aria-hidden="true" />}
         {visible.map((row) => (
           <RowView
@@ -194,6 +201,13 @@ function RowView({
     return (
       <div className={`vrow notice-row${matched ? " hit" : ""}`}>
         <TurnNotice notice={row.notice} failure={row.failure} />
+      </div>
+    );
+  }
+  if (row.kind === "command") {
+    return (
+      <div className={`vrow command-row${matched ? " hit" : ""}`}>
+        <CommandCard row={row} />
       </div>
     );
   }

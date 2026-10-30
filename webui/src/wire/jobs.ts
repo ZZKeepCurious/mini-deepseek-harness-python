@@ -34,3 +34,14 @@ export function isJobListFrame(x: unknown): x is JobListFrame {
   const f = x as { type?: unknown; jobs?: unknown };
   return f.type === "rows" && Array.isArray(f.jobs);
 }
+
+/** Wire §4.7: only `running` jobs accept user cancel via `job/kill`. */
+export function isJobKillable(status: string | undefined): boolean {
+  return status === "running";
+}
+
+export type JobKillOutcome = "requested" | "already-finished";
+
+export function jobKillArgs(sessionId: string, jobId: string): { sessionId: string; jobId: string } {
+  return { sessionId, jobId };
+}

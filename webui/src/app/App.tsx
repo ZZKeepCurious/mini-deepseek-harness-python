@@ -1,9 +1,13 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useBackend } from "./useBackend";
 import { useAccount } from "./useAccount";
 import { useQuotaNotice } from "./useQuotaNotice";
 import { usePreferences } from "./usePreferences";
 import { useSettings } from "./useSettings";
+import { usePermissionCatalog } from "./usePermissionCatalog";
+import { useSchedules } from "./useSchedules";
+import { useMessageFeedback } from "./useMessageFeedback";
+import { loadScheduleHistory } from "../wire/schedule";
 import {
   applyPreferences,
   loadPreferences,
@@ -21,14 +25,26 @@ import {
   type RightView,
 } from "./rightDock";
 import { inboxQueue } from "../wire/control";
-import { composerServices } from "../wire/composer";
+import { permissionSelectionOf } from "../wire/permissions";
+import { composerServices, executeCommand } from "../wire/composer";
+import { foldPlanProjection, planSelectionOf } from "../wire/plan";
+import { groupRows } from "../trajectory/model";
+import type { ToolRow } from "../trajectory/model";
 import { SessionList } from "../ui/SessionList";
+import { SubagentPanel } from "../ui/SubagentPanel";
+import { childSessionsOf, parentSessionOf, shortSessionId } from "../wire/subagents";
 import { Trajectory } from "../ui/Trajectory";
 import { ChatView } from "../ui/ChatView";
 import { AccountMenu } from "../ui/AccountMenu";
 import { AccountSection } from "../ui/AccountSection";
 import { ApprovalPanel } from "../ui/ApprovalPanel";
+import { PlanReviewPanel } from "../ui/PlanReviewPanel";
+import { QuestionComposer } from "../ui/QuestionComposer";
+import { planReviewOf } from "../wire/plan-review";
 import { ControlPanel } from "../ui/ControlPanel";
+import { SchedulePanel } from "../ui/SchedulePanel";
+import { GoalBar } from "../ui/GoalBar";
+import { useGoal } from "./useGoal";
 import { DocumentPreview } from "../ui/DocumentPreview";
 import { FilesPanel } from "../ui/FilesPanel";
 import { QuotaNotice } from "../ui/QuotaNotice";
@@ -46,6 +62,9 @@ type View = "chat" | "trajectory";
 export function App() {
   const bk = useBackend();
   const settings = useSettings(bk.onEmit);
+  const permissionCatalog = usePermissionCatalog(bk.onEmit);
+  const schedules = useSchedules(bk.selectedId, bk.onEmit);
+  const messageFeedback = useMessageFeedback(bk.selectedId);
   const { preferences, update: updatePreferences } = usePreferences();
   const colorScheme = resolvedTheme(preferences.theme);
   const account = useAccount({
@@ -55,10 +74,19 @@ export function App() {
     colorScheme,
   });
   const quota = useQuotaNotice(bk.liveTrajectory);
+  const goalChangeSeq = useMemo(() => {
+    let seq = -1;
+    for (const event of bk.trajectory) {
+      if (event.type === "goal/change") seq = event.seq;
+    }
+    return seq;
+  }, [bk.trajectory]);
+  const goal = useGoal(bk.selectedId, goalChangeSeq);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsEntry, setSettingsEntry] = useState<SettingsSection | undefined>(undefined);
   const [view, setView] = useState<View>("chat");
   const [previewPath, setPreviewPath] = useState<string | null>(null);
+  const [showArchived, setShowArchived] = useState(false);
   const [dock, setDock] = useState<DockLayout>(() => defaultDockLayout());
   const dockRef = useRef(dock);
   dockRef.current = dock;
@@ -130,20 +158,95 @@ export function App() {
 
   const queue = bk.selectedId ? inboxQueue(bk.projections[bk.selectedId]?.inbox) : [];
   const jobs = bk.selectedId ? bk.jobs[bk.selectedId] ?? [] : [];
+  const selectedApproval =
+    bk.selectedId === null
+      ? null
+      : bk.approvals.find((approval) => approval.agentId === bk.selectedId) ?? null;
+  const selectedQuestion =
+    bk.selectedId === null
+      ? null
+      : bk.questions.find((question) => question.agentId === bk.selectedId && question.hidden !== true) ?? null;
+  const hiddenQuestion =
+    bk.selectedId === null
+      ? null
+      : bk.questions.find((question) => question.agentId === bk.selectedId && question.hidden === true) ?? null;
+  const selectedReview = selectedQuestion === null ? undefined : planReviewOf(selectedQuestion.questions);
+  const approvalDetail = useMemo<ToolRow | null>(() => {
+    const callId = selectedApproval?.callId;
+    if (callId === undefined) return null;
+    for (const row of groupRows(bk.trajectory)) {
+      if (row.kind === "tool" && row.callId === callId) return row;
+    }
+    return null;
+  }, [bk.trajectory, selectedApproval?.callId]);
+  const pendingSessions = useMemo(
+    () => new Set(bk.approvals.map((approval) => approval.agentId)),
+    [bk.approvals],
+  );
+  const permission =
+    bk.selectedId === null
+      ? null
+      : permissionSelectionOf(bk.projections[bk.selectedId]?.permissions);
+  const plan =
+    bk.selectedId === null
+      ? null
+      : planSelectionOf(bk.projections[bk.selectedId]?.plan) ??
+        foldPlanProjection(bk.trajectory);
+
+  const exitPlan = async (): Promise<string | null> => {
+    if (bk.selectedId === null) return null;
+    try {
+      const result = await executeCommand(bk.selectedId, "/plan off", []);
+      if (result === null) return "not a command";
+      if (result.result.kind === "error") return result.result.text ?? "command refused";
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  };
 
   const columns = dockVisible && !dock.fullscreen
     ? `300px minmax(0, 1fr) ${dock.width}px`
     : "300px minmax(0, 1fr) 0";
 
+  const subagentChildren =
+    bk.selectedId === null ? [] : childSessionsOf(bk.selectedId, bk.sessions);
+  const parentSession =
+    bk.selectedId === null ? null : parentSessionOf(bk.selectedId, bk.sessions);
+  const selectedSummary =
+    bk.selectedId === null
+      ? null
+      : bk.sessions.find((session) => session.sessionId === bk.selectedId) ?? null;
+  const feedbackEnabled = messageFeedback.error === null && !messageFeedback.loading;
+
   return (
     <div className="shell" style={{ gridTemplateColumns: columns }}>
-      <SessionList
-        sessions={bk.sessions}
-        selectedId={bk.selectedId}
-        onSelect={bk.selectSession}
-        onCreate={bk.createSession}
-        creating={false}
-      />
+      <div className="left-stack">
+        <SessionList
+          sessions={bk.sessions}
+          selectedId={bk.selectedId}
+          pending={pendingSessions}
+          home={bk.host?.home}
+          archivedIds={bk.workspaces.archivedSessionIds}
+          workspaceRoster={bk.workspaces}
+          showArchived={showArchived}
+          createError={bk.error}
+          onSelect={bk.selectSession}
+          onCreate={bk.createSession}
+          onFork={bk.forkSession}
+          onArchive={bk.archiveSession}
+          onUnarchive={bk.unarchiveSession}
+          onShowArchived={setShowArchived}
+          creating={false}
+        />
+        {bk.selectedId !== null && (
+          <SubagentPanel
+            parentSessionId={bk.selectedId}
+            childSessions={subagentChildren}
+            onOpen={bk.selectSession}
+          />
+        )}
+      </div>
 
       <div className="panel center">
         <div className="panel-header">
@@ -170,6 +273,16 @@ export function App() {
             )}
           </div>
           <span className="spacer" />
+          {parentSession !== null && (
+            <button
+              type="button"
+              className="btn small ghost"
+              aria-label={`返回父会话 ${parentSession.sessionId}`}
+              onClick={() => bk.selectSession(parentSession.sessionId)}
+            >
+              返回父会话 {shortSessionId(parentSession.sessionId)}
+            </button>
+          )}
           {bk.selectedId && (
             <>
               <span className="dim" style={{ fontFamily: "var(--mono)", fontSize: 11 }}>
@@ -203,16 +316,82 @@ export function App() {
               onClose={() => setPreviewPath(null)}
             />
           ) : view === "chat" ? (
-            <ChatView events={bk.trajectory} running={bk.running} />
+            <ChatView
+              events={bk.trajectory}
+              running={bk.running}
+              blankSession={selectedSummary?.blank === true}
+              historyHasMore={bk.hasMore}
+              onLoadEarlier={() => void bk.loadEarlierHistory()}
+              feedbackEnabled={feedbackEnabled}
+              feedbackRating={messageFeedback.ratingOf}
+              onFeedbackRate={(messageId, rating) => void messageFeedback.setRating(messageId, rating)}
+              onFeedbackClear={(messageId) => void messageFeedback.clearRating(messageId)}
+            />
           ) : (
-            <Trajectory events={bk.trajectory} running={bk.running} />
+            <Trajectory
+              events={bk.trajectory}
+              running={bk.running}
+              historyHasMore={bk.hasMore}
+              onLoadEarlier={() => void bk.loadEarlierHistory()}
+            />
           )}
         </div>
-        <Composer
-          sessionId={bk.selectedId}
-          running={bk.running}
-          services={composerServices}
-        />
+        {selectedApproval !== null ? (
+          <ApprovalPanel
+            approval={selectedApproval}
+            detail={approvalDetail}
+            onAnswer={bk.askApproval}
+          />
+        ) : selectedQuestion !== null && selectedReview !== undefined ? (
+          <PlanReviewPanel
+            pendingKey={selectedQuestion.key}
+            review={selectedReview}
+            onAnswer={(answer) => bk.answerQuestion(selectedQuestion, answer)}
+            onDismiss={() => bk.dismissQuestion(selectedQuestion)}
+          />
+        ) : selectedQuestion !== null ? (
+          <QuestionComposer
+            pendingKey={selectedQuestion.key}
+            questions={selectedQuestion.questions}
+            onAnswer={(answer) => bk.answerQuestion(selectedQuestion, answer)}
+            onDismiss={() => bk.dismissQuestion(selectedQuestion)}
+            clock={selectedQuestion.clock}
+            onTakeTime={() => { bk.takeTimeQuestion(selectedQuestion); }}
+            onHoldFocus={() => { bk.holdQuestionFocus(selectedQuestion); }}
+            onReleaseFocus={() => { bk.releaseQuestionFocus(selectedQuestion); }}
+            onEngage={() => { bk.engageQuestion(selectedQuestion); }}
+          />
+        ) : (
+          <>
+            {hiddenQuestion !== null && (
+              <div className="question-hidden-seat">
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => { bk.revealQuestion(hiddenQuestion); }}
+                >
+                  打开提问
+                </button>
+              </div>
+            )}
+            <GoalBar
+              goal={goal.goal}
+              onEdit={goal.edit}
+              onPause={goal.pause}
+              onResume={goal.resume}
+              onClear={goal.clear}
+            />
+            <Composer
+              sessionId={bk.selectedId}
+              running={bk.running}
+              services={composerServices}
+              permission={permission}
+              permissionCatalog={permissionCatalog.catalog}
+              plan={plan}
+              onExitPlan={exitPlan}
+            />
+          </>
+        )}
       </div>
 
       {dockVisible && (
@@ -222,13 +401,6 @@ export function App() {
           onWidth={resizeDock}
           onCollapse={collapseDock}
           onToggleFullscreen={toggleFullscreen}
-          top={
-            <ApprovalPanel
-              approvals={bk.approvals}
-              sessionId={bk.selectedId}
-              onResolve={(a, allowed) => bk.askApproval(a, allowed, bk.selectedId ?? "")}
-            />
-          }
         >
           {dock.view === "files" ? (
             <FilesPanel
@@ -240,6 +412,19 @@ export function App() {
             <Suspense fallback={<div className="empty">加载终端…</div>}>
               <TerminalPanel sessionId={bk.selectedId} services={bk.terminal} />
             </Suspense>
+          ) : dock.view === "schedule" ? (
+            <SchedulePanel
+              sessionId={bk.selectedId}
+              schedules={schedules.schedules}
+              loading={schedules.loading}
+              error={schedules.error}
+              onRefresh={() => void schedules.reload()}
+              onDelete={(id) => void schedules.remove(id)}
+              onLoadHistory={(scheduleId) => {
+                if (bk.selectedId === null) return Promise.resolve([]);
+                return loadScheduleHistory(bk.selectedId, scheduleId);
+              }}
+            />
           ) : (
             <ControlPanel
               queue={queue}
@@ -251,6 +436,8 @@ export function App() {
               }
               onQueueRemove={(itemId) => void bk.updateQueue(itemId, { kind: "remove" })}
               onQueueSteer={(itemId) => void bk.updateQueue(itemId, { kind: "steer" })}
+              onJobKill={(jobId) => void bk.killJob(jobId)}
+              onJobPreview={(jobId) => bk.previewJobOutput(jobId)}
             />
           )}
         </RightDock>

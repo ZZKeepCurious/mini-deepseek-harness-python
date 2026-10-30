@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { Composer } from "../src/composer/Composer";
 import type { ComposerServices } from "../src/wire/composer";
+import type { PermissionCatalog } from "../src/wire";
 
 function makeServices(overrides: Partial<ComposerServices> = {}): ComposerServices {
   return {
@@ -265,5 +266,137 @@ describe("Composer attachments and steering", () => {
     });
     expect((await screen.findByRole("alert")).textContent).toContain("session/attachment-invalid");
     expect(screen.queryByText("big.bin")).toBeNull();
+  });
+});
+
+const PERMISSION_CATALOG: PermissionCatalog = {
+  options: [
+    { value: "read-only", name: "read-only", description: "Read only files" },
+    { value: "workspace-write", name: "workspace-write", description: "Write the workspace" },
+    { value: "danger-full-access", name: "danger-full-access" },
+    { value: "auto", name: "auto" },
+  ],
+  defaultOptions: [
+    { value: "read-only", name: "read-only" },
+    { value: "workspace-write", name: "workspace-write" },
+    { value: "danger-full-access", name: "danger-full-access" },
+  ],
+  defaultPreset: "workspace-write",
+};
+
+function renderWithPermissions(services: ComposerServices) {
+  return render(
+    <Composer
+      sessionId="s1"
+      running={false}
+      services={services}
+      permission={{ currentValue: "workspace-write" }}
+      permissionCatalog={PERMISSION_CATALOG}
+    />,
+  );
+}
+
+describe("Composer permission picker", () => {
+  it("lists the catalog as the /permission argument slot and marks the active preset", async () => {
+    const services = makeServices();
+    renderWithPermissions(services);
+    const input = textbox();
+    fireEvent.change(input, { target: { value: "/permission" } });
+
+    const listbox = await screen.findByRole("listbox", { name: "/permission 匹配项" });
+    const options = within(listbox).getAllByRole("option");
+    expect(options.map((option) => option.querySelector(".composer-menu-label")?.textContent)).toEqual([
+      "仅可查看",
+      "工作区内修改",
+      "完全权限",
+      "自动审查",
+    ]);
+    expect(options[1].getAttribute("aria-current")).toBe("true");
+    expect(options[0].getAttribute("aria-current")).toBeNull();
+    expect(within(listbox).getByText("EXP")).toBeTruthy();
+  });
+
+  it("runs the picked preset as a command and clears the draft", async () => {
+    const services = makeServices();
+    renderWithPermissions(services);
+    const input = textbox();
+    fireEvent.change(input, { target: { value: "/permission read" } });
+    const listbox = await screen.findByRole("listbox", { name: "/permission 匹配项" });
+    expect(within(listbox).getAllByRole("option")).toHaveLength(1);
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() =>
+      expect(services.executeCommand).toHaveBeenCalledWith("s1", "/permission read-only", []),
+    );
+    expect(input.value).toBe("");
+    expect(services.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("closes the argument slot on Escape", async () => {
+    renderWithPermissions(makeServices());
+    const input = textbox();
+    fireEvent.change(input, { target: { value: "/permission" } });
+    await screen.findByRole("listbox", { name: "/permission 匹配项" });
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(screen.queryByRole("listbox", { name: "/permission 匹配项" })).toBeNull();
+    expect(input.value).toBe("/permission");
+  });
+
+  it("confirms full access before switching", async () => {
+    const services = makeServices();
+    renderWithPermissions(services);
+    const input = textbox();
+    fireEvent.change(input, { target: { value: "/permission danger" } });
+    const listbox = await screen.findByRole("listbox", { name: "/permission 匹配项" });
+    fireEvent.click(within(listbox).getByText("完全权限"));
+
+    const dialog = screen.getByRole("dialog", { name: "确认启用完全权限？" });
+    expect(services.executeCommand).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole("checkbox", { name: "我已了解风险，并愿意继续" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "启用完全权限" }));
+    await waitFor(() =>
+      expect(services.executeCommand).toHaveBeenCalledWith("s1", "/permission danger-full-access", []),
+    );
+    expect(input.value).toBe("");
+  });
+
+  it("switches without confirmation from the toolbar seat", async () => {
+    const services = makeServices();
+    renderWithPermissions(services);
+    await waitFor(() => expect(services.listCommands).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "访问模式，当前：工作区内修改" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "自动审查 EXP" }));
+    const dialog = screen.getByRole("dialog", { name: "确认启用自动审查（实验）？" });
+    fireEvent.click(within(dialog).getByRole("checkbox", { name: "我已了解这些风险，并愿意继续" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "启用自动审查" }));
+    await waitFor(() => expect(services.executeCommand).toHaveBeenCalledWith("s1", "/permission auto", []));
+  });
+
+  it("runs an argued preset line as typed, without a picker or a second confirmation", async () => {
+    const services = makeServices({
+      listCommands: vi.fn(async () => [
+        { name: "permission", description: "Switch the session permission preset" },
+      ]),
+    });
+    renderWithPermissions(services);
+    const input = textbox();
+    fireEvent.change(input, { target: { value: "/permission danger-full-access" } });
+    expect(screen.queryByRole("listbox", { name: "/permission 匹配项" })).toBeNull();
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() =>
+      expect(services.executeCommand).toHaveBeenCalledWith(
+        "s1",
+        "/permission danger-full-access",
+        [],
+      ),
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(input.value).toBe("");
+  });
+
+  it("omits the seat when the host exposes no permission capability", async () => {
+    const services = makeServices();
+    render(<Composer sessionId="s1" running={false} services={services} />);
+    await waitFor(() => expect(services.listCommands).toHaveBeenCalled());
+    expect(screen.queryByRole("button", { name: /^访问模式/u })).toBeNull();
   });
 });

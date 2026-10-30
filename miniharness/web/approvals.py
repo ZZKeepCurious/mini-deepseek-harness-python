@@ -5,8 +5,10 @@ approval 转发（last-resort 转发到浏览器 approval/request），mini 只�
 
   * 工具的 `tools/ask` 闸门（core/tools.py pipeline_policy：pre-execute 判
     kind=='ask'）挂起 pending、以 `approval/request` waterfall 投递给所有
-    `$events` 客户端。request 只带 `{toolName}`（上游 ApprovalRequest =
-    {toolName, callId?, reason?}，mini 无 callId/reason）。
+    `$events` 客户端。request 为上游 ApprovalRequest
+    （user-approval/src/types.ts: `{toolName, callId?, reason?, displayReason?}`）：
+    闸门载荷里 ask 决策带的 `reason`/`displayReason` 原样转发，`callId` 取本次
+    工具执行（供前端把审批关联到对应工具卡片）。
   * 首个客户端经 HTTP `$events/result` 结算（registry.invoke 返回 kind/value）：
       'result' value ∈ APPROVAL_OUTCOMES → 原样；否则 'unavailable'（fail-closed）
       'rejected' → 'unavailable'（fail-closed）
@@ -58,19 +60,38 @@ class RemoteApprovalBridge:
 
         async def ask(payload: dict, nxt: Any) -> bool:
             tool_name = payload.get("tool") or "unknown"
+            exec_ = payload.get("exec")
+            call_id = getattr(exec_, "call_id", None)
+            reason = payload.get("reason")
+            display_reason = payload.get("displayReason")
             approval_id = str(uuid.uuid4())
-            session.append("approval/asked", {"id": approval_id, "toolName": tool_name})
-            outcome = await self._request(session_id, tool_name, nxt)
+            asked: dict = {"id": approval_id, "toolName": tool_name}
+            if call_id is not None:
+                asked["callId"] = call_id
+            if reason is not None:
+                asked["reason"] = reason
+            session.append("approval/asked", asked)
+            outcome = await self._request(
+                session_id, tool_name, nxt, call_id, reason, display_reason)
             session.append("approval/decided", {"id": approval_id, "outcome": outcome})
             return outcome == "allowed-once"
 
         self._disposers.append(ctx.on("tools/ask", ask))
 
-    async def _request(self, session_id: str, tool_name: str, nxt: Any) -> str:
+    async def _request(self, session_id: str, tool_name: str, nxt: Any,
+                       call_id: str | None = None, reason: str | None = None,
+                       display_reason: dict | None = None) -> str:
         """投递 approval/request waterfall 并归一化结局（本地 answerer 同款形状）。"""
+        request: dict = {"toolName": tool_name}
+        if call_id is not None:
+            request["callId"] = call_id
+        if reason is not None:
+            request["reason"] = reason
+        if display_reason is not None:
+            request["displayReason"] = display_reason
         try:
             kind, value = await self.streams.events.invoke(
-                "approval/request", session_id, {"toolName": tool_name})
+                "approval/request", session_id, request)
         except asyncio.CancelledError:
             return "cancelled"
         if kind == "cancelled":
@@ -79,7 +100,9 @@ class RemoteApprovalBridge:
             return await nxt()
         if kind == "rejected":
             return "unavailable"
-        if value is not None and value in APPROVAL_OUTCOMES:
+        # wire 边界：outcome.value 是客户端任意 JSON，非字符串一律 fail-closed
+        # （裸字符串才是上游约定，见 user-approval/src/types.ts:32）。
+        if isinstance(value, str) and value in APPROVAL_OUTCOMES:
             return value
         return "unavailable"
 

@@ -1,4 +1,4 @@
-export type RightView = "console" | "files" | "terminal";
+export type RightView = "console" | "files" | "terminal" | "schedule";
 
 export interface DockLayout {
   view: RightView;
@@ -44,7 +44,12 @@ function storageKey(sessionId: string): string {
 }
 
 function isView(value: unknown): value is RightView {
-  return value === "console" || value === "files" || value === "terminal";
+  return (
+    value === "console" ||
+    value === "files" ||
+    value === "terminal" ||
+    value === "schedule"
+  );
 }
 
 /**

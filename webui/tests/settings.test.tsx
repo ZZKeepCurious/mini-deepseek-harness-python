@@ -324,7 +324,7 @@ describe("SettingsDialog General", () => {
     await waitFor(() => expect(select.value).toBe("read-only"));
 
     fireEvent.change(select, { target: { value: "danger-full-access" } });
-    expect(screen.getByRole("alertdialog", { name: "确认启用完全权限" })).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "确认启用完全权限？" })).toBeTruthy();
     const confirm = screen.getByRole("button", { name: "启用完全权限" }) as HTMLButtonElement;
     expect(confirm.disabled).toBe(true);
     expect(server.calls.filter((call) => call.method === "settings/update")).toHaveLength(1);

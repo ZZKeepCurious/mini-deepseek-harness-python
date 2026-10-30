@@ -99,6 +99,23 @@ export function useSettings(subscribe: EmitSubscribe): UseSettings {
     [reload, subscribe],
   );
 
+  // The host publishes catalog changes when a permission plugin is added or
+  // removed; the settings row must stop offering a preset the process no
+  // longer lists. The document itself is unchanged, so only the catalog is
+  // re-read.
+  useEffect(() => {
+    const refreshCatalog = async (): Promise<void> => {
+      try {
+        setPermissionCatalog(await loadPermissionCatalog());
+      } catch {
+        setPermissionCatalog(null);
+      }
+    };
+    return subscribe("permission-presets/catalog-changed", () => {
+      void refreshCatalog();
+    });
+  }, [subscribe]);
+
   const settle = useCallback(
     async (
       ns: string,

@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  detectPermissionArguments,
   detectTrigger,
   fileCandidates,
   formatFileMention,
   formatSessionMention,
   parseSlashLine,
+  permissionCandidates,
   rankCandidates,
   sessionCandidates,
   sessionReferenceUri,
@@ -159,5 +161,76 @@ describe("candidate menus", () => {
       { id: "c", group: "g", label: "p-l-a-n", kind: "command", value: "c" },
     ];
     expect(rankCandidates(rows, "plan").map((row) => row.value)).toEqual(["b", "a", "c"]);
+  });
+});
+
+describe("/permission arguments", () => {
+  const options = [
+    { value: "read-only", name: "read-only", description: "Read only files" },
+    { value: "workspace-write", name: "workspace-write", description: "Write the workspace" },
+    { value: "danger-full-access", name: "danger-full-access" },
+    { value: "auto", name: "auto" },
+  ];
+
+  it("recognizes the command and its first argument on the current line", () => {
+    expect(detectPermissionArguments("/permission", 11)).toEqual({ query: "", start: 11, end: 11 });
+    expect(detectPermissionArguments("/permission ", 12)).toEqual({ query: "", start: 12, end: 12 });
+    expect(detectPermissionArguments("/permission auto", 16)).toEqual({
+      query: "auto",
+      start: 12,
+      end: 16,
+    });
+    expect(detectPermissionArguments("first\n/permission re", 20)).toEqual({
+      query: "re",
+      start: 18,
+      end: 20,
+    });
+  });
+
+  it("stays out of other commands and later lines", () => {
+    expect(detectPermissionArguments("/plan", 5)).toBeNull();
+    expect(detectPermissionArguments("please /permission", 18)).toBeNull();
+    expect(detectPermissionArguments("/permission auto\nsecond", 24)).toBeNull();
+  });
+
+  it("lists the catalog with product labels, EXP badge and the active preset", () => {
+    const rows = permissionCandidates(options, "workspace-write", "");
+    expect(rows.map((row) => row.label)).toEqual([
+      "仅可查看",
+      "工作区内修改",
+      "完全权限",
+      "自动审查",
+    ]);
+    expect(rows.map((row) => row.kind)).toEqual([
+      "permission",
+      "permission",
+      "permission",
+      "permission",
+    ]);
+    expect(rows[1].active).toBe(true);
+    expect(rows[0].active).toBe(false);
+    expect(rows[3].badge).toBe("EXP");
+    expect(rows[3].detail).toContain("无沙箱运行");
+    expect(rows[0].detail).toBe("Read only files");
+  });
+
+  it("filters by query and keeps host-defined labels intact", () => {
+    const rows = permissionCandidates(
+      [...options, { value: "team-locked", name: "Team Locked" }],
+      null,
+      "team",
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ value: "team-locked", label: "Team Locked", active: false });
+  });
+
+  it("matches the machine value when the label is product copy", () => {
+    expect(permissionCandidates(options, null, "danger").map((row) => row.value)).toEqual([
+      "danger-full-access",
+    ]);
+    expect(permissionCandidates(options, null, "auto").map((row) => row.value)).toEqual(["auto"]);
+    expect(permissionCandidates(options, null, "仅可").map((row) => row.value)).toEqual([
+      "read-only",
+    ]);
   });
 });

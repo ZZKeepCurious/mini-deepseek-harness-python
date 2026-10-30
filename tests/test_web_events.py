@@ -314,6 +314,14 @@ class RemoteForwardedEventsTest(unittest.TestCase):
         frame = self._first_emit()
         self.assertEqual(frame["event"], "schedule/changed")
 
+    def test_permission_catalog_changed_forwarded(self):
+        """remote-events.ts:47：两处权限选择器靠这条重读目录。"""
+        global _EVENT, _ARGS
+        _EVENT, _ARGS = "permission-presets/catalog-changed", ()
+        frame = self._first_emit()
+        self.assertEqual(frame["event"], "permission-presets/catalog-changed")
+        self.assertEqual(frame["args"], [])
+
     def test_has_live_client_false_without_events_stream(self):
         self.assertFalse(self.api.gateway.has_live_client())
 

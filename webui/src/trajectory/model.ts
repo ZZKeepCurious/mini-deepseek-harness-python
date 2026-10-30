@@ -16,6 +16,7 @@ export const DEFAULT_VIEWPORT_HEIGHT = 480;
 export const H_TURN = 22;
 export const H_SUMMARY = 26;
 export const H_NOTICE = 54;
+export const H_COMMAND = 36;
 export const H_MESSAGE_BASE = 34;
 export const H_MESSAGE_LINE = 17;
 export const H_TOOL_BASE = 30;
@@ -41,6 +42,7 @@ export interface MessageRow {
   turn: number;
   seq: number;
   role: string;
+  messageId?: string;
   text: string;
   blocks: Block[];
   height: number;
@@ -91,7 +93,23 @@ export interface NoticeRow {
   height: number;
 }
 
-export type TrajectoryRow = TurnRow | MessageRow | ToolRow | SummaryRow | NoticeRow;
+export interface CommandOutcome {
+  kind: "success" | "error";
+  text?: string;
+}
+
+export interface CommandRow {
+  kind: "command";
+  key: string;
+  turn: number;
+  seq: number;
+  commandId: string;
+  name: string;
+  outcome: CommandOutcome | null;
+  height: number;
+}
+
+export type TrajectoryRow = TurnRow | MessageRow | ToolRow | SummaryRow | NoticeRow | CommandRow;
 
 export interface RowWindow {
   start: number;
@@ -117,6 +135,7 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 }
 
 interface MessageLike {
+  id?: unknown;
   role?: unknown;
   content?: unknown;
 }
@@ -257,10 +276,20 @@ function noticeOf(reason: unknown): { notice: NoticeRow["notice"]; failure: Turn
 export function groupRows(events: readonly EventEnvelope[]): TrajectoryRow[] {
   const rows: TrajectoryRow[] = [];
   const results = new Map<string, ReturnType<typeof toolResultOf>>();
+  const commandDone = new Map<string, CommandOutcome>();
   for (const ev of events) {
-    if (ev.type !== "tool/result") continue;
-    const result = toolResultOf(ev);
-    if (result.callId !== "") results.set(result.callId, result);
+    if (ev.type === "tool/result") {
+      const result = toolResultOf(ev);
+      if (result.callId !== "") results.set(result.callId, result);
+    }
+    if (ev.type === "command/done") {
+      const data = dataOf(ev);
+      const commandId = stringOf(data.commandId);
+      if (commandId === "") continue;
+      const kind = data.kind === "error" ? "error" : "success";
+      const text = typeof data.text === "string" ? data.text : undefined;
+      commandDone.set(commandId, text === undefined ? { kind } : { kind, text });
+    }
   }
   let turn = 1;
   for (const ev of events) {
@@ -292,15 +321,34 @@ export function groupRows(events: readonly EventEnvelope[]): TrajectoryRow[] {
     if (msg) {
       const blocks = blocksOf(msg.content);
       const text = messageText(msg.content);
+      const messageId = typeof msg.id === "string" && msg.id !== "" ? msg.id : undefined;
       rows.push({
         kind: "message",
         key: `msg:${ev.seq}`,
         turn,
         seq: ev.seq,
         role: stringOf(msg.role) || "unknown",
+        ...(messageId === undefined ? {} : { messageId }),
         text,
         blocks,
         height: messageHeight(text),
+      });
+      continue;
+    }
+    if (ev.type === "command/run") {
+      const commandId = stringOf(d.commandId);
+      const name = stringOf(d.name) || "?";
+      const outcome = commandId === "" ? null : commandDone.get(commandId) ?? null;
+      const text = outcome?.text ?? "";
+      rows.push({
+        kind: "command",
+        key: `cmd:${ev.seq}`,
+        turn,
+        seq: ev.seq,
+        commandId,
+        name,
+        outcome,
+        height: text.includes("\n") ? H_COMMAND + H_TOOL_LINE : H_COMMAND,
       });
       continue;
     }
@@ -354,6 +402,8 @@ export function applyCollapse(rows: readonly TrajectoryRow[], collapsed: Readonl
         } else if (k.kind === "tool") {
           toolCount += 1;
           if (!preview) preview = `${k.name}(…)`;
+        } else if (k.kind === "command") {
+          if (!preview) preview = k.outcome?.text ?? k.name;
         }
         j += 1;
       }
@@ -391,6 +441,8 @@ export function buildOverview(rows: readonly TrajectoryRow[]): TurnOverview[] {
     } else if (r.kind === "tool") {
       cur.toolCount += 1;
       if (!cur.preview) cur.preview = `${r.name}(…)`;
+    } else if (r.kind === "command") {
+      if (!cur.preview) cur.preview = previewLine(r.outcome?.text ?? r.name, 40);
     }
   }
   return out;

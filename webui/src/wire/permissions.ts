@@ -17,6 +17,21 @@ export interface PermissionCatalog {
   defaultPreset: string;
 }
 
+/** Session `permissions` projection value (session-controller `permissions` unit). */
+export interface PermissionSelection {
+  currentValue: string;
+}
+
+/**
+ * Read one session's `permissions` projection. `undefined`/malformed values mean
+ * the capability is absent on this host (upstream `selectionOf`).
+ */
+export function permissionSelectionOf(value: unknown): PermissionSelection | null {
+  if (typeof value !== "object" || value === null) return null;
+  const current = (value as { currentValue?: unknown }).currentValue;
+  return typeof current === "string" && current !== "" ? { currentValue: current } : null;
+}
+
 export async function loadPermissionCatalog(): Promise<PermissionCatalog> {
   return rpc<PermissionCatalog>("permissionPresets/catalog", {});
 }

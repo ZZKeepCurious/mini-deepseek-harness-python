@@ -4,6 +4,12 @@ import type {
   SessionReferenceCandidate,
   SkillDescriptor,
 } from "../wire/composer";
+import type { PermissionOption } from "../wire/permissions";
+import {
+  displayPermissionPreset,
+  presetBadge,
+  presetDescription,
+} from "../app/permissionPresets";
 
 export interface TriggerHit {
   trigger: "/" | "@";
@@ -19,9 +25,11 @@ export interface MenuCandidate {
   label: string;
   detail?: string;
   badge?: string;
-  kind: "command" | "skill" | "file" | "directory" | "session";
+  kind: "command" | "skill" | "file" | "directory" | "session" | "permission";
   value: string;
   mention?: string;
+  /** The host currently has this value selected (permission presets). */
+  active?: boolean;
 }
 
 const WORD_CHAR = /[\p{L}\p{N}_]/u;
@@ -94,6 +102,53 @@ export function replaceRange(
     text: `${draft.slice(0, start)}${insertion}${draft.slice(end)}`,
     caret: start + insertion.length,
   };
+}
+
+/** Argument span of a `/permission <preset>` line under the caret. */
+export interface PermissionArgumentHit {
+  query: string;
+  start: number;
+  end: number;
+}
+
+const PERMISSION_LINE = /^\/permission(?:[ \t]+([^\n\r]*))?$/u;
+
+/**
+ * Detect the `/permission` argument slot: the current line is the bare command
+ * plus its first argument. A command with other commands' text or a later line
+ * is out of scope.
+ */
+export function detectPermissionArguments(
+  draft: string,
+  caret: number,
+): PermissionArgumentHit | null {
+  const cursor = Math.max(0, Math.min(caret, draft.length));
+  const lineStart = draft.lastIndexOf("\n", cursor - 1) + 1;
+  const match = PERMISSION_LINE.exec(draft.slice(lineStart, cursor));
+  if (match === null) return null;
+  const query = match[1] ?? "";
+  return { query, start: cursor - query.length, end: cursor };
+}
+
+/** Preset choices for the `/permission` argument slot, active value marked. */
+export function permissionCandidates(
+  options: readonly PermissionOption[],
+  currentValue: string | null,
+  query: string,
+): MenuCandidate[] {
+  return rankCandidates(
+    options.map((option) => ({
+      id: `permission:${option.value}`,
+      group: "权限模式",
+      label: displayPermissionPreset(option.value, option.name),
+      detail: presetDescription(option),
+      badge: presetBadge(option.value),
+      kind: "permission",
+      value: option.value,
+      active: option.value === currentValue,
+    })),
+    query,
+  );
 }
 
 export function formatFileMention(
@@ -172,6 +227,9 @@ function score(query: string, candidate: MenuCandidate): number {
     if (at === needle.length) return 2;
   }
   if (candidate.detail?.toLocaleLowerCase().includes(needle)) return 3;
+  // Machine values are typeable for slots whose label is product copy
+  // (`/permission auto` names the preset, not its localized label).
+  if (candidate.value.toLocaleLowerCase().includes(needle)) return 4;
   return -1;
 }
 
