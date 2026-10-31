@@ -479,6 +479,9 @@ class WebApi:
                  schedule_root: str | None = None):
         self.ctx = ctx
         self.adapter = adapter
+        from ..seams.credentials_local import wire_llm_adapter_credentials
+
+        wire_llm_adapter_credentials(ctx, adapter)
         self.tools = tools if tools is not None else ToolRegistry(ctx)
         self.cwd = cwd or os.getcwd()
         self.roster = roster

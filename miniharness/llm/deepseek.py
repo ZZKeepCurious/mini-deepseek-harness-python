@@ -366,20 +366,16 @@ class DeepSeekAdapter(LlmAdapter):
                     "Sign in to DeepSeek to use the account provider. The request "
                     "destination must allow account authentication.")
             return {"x-dsh-auth-token": token}
-        key = (self._key or "").strip()
-        if len(key) == 0:
+        from .deepseek_official import present_api_key_from_adapter
+
+        key = present_api_key_from_adapter(self)
+        if key is None or len(key) == 0:
             raise LlmFailure(
                 MISSING_CREDENTIAL,
                 'llm-deepseek: no API key for provider route "deepseek-official"; '
                 "store DEEPSEEK_API_KEY through the credentials service (the web "
                 "Models page writes it), or export DEEPSEEK_API_KEY in the launching "
                 "environment")
-        if not _LEGAL_API_KEY.match(key):
-            raise LlmFailure(
-                INVALID_CREDENTIAL,
-                "llm-deepseek: the API key resolved from DEEPSEEK_API_KEY contains "
-                "characters no HTTP header can carry; set DEEPSEEK_API_KEY to the raw "
-                "key alone (the web Models page writes it)")
         return {"x-api-key": key}
 
     def _map_request_error(self, error: LlmFailure) -> LlmFailure:

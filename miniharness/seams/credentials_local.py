@@ -1121,3 +1121,30 @@ def install_credentials(ctx: Context, provider: LocalCredentialProvider | None =
     if existing is not None:
         return existing
     return CredentialsService(ctx, provider)
+
+
+def wire_llm_adapter_credentials(ctx: Context, adapter) -> None:
+    """若 `ctx.credentials` 在场，为 DeepSeekAdapter 装配 `resolve_api_key`（对齐上游
+    `ctx.credentials.resolve(DEEPSEEK_API_KEY)`）。显式 resolver 或缺服务时 no-op。"""
+    from ..llm.deepseek import DeepSeekAdapter
+
+    if not isinstance(adapter, DeepSeekAdapter):
+        return
+    if adapter._resolve_api_key is not None:
+        return
+    credentials = ctx.get("credentials")
+    if credentials is None:
+        return
+    ref = credential_ref("DEEPSEEK_API_KEY")
+
+    def resolve() -> str | None:
+        row = credentials.provider.resolve(ref)
+        if row is None:
+            return None
+        value = row[0]
+        if not isinstance(value, str):
+            return None
+        stripped = value.strip()
+        return stripped if stripped else None
+
+    adapter._resolve_api_key = resolve
