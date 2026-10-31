@@ -179,6 +179,9 @@ hooks 的价值在于迁移成本：已经写好 Claude Code 钩子（安全策�
 
 ### 7.5.2 会话服务：unary 方法（`web/api.py`）
 
+unary 端点全集与逐域说明以 [interface-wire.md](../interface-wire.md) 为准；实现侧权威列表是
+`WebApi.ROUTES`（`miniharness/web/api.py`），不要在本章硬编码个数。
+
 `WebApi(ctx, adapter, tools)` 持有会话注册表（`_agents`：sessionId → AgentLoop，create 时 attach 一个常驻 AgentLoop）。会话操作全为 **Typert Remote**（`packages/api/session-controller/src/index.ts`）：
 
 | 方法 | 语义 |

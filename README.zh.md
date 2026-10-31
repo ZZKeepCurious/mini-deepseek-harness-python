@@ -17,7 +17,22 @@
 - **[分析报告](docs/report/index.md)**——对上游仓库的深度剖析：五层架构、`ctx` 服务地图、技术核心、关键流程，全部配 Mermaid 图（首页阅读地图 + 六个主题子页）。站点由 MkDocs 构建并部署到 GitHub Pages：https://zzkeepcurious.github.io/mini-deepseek-harness-python/
 - **[step-by-step 手册](docs/chapters/)**——系统如何从 0 长出来，一章一个主题：概念 → 最小可运行代码 → 硬性规定/测试 → 检查点练习。
 
-## 能力清单
+见 [ROADMAP.md](ROADMAP.md) 了解项目在补哪些上游能力。
+
+## 能力导航
+
+| 你想查 | 打开 |
+|---|---|
+| 每个 mini 模块对应上游哪段源码 | [docs/architecture.md](docs/architecture.md) 映射表 |
+| Web unary / Remote 流、错误码与帧形状 | [docs/interface-wire.md](docs/interface-wire.md)（端点全集以 `miniharness/web/api.py` 的 `WebApi.ROUTES` 为准） |
+| 浏览器前端如何构建与代理后端 | [webui/README.md](webui/README.md) |
+| 上游体系解读与对照索引 | [docs/report/index.md](docs/report/index.md) |
+
+下面按主题分组列出**面向读者的能力概览**；逐模块备注与载体差异只在映射表里维护，避免两处漂移。
+
+## 能力概览
+
+### 内核、会话与持久化
 
 | 能力 | 上游对应 |
 |---|---|
@@ -25,20 +40,41 @@
 | 持久化（JSONL / SQLite、默认 zstd 拼接帧容器一行一事件、`root/--<projectKey>--/<encoded-id>/session.v4.jsonl[.zstd]` 布局、header + `SESSION_FORMAT_VERSION=4` 双向拒读、编码或布局错配直接拒绝、flush 栅栏、崩溃恢复、多代读侧经 v0→v1→v2→v3→v4 迁移链就地迁移 released 旧产物） | `packages/session/session-persistence` + `session-format-*` |
 | 插件事件总线（emit / waterfall / parallel / serial、作用域、依赖驱动激活、经 HMR 服务 + `watch_user_patches` 的 epoch 重载） | `vendor/cordis` + `vendor/hmr` + `core/scope` + `core/hmr` |
 | 配置 schema 引擎（schemastery 全量移植：17 类 resolver、meta 克隆、toString/toJSON/i18n/simplify、`~standard` 协议面） | `vendor/schemastery/src/index.ts` |
-| 工具注册表 + 执行管线（schema 校验、pre/execute/post、timeout） | `packages/core/tools` |
+| boot 与组合（YAML/JSON 补丁、`!!js` 环境变量插值、启动断言） | `packages/boot` |
+| 插件装载树（Loader 服务 + EntryTree + live fiber：配置条目 `{plugins}` 动态装载/卸载、disabled/`!!js` 激活期求值、`include` 文件背书子树 + 补丁展开、启动未激活审计；`internal/config|update|plugin` 钩子） | `vendor/loader` + `vendor/include` |
+| 会话管理服务（`ctx.sessions`：create/prepare/enter/announce 生命周期、fork 五错误码、flush 检查点、`session/created|disposed|event|flush` 四事件） | `packages/core/session`（SessionStore） |
+| 会话检查点策略（模型请求前 / 顶层工具体前 / 每步边界三种语义持久化屏障；经 `SessionStore.checkpoint` fail-closed） | `packages/session/session-checkpoint-policy` |
+| 会话投影系（`sessionProjections` 注册 API、turnOutline/title/workingDirectory/permission 等 wire 单元、投影缓存 `session_projcache` domain） | `packages/session/session-projection` 等 |
+| 工作目录接缝（可变 durable cwd 与 `header.cwd` 分离；消费者经 `working_directory_of` 读取） | `packages/session/working-directory` + `packages/session/tool-working-directory` |
+
+### Agent、模型与工具
+
+| 能力 | 上游对应 |
+|---|---|
+| 工具注册表 + 执行管线（schema 校验、pre/execute/post、timeout；注册项可选 `when` 逐步解析激活，对齐 `ToolsService.resolve`） | `packages/core/tools` |
 | 文件系统域（`ctx.fs` seam + 本地/沙箱后端 + `read`/`read_image`/`write`/`edit`/`str_replace_editor`/`glob`/`grep` 模型侧工具（注册开关 + canonical `processPath` 结果）；观测态写/编辑守卫 + 沙箱围栏 + watchdog `watch`） | `packages/fs/{fs,fs-local,fs-sandbox,fs-observation-policy,tool-fs,tool-str-replace-editor,tool-fs-search}` |
 | Agent Loop（async 驱动 turn/step 状态机 + 同步门面经常驻单事件循环驱动、pre-step 拒绝、工具回灌续跑） | `core/agent-loop` |
 | LLM 扩展口（async `stream(messages, tools, signal, session_id, purpose)` 接口约定、假模型、DeepSeek 官方 SSE 适配器（httpx 异步流式）、reasoning_effort 四档） | `llm/llm` + `llm/llm-deepseek` |
+| pi-ai 多 provider 适配器（anthropic-messages / openai-completions / openai-responses；`llm-pi-ai/request-headers` waterfall 扩展 HTTP 头，session/purpose 进上下文不落 body） | `packages/llm/pi-ai` |
 | 图片输入请求（catalog 能力解析、`ImageRequestTarget` 投影几何、provider vision-token 定价、Files API 上传复用 + durable 索引、inline base64 回退、有界 stale-id 重试、规范化图片诊断；`image/offload` durable 卸载 + `IMAGE_OFFLOAD_REQUIRED` 恢复） | `llm/llm-deepseek`（`common/*`）+ `attachment/attachment-local` + `compaction/compaction-image-offload` |
 | 会话级文件上传（`ctx.fileUploads` receipt；流式 `POST /api/session/uploadFileBinary` 不聚合 base64；base64 `fileUploads/upload` 回退；`{type:'file',receiptId}` prompt 受理 + 绑定/提交/回滚 + `user/message`/队列移除时退休；子代理拒绝） | `packages/client/file-upload` + `packages/attachment/attachment` |
 | DeepSeek 账户模型目录（`GET /models` listing 解码 + 逐条能力/要求门控、`modelOverrides` 叠加、版本门控抛 `CLIENT_UPGRADE_REQUIRED`/`MODEL_UNSUPPORTED`、单飞/后台刷新/last-known-good 缓存；`models` 不再可配；缺凭证 → 空发现目录） | `llm/llm-deepseek-account` + `llm/llm-deepseek-api-key` |
 | DeepSeek 请求扩展（`ExtensionRegistry` + `prepare_request_extensions`：逐字段准备、失败省略并告警一次、基础字段冲突或准备失败抛 `REQUEST_EXTENSION`、合并体不可序列化退回基础请求体、仅 HTTP 2xx 后提交 accept）+ 活动插件包清单贡献（`dsh_plugin_packages` = `{version:1, packages:[{name, version?}]}`，由活动 fiber 经 `importlib.metadata` 解析，版本可选/缺失容忍） | `llm/deepseek-llm-api-extensions` + `llm/llm-deepseek/src/request-extensions.ts` + `llm/plugin-package-inventory-deepseek` |
-| 会话检查点策略（模型请求前 / 顶层工具体前 / 每步边界三种语义持久化屏障；经 `SessionStore.checkpoint` fail-closed） | `packages/session/session-checkpoint-policy` |
-| PTC 运行时 seam + Python 后端（`PtcRuntime` Service Definition + 全新 CPython 子进程内 `run`，支持顶层 await/return、行 JSON 绑定桥、墙钟/中止/输出上限、正交失败分类、`programFormat`/`release(owner)` + `stateOwner` owner 契约） | `packages/ptc-runtime/{ptc-runtime,ptc-runtime-node}` + `packages/experimental/ptc-runtime-python` |
+| PTC 运行时 seam + Python 后端（`PtcRuntime` Service Definition + 全新 CPython 子进程内 `run`，支持顶层 await/return、行 JSON 绑定桥、墙钟/中止/输出上限、正交失败分类、`programFormat`/`release(owner)` + `stateOwner` owner 契约；`resolve` 透传 `sandboxPolicy`，声明 `sandbox_mode` 时 confine worker） | `packages/ptc-runtime/{ptc-runtime,ptc-runtime-node}` + `packages/experimental/ptc-runtime-python` |
 | PTC 模式 `run_code` 工具（按 runtime 语言取 schema 文案、经 `tools` 绑定嵌套子派发、`tool/ptc-dispatch*` 事件日志、精心挑选外层结果、按 Agent 记 `stateOwner` 并在拆解时释放） | `packages/core/tools/src/ptc.ts` |
 | 模型请求重试/退避（normal/always 策略、`agent/request-error`、`llm/retry` 审计对、熔合信号派发前检查 + 事件驱动多信号竞速可取消等待、插件 teardown 排干在途恢复） | `llm/llm-retry` + `llm/llm/src/retry-policy.ts` |
 | token 计量（增量 fold、usage 折入锚、4 字符/token 启发式） | `llm/token-meter` |
 | 上下文压缩（pre-step 压力 + `CONTEXT_WINDOW_EXCEEDED` 恢复、surface-replace 检查点事务、可选 tool-result pruner 阶段；压力/保留预算按「上下文窗口 − 预留输出 − `headroomTokens`」缩放） | `compaction/compaction-basic` + `compaction-tool-result-pruner` |
+| 动态工具更新（`ToolUpdate` 路由能力 + `Session.toolHistory()` 折叠 + live `developer/message` 工具增删发射 + `projectToolUpdates` 请求投影；`startsSeries` reason-independent、工具变更的系列触发在 tool-update 路由上抑制） | `packages/core/session` + `packages/core/agent-loop` + `packages/llm/llm` |
+| system prompt 分节（有序节注册 + 渲染进每次请求） | `core/system-prompt` |
+| 工作流（`ctx.workflowEngine` 接缝 + Python 工作流引擎 + `workflow` 模型工具；guest 经 workflow-ptc 沙箱门与 PTC confine；脚本语言 JS→Python 为登记的载体差异） | `packages/workflow/{workflow,workflow-ptc,tool-workflow}` |
+| LSP 工具族（opt-in profile 条目；四种语义操作，无 JSON-RPC 逃生口） | `packages/lsp/{lsp,lsp-stdio,tool-lsp}` |
+| 大结果落盘（`ctx.spillStore` + post-execute 策略；嵌套 PTC 省略图片经 `ptc-mode` 重注） | `packages/spill/{spill,spill-local,spill-policy}` |
+
+### 交互、计划与权限
+
+| 能力 | 上游对应 |
+|---|---|
 | 后台作业（`job_output`/`job_list`/`job_kill` + 完成 notice、per-owner 上限；每作业一个有界输出 ring，绝对字节偏移——注册表泵入 pull 源、消费式 `read` + 非消耗 `readAt`、scope 分层 `events.subscribe`、`settled{cause,awaited}`；注册表发号 `<kind>-<16 位 hex uuid>`（碰撞重试），并在 owner 会话落 `job/registered`/`job/settled`（含创建它的 `toolCall` 与 `producerReported`）；归档准入应答 `job` 家族） | `packages/jobs`（jobs-local + tool-jobs） |
 | plan 模式（log-only `plan/mode` 状态、plan:policy prompt 分节注入、in-turn queued 提交） | `packages/plan/plan-mode` |
 | plan 审查 UI（`/plan` 命令、`exit_plan_mode` 审查工具、userQuestions 通道、plan 投影单元） | `packages/plan/plan-mode` |
@@ -48,19 +84,26 @@
 | 人工反馈（`feedback/record` 会话事件 + `/feedback` 命令（recordInput:false）+ `sessionFeedback` Remote；`messageFeedback` Remote list/put/delete——note 校验先于一切、目标校验（append-origin 非空 assistant/message）、版本 CAS、幂等 delete、活/冷会话路径） | `packages/feedback/{command-feedback,message-feedback}` |
 | 目标（`goal/change` 事件溯源 fold、GoalService、自动续跑 goal round、`get_goal`/`create_goal`/`update_goal` 三工具、`/goal` 命令、host plane 的 `goals/*` Remote `get/create/edit/pause/resume/complete/clear`） | `packages/goal`（goal + goal-round-driver + tool-goal + command-goal） |
 | 定时跟进（`ctx.schedule` 服务：六规则 `after`/`at`/`every`/`daily`/`weekly`/`cron`（Vixie 语义 + DST）、`title` 必填、Host 权威 `storage-domain` 任务表 + 单 Host 定时器按会话批量唤醒、`deliveryMode:'host'`、compare-and-update `schedule_update`、Remote `schedule/list|catalog|history|delete|update`、`schedule/changed` 事件、身份游标投递历史；模型侧工具在独立 `schedule/tool-schedule` 面（`install_tool_schedule`），委派子代理调用以 `subagent_session` 拒绝；旧 `schedule/change` 会话事件仅保留只读） | `packages/schedule/schedule` + `packages/schedule/tool-schedule` |
-| 动态工具更新（`ToolUpdate` 路由能力 + `Session.toolHistory()` 折叠 + live `developer/message` 工具增删发射 + `projectToolUpdates` 请求投影；`startsSeries` reason-independent、工具变更的系列触发在 tool-update 路由上抑制） | `packages/core/session` + `packages/core/agent-loop` + `packages/llm/llm` |
-| system prompt 分节（有序节注册 + 渲染进每次请求） | `core/system-prompt` |
-| boot 与组合（YAML/JSON 补丁、`!!js` 环境变量插值、启动断言） | `packages/boot` |
-| 插件装载树（Loader 服务 + EntryTree + live fiber：配置条目 `{plugins}` 动态装载/卸载、disabled/`!!js` 激活期求值、`include` 文件背书子树 + 补丁展开、启动未激活审计；`internal/config|update|plugin` 钩子） | `vendor/loader` + `vendor/include` |
+
+### Web 与组合管理
+
+| 能力 | 上游对应 |
+|---|---|
 | headless 一次性任务入口（`--profile headless "task"`：stdout 最终文本、退出码按 turn/end reason） | `packages/bundle/headless` + `apps/cli` |
 | web 传输层与浏览器前端（`--profile web`；两信封 RPC、`/api/remote.mux`、`$events`、follow/control、审批桥、FastAPI 载体、会话导出、`/api/file` 文件展示、`webui/` 前端；详见下文） | `packages/api/gateway` + `packages/api/session-controller` + `packages/api/remotes` + `host/frontend-static` + `host/webserver` |
 | 模型可见 web 工具族（`ctx.web` 运行时 + DeepSeek 搜索 provider + 匿名 HTTP 抓取 provider + DeepSeek Search/Fetch API provider `deepseek-search-api`/`deepseek-fetch-api` + `web_search`/`web_fetch` 两工具：URL 策略与凭据检查、双 provider 注册表 `WEB_DUPLICATE_PROVIDER`、执行期选择六分支、配置回落 `DSH_WEB_SEARCH_PROVIDER`/`DSH_WEB_FETCH_PROVIDER`、防 DNS 重绑定的整址公网策略、字节/字符帽、`redirect:'error'` 手动 3xx 拒绝、citation snippets、round-robin 去重 merge、HTML→Markdown） | `packages/web/{web,web-search-deepseek,web-fetch-http,web-deepseek-api}` + `packages/web/tool-web` |
 | 启动器选项（`--patch`、`--dump-config` / `--dump-default-config` / `--dump-config-schema`、只读组合导出） | `apps/cli/src/args.ts` |
 | 配置 schema 导出（`--dump-config-schema`：组合条目表导出为 JSON Schema 2020-12 文档——`$defs` entry/patch/loaderExpression/unknownConfig + 声明了 schemastery `Config` 的插件逐个投影、`x-cordis` 注解 profile/complete/entries/diagnostics；boot-free） | `packages/boot/app-boot/src/config-schema` + `apps/cli/src/dump-config-schema.ts` |
 | 插件清单投影（`pluginInventory/list`：Loader 条目四字段 `{entryId,moduleName,enabled,fiberPhase}` + preset 组合行 flatten + `!!js` conditional；flatten 工具归口 `preset/registry.py`） | `packages/host/plugin-inventory` + `packages/preset/agent-presets` |
-| profile 插件启停（`pluginManager/listPlugins` + `setPluginEnabled`：唯一补丁目标或 `readOnlyReason`，写 `cordis.patch.yml` 并对账/回滚 + `plugin-manager/changed`；安装/卸载/市场为 npm 载体缺口） | `packages/boot/plugin-manager` |
+| profile 插件启停（`pluginManager/listPlugins` + `setPluginEnabled`：唯一补丁目标或 `readOnlyReason`，写 `cordis.patch.yml` 并对账/回滚 + `plugin-manager/changed`） | `packages/boot/plugin-manager` |
+| 插件市场 Remote（`pluginMarket/listIndexes|setIndexes|search|readEntryDetail` + `pluginRegistryProbe/fastest`；HTTP(S) 索引与 Python 模块 install 扩展，不执行 pnpm 安装） | `packages/boot/plugin-market` |
+| Action cards 投影（opt-in `experimental/action_cards`：producer 注册 + 会话投影单元，WebUI 按需渲染） | `packages/experimental/action-cards`（上游实验族） |
 | 声明式 agent-preset 注册表（`ctx.agentPresets` 的 `register(definition)` + 声明行组合清单：entry-list 形状校验、组 disabled 继承、`!!js` conditional 行；`resolve_composition(id)` 经接线 roster 产出活组合 `{tools, persona}`；无常驻 live-fiber 挂载——工具清单载体保持目录发现） | `packages/preset/agent-preset-registry` |
-| 会话管理服务（`ctx.sessions`：create/prepare/enter/announce 生命周期、fork 五错误码、flush 检查点、`session/created|disposed|event|flush` 四事件） | `packages/core/session`（SessionStore） |
+
+### 宿主 Remote、工作区与终端
+
+| 能力 | 上游对应 |
+|---|---|
 | 终端服务域 + 真实 PTY 后端 + 模型工具族 + 浏览器终端域（`ctx.terminals` seam：spawn/kill/read/signal/start_send/list + `TerminalError` 8 码闭集；`miniharness/terminal_bash` 真实后端：config/env 带 UTF-8 preamble + `133;D` prompt marker 纪律、终端仿真器、poll-readiness 五种结算、`inspect_activity`（可选 shell-activity 证据：私有 `bash --rcfile` / zsh `ZDOTDIR` 状态文件，仅 POSIX）、平台拆三 provider——POSIX `pty` / Windows pywinpty ConPTY；`miniharness/tool_terminal` 六模型工具 `terminal_open`/`terminal_send`/`terminal_read`/`terminal_signal`/`terminal_close`/`terminal_list`，render 逐字对齐、`maxResultBytes` 截断、后台 `terminal_send` 经 `jobs.start(kind='pty-send')`；`miniharness/terminal_controller` 浏览器终端域——`ctx.terminalController` 的 Remote namespace `terminal/*`（environment/shells/list/create/attach/rename/close），pyte 有界恢复屏、逐 follower UTF-8 帧字节预算、owner 作用域拆解与 `sandbox/mode` 变更围栏） | `packages/terminal/{terminal,terminal-bash,tool-terminal}` + `packages/api/terminal-controller` + `packages/shell/pwsh-local` |
 | 持久 shell 工具（opt-in `bash`/`pwsh` 变体：经 per-agent 持久 PTY 会话运行命令，shell 状态——当前目录、导出环境变量——跨调用保持；命令包装携带 start/end 标记 + 退出码，从回滚缓冲抽取输出并封顶；超时/退出重置 shell 并给新目录提示；共享引擎 `persistent_shell/`（bash/pwsh 方言）+ `tool_bash_persistent`/`tool_pwsh_persistent` 包装；与一次性 `tool_bash`/`tool_pwsh` 互为替代） | `packages/shell/tool-bash-persistent` + `packages/shell/tool-pwsh-persistent` |
 | 存储中心（`ctx.storage`：具名 backend 注册表 + 可挂载存储形态、schema 校验的 KV 域（单写链 + 持久后 `domain/changed` 事件）、JSON medium 以整文档单元或一记录一文档并原子重写） | `packages/storage`（storage + storage-domain + storage-json） |
@@ -78,17 +121,18 @@
 | 会话回合大纲（`turnOutline` 投影单元：由 turn/start 锚定 + 首人类 prompt + 落定回复折成整日志回合轨道；预览预算 50/120、严格递增 schema） | `packages/session/session-turn-outline` |
 | 会话标题（`ctx.sessionTitle`：清洗 + UTF-8 安全 fallback 派生、`title`/`titleInput` 投影单元、用户钉扎 rename、显式 refresh 取消钉扎、提供者注册表；自动 first-prompt 生成——fallback 先落、路由主请求后执行提供者；first-prompt LLM 提供者按词/CJK 预算 framing 标题请求、字节/token 上限） | `packages/session/session-title` + `session-title-first-prompt-llm` |
 | 会话投影缓存（`ctx.sessionProjectionCache`：checkpoint 写后节流落盘到 `session_projcache` storage domain——turn/end/create/dispose 强制 + 计数/间隔节流；lifecycle + formatVersion 身份匹配、零 I/O 列表读、冷读播种 + fail-soft 写回） | `packages/session/session-projection-cache` |
-| 工作目录接缝（`ctx.workingDirectory`：可变、durable 的当前执行目录，从不可变的项目身份 `header.cwd` 分离出来——`get` 取投影态 ?? defaultDirectory，`ensure` 存在校验 + 失效恢复原项目并落通知，`set` 相对当前目录/canonical/校验，per-session serialize 链，提交早于兑现，拆解排干；`workingDirectory` 投影单元 + 系统提示 context `working-directory:current`（required、不插值） + `system-prompt/assemble` prepend 准入 + 模型工具 `working_directory({cd?})`；全部 cwd 消费者——fs/lsp/persistent-shell/skill/context/workflow-ptc/run_code/bash/pwsh/terminal-controller——经共享 `core/working_cwd.working_directory_of` 读取） | `packages/session/working-directory` + `packages/session/tool-working-directory` |
-| 工作流（`ctx.workflowEngine` 接缝 + Python 工作流引擎 + `workflow` 模型工具：Python 脚本以 `agent`/`parallel`/`pipeline`/`phase`/`log`/`args` 六全局大规模编排子代理、FIFO 并发槽、总 agent/items 上限、schema 子集子代理选项、durable `tool-workflow/run-start|agent-start|agent-end|run-end` 记录、前台/后台作业；脚本语言 JS→Python 为登记的载体差异） | `packages/workflow/{workflow,workflow-ptc,tool-workflow}` |
 | subprocess 接缝（`ctx.subprocess`：`resolve_executable`/`terminal_environment`/`scrubbed_parent_env` 收编为上游 SubprocessRuntime 服务定义面，复用既有实现） | `packages/subprocess/{subprocess,subprocess-local}` |
 | 账户 Remote + Platform 浏览器 PKCE（`account/getState`/`getProfile`/`getBalance`/`startSignIn`/`cancelSignIn`/`signOut` + 元数据 `AccountClientMetadata` 贯通 + `getUnnotifiedBonuses`/`ackBonusNotified`/`hasRunningAccountTasks` + 投影 `watch` 与无 replay `watchExpiry` 流，经 `ctx.deepseekAccount`；Platform attempt 驱动 `/auth-api/v0/dsh/{auth_init,auth_exchange,auth_cancel}` 的 S256 PKCE、固定宿主 `/oauth/callback`、durable grant/device 记录、profile/wallet/bonus 读取与有界 logout 撤销；`resolveToken`/`rejectToken` + `deepseek-account/signed-out`/`session-expired`/`model-sign-in-required` 事件 + 签出时取消运行中账户路由 Agent；缺少 credentials/authorization 服务时退回 signed-out 本地实现） | `packages/credentials/deepseek-account` + `deepseek-account-platform` + `packages/api/account-controller` |
 | 会话检索（`ctx.sessionQuery` + SQLite FTS5 索引：跨会话/会话内全文检索、原始事件窗口、替换/来源追溯、世系；模型侧 `session_search`/`session_event_search`/`session_event_read`/`session_event_trace`/`session_trace` 五工具；会话日志导出见 `web/downloads.py`） | `packages/session-query/{session-query,session-query-sqlite,tool-session-query}` |
 | 待办清单（`to_todo_list` 入参校验 + `fold_todos` 最新写胜出折叠 + 模型侧 `todo_write` 工具；`todo/write` 为 log-only 事件） | `packages/todo` |
 | 工具调用恢复（`ToolCallRecovery`：失败 live step 在 `step/end` 前补保守 `TOOL_OUTCOME_UNKNOWN`/`TOOL_NOT_STARTED` 工具结果，与崩溃中断/fork seed 闭包共用；替换结果或其它 turn 的结果不确认 pending 调用） | `packages/core/session` + `packages/core/agent-loop` |
-| 大结果落盘（`ctx.spillStore` seam + 每会话私有目录本地存储 + `tools/post-execute` 策略：text/image 结果按 token 预算落盘与整图 head/tail 保留、报告省略图片数、给取回提示；嵌套 PTC 被省略图片经 `ptc-mode` 上下文重注） | `packages/spill/{spill,spill-local,spill-policy}` |
 | 工作区（`ctx.workspaces` 注册表：realpath canon 路径身份、稳定 uuid、有序会话账户 attach/insertBefore/detach、实时目录状态；全局归档会话集含 `workspace/session-activity` 准入 + `workspace/session-stop`/`stopActivity`，`turn` 家族由 agent 注册表安装的归档准入应答；全局置顶会话集最近在前；首用 `initializeDefault` + 持久 `defaultWorkspaceId`） | `packages/workspace/workspace` |
 | 用户设置（`ctx.settings` provider：命名空间注册、解析值 = schema 默认 → composition base → 用户 section、revision 守卫写与 `SETTINGS_CONFLICT`、secret 脱敏、文件 provider + watchdog 重载；`SettingsForms` 核心——profile 条目驱动的表单读（`config-editor` `configuration()` 三层）+ 写持久化到 profile `cordis.patch.yml`、revision 追踪、`configure({auto})` 页面策略、legacy `settings.yaml` 导入；**生产接线**——web profile（`--profile web`）为 boot/profile 驱动：默认 web 组合种子进 `$DSH_HOME/profiles/web/cordis.yml`、以 Loader 条目树（`cli/plugins/*`）boot、装配 config-editor + SettingsForms，settings Remote 读活条目命名空间、写经 config-editor 持久化 profile 补丁） | `packages/settings/{settings,settings-file}` |
-| LSP 工具族（`ctx.lsp` 能力 seam：语言服务 provider 注册表 + 按文件末段扩展名的每查询、顺序无关路由，暴露恰好四种语义操作——goToDefinition/findReferences/goToImplementation/hover——无 JSON-RPC 逃生口；`lsp-stdio` 通用后端为每个规范工作区 spawn 一个服务端，含 `Content-Length` 分帧、initialize 握手、串行可取消查询队列、瞬态 `didOpen`→request→`didClose`、有界拆除、传输失败透明重试一次；模型面 `lsp` 只读工具把一基 UTF-16 光标转成零基位置、要求会话工作区 cwd、封顶渲染位置/hover；经 profile `lsp-stdio` 条目 opt-in——不在默认组合内） | `packages/lsp/{lsp,lsp-stdio,tool-lsp}` + `packages/core/system-prompt`（TOOL_LSP order） |
+
+### 扩展能力
+
+| 能力 | 上游对应 |
+|---|---|
 | 能力扩展口（沙箱 / 凭据 / 授权 / 子 agent；详见下文） | capability seams 文档 |
 | 可继续子代理（durable 子会话、异步结算、生命周期事件、归档准入、激活容量、控制工具、图片 prompt 经 attachment store 受理、`agent_preset` 独立 preset 选择并挂载子组合；详见下文） | `packages/subagent` |
 | Agent Teams（roster + mailbox + 共享任务 DAG；详见下文） | `packages/experimental/agent-team` + `tool-agent-team` |
@@ -102,7 +146,7 @@
 
 ### 重点能力说明
 
-**web 传输层与浏览器前端**：`--profile web` 启动。两信封 RPC（`client-request` / `server-response`）、WebApi unary 会话服务、Remote 流 wire（单条 `/api/remote.mux` WebSocket 承载 open / item / end / cancel / error 帧，帧字段集合精确匹配；每条流一条 256 KiB 有界上行 inbox，超限或 `end` 后再来 `item` 以 `gateway/uplink-overflow` / `gateway/protocol` 只中止该流）；每个流方法经调用上下文读自己的上行，逐项过该方法声明的 codec（未声明则走无损 JSON 校验），被拒项以 `gateway/input-invalid` 中止该流；unary 结果含字节时改用 `multipart/form-data`（`metadata` part + 每附件一个 `bytes-<i>` part，JSON 槽位留 `null`），客户端按描述符 path 写回 `Uint8Array`；`$events` 注册表（转发 api-session/*，`approval/request` 与 `user-questions/request` waterfall 经 `$events/result` 结算）、`session/follow` / `session/control` 流；客户端为每条逻辑流持一个句柄，在 `open` 帧之后发上行项并可半关；审批桥把 async `tools/ask` 接到 `$events` waterfall；FastAPI 载体与 gateway 的 `stream-server.ts` / `handler.ts` 状态码链一致；会话日志导出 `GET /api/session.export`，把 root、子代理后代和被引用媒体打包成 zip，沿用 200 / 400 / 404 / 501 / 500 状态码链，错误走私有信封外壳；`GET`/`HEAD /api/file?path=` 按认证后的宿主绝对路径有界读取（`Cache-Control: private, no-store`、`nosniff`、CSP sandbox，`FsError` 映射 400/403/404/413/499），供前端展示本地图片与文档；产品化前端 `webui/` 是仓库顶层的独立 React 工程，只依赖 wire 约定，提供会话列表与新建、Trajectory（虚拟化窗口、Overview 折叠视图、全文搜索）、MarkdownText（GFM/表格/代码/KaTeX/安全链接/本地图片/搜索高亮）、Composer（草稿持久化、14 行封顶、`/` 命令、`@` 文件/会话引用、二进制附件、忙时 queue/steer）、工具卡（Bash/PowerShell、grep/glob、todo、read、write/edit diff、web、图片、通用回退）、Chat/Trajectory 双 tab、工作区文件树（`workspaceFiles/changes` 逐层实时刷新）与 text/markdown/code/image/PDF 预览、xterm 终端（多 tab、shell 选择、重命名/关闭、写与尺寸确认、断连重连）、右侧栏 Console/Files/Terminal 三 tab 与 per-session 布局（拖拽或键盘调宽、收起、<768px 自动全屏）、设置对话框（常规页权限缺省预设与完全权限确认门、浏览器外观/排版/发送偏好、按值类型渲染的插件命名空间表单；写入带 revision 围栏、冲突后重读、密钥只报存在性）、审批瀑布、计划芯片与目标栏、计划审查（批准 / 讨论修改）、通用提问卡与 `/goal` 命令卡、队列与作业面板，`vite build` 产物经 `MINIHARNESS_WEBUI_DIST` 由后端静态承载；`web/static/` 的 vanilla SPA 只作教学参照，消费旧 SSE wire，对新后端不工作。
+**web 传输层与浏览器前端**：`python -m miniharness.cli --profile web` 启动 FastAPI 宿主。传输形状与上游 gateway 一致：两信封 unary（`POST /api/<namespace>/<method>`）、单 WebSocket `/api/remote.mux` 承载全部 Remote 流、`$events` 审批与提问 waterfall 经 `$events/result` 结算。帧字段、错误码、multipart 字节附件与可选 token 门的完整列表见 [docs/interface-wire.md](docs/interface-wire.md)。产品化 UI 在仓库顶层 `webui/`（只依赖 wire，构建与代理见 [webui/README.md](webui/README.md)）；`web/static/` 为旧 SSE 教学参照，对当前后端不可用。
 
 **能力扩展口**：
 

@@ -54,7 +54,14 @@ flowchart LR
 |---|---|---|---|
 | `packages/core/session` | `core/session/` | 01 | 02 §3-4 |
 | `packages/context + vendor/cordis(core)` | `core/scope.py` | 02 | 02 §4.1 |
-| `packages/core/tools` | `core/tools.py` | 03 | 03 §5.2 |
+| `packages/core/tools`（含 `when` / `resolve_activation`） | `core/tools.py` | 03 | 03 §5.2 |
+| `packages/llm/pi-ai`（`llm-pi-ai/request-headers`） | `llm/pi_ai.py` | 04 §4.9 | — |
+| `packages/ptc-runtime/*` + `packages/workflow/workflow-ptc`（sandboxMode / confine） | `ptc_runtime/` + `workflow_ptc/` + `ptc/run_code.py` | — | [architecture.md](../architecture.md) 映射表 |
+| `packages/workflow/{workflow,tool-workflow}` | `workflow/` + `tool_workflow/` | — | — |
+| `packages/boot/plugin-manager` + `packages/host/plugin-inventory` | `boot/plugin_manager.py` + `web/api.py` Remote | 08 | 04 议题 2 |
+| `packages/boot/plugin-market` | `boot/plugin_market.py` + `cli/plugins/plugin_market.py` | — | [interface-wire.md](../interface-wire.md) §4.15 |
+| `packages/experimental/action-cards`（opt-in） | `experimental/action_cards/` + `cli/plugins/action_cards.py` | — | — |
+| `packages/schedule/schedule` + `schedule/tool-schedule` | `schedule/` + `web/api.py` `schedule/*` | 07 §7.5 | 04 议题 8 |
 | `packages/llm/llm + llm-deepseek` | `llm/` | 04 | 02 §3 + 03 §5.4 |
 | `packages/core/agent-loop` | `core/agent_loop/agent.py` | 04 / 06 | 03 §5.1 |
 | `packages/session/session-persistence` | `core/session/persistence.py` | 05 | 03 §5.3 |
@@ -81,6 +88,8 @@ flowchart LR
 | `web 表面会话管理（上游无 CLI）` | `cli/session_cmds.py` | 07 | 04 议题 2 |
 | （工程化） | `.github/workflows/ci.yml + tests/test_real_api.py` | 00 | — |
 | `packages/client/connection + packages/api/gateway + packages/api/session-controller + packages/api/remotes + host/frontend-static + host/webserver` | `web/`（envelope + stream_protocol + mux + events + streams + api + approvals + server + frontend + launcher） | 07 §7.5 | 04 议题 2 |
+| （wire 速查，非上游包） | `docs/interface-wire.md`（与 `WebApi.ROUTES` 同步） | 07 §7.5.2 | — |
+| （模块映射，非上游包） | `docs/architecture.md` | 08 + 各章 | 05 |
 | `packages/session-query/session-log-export（导出域）+ api/session-controller（端点约定面）` | `web/downloads.py` | 07 §7.5 | — |
 | `packages/bundle/web-app` + `packages/client` | `webui/`（产品化 React+TS+Vite 独立工程，只依赖 wire 约定）+ `web/static/`（vanilla SPA 教学参照，旧 SSE wire 不对新后端工作） | 07 §7.5.4 | 04 议题 2 |
 | `packages/skill/（skill + skill-filesystem + tool-skill + skill-badge）` | `skills/`（registry + filesystem + tool_skill） | 13 | 04 议题 10 |

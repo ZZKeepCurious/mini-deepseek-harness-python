@@ -3,7 +3,7 @@
 > 定位：这是 `mini-deepseek-harness` 前后端的**唯一耦合面**——`miniharness/web/` 传输层对
 > 前端发布的所有接口约定（信封、帧、错误语义）。产品化前端（仓库顶层 `webui/`）与任何第三方
 > 客户端只依赖本约定，禁止 import Python 内部。正文与当前实现逐条对应，接口约定与上游
-> `dsh-v0.2.0-rc.2` 一致（`packages/client/connection` + `packages/api/gateway` +
+> `dsh-v0.2.2-alpha.2` wire 面一致（`packages/client/connection` + `packages/api/gateway` +
 > `packages/api/session-controller` + `packages/api/remotes` + `packages/api/job-controller` +
 > `packages/api/terminal-controller` + `packages/api/workspace-controller` +
 > `packages/credentials/deepseek-account` + `packages/schedule/schedule` +
@@ -20,7 +20,7 @@
 
 | 通道 | 载体 | 覆盖范围 | 载体状态码 |
 |---|---|---|---|
-| unary RPC | `POST /api/<endpoint>` | `WebApi.ROUTES` 全部 69 个 unary 端点（`session/*` 17 个 + `terminal`/`workspace`/`workspaceFiles`/`settings`/`credentials`/`schedule`/`account`/`agentPresets` 等各域端点）+ `$events/result` 特判 | 401* / 404 / 415 / 400 / 500 / 200 |
+| unary RPC | `POST /api/<endpoint>` | `WebApi.ROUTES` 全部 unary 端点（当前实现 101 条，权威列表见 `miniharness/web/api.py` 的 `ROUTES` 字典；含 `session/*`、`pluginInventory`/`pluginManager`/`pluginMarket`/`pluginRegistryProbe`、`terminal`、`workspace`、`workspaceFiles`、`settings`、`credentials`、`schedule`、`account`、`agentPresets` 等各域）+ `$events/result` 特判 | 401* / 404 / 415 / 400 / 500 / 200 |
 | Remote 流 | `WS /api/remote.mux` | `GatewayStreams.stream_kinds` 全部 12 条流：`$events` + `session/follow`/`session/control` + `terminal/retain`/`terminal/attach` + `workspace/follow` + `workspaceFiles/changes` + `job/list`/`job/follow` + `account/watch`/`account/watchExpiry` + `userQuestions/attachWait` | HTTP 401*（升级拒绝）/ WS 关闭码 1003 / 1008 / 1011 |
 | 会话导出 | `GET /api/session.export` | 会话日志 zip 下载 | 401* / 200 / 400 / 404 / 501 / 500 |
 | 文件展示 | `GET`/`HEAD /api/file?path=` | 认证后的绝对路径有界读取（图片/文档） | 401* / 200 / 400 / 403 / 404 / 413 / 499 / 500 |
@@ -651,6 +651,27 @@ unary `POST /api/account/<method>`；除 `getState`/`hasRunningAccountTasks`/`ca
   `session/projections.permissions.currentValue`，不在此读面。新会话缺省由
   `permission-presets` 命名空间的 `defaultPreset` 字段决定（组合条目必须透传该键，
   否则写入持久化却不生效）。
+
+### 4.15 `pluginInventory` / `pluginManager` / `pluginMarket` / `pluginRegistryProbe`
+
+Host 插件管理面（上游 `packages/host/plugin-inventory` + `packages/boot/plugin-manager` +
+`packages/boot/plugin-market`）。unary `POST /api/<namespace>/<method>`；命名空间未挂 →
+`gateway/invocation-unavailable`。
+
+- `pluginInventory/list`（`{args:{}}`）→ Loader 条目数组 `{entryId, moduleName, enabled,
+  fiberPhase}`；`PluginManager` 在场时附加 `managementAvailable: true`。
+- `pluginManager/listPlugins`（`{args:{}}`）→ 组合行 `{id, name?, enabled, patchId?,
+  readOnlyReason?}`。
+- `pluginManager/setPluginEnabled`（`args:{id, enabled}`）→ 写 profile `cordis.patch.yml`
+  并 reconcile；失败回滚；成功 emit `plugin-manager/changed`。
+- `pluginMarket/listIndexes` / `setIndexes`（`urls` 字符串数组，绝对 http(s) URL）→ 持久化
+  用户索引列表；非法 URL → `plugin-market/invalid-index-url`。
+- `pluginMarket/search`（`{url, query?, limit?}`）→ `{url, plugins:[...]}`；索引抓取失败 →
+  `plugin-market/index-fetch-failed` 等 `MarketFault.code`。
+- `pluginMarket/readEntryDetail`（`{url, name}`）→ 单条插件元数据（含 install 形状；Python
+  模块安装为 `source.type: python` 扩展）。
+- `pluginRegistryProbe/fastest`（`{args:{urls}}`）→ `{url, latencyMs}` 或探测失败码。
+- 前端：`webui` 设置与插件相关面板经 `wire` 调用上述端点；npm 安装子进程不在 mini 载体。
 
 ## 5. `$events/result`（HTTP unary 特判端点，`web/server.py` + `web/events.py`）
 `POST /api/$events/result`，body 为 `client-request` 全形，`payload` 恰：
