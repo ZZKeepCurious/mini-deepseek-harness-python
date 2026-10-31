@@ -471,16 +471,17 @@ class DeepSeekAdapter(LlmAdapter):
         return rows
 
     def _refresh_official_listing(self) -> None:
-        import asyncio
-
         if self._official_route is None:
             return
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            asyncio.run(self._official_route.connect())
-        else:
-            asyncio.ensure_future(self._official_route.connect())
+        from .deepseek_account import DEFAULT_MODELS_TIMEOUT_MS
+        from .deepseek_official import run_official_connect_abandonable
+
+        timeout_ms = (self._models_timeout_ms if self._models_timeout_ms is not None
+                      else DEFAULT_MODELS_TIMEOUT_MS)
+        run_official_connect_abandonable(
+            self._official_route.connect,
+            timeout_ms=timeout_ms,
+        )
         self._models = self._official_route.resolution_models()
 
     async def stream(self, messages, tools, signal=None,

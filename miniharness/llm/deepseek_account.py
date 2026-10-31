@@ -682,7 +682,7 @@ class AccountModelCatalog:
     async def _start(self, settings: CatalogSettings, token: str):
         if self._inflight is not None and not self._inflight.done():
             return await self._inflight
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
         self._inflight = future
         try:
