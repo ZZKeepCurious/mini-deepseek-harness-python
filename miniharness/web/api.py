@@ -270,15 +270,18 @@ class _ObserveEventSubscription(_Subscription):
 
     def __init__(self, api: "WebApi", request: dict):
         super().__init__()
-        self._dispose = None
+        self._disposers: list[Any] = []
         try:
-            session_id = api._address_target(request)
-            session = api.store.get(session_id)
-            if session is None:
-                raise _Reject("session/not-found", f'session "{session_id}" not found',
-                              {"sessionId": session_id})
+            from .event_listener import emit_event_frame, expand_created_backfill
+            from .history import address_id
+
+            address = request.get("address")
+            if not isinstance(address, dict) or address.get("kind") not in ("session", "subagent"):
+                raise _Reject("gateway/bad-request",
+                              "address must be a session or subagent address", {})
+            session_id = address_id(address)
             self._push({"type": "ready"})
-            state: dict[str, Any] = {"next_seq": session.seq}
+            state: dict[str, Any] = {"next_seq": None}
 
             def on_event(payload: dict) -> None:
                 if self.done:
@@ -288,59 +291,35 @@ class _ObserveEventSubscription(_Subscription):
                 if getattr(current, "session_id", None) != session_id or not isinstance(event, Mapping):
                     return
                 seq = event["seq"]
-                if seq < state["next_seq"]:
+                next_seq = state["next_seq"]
+                if next_seq is not None and seq < next_seq:
                     return
-                if seq != state["next_seq"]:
+                if next_seq is not None and seq != next_seq:
                     self._fail("gateway/internal",
-                               f"session event stream skipped seq {state['next_seq']}", {})
+                               f"session event stream skipped seq {next_seq}", {})
                     return
                 state["next_seq"] = seq + 1
-                self._push({"type": "event", "event": thaw(event)})
+                self._push(emit_event_frame(event))
 
-            self._dispose = api.ctx.on("session/event", on_event, global_=True)
-        except _Reject as error:
-            self._fail(error.code, error.message, error.details)
-
-    def close(self) -> None:
-        if self._dispose is not None:
-            self._dispose()
-            self._dispose = None
-        self._end()
-
-
-class _ObserveStateSubscription(_Subscription):
-    """session/observeState：完整 passive state 替换帧。"""
-
-    def __init__(self, api: "WebApi", request: dict):
-        super().__init__()
-        self._disposers: list[Any] = []
-        try:
-            from .session_passive import read_session_state
-
-            session_id = request.get("sessionId")
-            if not isinstance(session_id, str) or session_id == "":
-                raise _Reject("gateway/bad-request", "sessionId must not be empty", {})
-            self._push(read_session_state(api, session_id))
-            target = session_id
-
-            def bump(agent_id: str | None = None) -> None:
+            def on_created(payload: dict) -> None:
                 if self.done:
                     return
-                if agent_id is not None and agent_id != target:
+                session = payload.get("session")
+                if getattr(session, "session_id", None) != session_id:
                     return
-                from .session_passive import read_session_state as read_state
-                self._push(read_state(api, target))
+                try:
+                    frames, next_seq = expand_created_backfill(session, state["next_seq"])
+                except _Reject as error:
+                    self._fail(error.code, error.message, error.details)
+                    return
+                for frame in frames:
+                    self._push(frame)
+                state["next_seq"] = next_seq
 
             ctx = api.ctx
             self._disposers = [
-                ctx.on("session/event", lambda payload: bump(
-                    getattr(payload.get("session"), "session_id", None)), global_=True),
-                ctx.on("agent/status", lambda payload: bump(
-                    getattr(payload.get("agent"), "id", None)), global_=True),
-                ctx.on("session/created", lambda payload: bump(
-                    getattr(payload.get("session"), "session_id", None)), global_=True),
-                ctx.on("session/disposed", lambda payload: bump(
-                    getattr(payload.get("session"), "session_id", None)), global_=True),
+                ctx.on("session/event", on_event, global_=True),
+                ctx.on("session/created", on_created, global_=True),
             ]
         except _Reject as error:
             self._fail(error.code, error.message, error.details)
@@ -349,6 +328,57 @@ class _ObserveStateSubscription(_Subscription):
         for dispose in self._disposers:
             dispose()
         self._disposers = []
+        self._end()
+
+
+class _ObserveStateSubscription(_Subscription):
+    """session/observeState：完整 passive state 替换帧。"""
+
+    def __init__(self, api: "WebApi", request: dict):
+        super().__init__()
+        self._listener = None
+        self._thread = None
+        try:
+            import threading
+
+            from .session_passive import read_session_state_resolved
+            from .state_listener import StateListenerSync
+
+            session_id = request.get("sessionId")
+            if not isinstance(session_id, str) or session_id == "":
+                raise _Reject("gateway/bad-request", "sessionId must not be empty", {})
+            self._listener = StateListenerSync(
+                api, session_id,
+                lambda: read_session_state_resolved(api, session_id))
+            self._listener.start()
+            self._thread = threading.Thread(target=self._pump_states, daemon=True)
+            self._thread.start()
+        except _Reject as error:
+            self._fail(error.code, error.message, error.details)
+
+    def _pump_states(self) -> None:
+        listener = self._listener
+        if listener is None:
+            return
+        try:
+            for versioned in listener.iter_versioned_states():
+                if self.done:
+                    break
+                if listener.is_current(versioned["revision"]):
+                    self._push(versioned["state"])
+        except _Reject as error:
+            self._fail(error.code, error.message, error.details)
+        finally:
+            if not self.done:
+                self._end()
+
+    def close(self) -> None:
+        if self._listener is not None:
+            self._listener.close()
+            self._listener = None
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
         self._end()
 
 
@@ -2327,11 +2357,11 @@ class WebApi:
         return events_page(self, payload)
 
     def state(self, payload: dict) -> dict:
-        from .session_passive import read_session_state
+        from .session_passive import read_session_state_resolved
         session_id = payload.get("sessionId")
         if not isinstance(session_id, str) or session_id == "":
             raise _Reject("gateway/bad-request", "sessionId must not be empty", {})
-        return read_session_state(self, session_id)
+        return read_session_state_resolved(self, session_id)
 
     def wait(self, payload: dict) -> dict:
         from .session_passive import wait_session

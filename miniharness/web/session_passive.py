@@ -18,7 +18,11 @@ def events_page(api, payload: dict) -> dict:
     return api.page(payload)
 
 
-def read_session_state(api, session_id: str) -> dict:
+def read_session_state(api, session_id: str, *, retried: bool = False) -> dict | None:
+    """被动 state 采样；live attach 竞态时首次返回 None，调用方应 retried=True 重读。"""
+    from ..session_query.config import SessionQueryError
+    from ..session_query.observation import observe_session
+
     Reject = _reject()
     agent = api._agents.get(session_id)
     if agent is not None:
@@ -34,21 +38,36 @@ def read_session_state(api, session_id: str) -> dict:
             "queue": _queue_items(agent),
             "pendingInput": _pending_input(api, session_id),
         }
-    session = api.store.get(session_id)
-    if session is None:
+    try:
+        with observe_session(api.ctx, session_id, projection=False) as observation:
+            if not retried and observation.source == "live":
+                return None
+            if observation.header.get("cwd") is None:
+                raise Reject("session/not-found", f'session "{session_id}" not found',
+                             {"sessionId": session_id, "kind": "session"})
+            return {
+                "cursor": observation.cursor,
+                "active": False,
+                "running": False,
+                "queue": None,
+                "pendingInput": _pending_input(api, session_id),
+            }
+    except SessionQueryError as error:
+        if error.code == "SESSION_QUERY_SESSION_NOT_FOUND":
+            raise Reject("session/not-found", f'session "{session_id}" not found',
+                         {"sessionId": session_id}) from error
+        raise
+
+
+def read_session_state_resolved(api, session_id: str) -> dict:
+    state = read_session_state(api, session_id)
+    if state is None:
+        state = read_session_state(api, session_id, retried=True)
+    if state is None:
+        Reject = _reject()
         raise Reject("session/not-found", f'session "{session_id}" not found',
                      {"sessionId": session_id})
-    header = api._wire_header(session)
-    if header.get("cwd") is None:
-        raise Reject("session/not-found", f'session "{session_id}" not found',
-                     {"sessionId": session_id, "kind": "session"})
-    return {
-        "cursor": session.seq - 1,
-        "active": False,
-        "running": False,
-        "queue": None,
-        "pendingInput": _pending_input(api, session_id),
-    }
+    return state
 
 
 def assistant_output(api, session_id: str, after_seq: int, through_seq: int,
@@ -85,6 +104,7 @@ def assistant_output(api, session_id: str, after_seq: int, through_seq: int,
 
 def wait_session(api, payload: dict) -> dict:
     from .api import _is_safe_int
+    from .state_listener import StateListenerSync
 
     Reject = _reject()
     session_id = payload.get("sessionId")
@@ -109,33 +129,55 @@ def wait_session(api, payload: dict) -> dict:
         raise Reject("gateway/bad-request",
                      "timeoutMs must be a positive supported timer delay", {})
 
+    def _read() -> dict:
+        return read_session_state_resolved(api, session_id)
+
+    listener = StateListenerSync(api, session_id, _read, refresh_ms=1_000)
+    listener.start()
     deadline = time.monotonic() + timeout_ms / 1000.0
     current_state: dict | None = None
-    reason = "timeout"
-    while time.monotonic() < deadline:
-        state = read_session_state(api, session_id)
-        current_state = state
-        action = _wait_action(state)
-        if action == "continue":
-            time.sleep(0.05)
-            continue
-        if action in ("input-required", "idle"):
-            reason = action
+    reason: str = "timeout"
+    states = listener.iter_versioned_states()
+    try:
+        for versioned in states:
+            if time.monotonic() >= deadline:
+                break
+            if not listener.is_current(versioned["revision"]):
+                continue
+            current_state = versioned["state"]
+            action = _wait_action(current_state)
+            if action == "continue":
+                continue
+            if action in ("input-required", "idle"):
+                reason = action
+                break
+            agent = api._agents.get(session_id)
+            session = api.store.get(session_id)
+            if agent is None or session is None or agent.session is not session:
+                continue
+            while time.monotonic() < deadline and not agent.when_idle():
+                time.sleep(0.05)
+            if not listener.is_current(versioned["revision"]):
+                continue
+            if api._agents.get(session_id) is not agent or api.store.get(session_id) is not session:
+                continue
+            fresh = _read()
+            current_state = fresh
+            reason = ("input-required" if _wait_action(fresh) == "input-required"
+                      else "idle")
             break
-        agent = api._agents.get(session_id)
-        if agent is None:
-            reason = "idle"
-            break
-        while time.monotonic() < deadline and not agent.when_idle():
-            time.sleep(0.05)
-        state = read_session_state(api, session_id)
-        current_state = state
-        reason = ("input-required" if _wait_action(state) == "input-required"
-                  else "idle")
-        break
+        else:
+            if current_state is None and not listener.closed:
+                raise Reject(
+                    "session/observation-ended",
+                    "Session observation ended before a stopping state", {})
+    finally:
+        listener.close()
+
     if current_state is None:
-        raise Reject("session/wait-timeout",
-                     "No Session state arrived before the wait deadline", {})
+        raise Reject(
+            "session/wait-timeout",
+            "No Session state arrived before the wait deadline", {})
     output = assistant_output(
         api, session_id, after_seq, current_state["cursor"], max_messages)
     return {"reason": reason, "state": current_state, "output": output}
