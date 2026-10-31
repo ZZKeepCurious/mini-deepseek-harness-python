@@ -269,7 +269,7 @@ class TestRequestEnvelope(unittest.TestCase):
         header = data["header"]
         # V3 canonical 信封：config 透传；header 不再携带 system（系统提示词是
         # surface node 0 的 system/message 事件）；tools 非空才带
-        self.assertEqual(header["config"], {"provider": "fake", "model": None})
+        self.assertEqual(header["config"], {"provider": "fake", "model": "fake-model"})
         self.assertNotIn("system", header)
         self.assertTrue(header["tools"])
         self.assertEqual(header["tools"][0]["name"], "bash")
@@ -283,7 +283,7 @@ class TestRequestEnvelope(unittest.TestCase):
         self.assertEqual(system_events[0]["data"]["message"]["content"][0]["text"], "你是一个助手。")
         # request/context 首次路由记录且仅一次（provider/model）
         ctx = [e for e in session.events if e["type"] == "request/context"]
-        self.assertEqual(ctx[0]["data"], {"provider": "fake", "model": None})
+        self.assertEqual(ctx[0]["data"], {"provider": "fake", "model": "fake-model"})
 
     def test_header_reuse_avoids_change_log(self):
         session, loop, _ = _make_env()

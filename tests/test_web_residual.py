@@ -373,9 +373,10 @@ class LlmRemoteTest(unittest.TestCase):
         self.assertEqual(
             self._value(self.api.dispatch("llm/listProviders", "l1", {})),
             [{"id": "fake", "name": "fake"}])
-        self.assertEqual(
-            self._value(self.api.dispatch("llm/listConfigurableProviders", "l2", {})),
-            [])
+        providers = self._value(
+            self.api.dispatch("llm/listConfigurableProviders", "l2", {}))
+        self.assertEqual(len(providers), 1)
+        self.assertEqual(providers[0]["provider"], "fake")
 
     def test_discovers_models_for_known_route(self):
         self.assertEqual(

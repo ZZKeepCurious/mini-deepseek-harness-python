@@ -11,8 +11,9 @@
   * 通知无 handler 直接丢弃；close 拒绝全部 pending 而不销毁流。
   * wire 类型：请求 initialize（cwd/provider/model/maxTokens? → serverInfo
     {name:'deepseek-harness-sdk-runtime', version}）、session/prompt
-    （sessionId/contentBlocks → messageId，未知 id 懒创建会话）、shutdown
-    （→ {}）；通知 session.event / session.status / subagent.started /
+    （sessionId/contentBlocks → messageId，未知 id 懒创建会话）、session/query
+    （同上 contentBlocks，结果 {kind:'prompt', messageId} 或 command 执行面）、
+    shutdown（→ {}）；通知 session.event / session.status / subagent.started /
     subagent.finished（mini 以内存仿真承载）。
   * serverInfo.name 是 wire 稳定标识 deepseek-harness-sdk-runtime。
   * messageId 是真实消息 id（create_message 的 uuid），与会话日志中
@@ -233,55 +234,11 @@ class SdkRuntime:
             self.provider = params.get("provider", "fake")
             self.model = params.get("model", "fake-model")
             return {"serverInfo": {"name": self.WIRE_NAME, "version": "0.0.1"}}
-        if method == "session/prompt":
-            session_id = params.get("sessionId")
-            if not isinstance(session_id, str) or not session_id:
-                raise ValueError("sessionId required")
-            loop = self._sessions.get(session_id)
-            if loop is None:
-                ctx = Context(name=f"sdk:{session_id}")
-                apply_retry_planner(ctx)
-                install_compaction(ctx)
-                install_tool_result_pruner(ctx)
-                install_jobs(ctx)
-                install_skills(ctx)
-                install_system_prompt(ctx)
-                install_sessions(ctx)
-                install_agents(ctx)
-                # 会话当前工作目录服务（对齐上游 dsh-working-directory）：装配
-                # fs / sessionProjections 前置；工具随注册表收编。
-                from ..fs import install_local_fs
-                from ..session_projection import install_session_projections
-                from ..working_directory import (
-                    install_working_directory,
-                    register_working_directory_tool,
-                )
-
-                if ctx.get("fs") is None:
-                    install_local_fs(ctx, {"cwd": os.getcwd()})
-                if ctx.get("sessionProjections") is None:
-                    install_session_projections(ctx)
-                install_working_directory(ctx)
-                reg = ToolRegistry(Context(name="sdk"))
-                register_job_tools(reg, ctx.get("jobs"))
-                register_skill_tools(reg, ctx.get("skills"))
-                register_working_directory_tool(ctx, reg)
-                # P2-25（对齐上游 sdk-app 门控装配）：DSH_PRIMARY_RUNTIME /
-                # DSH_BUNDLED_PRIMARY_RUNTIME 在场才挂 office 技能与
-                # load_workspace_dependencies（上游 sdk-app/cordis.patch.yml:29-41
-                # 同款 disabled 门控）。缺省无捆绑运行时 → 工具回落运行中 Python。
-                self._install_office_extras(ctx, reg)
-                loop = AgentLoop(Session(session_id), self._adapter, reg, ctx)
-                loop.publish()
-                self._sessions[session_id] = loop
-            blocks = params.get("contentBlocks")
-            text = "".join(b.get("text", "") for b in blocks or []
-                           if b.get("type") == "text")
-            message = create_message("user", [text_block(text)],
-                                     {"kind": "user"})
-            self.last_message_id = message["id"]
-            loop.followup(message)
-            return {"messageId": message["id"]}
+        if method in ("session/prompt", "session/query"):
+            message_id = self._session_prompt(params)
+            if method == "session/query":
+                return {"kind": "prompt", "messageId": message_id}
+            return {"messageId": message_id}
         if method == "shutdown":
             for loop in self._sessions.values():
                 try:
@@ -291,6 +248,50 @@ class SdkRuntime:
             self._sessions.clear()
             return {}
         raise ValueError(f"method not found: {method}")
+
+    def _session_prompt(self, params: dict) -> str:
+        session_id = params.get("sessionId")
+        if not isinstance(session_id, str) or not session_id:
+            raise ValueError("sessionId required")
+        loop = self._sessions.get(session_id)
+        if loop is None:
+            ctx = Context(name=f"sdk:{session_id}")
+            apply_retry_planner(ctx)
+            install_compaction(ctx)
+            install_tool_result_pruner(ctx)
+            install_jobs(ctx)
+            install_skills(ctx)
+            install_system_prompt(ctx)
+            install_sessions(ctx)
+            install_agents(ctx)
+            from ..fs import install_local_fs
+            from ..session_projection import install_session_projections
+            from ..working_directory import (
+                install_working_directory,
+                register_working_directory_tool,
+            )
+
+            if ctx.get("fs") is None:
+                install_local_fs(ctx, {"cwd": os.getcwd()})
+            if ctx.get("sessionProjections") is None:
+                install_session_projections(ctx)
+            install_working_directory(ctx)
+            reg = ToolRegistry(Context(name="sdk"))
+            register_job_tools(reg, ctx.get("jobs"))
+            register_skill_tools(reg, ctx.get("skills"))
+            register_working_directory_tool(ctx, reg)
+            self._install_office_extras(ctx, reg)
+            loop = AgentLoop(Session(session_id), self._adapter, reg, ctx)
+            loop.publish()
+            self._sessions[session_id] = loop
+        blocks = params.get("contentBlocks")
+        text = "".join(b.get("text", "") for b in blocks or []
+                       if b.get("type") == "text")
+        message = create_message("user", [text_block(text)],
+                                 {"kind": "user"})
+        self.last_message_id = message["id"]
+        loop.followup(message)
+        return message["id"]
 
     @property
     def sessions(self) -> dict:

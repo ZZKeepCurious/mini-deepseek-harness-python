@@ -122,6 +122,7 @@ LAYER_UNITS = [
     ("client", 3),
     ("mcp", 3),
     ("web", 3),
+    ("webhook", 3),
     ("shell", 3),
     ("feedback", 3),
 ]
@@ -413,6 +414,10 @@ class ImportDirectionTest(unittest.TestCase):
                     # gateway 流层仅消费它（上游 codec 由 terminal-controller 类型图
                     # 生成、经 `descriptor.uplink.codec` 注册）；terminal_controller
                     # 不得反向 import web
+                    continue
+                if src_unit == "web" and dst_unit == "seams":
+                    # §5 显式例外（单方向）：GitHub webhook 验签读 credentials 管理文件
+                    # / env 回退（同 settings-controller 读凭据面）；seams 不得反向 import web
                     continue
                 if src_unit == "llm" and dst_unit == "identity":
                     # §5 显式例外（单方向）：llm-deepseek 请求头

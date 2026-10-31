@@ -18,6 +18,7 @@ import json
 import sys
 from typing import Any
 
+from ...core.agent_loop.agent import AgentLoop
 from ...protocol.acp import AcpRequestError, AcpServer
 from ...protocol.sdk import JsonRpcLineTransport, SdkRuntime
 from ...core.session import thaw
@@ -118,7 +119,7 @@ class _SdkWorkerRuntime:
 
     def handle(self, method: str, params: dict) -> Any:
         result = self.runtime.handle(method, params)
-        if method == "session/prompt":
+        if method in ("session/prompt", "session/query"):
             session_id = params.get("sessionId")
             loop = self.runtime.sessions.get(session_id)
             if loop is not None:
