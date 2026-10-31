@@ -859,6 +859,25 @@ class TestSessionFollow(WebApiTest):
         self.assertEqual(snapshot["assistantStream"], {"revision": 0})
         sub.close()
 
+    def test_assistant_stream_live_frames(self):
+        session_id = self._value(self._create())["sessionId"]
+        sub = self.api.follow({
+            "address": {"kind": "session", "sessionId": session_id},
+            "assistantStream": True,
+        })
+        self.assertIsNotNone(sub.pull())  # snapshot
+        self._prompt_and_settle(session_id, "hello")
+        stream_frames = [
+            f for f in self._drain(sub)
+            if f.get("type") == "assistant-stream"
+        ]
+        self.assertGreaterEqual(len(stream_frames), 2)
+        kinds = [f["frame"]["type"] for f in stream_frames]
+        self.assertEqual(kinds[0], "start")
+        self.assertIn("chunk", kinds)
+        self.assertEqual(kinds[-1], "end")
+        sub.close()
+
     def test_streams_live_events(self):
         session_id = self._value(self._create())["sessionId"]
         sub = self.api.follow({"address": {"kind": "session", "sessionId": session_id}})

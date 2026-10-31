@@ -1,7 +1,7 @@
 """session/follow 可选 assistantStream 面（对齐 session-controller assistant-stream.ts）。
 
-mini 载体：AgentLoop 尚未 emit `agent/assistant-stream`；此处提供 wire 就绪的
-baseline（revision 0）与订阅挂点，后续 Agent 侧补事件即可增量闭合。
+AgentLoop 经 `agent/assistant-stream` 派发 start/chunk/end 帧；此处把进程内
+帧投影到 session/follow 的 `assistant-stream` wire 类型。
 """
 from __future__ import annotations
 

@@ -303,6 +303,7 @@ class AgentLoop:
         self._turn = _replayed_next_turn(self.session) - 1
         self._step = 0     # 当前已打开的 step 编号（1 起，每 turn 重置）
         self._assistant_attempt_counter = 0   # Agent 生命周期内 attempt 计数（attemptId）
+        self._assistant_stream_revision = 0   # 进程内 assistant-stream 帧 revision（对齐 agent.ts）
         self._turn_end: dict | None = None
         self._step_signal: ToolExec | None = None   # 阶段 7：当前 step 的共享取消信号
         # 协作式取消事件（asyncio.Event，_open_turn 每轮新建）：cancel 置位，
@@ -436,6 +437,18 @@ class AgentLoop:
         detach, self._detach_session = self._detach_session, None
         if detach is not None:
             detach()
+
+    def _next_assistant_stream_revision(self) -> int:
+        self._assistant_stream_revision += 1
+        return self._assistant_stream_revision
+
+    def _emit_assistant_stream_frame(self, frame: dict) -> None:
+        """进程内实时 assistant 流帧（不入 session 日志；对齐 agent/assistant-stream）。"""
+        self.ctx.emit(
+            "agent/assistant-stream",
+            {"agent": self, "frame": frame},
+            this_arg=self._carrier,
+        )
 
     @property
     def id(self) -> str:
@@ -1250,8 +1263,13 @@ class AgentLoop:
             messages = projected["messages"]
             tools = projected["tools"]
             live = AssistantStreamAttempt(
-                self.session.session_id, self._assistant_attempt_counter,
-                self._turn, self._step)
+                self.session.session_id,
+                self._assistant_attempt_counter,
+                self._next_assistant_stream_revision,
+                self._turn,
+                self._step,
+                self._emit_assistant_stream_frame,
+            )
             self._assistant_attempt_counter += 1
             settled = False
             try:

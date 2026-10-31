@@ -35,6 +35,7 @@ class AssistantStreamAttempt:
         self,
         session_id: str,
         attempt: int,
+        next_revision: Callable[[], int],
         turn: int,
         step: int,
         emit: Callable[[dict], None] | None = None,
@@ -42,20 +43,16 @@ class AssistantStreamAttempt:
         self.attempt_id = f"{session_id}:{attempt}"
         self.turn = turn
         self.step = step
+        self._next_revision = next_revision
         self._emit = emit or _default_emit
         self._accumulator = AssistantStreamAccumulator()
         self._assembler = BlockAssembler()
         self._index = 0
-        self._revision = 0
         self._terminal = False
 
     @property
     def ended(self) -> bool:
         return self._terminal
-
-    def _next_revision(self) -> int:
-        self._revision += 1
-        return self._revision
 
     def start(self) -> None:
         """发布 opening 标记（首块投递之前）。"""

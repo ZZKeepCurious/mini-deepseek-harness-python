@@ -72,6 +72,24 @@ class TestLoop(unittest.TestCase):
         self.assertGreater(len(am["data"]["stream"]), 0)
         self.assertNotIn("sourceEventSeqs", am)
 
+    def test_agent_assistant_stream_events(self):
+        session, loop, _ = _make_env()
+        frames: list[dict] = []
+        loop.ctx.on(
+            "agent/assistant-stream",
+            lambda payload: frames.append(payload["frame"]),
+            global_=True,
+        )
+        loop.followup("你好")
+        kinds = [f["type"] for f in frames]
+        self.assertEqual(kinds[0], "start")
+        self.assertIn("chunk", kinds)
+        self.assertEqual(kinds[-1], "end")
+        self.assertEqual(frames[-1]["outcome"]["kind"], "committed")
+        revisions = [f["revision"] for f in frames]
+        self.assertEqual(revisions, sorted(revisions))
+        self.assertEqual(revisions[0], 1)
+
     def test_tool_call_roundtrip(self):
         session, loop, adapter = _make_env(
             tool_call={"name": "bash", "arguments": {"cmd": "ls"}}
