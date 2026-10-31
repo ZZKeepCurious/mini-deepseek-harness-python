@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import type { ModelCatalog, ModelSelection } from "../wire/session";
+import { modelBadgeLabel } from "../wire/modelBadge";
 
 interface Props {
   catalog: ModelCatalog | null;
@@ -25,6 +26,7 @@ export function ModelSelect({ catalog, selection, locked, onSelect }: Props) {
           provider: group.id,
           model: model.id,
           label: model.name,
+          badge: modelBadgeLabel(model.badge),
         })),
       ),
     [groups],
@@ -72,6 +74,9 @@ export function ModelSelect({ catalog, selection, locked, onSelect }: Props) {
               }}
             >
               <span>{entry.label}</span>
+              {entry.badge !== undefined && (
+                <span className="composer-menu-badge">{entry.badge}</span>
+              )}
               <span className="dim">{entry.provider}</span>
             </button>
           ))}

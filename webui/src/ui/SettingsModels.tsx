@@ -9,7 +9,9 @@ import {
   discoverModels,
   listConfigurableProviders,
   type ConfigurableProvider,
+  type DiscoveredModel,
 } from "../wire/llm";
+import { modelBadgeLabel } from "../wire/modelBadge";
 import type { UseModelCatalog } from "../app/useModelCatalog";
 import { SecretMask } from "./SecretMask";
 
@@ -23,7 +25,7 @@ export function SettingsModels({ models }: Props) {
   const [credentials, setCredentials] = useState<CredentialsDescribe>({});
   const [discoverError, setDiscoverError] = useState<string | null>(null);
   const [discovering, setDiscovering] = useState<string | null>(null);
-  const [discovered, setDiscovered] = useState<Record<string, string[]>>({});
+  const [discovered, setDiscovered] = useState<Record<string, DiscoveredModel[]>>({});
 
   const credentialRefs = useMemo(() => {
     const refs = new Set<string>();
@@ -76,7 +78,7 @@ export function SettingsModels({ models }: Props) {
       const rows = await discoverModels(provider.settingsNs, { provider: provider.provider });
       setDiscovered((current) => ({
         ...current,
-        [provider.provider]: rows.map((row) => row.name ?? row.id),
+        [provider.provider]: rows,
       }));
       await models.refresh();
     } catch (caught) {
@@ -114,11 +116,17 @@ export function SettingsModels({ models }: Props) {
         <section key={group.id} className="settings-models-group">
           <h3>{group.name}</h3>
           <ul>
-            {group.models.map((model) => (
-              <li key={model.id}>
-                {model.name} <span className="dim">({model.id})</span>
-              </li>
-            ))}
+            {group.models.map((model) => {
+              const badge = modelBadgeLabel(model.badge);
+              return (
+                <li key={model.id}>
+                  {model.name} <span className="dim">({model.id})</span>
+                  {badge !== undefined && (
+                    <span className="settings-badge">{badge}</span>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         </section>
       ))}
@@ -160,9 +168,17 @@ export function SettingsModels({ models }: Props) {
             </button>
             {(discovered[provider.provider] ?? []).length > 0 && (
               <ul>
-                {discovered[provider.provider].map((name) => (
-                  <li key={name}>{name}</li>
-                ))}
+                {discovered[provider.provider].map((row) => {
+                  const badge = modelBadgeLabel(row.badge);
+                  return (
+                    <li key={row.id}>
+                      {row.name ?? row.id}
+                      {badge !== undefined && (
+                        <span className="settings-badge">{badge}</span>
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </div>

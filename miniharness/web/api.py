@@ -464,6 +464,21 @@ class _ControlSubscription(_Subscription):
         self._end()
 
 
+def _wire_model_from_adapter_info(info: dict) -> dict | None:
+    """适配器 `available_models` 行 → wire 模型行（modelCatalog / discoverModels）。"""
+    model_id = info.get("model")
+    if not isinstance(model_id, str) or model_id == "":
+        return None
+    row: dict[str, Any] = {"id": model_id, "name": info.get("name") or model_id}
+    modalities = info.get("input_modalities")
+    if modalities is not None:
+        row["inputModalities"] = modalities
+    badge = info.get("badge")
+    if isinstance(badge, dict):
+        row["badge"] = badge
+    return row
+
+
 class WebApi:
     """web 会话服务核心：session 域 unary 方法 + 流订阅工厂。
 
@@ -1216,7 +1231,7 @@ class WebApi:
         上游按 settingsNs 查询已注册的 discovery；mini 无 discovery 注册表，
         由注入适配器自己的目录回答（DeepSeek 的 `available_models`），未知
         provider / 仅给 baseURL → `llm/model-discovery-rejected`。
-        载体差异：`name`/`inputModalities` 由适配器目录派生；无 contextWindow/
+        载体差异：`name`/`inputModalities`/`badge` 由适配器目录派生；无 contextWindow/
         maxTokens 披露时省略。
         """
         request = payload.get("request") or {}
@@ -1230,15 +1245,14 @@ class WebApi:
                 {"settingsNs": payload.get("settingsNs"),
                  **({"provider": provider} if isinstance(provider, str) else {})})
         models = self._remote_call(available)
-        return [
-            {
-                "id": info["model"],
-                **({"name": info["name"]} if info.get("name") is not None else {}),
-                **({"inputModalities": info["input_modalities"]}
-                   if info.get("input_modalities") is not None else {}),
-            }
-            for info in models
-        ]
+        rows: list[dict] = []
+        for info in models:
+            if not isinstance(info, dict):
+                continue
+            row = _wire_model_from_adapter_info(info)
+            if row is not None:
+                rows.append(row)
+        return rows
 
     # ---------- commands 域（packages/interaction/commands 的 `commands` Remote namespace） ----------
 
@@ -1763,11 +1777,9 @@ class WebApi:
                 prov = info.get("provider", route)
                 if prov != route:
                     continue
-                model_id = info.get("model")
-                if not isinstance(model_id, str) or model_id == "":
-                    continue
-                row = {"id": model_id, "name": info.get("name") or model_id}
-                models.append(row)
+                row = _wire_model_from_adapter_info(info)
+                if row is not None:
+                    models.append(row)
             return models
         info = self.adapter.resolve_model_info()
         if info.get("provider") != route:

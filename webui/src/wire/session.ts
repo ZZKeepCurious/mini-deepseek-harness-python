@@ -5,6 +5,7 @@
 // applied and refuses with `session/provider-models-unavailable` otherwise.
 
 import { rpc } from "./rpc";
+import type { ModelBadge } from "./modelBadge";
 
 export interface ModelSelection {
   provider: string;
@@ -15,7 +16,7 @@ export interface ModelSelection {
 export interface ModelCatalogGroup {
   id: string;
   name: string;
-  models: Array<{ id: string; name: string }>;
+  models: Array<{ id: string; name: string; badge?: ModelBadge }>;
 }
 
 export interface ModelCatalog {

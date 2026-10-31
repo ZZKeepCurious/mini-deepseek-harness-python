@@ -394,6 +394,16 @@ class TestSessionSearch(WebApiTest):
         self.assertIn("needle", hit["snippet"])
 
 
+class _BadgeFake(FakeLlmAdapter):
+    def available_models(self):
+        return [{
+            "provider": self.provider,
+            "model": self.model,
+            "name": self.model,
+            "badge": {"tone": "info", "text": {"en": "New"}},
+        }]
+
+
 class TestSessionSelectModel(WebApiTest):
     def test_catalog_advertises_adapter_route(self):
         session_id = self._value(self._create())["sessionId"]
@@ -402,6 +412,18 @@ class TestSessionSelectModel(WebApiTest):
         self.assertEqual(value["routableProviders"], ["fake"])
         self.assertEqual(value["groups"][0]["models"], [{"id": "fake-model", "name": "fake-model"}])
         self.assertEqual(value["failures"], [])
+
+    def test_catalog_and_discover_project_listing_badge(self):
+        ctx = Context(name="web-api-badge")
+        self.addCleanup(ctx.dispose)
+        api = WebApi(ctx, _BadgeFake())
+        catalog = self._value(api.dispatch("session.modelCatalog", "rid", {}))
+        self.assertEqual(catalog["groups"][0]["models"][0]["badge"]["text"]["en"], "New")
+        discovered = self._value(api.dispatch("llm.discoverModels", "rid", {
+            "settingsNs": "credentials",
+            "request": {"provider": "fake"},
+        }))
+        self.assertEqual(discovered[0]["badge"]["text"]["en"], "New")
 
     def test_catalog_reads_agent_default_model(self):
         from miniharness.core.agent_default_model import install_agent_default_model

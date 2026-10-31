@@ -1,4 +1,5 @@
 import { rpc } from "./rpc";
+import type { ModelBadge } from "./modelBadge";
 
 export interface ConfigurableProvider {
   provider: string;
@@ -12,6 +13,7 @@ export interface DiscoveredModel {
   id: string;
   name?: string;
   inputModalities?: string[];
+  badge?: ModelBadge;
 }
 
 export async function listConfigurableProviders(): Promise<ConfigurableProvider[]> {
