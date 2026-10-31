@@ -245,6 +245,13 @@ class RemoteEventRegistry:
         self._disposers.append(
             _forward_emit(ctx, self, "permission-presets/catalog-changed"))
 
+    def get_pending_remote_events(self) -> list[dict]:
+        """挂起 Remote 事件快照（上游 typertGateway.getPendingRemoteEvents）。"""
+        return [
+            {"event": pending.event, "agentId": pending.agent_id}
+            for pending in self._pending.values()
+        ]
+
     def has_live_client(self) -> bool:
         """是否存在活跃的 `$events` 客户端流（上游 gateway index.ts:284 hasLiveClient）。
 

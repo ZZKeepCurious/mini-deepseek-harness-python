@@ -265,6 +265,125 @@ class _FollowSubscription(_Subscription):
         self._end()
 
 
+class _ObserveEventSubscription(_Subscription):
+    """session/observeEvent：ready + 后续 durable 事件（无 snapshot）。"""
+
+    def __init__(self, api: "WebApi", request: dict):
+        super().__init__()
+        self._dispose = None
+        try:
+            session_id = api._address_target(request)
+            session = api.store.get(session_id)
+            if session is None:
+                raise _Reject("session/not-found", f'session "{session_id}" not found',
+                              {"sessionId": session_id})
+            self._push({"type": "ready"})
+            state: dict[str, Any] = {"next_seq": session.seq}
+
+            def on_event(payload: dict) -> None:
+                if self.done:
+                    return
+                current = payload.get("session")
+                event = payload.get("event")
+                if getattr(current, "session_id", None) != session_id or not isinstance(event, Mapping):
+                    return
+                seq = event["seq"]
+                if seq < state["next_seq"]:
+                    return
+                if seq != state["next_seq"]:
+                    self._fail("gateway/internal",
+                               f"session event stream skipped seq {state['next_seq']}", {})
+                    return
+                state["next_seq"] = seq + 1
+                self._push({"type": "event", "event": thaw(event)})
+
+            self._dispose = api.ctx.on("session/event", on_event, global_=True)
+        except _Reject as error:
+            self._fail(error.code, error.message, error.details)
+
+    def close(self) -> None:
+        if self._dispose is not None:
+            self._dispose()
+            self._dispose = None
+        self._end()
+
+
+class _ObserveStateSubscription(_Subscription):
+    """session/observeState：完整 passive state 替换帧。"""
+
+    def __init__(self, api: "WebApi", request: dict):
+        super().__init__()
+        self._disposers: list[Any] = []
+        try:
+            from .session_passive import read_session_state
+
+            session_id = request.get("sessionId")
+            if not isinstance(session_id, str) or session_id == "":
+                raise _Reject("gateway/bad-request", "sessionId must not be empty", {})
+            self._push(read_session_state(api, session_id))
+            target = session_id
+
+            def bump(agent_id: str | None = None) -> None:
+                if self.done:
+                    return
+                if agent_id is not None and agent_id != target:
+                    return
+                from .session_passive import read_session_state as read_state
+                self._push(read_state(api, target))
+
+            ctx = api.ctx
+            self._disposers = [
+                ctx.on("session/event", lambda payload: bump(
+                    getattr(payload.get("session"), "session_id", None)), global_=True),
+                ctx.on("agent/status", lambda payload: bump(
+                    getattr(payload.get("agent"), "id", None)), global_=True),
+                ctx.on("session/created", lambda payload: bump(
+                    getattr(payload.get("session"), "session_id", None)), global_=True),
+                ctx.on("session/disposed", lambda payload: bump(
+                    getattr(payload.get("session"), "session_id", None)), global_=True),
+            ]
+        except _Reject as error:
+            self._fail(error.code, error.message, error.details)
+
+    def close(self) -> None:
+        for dispose in self._disposers:
+            dispose()
+        self._disposers = []
+        self._end()
+
+
+class _ObserveProjectionsSubscription(_Subscription):
+    """session/observeProjections：ready + 稀疏 projection 替换帧。"""
+
+    def __init__(self, api: "WebApi", request: dict):
+        super().__init__()
+        self._dispose = None
+        try:
+            session_id = request.get("sessionId")
+            if not isinstance(session_id, str) or session_id == "":
+                raise _Reject("gateway/bad-request", "sessionId must not be empty", {})
+            registry = api.ctx.get("sessionProjections")
+            if registry is None:
+                raise _Reject("session/projections-unavailable",
+                              "Session projections are unavailable", {})
+            self._push({"type": "ready"})
+
+            def on_changed(session, key, value, seq) -> None:
+                if self.done or session.session_id != session_id:
+                    return
+                self._push({"type": "projection", "key": key, "value": value, "seq": seq})
+
+            self._dispose = registry.on_changed(on_changed)
+        except _Reject as error:
+            self._fail(error.code, error.message, error.details)
+
+    def close(self) -> None:
+        if self._dispose is not None:
+            self._dispose()
+            self._dispose = None
+        self._end()
+
+
 class _ControlSubscription(_Subscription):
     """session.control 流订阅（control.ts 同款）：投影基线 + projection 替换帧。
 
@@ -423,6 +542,9 @@ class WebApi:
         "session/updateQueue": "update_queue",
         "session/cancel": "cancel",
         "session/page": "page",
+        "session/events": "events",
+        "session/state": "state",
+        "session/wait": "wait",
         "session/projections": "projections",
         "session/workspacePathApplications": "workspace_path_applications",
         "pluginInventory/list": "plugin_inventory",
@@ -2200,35 +2322,55 @@ class WebApi:
 
     # ---------- session.page ----------
 
+    def events(self, payload: dict) -> dict:
+        from .session_passive import events_page
+        return events_page(self, payload)
+
+    def state(self, payload: dict) -> dict:
+        from .session_passive import read_session_state
+        session_id = payload.get("sessionId")
+        if not isinstance(session_id, str) or session_id == "":
+            raise _Reject("gateway/bad-request", "sessionId must not be empty", {})
+        return read_session_state(self, session_id)
+
+    def wait(self, payload: dict) -> dict:
+        from .session_passive import wait_session
+        return wait_session(self, payload)
+
     def page(self, payload: dict) -> dict:
-        session_id = self._address_target(payload)
-        session = self.store.get(session_id)
-        source = list(session.events)
-        source_cursor = source[-1]["seq"] if source else -1
+        from ..session_query.config import SessionQueryError
+        from ..session_query.observation import observe_session
+        from .history import (
+            address_id,
+            history_page,
+            resolve_history_request,
+            validate_observation_address,
+        )
 
-        through_seq = payload.get("throughSeq")
-        if not _is_safe_int(through_seq) or through_seq < -1:
+        address = payload.get("address")
+        if not isinstance(address, dict) or address.get("kind") not in ("session", "subagent"):
             raise _Reject("gateway/bad-request",
-                          "throughSeq must be an integer greater than or equal to -1",
-                          {})
-        if through_seq > source_cursor:
-            raise _Reject("gateway/bad-request",
-                          f"session page through seq {through_seq} is past cursor {source_cursor}",
-                          {"sessionId": session_id})
-        if 0 <= through_seq < len(source) and source[through_seq]["seq"] != through_seq:
-            raise _Reject("gateway/internal", f"session log does not contain through seq {through_seq}",
-                          {"sessionId": session_id})
-
-        before_seq = payload.get("beforeSeq")
-        if before_seq is not None and (not _is_safe_int(before_seq) or before_seq < 0):
-            raise _Reject("gateway/bad-request", "beforeSeq must be a non-negative safe integer", {})
-        max_messages = payload.get("maxMessages")
-        turn_window = payload.get("turnWindow")
-        self._validate_history_window(max_messages, turn_window)
-
-        page_events, has_more = self._paginate(
-            source, before_seq, max_messages or DEFAULT_MAX_MESSAGES, through_seq, turn_window)
-        return {"records": self._page_records(page_events), "hasMore": has_more}
+                          "address must be a session or subagent address", {})
+        spec = resolve_history_request(payload)
+        session_id = address_id(address)
+        need_projection = address.get("kind") == "subagent"
+        try:
+            with observe_session(self.ctx, session_id, projection=need_projection) as observation:
+                if need_projection:
+                    self._attach_observation_projections(observation)
+                validate_observation_address(address, observation)
+                return history_page(observation, spec, self._paginate)
+        except SessionQueryError as error:
+            if error.code == "SESSION_QUERY_SESSION_NOT_FOUND":
+                if address.get("kind") == "session":
+                    target = address.get("sessionId", "")
+                    raise _Reject("session/not-found", f'session "{target}" not found',
+                                  {"sessionId": target}) from error
+                raise _Reject("subagent/not-found", "subagent is unavailable", {
+                    "parentSessionId": address.get("parentSessionId"),
+                    "childSessionId": address.get("childSessionId"),
+                }) from error
+            raise
 
     @staticmethod
     def _validate_history_window(max_messages: Any, turn_window: Any) -> None:
@@ -2296,6 +2438,15 @@ class WebApi:
     def follow(self, request: dict) -> _FollowSubscription:
         """session.follow：快照 + 增量（历史 follow 同款）。"""
         return _FollowSubscription(self, request)
+
+    def observe_event(self, request: dict) -> _ObserveEventSubscription:
+        return _ObserveEventSubscription(self, request)
+
+    def observe_state(self, request: dict) -> _ObserveStateSubscription:
+        return _ObserveStateSubscription(self, request)
+
+    def observe_projections(self, request: dict) -> _ObserveProjectionsSubscription:
+        return _ObserveProjectionsSubscription(self, request)
 
     def control(self) -> _ControlSubscription:
         """session.control：投影基线 + projection 替换帧。"""
@@ -2503,6 +2654,36 @@ class WebApi:
                 "gateway/bad-request",
                 "client metadata must carry version, locale, and timezoneOffsetSeconds", {})
         return client
+
+    def _attach_observation_projections(self, observation) -> None:
+        registry = self.ctx.get("sessionProjections")
+        if registry is None:
+            return
+        from ..telemetry.projection_values import projection_values
+
+        live = observation._live_session
+        if live is not None:
+            registry.snapshot(live)
+            observation.projections = {
+                "asOfSeq": live.seq - 1,
+                "values": projection_values(live, self.ctx.get("usageStats"), registry),
+            }
+            return
+
+        class _PreparedSession:
+            def __init__(self, session_id, meta, events):
+                self.session_id = session_id
+                self.meta = meta
+                self.seq = (events[-1]["seq"] + 1) if events else 0
+                self.events = events
+
+        stub = _PreparedSession(
+            observation.header["id"], observation.header, observation.events)
+        registry.snapshot(stub)
+        observation.projections = {
+            "asOfSeq": stub.seq - 1,
+            "values": projection_values(stub, self.ctx.get("usageStats"), registry),
+        }
 
     # ---------- wire 辅助 ----------
 

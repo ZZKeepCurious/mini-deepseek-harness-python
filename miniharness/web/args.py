@@ -121,10 +121,35 @@ _SPECS: dict[str, dict[str, tuple[str, bool]]] = {
     },
     "session/page": {
         "address": (OBJ, True),
-        "throughSeq": (INT, True),
+        "throughSeq": (INT, False),
         "beforeSeq": (INT, False),
         "maxMessages": (INT, False),
         "turnWindow": (OBJ, False),
+    },
+    "session/events": {
+        "address": (OBJ, True),
+        "throughSeq": (INT, False),
+        "beforeSeq": (INT, False),
+        "maxMessages": (INT, False),
+        "turnWindow": (OBJ, False),
+    },
+    "session/state": {
+        "sessionId": (STR, True),
+    },
+    "session/wait": {
+        "sessionId": (STR, True),
+        "timeoutMs": (INT, False),
+        "afterSeq": (INT, False),
+        "maxMessages": (INT, False),
+    },
+    "session/observeEvent": {
+        "address": (OBJ, True),
+    },
+    "session/observeProjections": {
+        "sessionId": (STR, True),
+    },
+    "session/observeState": {
+        "sessionId": (STR, True),
     },
     "session/follow": {
         "address": (OBJ, True),

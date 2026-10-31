@@ -56,7 +56,7 @@ from .args import (
     canonical_endpoint,
     validate_args,
 )
-from .events import RemoteEventRegistry
+from .events import RemoteEventRegistry, _signal_aborted
 from .stream_protocol import REMOTE_EVENT_STREAM_ENDPOINT
 from .uplink import UplinkInbox, UplinkItems
 from ..telemetry import projection_values
@@ -181,6 +181,9 @@ class GatewayStreams:
         return {
             REMOTE_EVENT_STREAM_ENDPOINT: "$events",
             "session/follow": "follow",
+            "session/observeEvent": "observe_event",
+            "session/observeProjections": "observe_projections",
+            "session/observeState": "observe_state",
             "session/control": "control",
             "terminal/retain": "terminal_retain",
             "terminal/attach": "terminal_attach",
@@ -193,6 +196,10 @@ class GatewayStreams:
             "userQuestions/attachWait": "user_questions_attach_wait",
             "remoteAccess/follow": "remote_access_follow",
         }
+
+    def get_pending_remote_events(self) -> list[dict]:
+        """供 session/state 读取 pendingInput（上游 gateway getPendingRemoteEvents）。"""
+        return self.events.get_pending_remote_events()
 
     def uplink_codecs(self) -> dict[str, Any]:
         """endpoint → 该方法声明的上行 codec（缺省即不声明，走无损 JSON 校验）。
@@ -243,6 +250,13 @@ class GatewayStreams:
             uplink_window)
         if kind == "follow":
             return _with_uplink(self._follow(payload["args"], invocation), invocation)
+        if kind == "observe_event":
+            return _with_uplink(self._observe_event(payload["args"], invocation), invocation)
+        if kind == "observe_projections":
+            return _with_uplink(
+                self._observe_projections(payload["args"], invocation), invocation)
+        if kind == "observe_state":
+            return _with_uplink(self._observe_state(payload["args"], invocation), invocation)
         if kind == "terminal_retain":
             return _with_uplink(
                 self._terminal_retain(payload["args"], invocation), invocation)
@@ -326,6 +340,47 @@ class GatewayStreams:
     def _record(event: dict) -> dict:
         """SessionEventEntry 包装（上游 history.ts entryFor：`{type:'event', event}`）。"""
         return {"type": "event", "event": _as_plain(event)}
+
+    async def _observe_event(self, args: dict, invocation: StreamInvocation):
+        async for frame in self._pump_api_subscription(
+                lambda: self.api.observe_event(args), invocation):
+            yield frame
+
+    async def _observe_state(self, args: dict, invocation: StreamInvocation):
+        async for frame in self._pump_api_subscription(
+                lambda: self.api.observe_state(args), invocation):
+            yield frame
+
+    async def _observe_projections(self, args: dict, invocation: StreamInvocation):
+        async for frame in self._pump_api_subscription(
+                lambda: self.api.observe_projections(args), invocation):
+            yield frame
+
+    async def _pump_api_subscription(self, factory, invocation: StreamInvocation):
+        subscription = factory()
+        try:
+            while True:
+                if invocation.signal is not None and _signal_aborted(invocation.signal):
+                    return
+                frame = subscription.pull()
+                if frame is not None:
+                    yield frame
+                    continue
+                if subscription.done:
+                    if subscription.error is not None:
+                        raise RemoteStreamError(
+                            subscription.error["code"], subscription.error["message"])
+                    return
+                wake = asyncio.Event()
+                subscription.set_waiter(wake.set)
+                frame = subscription.pull()
+                if frame is not None:
+                    subscription.set_waiter(None)
+                    yield frame
+                    continue
+                await wake.wait()
+        finally:
+            subscription.close()
 
     # ---------- terminal/retain（窗口持有流） ----------
 

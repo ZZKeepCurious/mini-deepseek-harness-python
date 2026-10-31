@@ -129,17 +129,19 @@ def render_skill_content(skill: dict) -> str:
 
 # ---------- catalog digest（目录身份 = durable 条目，非渲染散文） ----------
 
-def digest_catalog_entries(entries: list[dict]) -> str:
+def digest_catalog_entries(entries: list[dict], incomplete: bool = False) -> str:
     """对目录条目列表取 sha256（每条 JSON.stringify([name, description]) 逐行）。
 
     与上游 digestCatalogEntries 一致：JSON 转义使边界精确（描述里任何分隔符
-    都是合法字符，只有引号能让边界唯一）。
+    都是合法字符，只有引号能让边界唯一）。`incomplete` 为真时在 canonical
+    前写入 ``incomplete\\n`` 前缀。
     """
     canonical = "\n".join(
         json.dumps([entry["name"], entry["description"]], ensure_ascii=False, separators=(",", ":"))
         for entry in entries
     )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    prefix = "incomplete\n" if incomplete else ""
+    return hashlib.sha256((prefix + canonical).encode("utf-8")).hexdigest()
 
 
 # ---------- 校验 ----------

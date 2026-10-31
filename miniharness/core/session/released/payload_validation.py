@@ -392,10 +392,12 @@ def message_source_value(value: Any, label: str, version: int,
         literal_value(source.get("form"), ["instructions"], f"{label} form")
         return
     if kind == "skill-catalog":
-        exact_keys(source, ("kind", "form", "entries"), ("update",), label)
+        exact_keys(source, ("kind", "form", "entries"), ("update", "incomplete"), label)
         literal_value(source.get("form"), ["catalog"], f"{label} form")
         if source.get("update") is not None:
             literal_value(source.get("update"), [True], f"{label} update")
+        if source.get("incomplete") is not None:
+            literal_value(source.get("incomplete"), [True], f"{label} incomplete")
         array_value(source.get("entries"), f"{label} entries", _skill_catalog_entry)
         return
     if kind in ("coordinator", "subagent-report"):

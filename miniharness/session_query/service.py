@@ -20,6 +20,7 @@ from .config import (
     SessionQueryError,
 )
 from .documents import build_event_records, build_search_documents
+from .observation import observe_session
 from .sqlite import SqliteSearchIndex
 
 __all__ = ["SessionQuery"]
@@ -58,6 +59,10 @@ class SessionQuery(Service):
         self._persistence = persistence
         self._index = index or SqliteSearchIndex(":memory:")
         self._indexed: dict = {}
+
+    def observe_session(self, session_id: str, *, projection: bool = False):
+        """精确读租约（对齐 upstream observeSession）；返回 context manager。"""
+        return observe_session(self.ctx, session_id, projection=projection)
 
     # ---------- 源解析 ----------
 

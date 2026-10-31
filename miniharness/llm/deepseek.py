@@ -223,7 +223,9 @@ class DeepSeekAdapter(LlmAdapter):
                  file_policy=None, default_context_window=None,
                  thinking=None, account_token=None,
                  auth: str | None = None, reject_token=None,
-                 account_route=None, extensions=None):
+                 account_route=None, official_route=None, extensions=None,
+                 models_timeout_ms: int | None = None,
+                 models_max_age_ms: int | None = None):
         self._key = api_key if api_key is not None else os.environ.get("DEEPSEEK_API_KEY", "")
         # DSH 账户 token：配置后以 x-dsh-auth-token 发送（账户 provider 路由）。
         self._account_token = account_token
@@ -242,6 +244,9 @@ class DeepSeekAdapter(LlmAdapter):
         # 账户路由目录（上游 llm-deepseek-account 的连接事实）：提供版本门控拒绝与
         # 登录态目录发现；official 路由为 None。
         self._account_route = account_route
+        self._official_route = official_route
+        self._models_timeout_ms = models_timeout_ms
+        self._models_max_age_ms = models_max_age_ms
         # 官方请求扩展注册表（上游 deepseekLlmApiExtensions + prepareRequestExtensions）：
         # 每次请求按注册字段准备顶层贡献（如 dsh_plugin_packages），准备失败逐字段省略。
         self._extensions = extensions
@@ -290,6 +295,29 @@ class DeepSeekAdapter(LlmAdapter):
                 DEFAULT_FILE_EXPIRY_SECONDS, DEFAULT_FILE_REFRESH_MARGIN_SECONDS,
                 DEFAULT_FILE_QUOTA_CLEANUP_BATCH),
         )
+        if self._official_route is None and self._auth == "official":
+            from .deepseek_official import (
+                build_official_route,
+                present_api_key_from_adapter,
+                should_follow_official_listing,
+            )
+            from .deepseek_account import DEFAULT_MODELS_MAX_AGE_MS, DEFAULT_MODELS_TIMEOUT_MS
+
+            if should_follow_official_listing(self._base, self._models):
+                timeout_ms = (self._models_timeout_ms if self._models_timeout_ms is not None
+                              else DEFAULT_MODELS_TIMEOUT_MS)
+                max_age_ms = (self._models_max_age_ms if self._models_max_age_ms is not None
+                              else DEFAULT_MODELS_MAX_AGE_MS)
+                route_max = max_tokens if max_tokens is not None else DEFAULT_MAX_TOKENS
+                self._official_route = build_official_route(
+                    base_url=self._base,
+                    supported=self._models,
+                    route_max_tokens=route_max,
+                    present_api_key=lambda: present_api_key_from_adapter(self),
+                    transport=self._transport,
+                    models_timeout_ms=timeout_ms,
+                    models_max_age_ms=max_age_ms,
+                )
 
     def _files(self) -> DeepSeekFileStore:
         """进程级上传复用 store（上游 resolveFiles）。"""
@@ -393,6 +421,8 @@ class DeepSeekAdapter(LlmAdapter):
         """
         if self._auth == "account" and self._account_route is not None:
             self._account_route.admit(model)
+        if self._auth == "official" and self._official_route is not None:
+            self._official_route.admit(model)
 
     def available_models(self) -> list:
         """登录/凭据可用时可路由的目录（上游 discoverModels）。
@@ -405,6 +435,20 @@ class DeepSeekAdapter(LlmAdapter):
             if self._account_route is None:
                 return []
             return self._account_route.discover_models()
+        if self._official_route is not None:
+            import asyncio
+
+            try:
+                self._auth_headers()
+            except LlmFailure as error:
+                if error.code == MISSING_CREDENTIAL:
+                    return []
+                raise
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                asyncio.run(self._official_route.refresh())
+            return self._official_route.discover_models_sync()
         try:
             self._auth_headers()
         except LlmFailure as error:

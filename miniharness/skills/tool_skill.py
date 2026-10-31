@@ -123,7 +123,24 @@ def _render_catalog_lines(entries: list[dict]) -> list[str]:
     return [f"- `{entry['name']}`: {escape_text(entry['description'])}" for entry in entries]
 
 
-def _render_catalog_message(entries: list[dict]) -> dict:
+def _incomplete_catalog_notice() -> str:
+    return (
+        "Some skills could not be checked. Only confirmed skills are listed; a lower-priority "
+        "definition of the same name may be selected when a preferred source is unavailable. "
+        "Discovery will be retried on the next request."
+    )
+
+
+def _render_catalog_message(entries: list[dict], incomplete: bool) -> dict:
+    tail = (
+        "Wait for an updated catalog before calling the `skill` tool. Do not infer skill "
+        "instructions from an empty catalog."
+        if len(entries) == 0 else
+        "If the user names a skill, or the task clearly matches a skill's description, call "
+        "the `skill` tool with the exact skill name before taking task actions. Load all "
+        "applicable skills, then follow their full instructions. This catalog contains "
+        "summaries only; do not infer or follow a skill's instructions until it has been loaded."
+    )
     text = "\n".join([
         "<system-reminder>",
         "A skill is a reusable set of task-specific instructions. The following skills are available in this session:",
@@ -132,37 +149,54 @@ def _render_catalog_message(entries: list[dict]) -> dict:
         *_render_catalog_lines(entries),
         "</available_skills>",
         "",
-        "If the user names a skill, or the task clearly matches a skill's description, call the `skill` tool with the exact skill name before taking task actions. Load all applicable skills, then follow their full instructions. This catalog contains summaries only; do not infer or follow a skill's instructions until it has been loaded.",
+        *([_incomplete_catalog_notice(), ""] if incomplete else []),
+        tail,
         "A user may also invoke a skill directly; its <skill_content> block then appears in this conversation. Follow it, and do not call the `skill` tool again for that skill.",
         "</system-reminder>",
     ])
-    return create_message("user", [text_block(text)], {
-        "kind": "skill-catalog", "form": "catalog", "entries": entries,
-    })
+    source: dict = {"kind": "skill-catalog", "form": "catalog", "entries": entries}
+    if incomplete:
+        source["incomplete"] = True
+    return create_message("user", [text_block(text)], source)
 
 
-def _render_catalog_update(entries: list[dict]) -> dict:
-    availability = [
-        "No skills are currently available through the `skill` tool. Do not use names from earlier skill catalogs.",
-        "A user may still invoke a skill directly; its <skill_content> block then appears in this conversation. Follow it, and do not call the `skill` tool for it.",
-    ] if len(entries) == 0 else [
-        "Use only names in this replacement catalog. If the user names a listed skill, or the task clearly matches its description, call the `skill` tool with the exact name before acting.",
-        "A user may also invoke a skill directly; its <skill_content> block then appears in this conversation. Follow it, and do not call the `skill` tool again for that skill.",
-    ]
+def _render_catalog_update(entries: list[dict], incomplete: bool) -> dict:
+    if len(entries) == 0:
+        availability = [
+            ("No skills could be confirmed in this discovery attempt. Do not use names from "
+             "earlier skill catalogs." if incomplete else
+             "No skills are currently available through the `skill` tool. Do not use names from "
+             "earlier skill catalogs."),
+            "A user may still invoke a skill directly; its <skill_content> block then appears in this conversation. Follow it, and do not call the `skill` tool for it.",
+        ]
+    else:
+        availability = [
+            "Use only names in this replacement catalog. If the user names a listed skill, or the task clearly matches its description, call the `skill` tool with the exact name before acting.",
+            "A user may also invoke a skill directly; its <skill_content> block then appears in this conversation. Follow it, and do not call the `skill` tool again for that skill.",
+        ]
+    header = (
+        "Skill discovery is incomplete. This catalog of currently available skills replaces "
+        "every earlier available-skills list in this session:"
+        if incomplete else
+        "The available skill catalog changed. This complete catalog replaces every earlier "
+        "available-skills list in this session:"
+    )
     text = "\n".join([
         "<system-reminder>",
-        "The available skill catalog changed. This complete catalog replaces every earlier available-skills list in this session:",
+        header,
         "",
         "<available_skills>",
         *_render_catalog_lines(entries),
         "</available_skills>",
         "",
+        *([_incomplete_catalog_notice(), ""] if incomplete else []),
         *availability,
         "</system-reminder>",
     ])
-    return create_message("user", [text_block(text)], {
-        "kind": "skill-catalog", "form": "catalog", "update": True, "entries": entries,
-    })
+    source: dict = {"kind": "skill-catalog", "form": "catalog", "update": True, "entries": entries}
+    if incomplete:
+        source["incomplete"] = True
+    return create_message("user", [text_block(text)], source)
 
 
 def _lookup_for(agent: Any) -> dict:
@@ -302,11 +336,10 @@ class SkillTool:
             tool_visible = tools.resolve(self.skill_tool.name) is self.skill_tool
         snapshot = self._registry.snapshot(_lookup_for(agent)) if tool_visible \
             else {"skills": [], "complete": True}
-        if not snapshot["complete"]:
-            return decision
         skills = [s for s in snapshot["skills"] if is_model_invocable(s)]
+        incomplete = not snapshot["complete"]
         entries = catalog_source_entries(skills, self.catalog_description_max_length)
-        digest = digest_catalog_entries(entries)
+        digest = digest_catalog_entries(entries, incomplete)
         history = self._catalog_history(agent)
         existing = self._catalog_message(decision)
         messages = list(decision.get("messages") or []) if isinstance(decision, dict) else []
@@ -316,16 +349,17 @@ class SkillTool:
             return {**decision, "messages": [
                 m for m in messages if m["id"] != existing["message"]["id"]
             ]}
-        if existing is not None and digest_catalog_entries(existing["entries"]) == digest:
+        if (existing is not None
+                and digest_catalog_entries(existing["entries"], existing["incomplete"]) == digest):
             return decision
-        if not history["published"] and len(skills) == 0:
+        if not history["published"] and len(skills) == 0 and not incomplete:
             if existing is None:
                 return decision
             return {**decision, "messages": [
                 m for m in messages if m["id"] != existing["message"]["id"]
             ]}
-        catalog = _render_catalog_update(entries) if history["published"] \
-            else _render_catalog_message(entries)
+        catalog = (_render_catalog_update(entries, incomplete) if history["published"]
+                   else _render_catalog_message(entries, incomplete))
         if existing is None:
             return {**decision, "kind": "enter", "messages": [*messages, catalog]}
         return {**decision, "kind": "enter", "messages": [
@@ -349,8 +383,10 @@ class SkillTool:
             if entries is None:
                 continue
             published = True
+            incomplete_flag = source.get("incomplete") is True
+            digest = digest_catalog_entries(entries, incomplete_flag)
             if event["seq"] in visible:
-                return {"visibleDigest": digest_catalog_entries(entries), "published": True}
+                return {"visibleDigest": digest, "published": True}
         return {"published": published}
 
     def _catalog_message(self, decision: dict) -> dict | None:
@@ -362,7 +398,11 @@ class SkillTool:
                 continue
             entries = _read_catalog_entries(source)
             if entries is not None:
-                return {"message": message, "entries": entries}
+                return {
+                    "message": message,
+                    "entries": entries,
+                    "incomplete": source.get("incomplete") is True,
+                }
         return None
 
 

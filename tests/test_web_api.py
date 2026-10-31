@@ -812,7 +812,7 @@ class TestSessionPage(WebApiTest):
         error = self._error(self.api.dispatch("session.page", "rid", {
             **self._address("session-h"), "throughSeq": 5}))
         self.assertEqual(error["code"], "gateway/bad-request")
-        self.assertIn("past cursor", error["message"])
+        self.assertIn("exceeds", error["message"])
 
     def test_page_validation(self):
         self._create(session_id="session-h")
@@ -829,7 +829,7 @@ class TestSessionPage(WebApiTest):
             "address": {"kind": "subagent", "parentSessionId": "session-p",
                         "childSessionId": "session-c"},
             "throughSeq": 0}))
-        self.assertEqual(error["code"], "session/not-found")
+        self.assertEqual(error["code"], "subagent/not-found")
 
 
 class TestSessionFollow(WebApiTest):
@@ -1038,7 +1038,8 @@ class TestDispatch(WebApiTest):
             "session/canOpenWorkspacePath",
             "session/openWorkspacePath", "session/rename", "session/fork",
             "session/prompt", "session/attachment", "session/updateQueue",
-            "session/cancel", "session/page", "session/projections",
+            "session/cancel", "session/page", "session/events", "session/state",
+            "session/wait", "session/projections",
             "session/workspacePathApplications", "pluginInventory/list",
             "pluginManager/listPlugins", "pluginManager/setPluginEnabled",
             "fileUploads/upload",
@@ -1113,10 +1114,9 @@ class TestArgsBoundary(WebApiTest):
         self.assertIn('missing "query"', error["message"])
         self.assertEqual(error["details"], {"endpoint": "session/search"})
 
-        error = self._error(self.api.dispatch("session.page", "rid", {
-            "address": {"kind": "session", "sessionId": "x"}}))
+        error = self._error(self.api.dispatch("session.state", "rid", {}))
         self.assertEqual(error["code"], "gateway/arguments-invalid")
-        self.assertIn('missing "throughSeq"', error["message"])
+        self.assertIn('missing "sessionId"', error["message"])
 
     def test_upstream_slash_endpoint_dispatches(self):
         # 上游 typert 端点为 `<namespace>/<method>`（gateway endpointOf）：斜杠式
