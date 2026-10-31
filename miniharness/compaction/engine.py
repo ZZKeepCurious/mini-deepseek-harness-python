@@ -198,7 +198,12 @@ class CompactionEngine:
         for _attempt in range(spec["compactionRetries"] + 1):
             range_ = select_compactable_range(agent.session, measurement, spec["retainTokens"])
             if range_ is None:
-                return result
+                if result is None:
+                    return None
+                raise RuntimeError(
+                    "no safe compaction range can reduce context below threshold "
+                    f"({measurement['totalTokens']} estimated tokens >= threshold "
+                    f"{spec['thresholdTokens']})")
             result = await self._compact_region(agent, range_["start"], range_["end"])
             measurement = self.meter.measure(agent.session)
             if measurement["totalTokens"] < spec["thresholdTokens"]:

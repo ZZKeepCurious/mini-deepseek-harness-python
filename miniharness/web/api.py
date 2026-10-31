@@ -603,6 +603,11 @@ class WebApi:
         "pluginInventory/list": "plugin_inventory",
         "pluginManager/listPlugins": "plugin_manager_list",
         "pluginManager/setPluginEnabled": "plugin_manager_set_enabled",
+        "pluginMarket/listIndexes": "plugin_market_list_indexes",
+        "pluginMarket/setIndexes": "plugin_market_set_indexes",
+        "pluginMarket/search": "plugin_market_search",
+        "pluginMarket/readEntryDetail": "plugin_market_read_entry_detail",
+        "pluginRegistryProbe/fastest": "plugin_registry_probe_fastest",
         "fileUploads/upload": "file_uploads_upload",
         "terminal/environment": "terminal_environment",
         "terminal/shells": "terminal_shells",
@@ -833,6 +838,41 @@ class WebApi:
     def plugin_manager_set_enabled(self, payload: dict) -> dict:
         return self._plugin_manager().set_plugin_enabled(
             payload["id"], payload["enabled"])
+
+    # ---------- pluginMarket / pluginRegistryProbe（Python 索引面） ----------
+
+    def _plugin_market(self):
+        service = self.ctx.get("pluginMarket")
+        if service is None:
+            raise _Reject("gateway/invocation-unavailable",
+                          "plugin market is not installed", {})
+        return service
+
+    def _plugin_registry_probe(self):
+        service = self.ctx.get("pluginRegistryProbe")
+        if service is None:
+            raise _Reject("gateway/invocation-unavailable",
+                          "plugin registry probe is not installed", {})
+        return service
+
+    def plugin_market_list_indexes(self, payload: dict) -> list[dict]:
+        return self._remote_call(lambda: self._plugin_market().list_indexes())
+
+    def plugin_market_set_indexes(self, payload: dict) -> None:
+        self._remote_call(lambda: self._plugin_market().set_indexes(payload["urls"]))
+
+    def plugin_market_search(self, payload: dict) -> dict:
+        return self._remote_call(
+            lambda: self._plugin_market().search(payload["url"], payload["query"]))
+
+    def plugin_market_read_entry_detail(self, payload: dict) -> dict:
+        options = payload.get("options")
+        return self._remote_call(lambda: self._plugin_market().read_entry_detail(
+            payload["url"], payload["name"], payload["version"], payload["language"],
+            options if isinstance(options, dict) else None))
+
+    def plugin_registry_probe_fastest(self, payload: dict) -> str | None:
+        return self._remote_call(lambda: self._plugin_registry_probe().fastest())
 
     # ---------- fileUploads（packages/client/file-upload 的 base64 回退） ----------
 
@@ -1280,7 +1320,8 @@ class WebApi:
         对齐 `api/session-controller/src/skill-catalog.ts`：按会话当前工作目录
         （working-directory 投影，缺省 header cwd）取 catalog，只回
         `isUserInvocable` 的条目，不加载正文。载体差异：mini 无 cold session
-        observation / preset-scoped registry，只服务 store 内会话与全局注册表。
+        observation / preset-scoped registry，只服务 store 内会话与全局注册表；
+        master M11 `acquireScope` 失败回退 global skills 在此不适用（无 preset 作用域采集）。
         """
         from ..skills import is_model_invocable, is_user_invocable
 

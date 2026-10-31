@@ -32,6 +32,8 @@ import threading
 import uuid
 from typing import Any
 
+from ..core.scope import Context
+from ..seams.sandbox_local import SandboxUnavailableError
 from .service import PtcRuntime, validate_binding_namespaces
 from .types import (
     PtcRunFailure,
@@ -169,8 +171,10 @@ class PythonPtcRuntime(PtcRuntime):
                  timeout_ms: int = DEFAULT_TIMEOUT_MS,
                  max_timeout_ms: int = DEFAULT_MAX_TIMEOUT_MS,
                  max_log_bytes: int = DEFAULT_MAX_LOG_BYTES,
-                 cwd: str | None = None) -> None:
+                 cwd: str | None = None,
+                 ctx: Context | None = None) -> None:
         super().__init__()
+        self._ctx = ctx
         resolved_bin = python_bin if python_bin is not None else sys.executable
         if not resolved_bin or not os.path.isfile(resolved_bin):
             raise ValueError(
@@ -206,11 +210,19 @@ class PythonPtcRuntime(PtcRuntime):
         return {"defaultMs": min(self._timeout_ms, self._max_timeout_ms),
                 "maxMs": self._max_timeout_ms}
 
+    @property
+    def sandbox_mode(self) -> str | None:
+        """部署缺省文件策略（对齐 ptc-runtime-node sandboxMode）。"""
+        if self._ctx is None:
+            return None
+        policy = self._ctx.get("sandboxPolicy")
+        if policy is None:
+            return None
+        return policy.default_mode
+
     def resolve(self, request: PtcRunRequest) -> PtcRunSpec:
-        """校验绑定并补全目录/截止（上游 resolve；显式 sandboxPolicy 不支持拒绝）。"""
+        """校验绑定并补全目录/截止（上游 resolve）。"""
         validate_binding_namespaces(request.bindings)
-        if request.sandboxPolicy is not None:
-            raise ValueError("ptc-runtime-python does not support an explicit sandbox policy")
         cwd = request.cwd if request.cwd is not None else self._cwd
         if not os.path.isabs(cwd):
             raise ValueError("ptc-runtime-python: run requires an absolute cwd")
@@ -224,16 +236,19 @@ class PythonPtcRuntime(PtcRuntime):
                     or budget > self._max_timeout_ms:
                 raise ValueError("ptc-runtime-python: run requires a valid resolved timeout")
             timeout_ms = min(budget, self._max_timeout_ms)
+        policy = request.sandboxPolicy
+        if policy is not None:
+            root = policy.get("workspaceRoot")
+            if isinstance(root, str) and root != "":
+                cwd = root
         return PtcRunSpec(
             program=request.program, bindings=list(request.bindings),
             cwd=cwd, timeoutMs=timeout_ms,
             stateOwner=request.stateOwner,
-            sandboxPolicy=None, signal=request.signal)
+            sandboxPolicy=policy, signal=request.signal)
 
     async def run(self, spec: PtcRunSpec) -> PtcRunResult:
         """在一个全新 CPython 子进程中执行程序（上游 run；结局作为字段 resolve）。"""
-        if spec.sandboxPolicy is not None:
-            raise ValueError("ptc-runtime-python: run requires resolved inputs without policy")
         return await asyncio.to_thread(self._run_blocking, spec)
 
     # ---------- 同步子进程载体（在工作线程内跑，避免阻塞事件循环） ----------
@@ -244,9 +259,28 @@ class PythonPtcRuntime(PtcRuntime):
             "program": spec.program,
             "bindings": [namespace.to_wire() for namespace in spec.bindings],
         }
+        argv = [self._python, "-u", "-c", _BOOTSTRAP]
+        sandbox_meta: PtcRunSandbox | None = None
+        policy = spec.sandboxPolicy
+        if policy is not None:
+            mode = policy.get("mode")
+            if mode != "danger-full-access":
+                provider = None if self._ctx is None else self._ctx.get("sandbox")
+                if provider is None:
+                    return PtcRunResult(error=PtcRunFailure(
+                        "sandbox-unavailable",
+                        "ptc-runtime-python requires ctx.sandbox to enforce file policy"))
+                try:
+                    confined = provider.confine(argv, policy)
+                except SandboxUnavailableError as error:
+                    return PtcRunResult(error=PtcRunFailure(
+                        "sandbox-unavailable", str(error)))
+                argv = confined["argv"]
+                sandbox_meta = PtcRunSandbox(
+                    mode=mode, denied=False, enforcement=confined.get("enforcement"))
         try:
             process = subprocess.Popen(
-                [self._python, "-u", "-c", _BOOTSTRAP],
+                argv,
                 cwd=spec.cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, text=True, encoding="utf-8",
                 errors="replace", bufsize=1,
@@ -281,6 +315,8 @@ class PythonPtcRuntime(PtcRuntime):
                               self._max_log_bytes)
             if process.poll() is None:
                 _terminate(process)
+            if sandbox_meta is not None:
+                result.sandbox = sandbox_meta
             return result
         finally:
             for stream in (process.stdin, process.stdout, process.stderr):
@@ -518,7 +554,7 @@ def install_ptc_runtime(ctx, *, python_bin: str | None = None, **options) -> Pyt
     """在 ctx 上装配 PythonPtcRuntime（幂等；上游 apply）。"""
     if getattr(ctx, "_miniharness_ptc_runtime", None) is not None:
         return ctx._miniharness_ptc_runtime
-    runtime = PythonPtcRuntime(python_bin=python_bin, **options)
+    runtime = PythonPtcRuntime(python_bin=python_bin, ctx=ctx, **options)
     ctx.provide("ptcRuntime", runtime)
     ctx._miniharness_ptc_runtime = runtime
     return runtime

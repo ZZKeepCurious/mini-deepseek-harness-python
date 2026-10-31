@@ -367,6 +367,7 @@ ACCOUNT_TOKEN_INVALID = "ACCOUNT_TOKEN_INVALID"        # 账户 token 被 provid
 CLIENT_UPGRADE_REQUIRED = "CLIENT_UPGRADE_REQUIRED"    # 列出的模型要求更新的客户端版本
 MODEL_UNSUPPORTED = "MODEL_UNSUPPORTED"                # 该构建不支持列出的模型
 REQUEST_EXTENSION = "REQUEST_EXTENSION"                # 请求扩展准备/合并失败（上游 deepseek request-extensions）
+REQUEST_HEADERS = "REQUEST_HEADERS"                    # pi-ai 请求头 waterfall 准备失败（上游 llm-pi-ai adapter）
 
 
 class StreamChunk(dict):

@@ -10,6 +10,12 @@ export interface ScheduleRecord {
   scheduledAt: string;
 }
 
+export interface ScheduleCatalogEntry extends ScheduleRecord {
+  sessionId: string;
+  status: string;
+  lastDelivery?: string;
+}
+
 export function scheduleRecordOf(x: unknown): ScheduleRecord | null {
   if (typeof x !== "object" || x === null) return null;
   const r = x as Record<string, unknown>;
@@ -123,4 +129,56 @@ export async function loadScheduleHistory(
 ): Promise<ScheduleDeliveryRecord[]> {
   const value = await rpc<unknown>("schedule/history", { sessionId, id: scheduleId, limit });
   return parseScheduleHistory(value);
+}
+
+export function scheduleCatalogEntryOf(x: unknown): ScheduleCatalogEntry | null {
+  const record = scheduleRecordOf(x);
+  if (record === null) return null;
+  if (typeof x !== "object" || x === null) return null;
+  const row = x as Record<string, unknown>;
+  if (typeof row.sessionId !== "string" || row.sessionId === "") return null;
+  if (typeof row.status !== "string" || row.status === "") return null;
+  return {
+    ...record,
+    sessionId: row.sessionId,
+    status: row.status,
+    ...(typeof row.lastDelivery === "string" ? { lastDelivery: row.lastDelivery } : {}),
+  };
+}
+
+export function parseScheduleCatalog(value: unknown): ScheduleCatalogEntry[] {
+  if (!Array.isArray(value)) return [];
+  const out: ScheduleCatalogEntry[] = [];
+  for (const item of value) {
+    const entry = scheduleCatalogEntryOf(item);
+    if (entry !== null) out.push(entry);
+  }
+  return sortSchedules(out);
+}
+
+export async function loadScheduleCatalog(): Promise<ScheduleCatalogEntry[]> {
+  const value = await rpc<unknown>("schedule/catalog", {});
+  return parseScheduleCatalog(value);
+}
+
+export function scheduleUpdateSucceeded(result: unknown): boolean {
+  if (typeof result !== "object" || result === null) return false;
+  const row = result as { updated?: unknown };
+  return row.updated === true;
+}
+
+export async function updateSessionSchedule(
+  sessionId: string,
+  id: string,
+  expected: ScheduleRecord,
+  patch: { title?: string; prompt?: string },
+): Promise<boolean> {
+  const result = await rpc<unknown>("schedule/update", {
+    sessionId,
+    id,
+    expected,
+    ...(patch.title !== undefined ? { title: patch.title } : {}),
+    ...(patch.prompt !== undefined ? { prompt: patch.prompt } : {}),
+  });
+  return scheduleUpdateSucceeded(result);
 }

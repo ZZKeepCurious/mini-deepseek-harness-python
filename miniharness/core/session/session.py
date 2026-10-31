@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 from .invariant import validate_event
 from .json import deep_freeze, is_json_safe, now_ms, thaw
+from .plugin_record import plugin_record_payload
 from .surface import (
     _surface_nodes,
     assert_developer_header,
@@ -342,6 +343,15 @@ class Session:
         if self._on_append is not None:
             self._on_append(record)
         return record
+
+    def append_plugin_record(self, type_: str, data: dict) -> int:
+        """追加 ignorable plugin record（对齐 upstream appendPluginRecord）。"""
+        payload = plugin_record_payload(type_, data)
+        record = deep_freeze({"seq": self.seq, "time": now_ms(), **payload})
+        self._events.append(record)
+        if self._on_append is not None:
+            self._on_append(record)
+        return record["seq"]
 
     def _replay_seed(self, seed: list) -> None:
         """恢复模式回放 seed：seq 必须从 0 连续、类型已知、surface 合法。

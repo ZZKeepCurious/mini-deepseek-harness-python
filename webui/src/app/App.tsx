@@ -432,13 +432,21 @@ export function App() {
             <SchedulePanel
               sessionId={bk.selectedId}
               schedules={schedules.schedules}
+              catalog={schedules.catalog}
               loading={schedules.loading}
+              catalogLoading={schedules.catalogLoading}
               error={schedules.error}
+              catalogError={schedules.catalogError}
               onRefresh={() => void schedules.reload()}
-              onDelete={(id) => void schedules.remove(id)}
-              onLoadHistory={(scheduleId) => {
-                if (bk.selectedId === null) return Promise.resolve([]);
-                return loadScheduleHistory(bk.selectedId, scheduleId);
+              onRefreshCatalog={() => void schedules.reloadCatalog()}
+              onDelete={(id, ownerSessionId) => void schedules.remove(id, ownerSessionId)}
+              onUpdate={(id, expected, patch, ownerSessionId) => {
+                void schedules.update(id, expected, patch, ownerSessionId);
+              }}
+              onLoadHistory={(scheduleId, ownerSessionId) => {
+                const sid = ownerSessionId ?? bk.selectedId;
+                if (sid === null) return Promise.resolve([]);
+                return loadScheduleHistory(sid, scheduleId);
               }}
             />
           ) : (

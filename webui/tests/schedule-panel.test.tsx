@@ -18,10 +18,15 @@ describe("SchedulePanel", () => {
             scheduledAt: "2026-09-16T15:00:00.120Z",
           },
         ]}
+        catalog={[]}
         loading={false}
+        catalogLoading={false}
         error={null}
+        catalogError={null}
         onRefresh={onRefresh}
+        onRefreshCatalog={() => {}}
         onDelete={onDelete}
+        onUpdate={() => {}}
         onLoadHistory={async () => []}
       />,
     );
@@ -30,7 +35,7 @@ describe("SchedulePanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "刷新日程" }));
     expect(onRefresh).toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "删除日程 Reminder" }));
-    expect(onDelete).toHaveBeenCalledWith("sch-1");
+    expect(onDelete).toHaveBeenCalledWith("sch-1", "s1");
   });
 
   it("prompts to select a session when idle", () => {
@@ -38,10 +43,15 @@ describe("SchedulePanel", () => {
       <SchedulePanel
         sessionId={null}
         schedules={[]}
+        catalog={[]}
         loading={false}
+        catalogLoading={false}
         error={null}
+        catalogError={null}
         onRefresh={() => {}}
+        onRefreshCatalog={() => {}}
         onDelete={() => {}}
+        onUpdate={() => {}}
         onLoadHistory={async () => []}
       />,
     );

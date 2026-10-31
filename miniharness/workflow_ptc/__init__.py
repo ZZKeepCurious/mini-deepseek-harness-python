@@ -171,8 +171,7 @@ class PtcWorkflowRun:
                 cwd=cwd,
                 timeoutMs=None,
                 signal=self._abort_event,
-                # 上游仅在运行时声明 sandboxMode 时传策略；mini 的 Python 运行时不
-                # 声明（显式策略会被它拒绝），故此键只在声明时出现。
+                # 上游仅在运行时声明 sandboxMode 时传策略（ptc-runtime-node 同构）。
                 **({} if runtime.sandbox_mode is None else {"sandboxPolicy": policy}),
             )
             outcome = await runtime.run(runtime.resolve(request))

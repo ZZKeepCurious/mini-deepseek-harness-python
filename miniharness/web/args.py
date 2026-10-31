@@ -168,6 +168,22 @@ _SPECS: dict[str, dict[str, tuple[str, bool]]] = {
         "id": (STR, True),
         "enabled": (BOOL, True),
     },
+    "pluginMarket/listIndexes": {},
+    "pluginMarket/setIndexes": {
+        "urls": (ARR, True),
+    },
+    "pluginMarket/search": {
+        "url": (STR, True),
+        "query": (OBJ, True),
+    },
+    "pluginMarket/readEntryDetail": {
+        "url": (STR, True),
+        "name": (STR, True),
+        "version": (STR, True),
+        "language": (STR, True),
+        "options": (OBJ, False),
+    },
+    "pluginRegistryProbe/fastest": {},
     # fileUploads（packages/client/file-upload）：base64 回退载体；原始字节走
     # `POST /api/session/uploadFileBinary`（无信封，不经本表）。
     "fileUploads/upload": {

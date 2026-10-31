@@ -126,6 +126,7 @@ async def schedule_tool_calls(
     body_fn: Callable | None = None,
     max_parallel: int = DEFAULT_MAX_PARALLEL_TOOL_CALLS,
     agent: Any = None,
+    tool_set: Any = None,
 ) -> tuple[bool, bool]:
     """调度一个 step 的全部工具调用。返回 (concluded, aborted)。
 
@@ -133,18 +134,26 @@ async def schedule_tool_calls(
     body_fn: 可注入的"政策通过后执行体"（默认 pipeline_async_body）。
     agent: 所属 AgentLoop（上游 ToolExecution.agent），透传进 ToolExec 供
     工具按会话 id 栅栏访问后台作业；None = 无 agent 调用方。
+    tool_set: step 级 ResolvedToolSet；有则 dispatch 仅准入集内工具。
     """
+    scope = agent.ctx if agent is not None else None
+
+    def _executable(name: str):
+        if hasattr(tools, "executable"):
+            return tools.executable(name, scope, tool_set)
+        return tools.resolve(name, scope)
+
     planned = list(tool_calls)
     next_ = 0
     concluded = False
     while next_ < len(planned):
         first = planned[next_]
-        tool = tools.resolve(first["name"])
+        tool = _executable(first["name"])
         mode = "parallel" if execution_mode(tool, _parse_args(first["arguments"])) == "parallel" else "exclusive"
         group = planned[next_:] if mode == "parallel" else [first]
         outcome = await _run_group(
             session, ctx, tools, turn, step, group, mode, signal, body_fn, max_parallel,
-            agent=agent,
+            agent=agent, tool_set=tool_set, executable=_executable,
         )
         concluded = concluded or outcome["concluded"]
         next_ += outcome["consumed"]
@@ -160,6 +169,7 @@ async def _run_group(
     session: Session, ctx: Context, tools: Any, turn: int, step: int,
     group: list[dict], mode: str, signal: ToolExec,
     body_fn: Callable | None, max_parallel: int, agent: Any = None,
+    tool_set: Any = None, executable: Callable | None = None,
 ) -> dict:
     slots: list[ToolResult | None] = [None] * len(group)
     slot_execs: list[ToolExec | None] = [None] * len(group)
@@ -172,6 +182,12 @@ async def _run_group(
     scheduler_failure: BaseException | None = None
     in_flight: dict[int, asyncio.Task] = {}
     body_fn = body_fn or pipeline_async_body
+    if executable is None:
+        scope = agent.ctx if agent is not None else None
+        def executable(name: str):
+            if hasattr(tools, "executable"):
+                return tools.executable(name, scope, tool_set)
+            return tools.resolve(name, scope)
 
     async def commit_ready() -> None:
         nonlocal committed, concluded
@@ -194,7 +210,7 @@ async def _run_group(
         call_seqs[index] = append_tool_call(
             session, turn, step, call["id"], call["name"], call["arguments"])
         started += 1
-        tool = tools.resolve(call["name"])
+        tool = executable(call["name"])
         if tool is None:
             # 上游 ToolNotFoundError：code 'UNKNOWN_TOOL'（tools/src/index.ts:494-510）
             slots[index] = ToolResult(ok=False, is_error=True, error=f"未知工具: {call['name']}",

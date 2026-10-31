@@ -69,7 +69,12 @@ from ..session import (
     tool_addition_block,
     tool_removal_block,
 )
-from ..tools import ToolExec, ToolRegistry
+from ..tools import (
+    ToolActivationContext,
+    ToolActivationError,
+    ToolExec,
+    ToolRegistry,
+)
 
 
 def canonical_header(config: dict, *, tools: list | None = None,
@@ -318,6 +323,7 @@ class AgentLoop:
         # 从会话日志读取（上游 buildRequest 的 `session.requestHeader()`），
         # 故冷恢复/新 loop 实例也能正确 diff 工具增删。
         self._header_logged = False
+        self._tool_set = None
         # A5：最近一次 request/header 落打印时的 surface 内容代数
         # （上游 agent.ts requestSurfaceGeneration：构造时播种为当前
         # session.surface.contentGeneration，非 undefined）。读的是
@@ -822,6 +828,13 @@ class AgentLoop:
                     }, this_arg=self._carrier)
                 if self._turn_end is not None and not self.inbox.next_step:
                     break
+        except ToolActivationError as e:
+            failure = {"code": ToolActivationError.code, "message": str(e)}
+            self._turn_end = {"kind": "error", "error": failure}
+            self.ctx.emit("agent/error", {"agent": self, "turn": self._turn,
+                                          "step": self._step, "error": failure},
+                          this_arg=self._carrier)
+            raise
         except LlmFailure as e:
             self._turn_end = {"kind": "error", "error": e.failure}
             self.ctx.emit("agent/error", {"agent": self, "turn": self._turn,
@@ -939,6 +952,9 @@ class AgentLoop:
                 raise recovery_error from error
             raise
         finally:
+            if self._tool_set is not None:
+                self._tool_set.dispose()
+                self._tool_set = None
             self.session.append("step/end", {"turn": self._turn, "step": self._step})
         if self._turn_end is not None and self._turn_end.get("kind") == "max-tokens":
             return {"kind": "max-tokens"}
@@ -979,6 +995,19 @@ class AgentLoop:
         # prepared route：路由决议先于任何模型可见输入提交（上游 prepareRequest
         # 在 step() attempt 循环内、system 投影与 user 批之前）
         config = self._request_config(self._turn, self._step)
+        model_selection = {
+            "provider": config["provider"],
+            "model": config.get("model"),
+            "reasoningEffort": config.get("reasoningEffort"),
+        }
+        if self._tool_set is not None:
+            self._tool_set.dispose()
+        self._tool_set = await self.tools.resolve_activation(
+            ToolActivationContext(
+                agent=self,
+                model_selection=model_selection,
+                signal=self._abort_proxy,
+            ))
 
         # 系统提示词投影（上游 SystemPromptProjection.project）：capable 且
         # 继续系列且文本变 → append 新节点；incapable/断裂/清空 → 规范化
@@ -1416,12 +1445,13 @@ class AgentLoop:
                 tool_calls, self._step_signal,
                 max_parallel=self.max_parallel_tool_calls,
                 agent=self,
+                tool_set=self._tool_set,
             )
             return concluded
         finally:
             self._step_signal = None
 
     def _tool_definitions(self) -> list[dict]:
-        # 模型可见 schema 经注册表白名单投影（对齐上游 registry.schemas()）：
+        # 模型可见 schema 经注册表白名单投影（对齐 upstream schemas(scope, toolSet)）：
         # 仅 name/description/parameters +（存在时）deferLoading 标记透传。
-        return self.tools.schemas(self.ctx)
+        return self.tools.schemas(self.ctx, tool_set=self._tool_set)

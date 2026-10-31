@@ -97,3 +97,8 @@ plugins:
       timeoutMs: 60000
   - id: deepseek-account
     module: miniharness.cli.plugins.deepseek_account
+  - id: plugin-market
+    module: miniharness.cli.plugins.plugin_market
+    config:
+      indexes: []
+      registryProbeEnabled: true

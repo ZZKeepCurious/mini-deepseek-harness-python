@@ -6,6 +6,8 @@ import {
   sortSchedules,
   scheduleDeleteSucceeded,
   parseScheduleHistory,
+  parseScheduleCatalog,
+  scheduleUpdateSucceeded,
 } from "../src/wire/schedule";
 
 describe("schedule wire", () => {
@@ -51,5 +53,25 @@ describe("schedule wire", () => {
     });
     expect(items[0]?.messageId).toBe("m1");
     expect(parseScheduleHistory({ code: "schedule_not_found" })).toEqual([]);
+  });
+
+  it("parses catalog entries", () => {
+    const entries = parseScheduleCatalog([
+      {
+        id: "sch-2",
+        kind: "at",
+        title: "T",
+        prompt: "P",
+        scheduledAt: "2026-09-16T15:00:00.120Z",
+        sessionId: "s9",
+        status: "active",
+      },
+    ]);
+    expect(entries[0]?.sessionId).toBe("s9");
+  });
+
+  it("detects update outcomes", () => {
+    expect(scheduleUpdateSucceeded({ id: "x", updated: true })).toBe(true);
+    expect(scheduleUpdateSucceeded({ id: "x", updated: false, code: "schedule_conflict" })).toBe(false);
   });
 });

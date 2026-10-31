@@ -265,6 +265,78 @@ class PiAiAdapterTest(unittest.TestCase):
         headers = _request_headers(_openai_headers("k"), profile)
         self.assertEqual(headers["Authorization"], "")
 
+    def test_profile_headers_case_insensitive_last_wins(self):
+        from miniharness.llm.pi_ai import _openai_headers, prepare_pi_ai_request_headers
+        profile = resolve_profiles({"deepseek": {
+            "baseURL": "https://mock.example.com",
+            "headers": {
+                "Authorization": "Bearer old-fixture",
+                "authorization": "Bearer new-fixture",
+                "X-Tenant": "old-tenant",
+                "x-tenant": "new-tenant",
+            },
+        }})["deepseek"]
+        headers = prepare_pi_ai_request_headers(
+            _openai_headers("k"), profile,
+            {"provider": "deepseek", "model": "m", "baseURL": profile.base_url},
+            None)
+        self.assertEqual(headers["authorization"], "Bearer new-fixture")
+        self.assertEqual(headers["x-tenant"], "new-tenant")
+
+    def test_request_headers_waterfall_and_attribution(self):
+        from miniharness.core.scope import Context
+        from miniharness.llm import user_agent
+        from miniharness.llm.pi_ai import (
+            _openai_headers,
+            prepare_pi_ai_request_headers,
+            resolve_profiles,
+        )
+
+        ctx = Context(name="pi-ai-headers")
+        self.addCleanup(ctx.dispose)
+        seen = []
+
+        def contributor(request, headers, next_fn):
+            seen.append(dict(request))
+            headers["x-tenant"] = "contributed"
+            headers["USER-AGENT"] = "contributor"
+            return next_fn()
+
+        ctx.on("llm-pi-ai/request-headers", contributor)
+        profile = resolve_profiles({"deepseek": {
+            "baseURL": "https://mock.example.com",
+            "headers": {"X-Company": "static"},
+        }})["deepseek"]
+        headers = prepare_pi_ai_request_headers(
+            _openai_headers("k"), profile,
+            {"provider": "deepseek", "model": "flash", "baseURL": profile.base_url,
+             "sessionId": "sess-1"},
+            ctx)
+        self.assertEqual(seen[0]["sessionId"], "sess-1")
+        self.assertEqual(headers["X-Company"], "static")
+        self.assertEqual(headers["x-tenant"], "contributed")
+        self.assertEqual(headers["user-agent"], user_agent())
+
+    def test_request_headers_waterfall_failure_code(self):
+        from miniharness.core.scope import Context
+        from miniharness.llm.pi_ai import _openai_headers, prepare_pi_ai_request_headers, resolve_profiles
+
+        ctx = Context(name="pi-ai-headers-fail")
+        self.addCleanup(ctx.dispose)
+        ctx.on("llm-pi-ai/request-headers",
+               lambda _request, _headers, _next: (_ for _ in ()).throw(
+                   RuntimeError("fixture header failure")))
+        profile = resolve_profiles({"deepseek": {
+            "baseURL": "https://mock.example.com",
+        }})["deepseek"]
+        with self.assertRaises(LlmFailure) as raised:
+            prepare_pi_ai_request_headers(
+                _openai_headers("k"), profile,
+                {"provider": "deepseek", "model": "m", "baseURL": profile.base_url},
+                ctx)
+        self.assertEqual(raised.exception.code, "REQUEST_HEADERS")
+        self.assertIn("fixture header failure", str(raised.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

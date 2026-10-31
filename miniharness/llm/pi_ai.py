@@ -28,7 +28,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, TypedDict
 
 from ..core.scope import Context
 from .protocol import (
@@ -40,12 +40,22 @@ from .protocol import (
 )
 from .retry_policy import resolve_retry_policy
 
+class PiAiRequestHeaderContext(TypedDict, total=False):
+    provider: str
+    model: str
+    baseURL: str
+    sessionId: str
+    purpose: str
+
+
 __all__ = [
     "DEFAULT_CONTEXT_WINDOW",
     "DEFAULT_INPUT",
     "DEFAULT_MAX_TOKENS",
     "PiAiAdapter",
+    "PiAiRequestHeaderContext",
     "SUPPORTED_PROTOCOLS",
+    "prepare_pi_ai_request_headers",
     "resolve_profiles",
 ]
 
@@ -248,9 +258,11 @@ class PiAiAdapter(LlmAdapter):
 
     def __init__(self, profiles: dict[str, PiAiProviderProfile],
                  credential_resolver: Any = None,
-                 default_provider: str | None = None):
+                 default_provider: str | None = None,
+                 ctx: Context | None = None):
         self.profiles = profiles
         self._credential_resolver = credential_resolver
+        self._ctx = ctx
         if default_provider is not None:
             if default_provider not in profiles:
                 raise ValueError(
@@ -336,10 +348,8 @@ class PiAiAdapter(LlmAdapter):
                      reasoning_effort: str | None = None) -> AsyncIterator[StreamChunk]:
         """按实例路由（provider/model）决议 profile 并走对应协议流。
 
-        session_id/purpose 为协议面参数：上游 pi-ai 把 sessionId 交外部
-        pi-ai SDK 作传输元数据（对 wire 的可断言效果为空，adapter.spec.ts:
-        151-152 只断言不注入 body 字段），purpose 不映射——mini 无该 SDK
-        载体，两者均不落 wire。
+        session_id/purpose 进入 `llm-pi-ai/request-headers` waterfall 上下文
+        （对齐 upstream PiAiRequestHeaderContext）；不落 HTTP body。
         """
         import asyncio
 
@@ -350,18 +360,30 @@ class PiAiAdapter(LlmAdapter):
             raise LlmFailure("NO_ADAPTER",
                              f"pi-ai adapter does not own provider {provider!r}")
         api_key = self.resolve_api_key(profile)
+        header_context: PiAiRequestHeaderContext = {
+            "provider": provider,
+            "model": model,
+            "baseURL": profile.base_url,
+        }
+        if session_id is not None:
+            header_context["sessionId"] = str(session_id)
+        if purpose is not None:
+            header_context["purpose"] = purpose
         if profile.api == "anthropic-messages":
             url = _join_url(profile.base_url, "/v1/messages")
             body = _build_anthropic_body(profile, model, messages, tools)
-            headers = _request_headers(_anthropic_headers(api_key), profile)
+            headers = prepare_pi_ai_request_headers(
+                _anthropic_headers(api_key), profile, header_context, self._ctx)
         elif profile.api == "openai-completions":
             url = _join_url(profile.base_url, "/v1/chat/completions")
             body = _build_openai_body(profile, model, messages, tools)
-            headers = _request_headers(_openai_headers(api_key), profile)
+            headers = prepare_pi_ai_request_headers(
+                _openai_headers(api_key), profile, header_context, self._ctx)
         else:
             url = _join_url(profile.base_url, "/v1/responses")
             body = _build_openai_responses_body(profile, model, messages, tools)
-            headers = _request_headers(_openai_headers(api_key), profile)
+            headers = prepare_pi_ai_request_headers(
+                _openai_headers(api_key), profile, header_context, self._ctx)
 
         # httpx 异步传输：asyncio.ensure_future 在调用方循环内驱动，chunk 经
         # asyncio 队列桥回。
@@ -411,8 +433,9 @@ class PiAiAdapter(LlmAdapter):
     @classmethod
     def from_providers(cls, providers: Any,
                        credential_resolver: Any = None,
-                       default_provider: str | None = None) -> "PiAiAdapter":
-        return cls(resolve_profiles(providers), credential_resolver, default_provider)
+                       default_provider: str | None = None,
+                       ctx: Context | None = None) -> "PiAiAdapter":
+        return cls(resolve_profiles(providers), credential_resolver, default_provider, ctx)
 
 
 def _join_url(base: str, path: str) -> str:
@@ -434,15 +457,72 @@ def _anthropic_headers(api_key: str | None) -> dict:
     return headers
 
 
+def _request_header_diagnostic(error: BaseException) -> str:
+    if isinstance(error, TypeError):
+        return ("TypeError during header preparation; check the contributing "
+                "plugin's header names, values, and configuration")
+    if isinstance(error, Exception):
+        return str(error)
+    return ("the contributing plugin threw a non-Error value; throw an Error "
+            "with a safe diagnostic")
+
+
+def _set_header_case_insensitive(headers: dict, name: str, value: str) -> None:
+    lower = name.lower()
+    for existing in list(headers.keys()):
+        if existing.lower() == lower:
+            del headers[existing]
+    headers[name] = value
+
+
+def _profile_headers_dict(profile: PiAiProviderProfile) -> dict:
+    configured: dict[str, str] = {}
+    for name, value in profile.headers:
+        _set_header_case_insensitive(configured, name, value)
+    return configured
+
+
+def _run_request_header_waterfall(ctx: Context, request: dict, headers: dict) -> dict:
+    listeners = ctx._hooks_for("llm-pi-ai/request-headers", None)
+    idx = 0
+
+    def step() -> dict:
+        nonlocal idx
+        if idx >= len(listeners):
+            return headers
+        fn = listeners[idx]
+        idx += 1
+        return fn(request, headers, step)
+
+    return step()
+
+
+def prepare_pi_ai_request_headers(base: dict, profile: PiAiProviderProfile,
+                                  request: PiAiRequestHeaderContext,
+                                  ctx: Context | None) -> dict:
+    """准备 pi-ai HTTP 头：profile 头 → waterfall → Harness 归因（adapter.ts requestHeaders）。"""
+    try:
+        merged = dict(base)
+        for name, value in _profile_headers_dict(profile).items():
+            _set_header_case_insensitive(merged, name, value)
+        frozen_request = dict(request)
+        if ctx is not None:
+            merged = _run_request_header_waterfall(ctx, frozen_request, merged)
+        for name, value in attribution_headers().items():
+            _set_header_case_insensitive(merged, name, value)
+        return merged
+    except Exception as error:
+        provider = request.get("provider", "?")
+        raise LlmFailure(
+            "REQUEST_HEADERS",
+            f'pi-ai request header preparation failed for provider "{provider}": '
+            f"{_request_header_diagnostic(error)}") from error
+
+
 def _request_headers(base: dict, profile: PiAiProviderProfile) -> dict:
-    """合并 deployment 头，归因名按大小写不敏感 reserved 胜（adapter.ts:204-212）。"""
-    attribution = attribution_headers()
-    reserved = {name.lower() for name in attribution}
-    merged = dict(base)
-    merged.update((name, value) for name, value in profile.headers
-                  if name.lower() not in reserved)
-    merged.update(attribution)
-    return merged
+    """无 waterfall 上下文时的合并（测试与旧调用点）。"""
+    return prepare_pi_ai_request_headers(
+        base, profile, {"provider": "", "model": "", "baseURL": profile.base_url}, None)
 
 
 def _build_anthropic_body(profile, model, messages, tools) -> dict:
@@ -615,10 +695,10 @@ def _http_error_chunk(status: int, text: str) -> StreamChunk:
 
 def install_pi_ai(ctx: Context, providers: Any, default_provider: str | None = None,
                   credential_resolver: Any = None) -> PiAiAdapter:
-    """装配一个 `ctx.get('llm')` 可用的 PiAiAdapter（幂等语义由调用方选择）。
+    """装配 PiAiAdapter；`ctx` 供 `llm-pi-ai/request-headers` waterfall 使用。
 
     @returns 按 providers 决议的适配器实例（不登记到 ctx 服务——mini 无
     llm 注册表；调用方直接持有传给 agent-loop）。
     """
     return PiAiAdapter.from_providers(providers, credential_resolver,
-                                      default_provider)
+                                      default_provider, ctx=ctx)

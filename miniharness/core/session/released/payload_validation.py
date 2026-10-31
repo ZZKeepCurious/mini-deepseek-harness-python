@@ -424,6 +424,14 @@ def message_source_value(value: Any, label: str, version: int,
         # `'working-directory': { kind: 'working-directory' }`，0.2.1 新增）。
         exact_keys(source, ("kind",), (), label)
         return
+    if kind == "action-cards":
+        exact_keys(source, ("kind", "through", "form", "summary"), (), label)
+        through = source.get("through")
+        if not isinstance(through, int) or isinstance(through, bool) or through < 0:
+            fail(f"{label} through must be a non-negative integer")
+        literal_value(source.get("form"), ["notice"], f"{label} form")
+        non_empty_string(source.get("summary"), f"{label} summary")
+        return
     non_empty_string(kind, f"{label} kind")
 
 

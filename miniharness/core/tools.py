@@ -171,6 +171,64 @@ class Tool:
     finalize_content: Callable[[ToolExec, dict], Any] | None = None  # 结算前内容收口（上游 finalizeContent）
     defer_loading: bool = False                         # schema 延迟加载标记（上游 ToolSchema.deferLoading）；
                                                         # mini 运行期不产出，仅随注册表 schema / 装配透传
+    when: Callable[["ToolActivationContext"], bool | Any] | None = None
+    # step 级激活条件（上游 ToolRegistrationOptions.when）；False 则本 step
+    # 不出现在 request/header 与 dispatch；抛错 → ToolActivationError。
+
+
+@dataclass(frozen=True)
+class ToolActivationContext:
+    """step 工具激活条件入参（对齐 upstream ToolActivationContext）。"""
+    agent: Any
+    model_selection: dict[str, Any]
+    signal: Any
+
+
+class ToolActivationError(Exception):
+    """条件求值失败（对齐 upstream ToolActivationError / TOOL_ACTIVATION_FAILED）。"""
+
+    code = "TOOL_ACTIVATION_FAILED"
+
+    def __init__(self, name: str, cause: BaseException):
+        self.tool_name = name
+        self.cause = cause
+        super().__init__(f'cannot resolve availability of tool "{name}"')
+
+
+class ResolvedToolSet:
+    """单 step 已准入工具集（对齐 upstream ResolvedToolSet）。"""
+
+    def __init__(
+        self,
+        registry: "ToolRegistry",
+        agent: Any,
+        admitted: dict[str, Tool],
+        snapshot_visible: dict[str, Tool],
+    ):
+        self._registry = registry
+        self._agent = agent
+        self._admitted = dict(admitted)
+        self._snapshot_visible = dict(snapshot_visible)
+        self._closed = False
+
+    def dispose(self) -> None:
+        self._closed = True
+
+    def view(self, scope: Context | None) -> dict[str, Tool]:
+        if self._closed:
+            return {}
+        agent_ctx = getattr(self._agent, "ctx", None)
+        if scope is not None and agent_ctx is not None and scope is not agent_ctx:
+            if scope_of(scope) != scope_of(agent_ctx):
+                return {}
+        out: dict[str, Tool] = {}
+        for name, tool in self._admitted.items():
+            if self._snapshot_visible.get(name) is not tool:
+                continue
+            if self._registry.resolve(name, agent_ctx) is not tool:
+                continue
+            out[name] = tool
+        return out
 
 
 @dataclass(frozen=True)
@@ -250,6 +308,53 @@ class ToolRegistry:
                 return tool
         return self._layers.global_layer.get(name)
 
+    def executable(
+        self,
+        name: str,
+        scope: Context | None = None,
+        tool_set: ResolvedToolSet | None = None,
+    ) -> Tool | None:
+        """可执行定义：有 step 准入集时仅准入集内；否则带 when 的条件注册不可用。"""
+        if tool_set is not None:
+            return tool_set.view(scope).get(name)
+        tool = self.resolve(name, scope)
+        if tool is not None and tool.when is not None:
+            return None
+        return tool
+
+    async def resolve_activation(self, context: ToolActivationContext) -> ResolvedToolSet:
+        """逐步解析 when 条件（对齐 upstream ToolsService.resolve）。"""
+        signal = context.signal
+        if getattr(signal, "aborted", False):
+            raise asyncio.CancelledError()
+        agent_ctx = context.agent.ctx
+        visible: dict[str, Tool] = {}
+        for name in self.names(agent_ctx):
+            tool = self.resolve(name, agent_ctx)
+            if tool is not None:
+                visible[name] = tool
+        admitted: dict[str, Tool] = {}
+        for name, tool in visible.items():
+            when = tool.when
+            if when is None:
+                admitted[name] = tool
+                continue
+            try:
+                enabled = when(context)
+                if inspect.isawaitable(enabled):
+                    enabled = await enabled
+            except BaseException as cause:
+                if getattr(signal, "aborted", False):
+                    raise asyncio.CancelledError() from cause
+                if not isinstance(cause, BaseException):
+                    cause = RuntimeError(cause)
+                raise ToolActivationError(name, cause) from cause
+            if getattr(signal, "aborted", False):
+                raise asyncio.CancelledError()
+            if enabled:
+                admitted[name] = tool
+        return ResolvedToolSet(self, context.agent, admitted, visible)
+
     def names(self, scope: Context | None = None) -> list[str]:
         merged = self._layers.merge(self._lookup_key(scope), lambda layer: layer)
         return sorted(merged)
@@ -270,8 +375,15 @@ class ToolRegistry:
             schema["deferLoading"] = True
         return schema
 
-    def schemas(self, scope: Context | None = None) -> list[dict]:
+    def schemas(
+        self,
+        scope: Context | None = None,
+        tool_set: ResolvedToolSet | None = None,
+    ) -> list[dict]:
         """按可见性投影全部工具的模型可见 schema（对齐上游 schemas(scope)）。"""
+        if tool_set is not None:
+            visible = tool_set.view(scope)
+            return [self.schema_of(visible[n]) for n in sorted(visible)]
         out = []
         for name in self.names(scope):
             tool = self.resolve(name, scope)
