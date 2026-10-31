@@ -413,6 +413,24 @@ class DeepSeekAdapter(LlmAdapter):
             raise
         return [catalog_model_info(self.provider, model) for model in self._models]
 
+    def configurable_providers(self) -> list:
+        """适配器声明的可配置 provider 目录（`llm/listConfigurableProviders`）。"""
+        rows = [{
+            "provider": "deepseek-official",
+            "displayName": "DeepSeek",
+            "settingsNs": "credentials",
+            "settingsPath": [],
+            "nativeAuth": {"env": ["DEEPSEEK_API_KEY"], "oauth": False},
+        }]
+        if self._account_route is not None:
+            rows.append({
+                "provider": "deepseek-account",
+                "displayName": "DeepSeek 账户",
+                "settingsNs": "deepseek-account",
+                "settingsPath": [],
+            })
+        return rows
+
     async def stream(self, messages, tools, signal=None,
                      session_id=None, purpose=None, reasoning_effort=None):
         """async 迭代器（对齐上游 async stream）：httpx 异步传输 + Messages SSE。

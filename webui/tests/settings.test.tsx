@@ -288,7 +288,12 @@ describe("SettingsDialog shell", () => {
     const nav = screen.getAllByRole("button").filter((button) =>
       ["常规", "内置插件", "模型", "Agent 预设"].includes(button.textContent ?? ""),
     );
-    expect(nav.map((button) => button.textContent)).toEqual(["常规", "内置插件"]);
+    expect(nav.map((button) => button.textContent)).toEqual([
+      "常规",
+      "模型",
+      "Agent 预设",
+      "内置插件",
+    ]);
     expect(screen.getByText("当前版本：0.1.0")).toBeTruthy();
     expect(screen.getByRole("button", { name: "打开配置文件" })).toBeTruthy();
 

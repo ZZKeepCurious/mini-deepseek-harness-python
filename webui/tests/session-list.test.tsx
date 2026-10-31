@@ -68,4 +68,11 @@ describe("SessionList", () => {
     fireEvent.click(screen.getByRole("button", { name: "重试新建" }));
     expect(onCreate).toHaveBeenCalledTimes(1);
   });
+
+  it("offers directory browse when wired", () => {
+    const onBrowseDirectory = vi.fn();
+    renderList({ onBrowseDirectory });
+    fireEvent.click(screen.getByRole("button", { name: "浏览目录" }));
+    expect(onBrowseDirectory).toHaveBeenCalledTimes(1);
+  });
 });

@@ -19,7 +19,9 @@ class FakeLlmAdapter(LlmAdapter):
     provider = "fake"
 
     def __init__(self, tool_call: dict | None = None, final_text: str = "任务完成。",
-                 image: dict | None = None, reasoning_effort: str | None = None):
+                 image: dict | None = None, reasoning_effort: str | None = None,
+                 model: str = "fake-model"):
+        self.model = model
         self._tool = tool_call
         self._text = final_text
         # 教学扩展：附带的 image 块（{attachment: ImageAttachmentRef 形状}），
@@ -38,6 +40,22 @@ class FakeLlmAdapter(LlmAdapter):
             "model": self.model,
             "input_modalities": ["text", "image"],
         }
+
+    def available_models(self) -> list:
+        model = self.model
+        if not isinstance(model, str) or model == "":
+            return []
+        return [{"provider": self.provider, "model": model, "name": model,
+                 "input_modalities": ["text", "image"]}]
+
+    def configurable_providers(self) -> list:
+        return [{
+            "provider": self.provider,
+            "displayName": "Fake LLM",
+            "settingsNs": "credentials",
+            "settingsPath": [],
+            "nativeAuth": {"env": ["FAKE_LLM_API_KEY"], "oauth": False},
+        }]
 
     @property
     def reasoning_effort(self) -> str | None:

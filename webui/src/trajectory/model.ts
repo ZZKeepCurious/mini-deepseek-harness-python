@@ -48,6 +48,15 @@ export interface MessageRow {
   height: number;
 }
 
+export interface WebhookNoticeRow {
+  kind: "webhook-notice";
+  key: string;
+  turn: number;
+  seq: number;
+  summary: string;
+  height: number;
+}
+
 export interface ToolRow {
   kind: "tool";
   key: string;
@@ -109,7 +118,14 @@ export interface CommandRow {
   height: number;
 }
 
-export type TrajectoryRow = TurnRow | MessageRow | ToolRow | SummaryRow | NoticeRow | CommandRow;
+export type TrajectoryRow =
+  | TurnRow
+  | MessageRow
+  | WebhookNoticeRow
+  | ToolRow
+  | SummaryRow
+  | NoticeRow
+  | CommandRow;
 
 export interface RowWindow {
   start: number;
@@ -319,6 +335,22 @@ export function groupRows(events: readonly EventEnvelope[]): TrajectoryRow[] {
     }
     const msg = messageOf(ev);
     if (msg) {
+      const source = asRecord((msg as MessageLike & { source?: unknown }).source);
+      if (source?.kind === "webhook" && source.form === "notice") {
+        const summary =
+          typeof source.summary === "string" && source.summary !== ""
+            ? source.summary
+            : "GitHub event received";
+        rows.push({
+          kind: "webhook-notice",
+          key: `webhook:${ev.seq}`,
+          turn,
+          seq: ev.seq,
+          summary,
+          height: H_NOTICE,
+        });
+        continue;
+      }
       const blocks = blocksOf(msg.content);
       const text = messageText(msg.content);
       const messageId = typeof msg.id === "string" && msg.id !== "" ? msg.id : undefined;

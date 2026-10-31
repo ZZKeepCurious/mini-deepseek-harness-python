@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import type { EventEnvelope } from "../wire";
 import { groupRows } from "../trajectory/model";
 import { MarkdownText } from "./MarkdownText";
+import { ReasoningRow } from "./ReasoningRow";
 import { ToolCallView } from "./tools/ToolCallView";
 import { TurnNotice } from "./TurnNotice";
 import { CommandCard } from "./CommandCard";
@@ -58,6 +59,15 @@ export function ChatView({
               <TurnNotice key={row.key} notice={row.notice} failure={row.failure} />
             );
           }
+          if (row.kind === "webhook-notice") {
+            return (
+              <div className="chat-webhook-notice" key={row.key}>
+                <button type="button" className="btn small ghost" disabled>
+                  {row.summary}
+                </button>
+              </div>
+            );
+          }
           if (row.kind === "command") {
             return (
               <div className="chat-command" key={row.key}>
@@ -92,11 +102,11 @@ export function ChatView({
               <div className="chat-content">
                 {row.blocks.map((block, index) =>
                   row.role === "assistant" ? (
-                    <MarkdownText
-                      key={index}
-                      text={block.text}
-                      variant={block.type === "reasoning" ? "compact" : "body"}
-                    />
+                    block.type === "reasoning" ? (
+                      <ReasoningRow key={index} text={block.text} />
+                    ) : (
+                      <MarkdownText key={index} text={block.text} variant="body" />
+                    )
                   ) : (
                     <div key={index} className="chat-user-text">{block.text}</div>
                   ),

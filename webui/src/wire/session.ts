@@ -6,6 +6,45 @@
 
 import { rpc } from "./rpc";
 
+export interface ModelSelection {
+  provider: string;
+  model: string;
+  reasoningEffort?: string;
+}
+
+export interface ModelCatalogGroup {
+  id: string;
+  name: string;
+  models: Array<{ id: string; name: string }>;
+}
+
+export interface ModelCatalog {
+  default: ModelSelection;
+  routableProviders: string[];
+  groups: ModelCatalogGroup[];
+  failures: unknown[];
+}
+
+/** Deployment model directory and current default selection. */
+export async function fetchModelCatalog(): Promise<ModelCatalog> {
+  return rpc<ModelCatalog>("session/modelCatalog", {});
+}
+
+/** Install a session-scoped model choice (also persists deployment default when configured). */
+export async function selectSessionModel(
+  sessionId: string,
+  provider: string,
+  model: string,
+  reasoningEffort?: string,
+): Promise<{ selected: ModelSelection }> {
+  return rpc("session/selectModel", {
+    sessionId,
+    provider,
+    model,
+    ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+  });
+}
+
 /** Persist the default account model after a completed sign-in. */
 export async function initializeDefaultModel(): Promise<void> {
   await rpc("session/initializeDefaultModel", {});

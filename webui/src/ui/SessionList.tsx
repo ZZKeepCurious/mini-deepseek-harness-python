@@ -18,6 +18,7 @@ interface Props {
   createError?: string | null;
   onSelect: (id: string) => void;
   onCreate: (cwd?: string) => void;
+  onBrowseDirectory?: () => void;
   onFork?: (id: string) => void;
   onArchive?: (id: string) => void;
   onUnarchive?: (id: string) => void;
@@ -36,6 +37,7 @@ export function SessionList({
   createError,
   onSelect,
   onCreate,
+  onBrowseDirectory,
   onFork,
   onArchive,
   onUnarchive,
@@ -141,6 +143,16 @@ export function SessionList({
         <button className="btn small" disabled={creating} onClick={() => onCreate(undefined)}>
           新建
         </button>
+        {onBrowseDirectory !== undefined && (
+          <button
+            type="button"
+            className="btn small ghost"
+            disabled={creating}
+            onClick={onBrowseDirectory}
+          >
+            浏览目录
+          </button>
+        )}
       </div>
       <div className="panel-body">
         {createError ? (

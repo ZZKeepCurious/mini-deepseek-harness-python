@@ -23,7 +23,10 @@ xterm 终端（多 tab、shell 选择、重命名/关闭、写与尺寸 ack、�
 账号与余额设置分节：档案/充值余额/赠金余额/用量与充值链接；`account/watch` 投影流驱动）、
 对话终止提示（输出 token 上限 / 失败代码 / 登录失效中断）与帧级额度提示（仅实时追加触发，
 登录后给充值入口）、审批瀑布、计划芯片（窄视口 `/plan off`）与目标栏（`goals/get` + 暂停/恢复/编辑/清除）、计划审查（`user-questions/request` 收窄后批准 / 讨论修改）、通用提问卡（分页/单选/多选/自定义/跳过、timed 倒计时 / 慢慢回答 / hide 座 / 超时后 RPC 作答）与 `/goal` 命令结果卡、队列编辑/插话/删除与作业面板
-（rc.1 数据源：队列 = `session/control` 投影帧折叠出的 `inbox` 投影、作业 = `job/list` roster 流）。
+（rc.1 数据源：队列 = `session/control` 投影帧折叠出的 `inbox` 投影、作业 = `job/list` roster 流）、
+模型选择与设置「模型」分节（`session/modelCatalog` / `ModelSelect` / `llm/discoverModels` / 凭据掩码）、
+Agent 预设目录（`agentPresets/list|read`）、目录浏览新建会话（`directoryPicker/*`）、
+webhook 会话 notice 芯片、Open In…（catalog 非空时）、品牌槽（`BrandSlot`）。
 
 ## 环境要求
 

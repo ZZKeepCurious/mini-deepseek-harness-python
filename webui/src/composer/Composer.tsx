@@ -9,6 +9,8 @@ import type {
 } from "../wire/composer";
 import type { PermissionCatalog, PermissionSelection } from "../wire";
 import type { PlanSelection } from "../wire/plan";
+import type { ModelCatalog, ModelSelection } from "../wire/session";
+import { ModelSelect } from "./ModelSelect";
 import {
   detectPermissionArguments,
   detectTrigger,
@@ -39,6 +41,9 @@ interface Props {
   plan?: PlanSelection | null;
   /** Turn plan mode off (`/plan off`). Return a failure string to show on the chip. */
   onExitPlan?: () => Promise<string | null>;
+  modelCatalog?: ModelCatalog | null;
+  modelSelection?: ModelSelection | null;
+  onSelectModel?: (provider: string, model: string) => Promise<string | null>;
 }
 
 interface Selection {
@@ -119,6 +124,9 @@ export function Composer({
   permissionCatalog = null,
   plan = null,
   onExitPlan,
+  modelCatalog = null,
+  modelSelection = null,
+  onSelectModel,
 }: Props) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -620,6 +628,14 @@ export function Composer({
           style={{ maxHeight: "calc(14 * 1.5em + 20px)", overflowY: "auto" }}
         />
         <div className="composer-toolbar">
+          {onSelectModel !== undefined && (
+            <ModelSelect
+              catalog={modelCatalog}
+              selection={modelSelection}
+              locked={disabled}
+              onSelect={onSelectModel}
+            />
+          )}
           <PermissionSelect
             selection={permission}
             catalog={permissionCatalog}

@@ -60,6 +60,13 @@ from .stream_protocol import (
 )
 from .streams import GatewayStreams, RemoteStreamError
 from .upload import UPLOAD_FILE_BINARY_PATH, handle_file_upload_http
+from .open_in_app import (
+    OPEN_IN_APP_APPS_PATH,
+    OPEN_IN_APP_OPEN_PATH,
+    handle_open_in_app_apps,
+    handle_open_in_app_open,
+)
+from .github_webhook import create_github_webhook_handler
 
 __all__ = ["create_app"]
 
@@ -126,6 +133,19 @@ def create_app(api: WebApi, gateway: GatewayStreams,
     async def media_file(request: Request) -> Response:
         """Authenticated bounded file display: GET/HEAD `/api/file?path=`."""
         return await handle_file_request(api, request)
+
+    @app.api_route(OPEN_IN_APP_APPS_PATH, methods=["GET", "HEAD"])
+    async def open_in_app_apps(request: Request) -> Response:
+        return handle_open_in_app_apps(request)
+
+    @app.api_route(OPEN_IN_APP_OPEN_PATH, methods=["POST"])
+    async def open_in_app_open(request: Request) -> Response:
+        return await handle_open_in_app_open(request)
+
+    for route_config in getattr(api, "_github_webhook_routes", ()) or ():
+        path = route_config["path"]
+        handler = create_github_webhook_handler(api, route_config)
+        app.add_api_route(path, handler, methods=["POST"])
 
     @app.get("/oauth/callback")
     async def account_oauth_callback(request: Request) -> Response:

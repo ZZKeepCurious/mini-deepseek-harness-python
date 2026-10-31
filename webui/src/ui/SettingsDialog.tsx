@@ -7,9 +7,12 @@ import type { KeyboardEvent, ReactNode } from "react";
 import type { UseSettings } from "../app/useSettings";
 import type { UiPreferences } from "../app/uiPreferences";
 import { SettingsGeneral } from "./SettingsGeneral";
+import { SettingsModels } from "./SettingsModels";
+import { SettingsAgentPresets } from "./SettingsAgentPresets";
 import { SettingsNamespaceForm } from "./SettingsNamespaceForm";
+import type { UseModelCatalog } from "../app/useModelCatalog";
 
-export type SettingsSection = "account" | "general" | "plugins";
+export type SettingsSection = "account" | "general" | "models" | "presets" | "plugins";
 
 export interface SettingsDialogProps {
   open: boolean;
@@ -22,11 +25,14 @@ export interface SettingsDialogProps {
   accountSection?: ReactNode;
   /** Section the next open starts on; the general section when absent. */
   initialSection?: SettingsSection;
+  modelCatalog?: UseModelCatalog;
 }
 
 const SECTIONS: { id: SettingsSection; label: string }[] = [
   { id: "account", label: "账号与余额" },
   { id: "general", label: "常规" },
+  { id: "models", label: "模型" },
+  { id: "presets", label: "Agent 预设" },
   { id: "plugins", label: "内置插件" },
 ];
 
@@ -39,6 +45,7 @@ export function SettingsDialog({
   version,
   accountSection,
   initialSection,
+  modelCatalog,
 }: SettingsDialogProps) {
   const [section, setSection] = useState<SettingsSection>(initialSection ?? "general");
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -150,6 +157,12 @@ export function SettingsDialog({
                 version={version}
               />
             )}
+
+            {section === "models" && modelCatalog !== undefined && (
+              <SettingsModels models={modelCatalog} />
+            )}
+
+            {section === "presets" && <SettingsAgentPresets />}
 
             {section === "plugins" && (
               <div className="settings-section">

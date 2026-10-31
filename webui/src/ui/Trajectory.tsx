@@ -23,6 +23,7 @@ import type { TrajectoryRow } from "../trajectory/model";
 import { TrajectorySearchIndex } from "../trajectory/search";
 import { Highlight } from "./Highlight";
 import { MarkdownText } from "./MarkdownText";
+import { ReasoningRow } from "./ReasoningRow";
 import { ToolCallView } from "./tools/ToolCallView";
 import { TurnNotice } from "./TurnNotice";
 import { CommandCard } from "./CommandCard";
@@ -211,6 +212,15 @@ function RowView({
       </div>
     );
   }
+  if (row.kind === "webhook-notice") {
+    return (
+      <div className={`vrow webhook-notice${matched ? " hit" : ""}`}>
+        <button type="button" className="btn small ghost" disabled>
+          {row.summary}
+        </button>
+      </div>
+    );
+  }
   if (row.kind === "message") {
     return (
       <div className={`vrow msg ${row.role === "user" ? "user" : "assistant"}${matched ? " hit" : ""}`}>
@@ -218,11 +228,11 @@ function RowView({
         {row.blocks.map((blk, i) => (
           <div key={i} className={blk.type === "reasoning" ? "block reasoning" : "block"}>
             {row.role === "assistant" ? (
-              <MarkdownText
-                text={blk.text}
-                variant={blk.type === "reasoning" ? "compact" : "body"}
-                highlightTerms={terms}
-              />
+              blk.type === "reasoning" ? (
+                <ReasoningRow text={blk.text} matched={matched} highlightTerms={terms} />
+              ) : (
+                <MarkdownText text={blk.text} variant="body" highlightTerms={terms} />
+              )
             ) : (
               <Highlight text={blk.text} terms={terms} />
             )}

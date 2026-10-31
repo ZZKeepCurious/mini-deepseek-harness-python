@@ -397,6 +397,9 @@ class WebApi:
         self.gateway = GatewayStreams(self)
         self.approvals = self.gateway.approvals
         self.questions = self.gateway.questions
+        runtime = ctx.get("webhookRuntime")
+        if runtime is not None:
+            runtime.bind_api(self)
 
     # ---------- 路由 ----------
 
@@ -1481,6 +1484,71 @@ class WebApi:
         self._attach(session)
         return self._create_result(session.session_id, self._preset_of(session))
 
+    def create_webhook_session(self, delivery: dict, rule_id: str, request: dict) -> None:
+        """webhook 规则命中后建会话并 queue 提示（fire-and-forget 线程 → 常驻循环）。"""
+
+        async def work() -> None:
+            self._create_webhook_session_on_resident(delivery, rule_id, request)
+
+        run_on_resident(work())
+
+    def _create_webhook_session_on_resident(
+            self, delivery: dict, rule_id: str, request: dict) -> None:
+        workspace_path = request.get("workspacePath")
+        agent_preset = request.get("agentPreset")
+        permission_preset = request.get("permissionPreset")
+        title = request.get("title")
+        prompt = request.get("prompt")
+        if not isinstance(workspace_path, str) or workspace_path == "":
+            raise ValueError("webhook session request requires workspacePath")
+        if not isinstance(agent_preset, str) or agent_preset == "":
+            raise ValueError("webhook session request requires agentPreset")
+        if not isinstance(prompt, str) or prompt.strip() == "":
+            raise ValueError("webhook session request requires non-empty prompt")
+        if not os.path.isabs(workspace_path):
+            raise ValueError("webhook session workspacePath must be absolute")
+        try:
+            os.makedirs(workspace_path, exist_ok=True)
+        except OSError as error:
+            raise RuntimeError(
+                f'failed to ensure project directory "{workspace_path}": {error}') from error
+        session_id = f"session-{uuid.uuid4()}"
+        meta: dict[str, Any] = {"cwd": workspace_path, "agentPreset": agent_preset}
+        if isinstance(permission_preset, str) and permission_preset != "":
+            meta["permissionPreset"] = permission_preset
+        if isinstance(title, str) and title != "":
+            meta["title"] = title
+        meta["webhook"] = {
+            "ruleId": rule_id,
+            "deliveryId": delivery.get("deliveryId"),
+            "source": delivery.get("source"),
+            "kind": delivery.get("kind"),
+        }
+        session = self.store.prepare(session_id, {"meta": meta})
+        loop = self._attach(session)
+        presets = self.ctx.get("permissionPresets")
+        if presets is not None and isinstance(permission_preset, str) and permission_preset != "":
+            apply = getattr(presets, "set", None)
+            if callable(apply):
+                apply({"sessionId": session_id, "preset": permission_preset})
+        summary = title if isinstance(title, str) and title != "" else "GitHub event received"
+        notice = create_message(
+            "user",
+            [text_block("")],
+            {
+                "kind": "webhook",
+                "provider": delivery.get("kind") or "github",
+                "source": delivery.get("source"),
+                "deliveryId": delivery.get("deliveryId"),
+                "ruleId": rule_id,
+                "form": "notice",
+                "summary": summary,
+            },
+        )
+        prompt_message = create_message("user", [text_block(prompt)], {"kind": "user"})
+        loop.inject(notice)
+        loop.followup(prompt_message)
+
     @staticmethod
     def _create_result(session_id: str, agent_preset: str | None) -> dict:
         result: dict[str, Any] = {"sessionId": session_id}
@@ -1494,14 +1562,51 @@ class WebApi:
 
     # ---------- session.selectModel / modelCatalog ----------
 
-    def _model_available(self, provider: Any, model: Any) -> bool:
-        """模型可用性门（上游 catalog.ts modelAvailable）。
+    def _models_for_route(self, route: str) -> list[dict]:
+        """一个 provider 路由下的目录模型（对齐 catalog.ts group.models）。"""
+        available = getattr(self.adapter, "available_models", None)
+        if available is not None:
+            rows = self._remote_call(available)
+            if not isinstance(rows, list):
+                return []
+            models: list[dict] = []
+            for info in rows:
+                if not isinstance(info, dict):
+                    continue
+                prov = info.get("provider", route)
+                if prov != route:
+                    continue
+                model_id = info.get("model")
+                if not isinstance(model_id, str) or model_id == "":
+                    continue
+                row = {"id": model_id, "name": info.get("name") or model_id}
+                models.append(row)
+            return models
+        info = self.adapter.resolve_model_info()
+        if info.get("provider") != route:
+            return []
+        model_id = info.get("model")
+        if not isinstance(model_id, str) or model_id == "":
+            return []
+        return [{"id": model_id, "name": model_id}]
 
-        部署的单适配器路由 = 当前 resolve_model_info 报出的 provider/model。
-        未列出的 provider/model → False → 调用方折 `session/model-unavailable`。
-        """
-        selection = self._selection()
-        return selection["provider"] == provider and selection["model"] == model
+    def _model_groups(self) -> list[dict]:
+        groups: list[dict] = []
+        for route in self._llm_routes():
+            models = self._models_for_route(route)
+            if models:
+                groups.append({"id": route, "name": route, "models": models})
+        return groups
+
+    def _model_available(self, provider: Any, model: Any) -> bool:
+        """模型可用性门（上游 catalog.ts modelAvailable）。"""
+        if not isinstance(provider, str) or not isinstance(model, str):
+            return False
+        for group in self._model_groups():
+            if group["id"] != provider:
+                continue
+            return any(entry["id"] == model for entry in group["models"])
+        return False
 
     def select_model(self, payload: dict) -> dict:
         """`session/selectModel`：安装会话级模型选择（上游 commands.ts selectModel）。
@@ -1544,15 +1649,8 @@ class WebApi:
         """`session/modelCatalog`：可路由 provider 由「有 ≥1 目录模型」派生
         （上游 catalog.ts buildModelCatalog：groups 过滤 models.length > 0，
         routableProviders = groups.map(id)）。"""
-        selection = self._selection()
-        provider = selection["provider"]
-        model = selection["model"]
-        groups: list[dict] = []
-        if model:
-            groups.append({"id": provider, "name": provider,
-                           "models": [{"id": model, "name": model}]})
-        groups = [group for group in groups if group["models"]]
-        return {"default": selection,
+        groups = self._model_groups()
+        return {"default": self._selection(),
                 "routableProviders": [group["id"] for group in groups],
                 "groups": groups, "failures": []}
 

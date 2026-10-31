@@ -52,6 +52,10 @@ import { RightDock } from "../ui/RightDock";
 import { SettingsDialog } from "../ui/SettingsDialog";
 import type { SettingsSection } from "../ui/SettingsDialog";
 import { Composer } from "../composer/Composer";
+import { useModelCatalog } from "./useModelCatalog";
+import { BrandSlot } from "../ui/BrandSlot";
+import { DirectoryPickerDialog } from "../ui/DirectoryPickerDialog";
+import { OpenInAppMenu } from "../ui/OpenInAppMenu";
 
 const TerminalPanel = lazy(() =>
   import("../ui/TerminalPanel").then((module) => ({ default: module.TerminalPanel })),
@@ -65,6 +69,7 @@ export function App() {
   const permissionCatalog = usePermissionCatalog(bk.onEmit);
   const schedules = useSchedules(bk.selectedId, bk.onEmit);
   const messageFeedback = useMessageFeedback(bk.selectedId);
+  const modelCatalog = useModelCatalog(bk.selectedId);
   const { preferences, update: updatePreferences } = usePreferences();
   const colorScheme = resolvedTheme(preferences.theme);
   const account = useAccount({
@@ -87,6 +92,7 @@ export function App() {
   const [view, setView] = useState<View>("chat");
   const [previewPath, setPreviewPath] = useState<string | null>(null);
   const [showArchived, setShowArchived] = useState(false);
+  const [directoryPickerOpen, setDirectoryPickerOpen] = useState(false);
   const [dock, setDock] = useState<DockLayout>(() => defaultDockLayout());
   const dockRef = useRef(dock);
   dockRef.current = dock;
@@ -222,6 +228,7 @@ export function App() {
   return (
     <div className="shell" style={{ gridTemplateColumns: columns }}>
       <div className="left-stack">
+        <BrandSlot />
         <SessionList
           sessions={bk.sessions}
           selectedId={bk.selectedId}
@@ -233,6 +240,7 @@ export function App() {
           createError={bk.error}
           onSelect={bk.selectSession}
           onCreate={bk.createSession}
+          onBrowseDirectory={() => setDirectoryPickerOpen(true)}
           onFork={bk.forkSession}
           onArchive={bk.archiveSession}
           onUnarchive={bk.unarchiveSession}
@@ -288,6 +296,7 @@ export function App() {
               <span className="dim" style={{ fontFamily: "var(--mono)", fontSize: 11 }}>
                 {bk.selectedId}
               </span>
+              <OpenInAppMenu path={selectedSummary?.cwd} />
               <button className="btn small ghost" onClick={() => bk.refresh()}>
                 刷新
               </button>
@@ -389,6 +398,13 @@ export function App() {
               permissionCatalog={permissionCatalog.catalog}
               plan={plan}
               onExitPlan={exitPlan}
+              modelCatalog={modelCatalog.catalog}
+              modelSelection={modelCatalog.selection}
+              onSelectModel={(provider, model) =>
+                bk.selectedId === null
+                  ? Promise.resolve("缺少会话")
+                  : modelCatalog.select(bk.selectedId, provider, model)
+              }
             />
           </>
         )}
@@ -491,6 +507,7 @@ export function App() {
           ) : undefined
         }
         initialSection={settingsEntry}
+        modelCatalog={modelCatalog}
       />
       {quota.notice !== null && (
         <QuotaNotice
@@ -500,6 +517,15 @@ export function App() {
           onDismiss={quota.dismiss}
         />
       )}
+      <DirectoryPickerDialog
+        open={directoryPickerOpen}
+        initialPath={bk.host?.home}
+        onClose={() => setDirectoryPickerOpen(false)}
+        onPick={(path) => {
+          setDirectoryPickerOpen(false);
+          void bk.createSession(path);
+        }}
+      />
     </div>
   );
 }
