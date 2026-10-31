@@ -290,51 +290,13 @@ class GatewayStreams:
     # ---------- session/follow（历史跟随流） ----------
 
     async def _follow(self, args: dict, invocation: StreamInvocation):
-        address = args.get("address")
-        if (address.get("kind") != "session"
-                or not isinstance(address.get("sessionId"), str)
-                or not address["sessionId"]):
-            raise RemoteStreamError("gateway/arguments-invalid",
-                                    "session/follow requires a session address")
-        max_messages = args.get("maxMessages")
-        turn_window = args.get("turnWindow")
-        # 上游 history.follow 先 validateHistoryWindow（maxMessages/turnWindow 语义门）
-        # 再取源；业务码在此折成流 error（同 `_FollowSubscription`）。
+        from .follow import run_session_follow
+
         try:
-            self.api._validate_history_window(max_messages, turn_window)
+            async for frame in run_session_follow(self.api, args, invocation.signal):
+                yield frame
         except _Reject as error:
             raise RemoteStreamError(error.code, error.message) from error
-        session_id = address["sessionId"]
-        session = self.api.store.get(session_id)
-        if session is None:
-            raise RemoteStreamError("session/not-found",
-                                    f'session "{session_id}" not found')
-        if self.api._agents.get(session_id) is None:
-            self.api._attach(session)
-        events = list(session.events)
-        # cursor = 最后一条已提交事件 seq（上游 0 基 seq 的 inclusive cursor，
-        # history.ts `sourceLog.at(-1)?.seq ?? -1`；空日志 -1）
-        cursor = events[-1]["seq"] if events else -1
-        # 上游 follow 快照 paginate(events, undefined, maxMessages ?? DEFAULT, cursor,
-        # turnWindow)：消息对齐 + turnWindow 截断（history.ts follow）。
-        page, has_more = self.api._paginate(
-            events, None, max_messages or DEFAULT_MAX_MESSAGES, cursor, turn_window)
-        records = [self._record(e) for e in page]
-        yield {"type": "snapshot", "header": self.api._wire_header(session),
-               "cursor": cursor, "records": records, "hasMore": has_more,
-               "projections": {"asOfSeq": cursor,
-                               "values": projection_values(
-                                   session, self.ctx.get("usageStats"),
-                                   self.ctx.get("sessionProjections"))}}
-        subscribed = cursor + 1
-        while True:
-            events = await _poll_new_events(
-                self.api, session_id, subscribed, invocation.signal)
-            if events is None:
-                return
-            for event in events:
-                subscribed = event["seq"] + 1
-                yield {"type": "event", "event": event}
 
     @staticmethod
     def _record(event: dict) -> dict:

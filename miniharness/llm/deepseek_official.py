@@ -6,6 +6,7 @@ packages/llm/llm-deepseek/src/listed-catalog.ts + listing-cache.ts。
 from __future__ import annotations
 
 import logging
+import sys
 from typing import Any, Callable
 from urllib.parse import urlparse
 
@@ -14,10 +15,9 @@ from .deepseek_account import (
     CatalogSettings,
     DEFAULT_MODELS_MAX_AGE_MS,
     DEFAULT_MODELS_TIMEOUT_MS,
-    refuse,
     request_model_listing,
-    resolve_account_catalog,
 )
+from .listed_catalog import ListedCatalog, refuse_listed_model, resolve_listed_catalog
 from .protocol import APP_IDENTITY, INVALID_CREDENTIAL, MISSING_CREDENTIAL, LlmFailure
 
 __all__ = [
@@ -32,6 +32,10 @@ logger = logging.getLogger(__name__)
 
 LOG_TAG = "[llm-deepseek-api-key]"
 OFFICIAL_ORIGIN = "https://api.deepseek.com"
+
+
+def _stderr_warn(message: str) -> None:
+    print(f"{LOG_TAG} {message}", file=sys.stderr)
 
 
 def model_listing_url(base_url: str) -> str:
@@ -62,36 +66,50 @@ class OfficialRoute:
         self._supported = tuple(supported)
         self._route_max_tokens = route_max_tokens
         self._client_version = client_version or APP_IDENTITY.version
-        self._reported_problems: tuple[str, ...] | None = None
+        self._reported_listing = None
+        self._resolution: tuple[Any, ...] = self._supported
 
-    def _resolve(self):
+    def _resolve(self) -> ListedCatalog:
         view = self._catalog.current()
         listing = view["listing"]
-        result = resolve_account_catalog(
+        result = resolve_listed_catalog(
             listing=(None if listing is None else listing.entries),
             supported=self._supported,
             overrides={},
             route_max_tokens=self._route_max_tokens,
             client_version=self._client_version,
         )
-        if listing is not None and result.problems != self._reported_problems:
-            self._reported_problems = result.problems
+        if listing is not None and listing is not self._reported_listing:
+            self._reported_listing = listing
             for problem in result.problems:
-                logger.warning("%s %s", LOG_TAG, problem)
+                _stderr_warn(problem)
+        self._resolution = result.resolution
         return result
 
+    def resolution_models(self) -> tuple[Any, ...]:
+        return self._resolution
+
     def admit(self, model: str) -> None:
-        refuse(model, self._resolve().refusals.get(model))
+        refuse_listed_model(model, self._resolve().refusals.get(model))
 
     async def refresh(self) -> None:
         await self._catalog.view()
 
+    async def connect(self) -> None:
+        """每次模型请求前刷新 listing 视图（上游 registerDeepSeekProvider.connect）。"""
+        await self.refresh()
+        self._resolve()
+
     def discover_models_sync(self) -> list:
         from .deepseek_files import catalog_model_info
 
+        view = self._catalog.current()
+        if not view["signed_in"]:
+            return []
+        result = self._resolve()
         return [
-            catalog_model_info("deepseek-official", model)
-            for model in self._resolve().offered
+            catalog_model_info("deepseek-official", model, result.badges.get(model.id))
+            for model in result.offered
         ]
 
 
@@ -117,7 +135,7 @@ def build_official_route(*, base_url: str, supported, route_max_tokens: int,
         settings=lambda: settings,
         token=token,
         load=load,
-        warn=lambda message: logger.warning("%s %s", LOG_TAG, message),
+        warn=lambda message: _stderr_warn(message),
         info=lambda message: logger.info("%s %s", LOG_TAG, message),
     )
     return OfficialRoute(
@@ -129,6 +147,12 @@ def build_official_route(*, base_url: str, supported, route_max_tokens: int,
 
 def present_api_key_from_adapter(adapter) -> str | None:
     """解析 API key；缺失 → None，畸形 → 抛 INVALID_CREDENTIAL（index.ts presentApiKey）。"""
+    resolver = getattr(adapter, "_resolve_api_key", None)
+    if resolver is not None:
+        try:
+            return resolver()
+        except LlmFailure:
+            raise
     if getattr(adapter, "_auth", None) != "official":
         return None
     key = (getattr(adapter, "_key", "") or "").strip()

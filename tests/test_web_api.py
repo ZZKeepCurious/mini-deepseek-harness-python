@@ -848,6 +848,17 @@ class TestSessionFollow(WebApiTest):
         self.assertEqual(snapshot["projections"]["values"], _zero_projection())
         sub.close()
 
+    def test_assistant_stream_baseline_on_snapshot(self):
+        session_id = self._value(self._create())["sessionId"]
+        sub = self.api.follow({
+            "address": {"kind": "session", "sessionId": session_id},
+            "assistantStream": True,
+        })
+        self.assertIsNone(sub.error)
+        snapshot = sub.pull()
+        self.assertEqual(snapshot["assistantStream"], {"revision": 0})
+        sub.close()
+
     def test_streams_live_events(self):
         session_id = self._value(self._create())["sessionId"]
         sub = self.api.follow({"address": {"kind": "session", "sessionId": session_id}})

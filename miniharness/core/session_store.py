@@ -141,8 +141,10 @@ class SessionStore(Service):
             raise RuntimeError(f'session "{id}" already exists')
         created_at = meta.pop("createdAt", None)
         inherited_event_count = options.get("inheritedEventCount")
+        mode = options.get("mode", "snapshot")
         return Session(id, seed=options.get("seed"), created_at=created_at,
-                       meta=meta, inherited_event_count=inherited_event_count)
+                       meta=meta, inherited_event_count=inherited_event_count,
+                       mode=mode)
 
     def enter(self, session: Session, owner_ctx: "Context | None" = None) -> Any:
         """把 prepare 好的会话装进店内：安装 append 发布钩子 + 登记条目。返回 detach 幂等 disposer。

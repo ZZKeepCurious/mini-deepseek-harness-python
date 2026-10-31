@@ -45,7 +45,7 @@ _OFF_ONLY_REASONING_EFFORTS = (_OFF,)
 _EFFORT_DEFAULTS = {"off": "off", "low": "low", "max": "max"}
 
 
-def catalog_model_info(provider: str, model) -> dict:
+def catalog_model_info(provider: str, model, badge: dict | None = None) -> dict:
     """广告一个 catalog 条目（上游 catalogModelInfo）。"""
     info: dict = {
         "provider": provider,
@@ -55,6 +55,8 @@ def catalog_model_info(provider: str, model) -> dict:
     }
     if model.description is not None:
         info["description"] = model.description
+    if badge is not None:
+        info["badge"] = badge
     return info
 
 

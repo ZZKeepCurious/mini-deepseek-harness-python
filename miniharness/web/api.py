@@ -192,39 +192,39 @@ class _Subscription:
 
 
 class _FollowSubscription(_Subscription):
-    """session.follow 流订阅（session-controller history.ts follow 同款）。
+    """session.follow 流订阅（WebController.follow + observation 快照）。
 
     构造即校验 + 快照；失败以 `error` 状态暴露（mux 转流 error 帧），不抛异常。
-    切换跟随 session/event 总线，gap 检测 fail loud。
     """
 
     def __init__(self, api: "WebApi", request: dict):
         super().__init__()
         self.api = api
-        self._dispose = None
+        self._disposers: list[Any] = []
         try:
             self._start(request)
         except _Reject as error:
             self._fail(error.code, error.message, error.details)
 
     def _start(self, request: dict) -> None:
+        from .assistant_stream_follow import bind_assistant_stream
+        from .event_listener import emit_event_frame, expand_created_backfill
+        from .follow import opening_for_session_follow
+        from .history import address_id
+
         api = self.api
-        max_messages = request.get("maxMessages")
-        turn_window = request.get("turnWindow")
-        api._validate_history_window(max_messages, turn_window)
-        session_id = api._address_target(request)
-        session = self._session_or_reject(session_id)
-        cursor = session.seq - 1
-        page, has_more = api._paginate(list(session.events), None,
-                                       max_messages or DEFAULT_MAX_MESSAGES, cursor, turn_window)
-        self._push({"type": "snapshot", "header": api._wire_header(session),
-                    "cursor": cursor, "records": api._page_records(page),
-                    "hasMore": has_more,
-                    "projections": {"asOfSeq": cursor,
-                                    "values": projection_values(
-                                        session, api.ctx.get("usageStats"),
-                                        api.ctx.get("sessionProjections"))}})
-        state: dict[str, Any] = {"next_seq": cursor + 1, "pending": []}
+        from .follow import _validate_follow_address
+
+        address = request.get("address")
+        if address is None:
+            raise _Reject("gateway/arguments-invalid",
+                          'args fields do not match the descriptor: missing "address"', {})
+        _validate_follow_address(address)
+        session_id = address_id(address)
+        want_assistant_stream = request.get("assistantStream") is True
+        opening, next_seq = opening_for_session_follow(api, request)
+        self._push(opening)
+        state: dict[str, Any] = {"next_seq": next_seq}
 
         def on_event(payload: dict) -> None:
             if self.done:
@@ -233,35 +233,40 @@ class _FollowSubscription(_Subscription):
             event = payload.get("event")
             if getattr(current, "session_id", None) != session_id or not isinstance(event, Mapping):
                 return
-            state["pending"].append(event)
-            self._drain(state)
-
-        self._dispose = api.ctx.on("session/event", on_event, global_=True)
-
-    def _drain(self, state: dict) -> None:
-        pending = state["pending"]
-        while pending and not self.done:
-            event = pending.pop(0)
-            if event["seq"] < state["next_seq"]:
-                continue
-            if event["seq"] != state["next_seq"]:
-                self._fail("gateway/internal",
-                           f"session event stream skipped seq {state['next_seq']}", {})
+            seq = event["seq"]
+            expected = state["next_seq"]
+            if seq < expected:
                 return
-            state["next_seq"] += 1
-            self._push({"type": "event", "event": thaw(event)})
+            if seq != expected:
+                self._fail("gateway/internal",
+                           f"session event stream skipped seq {expected}", {})
+                return
+            state["next_seq"] = seq + 1
+            self._push(emit_event_frame(event))
 
-    def _session_or_reject(self, session_id: str) -> Session:
-        session = self.api.store.get(session_id)
-        if session is None:
-            raise _Reject("session/not-found", f'session "{session_id}" not found',
-                          {"sessionId": session_id})
-        return session
+        def on_created(payload: dict) -> None:
+            if self.done:
+                return
+            session = payload.get("session")
+            if getattr(session, "session_id", None) != session_id:
+                return
+            frames, state["next_seq"] = expand_created_backfill(session, state["next_seq"])
+            for frame in frames:
+                self._push(frame)
+
+        ctx = api.ctx
+        self._disposers.extend([
+            ctx.on("session/event", on_event, global_=True),
+            ctx.on("session/created", on_created, global_=True),
+        ])
+        if want_assistant_stream:
+            self._disposers.append(
+                bind_assistant_stream(ctx, session_id, self._push))
 
     def close(self) -> None:
-        if self._dispose is not None:
-            self._dispose()
-            self._dispose = None
+        for dispose in self._disposers:
+            dispose()
+        self._disposers.clear()
         self._end()
 
 
@@ -2689,8 +2694,6 @@ class WebApi:
         registry = self.ctx.get("sessionProjections")
         if registry is None:
             return
-        from ..telemetry.projection_values import projection_values
-
         live = observation._live_session
         if live is not None:
             registry.snapshot(live)
@@ -2701,14 +2704,27 @@ class WebApi:
             return
 
         class _PreparedSession:
-            def __init__(self, session_id, meta, events):
+            def __init__(self, session_id, meta, events, inherited_event_count):
                 self.session_id = session_id
                 self.meta = meta
                 self.seq = (events[-1]["seq"] + 1) if events else 0
                 self.events = events
+                self.inherited_event_count = inherited_event_count
+
+            def snapshot_events(self, from_=None, to_=None):
+                items = list(self.events)
+                if from_ is not None:
+                    items = [event for event in items if event["seq"] >= from_]
+                if to_ is not None:
+                    items = [event for event in items if event["seq"] < to_]
+                return tuple(items)
 
         stub = _PreparedSession(
-            observation.header["id"], observation.header, observation.events)
+            observation.header["id"],
+            observation.header,
+            observation.events,
+            observation.inherited_event_count,
+        )
         registry.snapshot(stub)
         observation.projections = {
             "asOfSeq": stub.seq - 1,

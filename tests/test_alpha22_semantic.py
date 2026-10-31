@@ -62,6 +62,34 @@ class ColdSessionEventsTest(unittest.TestCase):
         self.assertEqual(value["cursor"], last)
         self.assertGreater(len(value["records"]), 0)
 
+    def test_follow_snapshot_on_prepared_log(self):
+        sub = self.api.follow({
+            "address": {"kind": "session", "sessionId": self.source_id},
+            "maxMessages": 50,
+        })
+        self.assertIsNone(sub.error)
+        snapshot = sub.pull()
+        self.assertEqual(snapshot["type"], "snapshot")
+        self.assertEqual(snapshot["header"]["id"], self.source_id)
+        last = self.persistence.inspect(self.source_id)["events"][-1]["seq"]
+        self.assertEqual(snapshot["cursor"], last)
+        self.assertGreater(len(snapshot["records"]), 0)
+        sub.close()
+
+    def test_follow_activate_promotes_prepared_session(self):
+        self.assertIsNone(self.api.store.get(self.source_id))
+        sub = self.api.follow({
+            "address": {"kind": "session", "sessionId": self.source_id},
+            "activate": True,
+        })
+        self.assertIsNone(sub.error)
+        snapshot = sub.pull()
+        self.assertEqual(snapshot["type"], "snapshot")
+        live = self.api.store.get(self.source_id)
+        self.assertIsNotNone(live)
+        self.assertGreaterEqual(live.seq, 1)
+        sub.close()
+
 
 if __name__ == "__main__":
     unittest.main()

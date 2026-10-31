@@ -155,6 +155,8 @@ _SPECS: dict[str, dict[str, tuple[str, bool]]] = {
         "address": (OBJ, True),
         "maxMessages": (INT, False),
         "turnWindow": (OBJ, False),
+        "activate": (BOOL, False),
+        "assistantStream": (BOOL, False),
     },
     "session/control": {},
     "pluginInventory/list": {},

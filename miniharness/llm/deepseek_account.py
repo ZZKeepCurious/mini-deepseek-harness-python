@@ -20,6 +20,7 @@ mini 载体差异（登记 verified-diffs）：
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -58,6 +59,10 @@ __all__ = [
 LISTING_TIMEOUT = "MODEL_LISTING_TIMEOUT"
 #: 本构建发送的输入模态，按上游顺序（listing.ts:6）。
 LISTED_MODALITIES = ("text", "image")
+MAX_BADGE_TEXT_LENGTH = 12
+BADGE_TONES = ("neutral", "info", "success", "warning")
+LANGUAGE_ID = re.compile(r"^[a-z]{2,8}(?:-[a-z0-9]{1,8})*$", re.I)
+_UNREADABLE_BADGE = re.compile(r"[\x00-\x1f\x7f\u2028\u2029]")
 #: listing 请求与首次等待的缺省 deadline（config.ts:11）。
 DEFAULT_MODELS_TIMEOUT_MS = 5_000
 #: listing 缺省刷新年龄（config.ts:13）。
@@ -103,6 +108,7 @@ class ListedFacts:
     context_window: int | None = None
     max_output_tokens: int | None = None
     system_prompt_update: str | None = None  # 'in-history' | 'leading-only'
+    tool_update: str | None = None  # 'in-history' | 'addition-only' | 'leading-only'
 
 
 @dataclass(frozen=True)
@@ -122,6 +128,7 @@ class ListingEntry:
     requirement: ClientRequirement
     capabilities: ListedCapabilities
     name: str | None = None
+    badge: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -170,14 +177,85 @@ def _capabilities_of(entry: dict) -> ListedCapabilities:
     if context_window is False or max_output_tokens is False:
         return ListedCapabilities(False, reason="declares an invalid context_window or max_output_tokens")
     update = messages.get("system_prompt_update")
+    tool_raw = messages.get("tool_update")
+    tool_update = None
+    if tool_raw is not None:
+        tool_update = (tool_raw if tool_raw in ("in-history", "addition-only")
+                       else "leading-only")
     facts = ListedFacts(
         input_modalities=tuple(inputs),
         context_window=context_window,
         max_output_tokens=max_output_tokens,
         system_prompt_update=(None if update is None
                               else ("in-history" if update == "in-history" else "leading-only")),
+        tool_update=tool_update,
     )
     return ListedCapabilities(True, facts=facts)
+
+
+def _optional_fields(value: Any) -> dict | None | bool:
+    if value is None:
+        return None
+    parsed = _fields(value)
+    return parsed if parsed is not None else False
+
+
+def _badge_text(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if len(text) == 0 or len(text) > MAX_BADGE_TEXT_LENGTH:
+        return None
+    if _UNREADABLE_BADGE.search(value):
+        return None
+    if not re.search(r"\S", text):
+        return None
+    return text
+
+
+def _localized_badge_text(value: Any) -> dict | None:
+    if isinstance(value, str):
+        text = _badge_text(value)
+        return {"en": text} if text is not None else None
+    variants = _optional_fields(value)
+    if variants is False or variants is None:
+        return None
+    texts: dict[str, str] = {}
+    for language, variant in variants.items():
+        text = _badge_text(variant)
+        if not LANGUAGE_ID.match(language) or text is None:
+            return None
+        texts[language.lower()] = text
+    if "en" not in texts:
+        return None
+    return texts
+
+
+def _badge_of(entry: dict) -> dict | None:
+    own_meta = f'client_metadata["{APP_IDENTITY.product}"]'
+    metadata = _optional_fields(entry.get("client_metadata"))
+    if metadata is False:
+        return {"kind": "invalid", "reason": "client_metadata is not an object"}
+    own = _optional_fields((metadata or {}).get(APP_IDENTITY.product))
+    if own is False:
+        return {"kind": "invalid", "reason": f"{own_meta} is not an object"}
+    declared = _optional_fields((own or {}).get("badge") if own else None)
+    if declared is False:
+        return {"kind": "invalid", "reason": f"{own_meta}.badge is not an object"}
+    if declared is None:
+        return None
+    text = _localized_badge_text(declared.get("text"))
+    if text is None:
+        return {
+            "kind": "invalid",
+            "reason": (
+                f'{own_meta}.badge.text is not a string or an object of lowercase '
+                f'language ids including "en", each text 1 to {MAX_BADGE_TEXT_LENGTH} '
+                f"characters on one line"),
+        }
+    tone = declared.get("tone")
+    tone = tone if tone in BADGE_TONES else "neutral"
+    return {"kind": "badge", "badge": {"text": text, "tone": tone}}
 
 
 def parse_model_listing(body: Any) -> ModelListing:
@@ -197,11 +275,13 @@ def parse_model_listing(body: Any) -> ModelListing:
             continue
         seen.add(mid)
         name = entry.get("name")
+        badge = _badge_of(entry)
         entries.append(ListingEntry(
             id=mid,
             name=name if isinstance(name, str) and len(name) > 0 else None,
             requirement=_requirement_of(entry),
             capabilities=_capabilities_of(entry),
+            badge=badge,
         ))
     if len(entries) == 0:
         raise LlmFailure(INVALID_RESPONSE, "DeepSeek model listing contains no model entry")
@@ -401,10 +481,18 @@ def _model_with(model, layer: dict):
 
 
 def _listed(base, entry: ListingEntry, facts: ListedFacts, route_max_tokens: int):
-    """把一条可用 listing 条目叠在本构建同 id 条目之上（resolve-catalog.ts:53）。"""
+    """把一条可用 listing 条目叠在本构建同 id 条目之上（listed-catalog.ts listed）。"""
     from dataclasses import replace
-    base = base if facts.system_prompt_update != "leading-only" \
-        else replace(base, systemPromptUpdate=None)
+
+    strip: dict[str, Any] = {}
+    if getattr(base, "systemPromptUpdate", None) is not None:
+        if facts.system_prompt_update == "leading-only":
+            strip["systemPromptUpdate"] = None
+    if getattr(base, "toolUpdate", None) is not None:
+        if facts.tool_update in (None, "leading-only"):
+            strip["toolUpdate"] = None
+    if strip:
+        base = replace(base, **strip)
     layer: dict = {"inputModalities": tuple(facts.input_modalities)}
     if entry.name is not None:
         layer["name"] = entry.name
@@ -414,6 +502,10 @@ def _listed(base, entry: ListingEntry, facts: ListedFacts, route_max_tokens: int
         layer["maxTokens"] = min(route_max_tokens, facts.max_output_tokens)
     if facts.system_prompt_update == "in-history":
         layer["systemPromptUpdate"] = "in-history"
+    if facts.tool_update == "in-history":
+        layer["toolUpdate"] = "in-history"
+    elif facts.tool_update == "addition-only":
+        layer["toolUpdate"] = "addition-only"
     return _model_with(base, layer)
 
 

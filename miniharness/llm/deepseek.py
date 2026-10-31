@@ -225,8 +225,10 @@ class DeepSeekAdapter(LlmAdapter):
                  auth: str | None = None, reject_token=None,
                  account_route=None, official_route=None, extensions=None,
                  models_timeout_ms: int | None = None,
-                 models_max_age_ms: int | None = None):
+                 models_max_age_ms: int | None = None,
+                 resolve_api_key=None):
         self._key = api_key if api_key is not None else os.environ.get("DEEPSEEK_API_KEY", "")
+        self._resolve_api_key = resolve_api_key
         # DSH 账户 token：配置后以 x-dsh-auth-token 发送（账户 provider 路由）。
         self._account_token = account_token
         # 认证 seam（上游 resolveAuth 拆分）：显式 auth 选择凭据模式；缺省按
@@ -444,10 +446,7 @@ class DeepSeekAdapter(LlmAdapter):
                 if error.code == MISSING_CREDENTIAL:
                     return []
                 raise
-            try:
-                asyncio.get_running_loop()
-            except RuntimeError:
-                asyncio.run(self._official_route.refresh())
+            self._refresh_official_listing()
             return self._official_route.discover_models_sync()
         try:
             self._auth_headers()
@@ -475,6 +474,19 @@ class DeepSeekAdapter(LlmAdapter):
             })
         return rows
 
+    def _refresh_official_listing(self) -> None:
+        import asyncio
+
+        if self._official_route is None:
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self._official_route.connect())
+        else:
+            asyncio.ensure_future(self._official_route.connect())
+        self._models = self._official_route.resolution_models()
+
     async def stream(self, messages, tools, signal=None,
                      session_id=None, purpose=None, reasoning_effort=None):
         """async 迭代器（对齐上游 async stream）：httpx 异步传输 + Messages SSE。
@@ -490,6 +502,9 @@ class DeepSeekAdapter(LlmAdapter):
             raise ValueError(
                 f"invalid reasoning mode {reasoning_effort!r}; "
                 f"expected one of {self.REASONING_EFFORTS}")
+        if self._auth == "official" and self._official_route is not None:
+            await self._official_route.connect()
+            self._models = self._official_route.resolution_models()
         abort_event = getattr(signal, "event", None) if signal is not None else None
         if not any(content_has_image(message.get("content") or []) for message in messages):
             body = self._build_body(messages, tools, reasoning_effort=reasoning_effort)
