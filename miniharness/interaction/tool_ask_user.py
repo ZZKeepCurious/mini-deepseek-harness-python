@@ -35,7 +35,10 @@ from .user_questions import (
 
 __all__ = [
     "ASK_USER_QUESTION",
+    "DESCRIPTION",
     "PENDING_NOTICE",
+    "SKIPPED_ANSWER_GUIDANCE",
+    "TIMED_DESCRIPTION",
     "register_ask_user_question",
     "register_timed_ask_user",
 ]
@@ -43,24 +46,30 @@ __all__ = [
 #: 工具名（上游 tool-ask-user 唯一注册名）。
 ASK_USER_QUESTION = "ask_user_question"
 
-DESCRIPTION = (
-    "Ask the user a concise question when you need confirmation, a choice, or "
-    "missing information before proceeding. Send one or more questions, each "
-    "with a stable id that will be echoed in the answer."
+#: 模型可见的 skip 语义（上游 timed.ts skippedAnswerGuidance，legacy/timed 共用）。
+SKIPPED_ANSWER_GUIDANCE = (
+    "An answer item with empty selected and no custom means the user skipped "
+    "that question: continue without it, do not ask it again, and do not treat "
+    "the skip as permission."
 )
 
-#: timed 工具的描述（上游 timed.ts:27-30 逐字）。
+DESCRIPTION = (
+    "Ask the user a concise question when you need confirmation, a choice, or "
+    "missing information before proceeding. "
+    + SKIPPED_ANSWER_GUIDANCE
+)
+
+#: timed 工具的描述（上游 timed.ts description 逐字）。
 TIMED_DESCRIPTION = (
     "Ask brief, direct, self-contained questions about missing information, "
     "preferences, or decisions. Use user-facing terms; assume no knowledge of "
-    "background work or internal names. Use distinct stable question IDs. A "
-    "submitted skipped question is an answer item with empty selected and no "
-    "custom; pending instead means no answer batch arrived before the timeout "
-    "and the user can still answer."
+    "background work or internal names. Use distinct stable question IDs. "
+    + SKIPPED_ANSWER_GUIDANCE
+    + " A pending result instead means no answer batch arrived before the "
+    "timeout and the user can still answer."
 )
 
-#: pending 结果 `message` 字段的指引（上游 timed.ts:39-42 逐字；投影据其判读
-#: 调用仍可回答，客户端据其判读该结果文本是超时而非答案批）。
+#: pending 结果 `message` 字段的指引（上游 timed.ts pendingNotice 逐字）。
 PENDING_NOTICE = (
     "No answer batch arrived before the timeout. This is pending, not a skipped "
     "answer. Continue useful independent work. The user can still answer; their "
