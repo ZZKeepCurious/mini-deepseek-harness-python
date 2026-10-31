@@ -110,6 +110,7 @@ LAYER_UNITS = [
     ("session_title", 2),
     ("session_projection_cache", 2),
     ("workflow", 2),
+    ("experimental", 2),
     ("workspace", 2),
     ("settings", 2),
     ("context", 2),
@@ -432,11 +433,18 @@ class ImportDirectionTest(unittest.TestCase):
                     # dsh-anonymous-user-id，package.json peerDependencies
                     # 声明）；identity 不得反向 import llm
                     continue
-                if (module_name == "miniharness.llm.deepseek"
-                        and dst == "miniharness.core.agent_loop.resident_loop"):
-                    # §5 显式例外（单方向）：official listing 同步 discover 经
-                    # run_abandonable_on_resident 提交常驻循环（对齐上游单 loop）；
-                    # resident_loop 不得反向 import llm
+                if (module_name in (
+                        "miniharness.llm.deepseek",
+                        "miniharness.llm.deepseek_official",
+                        "miniharness.boot.plugin_market",
+                ) and dst == "miniharness.core.agent_loop.resident_loop"):
+                    # §5 显式例外（单方向）：listing / 市场索引 HTTP 经常驻循环
+                    # 提交 async 工作（对齐上游单 event loop）；resident_loop 不得反向 import
+                    continue
+                if (module_name == "miniharness.ptc_runtime.runtime"
+                        and dst == "miniharness.seams.sandbox_local"):
+                    # §5 显式例外（单方向）：PTC worker 运行时 confine 消费
+                    # ctx.sandbox（上游 ptc-runtime-node 依赖 sandbox 包）；seams 不得反向 import ptc_runtime
                     continue
                 if dst_layer >= src_layer:
                     violations.append(

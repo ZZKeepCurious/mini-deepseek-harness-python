@@ -113,7 +113,15 @@ class TestCredentialsWatchProvider(unittest.TestCase):
         try:
             p.set("api_key", "sk-1")
             self._events.clear()
-            os.remove(self._filename)
+            deadline = time.time() + WAIT
+            while True:
+                try:
+                    os.remove(self._filename)
+                    break
+                except PermissionError:
+                    if time.time() >= deadline:
+                        raise
+                    time.sleep(POLL)
             self.assertTrue(_wait_until(lambda: p.resolve("api_key") is None),
                             "external delete not cleared")
             self.assertIn(("reference", "api_key"), self._events)
