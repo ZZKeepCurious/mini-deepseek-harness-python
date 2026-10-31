@@ -1,6 +1,6 @@
 # 06 · 附录：资源、HOWTO 与结语
 
-<p class="lead">Python SDK 驱动 harness、添加插件与贡献、常见 HOWTO、参考速查与结语。</p>
+<p class="lead">Python SDK 驱动 harness、添加插件与贡献、常见 HOWTO 与参考表。</p>
 
 <div class="pill-row">
   <span class="tag t-blue">everything is a plugin</span>
@@ -15,8 +15,8 @@
 
 ### 9.1 SDK 与 dsh 的关系和区别
 
-**一句话关系**：Python SDK 是 **dsh 的进程级客户端**，它把内置的 dsh 运行时（单文件可执行 `dsh-jsonrpc-agent`）作为子进程启动，通过 stdio 上的换行分隔 JSON-RPC 协议驱动它。SDK 能做什么，取决于其组合里挂了哪些插件；它并不重新实现 harness。
-
+| 关系 | Python SDK 是 dsh 的进程级客户端：启动内置运行时（单文件 `dsh-jsonrpc-agent`）子进程，经 stdio 换行分隔 JSON-RPC 驱动；能力边界由组合里挂了哪些插件决定，不重新实现 harness 内核。 |
+|---|---|
 | 方面 | dsh（产品本体） | deepseek-harness-sdk（Python 客户端） |
 |---|---|---|
 | 形态 | TypeScript monorepo：CLI + Web + 插件生态 + 组合系统，从源码构建运行 | PyPI 分发包 `deepseek-harness-sdk`（import `deepseek_harness`），内置捆绑运行时，安装后**不需要 Node.js** |
@@ -26,7 +26,7 @@
 | 环境变量 | 继承 `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` / `DSH_HOME` 等 | 运行时继承同一套 `DEEPSEEK_*`；`DSH_SESSION_ROOT` 由 `session_root=` 参数设置；自定义组合经 `DSH_CORDIS_CONFIG` 注入 |
 | 平台 | macOS / Linux 为主（Windows 部分支持） | Linux x64 / arm64、macOS 14+ arm64；持久 PTY bash 需 POSIX，**不支持 Windows agent**；内置组合（`sdk-runtime/.../cordis.yml`）**不含 permission 层**，bash/fs 无路径限制——行为等价于 `danger-full-access`（**学习归纳**：该名仅见于上游 `app-boot.spec.ts:130` 的 `.env` 拒绝名单 `DSH_PERMISSION_MODE=danger-full-access`，非正式组合名），只能在可丢弃的 checkout/容器里跑 |
 
-### 9.2 上手步骤（step-by-step）
+### 9.2 上手步骤
 
 1. **安装**（Python 3.10+）：
 
@@ -138,7 +138,7 @@ export function apply(ctx: Context) {
 !!! success "验收"
     `pnpm dsh --profile <name> --dump-config` 能看到该行（注释标注来源文件与 overlay）；跑一次任务观察工具被调用；对行为变化按 `docs/testing.md` 补测试。
 
-### 10.3 正式贡献：新增 workspace 包（按清单）
+### 10.3 正式贡献：新增 workspace 包
 
 完整 checklist 见 `docs/cookbook/adding-a-package.md`（以 bash 与 adapter 包为模板校验过）。流程：
 
@@ -188,7 +188,7 @@ export function apply(ctx: Context) {
 
 UI 专用格式（fenced console、diff、相对路径）留在卡片投影里，绝不进 canonical 值或 Native 内容；持久化的 replayable 卡片数据走 `output.presentationMeta(args, value)`，经 `tool/result` 的 `meta` 回放复原。
 
-### 11.4 常用参考速查
+### 11.4 常用参考
 
 - **事件**：`docs/event-producer-consumer.md` + 每包组 subsystems 页；事件 JSDoc 需 `@mode` 与 payload `@param`。
 - **测试**：`docs/testing.md`（门禁 `test:coverage` 每文件 100%；模型/用户可见行为要 keyless 快照）。

@@ -1,6 +1,6 @@
-# DeepSeek Harness 深度掌握指南 · 体系化报告
+# DeepSeek Harness 解读报告
 
-<p class="lead">本报告由<b>六个主题子页</b> + 本阅读地图构成。每个子页独立可维护、可锚点直达。本页同时承载<b>四维对照表</b>（上游包 ↔ mini 模块 ↔ 手册章节 ↔ 报告页面），作为解读完整性的检查清单。</p>
+<p class="lead">六个主题子页解读上游 dsh：全景、内核、流程、产品面、复现路线与附录。下文 Mermaid 图与<b>四维对照表</b>（上游包 ↔ mini 模块 ↔ 手册章节 ↔ 报告页面）便于在文档间跳转。</p>
 
 <div class="pill-row">
   <span class="tag t-blue">everything is a plugin</span>
@@ -11,11 +11,11 @@
   <span class="tag t-amber">Python SDK 存在</span>
 </div>
 
-## 阅读地图
+## 报告结构
 
 ```mermaid
 flowchart LR
-  subgraph REP["报告（地图层 · 读什么）"]
+  subgraph REP["报告 · 读什么"]
     O1["01 全景与分层架构"]
     O2["02 系统架构与内核"]
     O3["03 关键处理流程"]
@@ -23,7 +23,7 @@ flowchart LR
     O5["05 路线图与 Python 复现"]
     O6["06 附录与 HOWTO"]
   end
-  subgraph MD["手册（施工图纸层 · 怎么做）"]
+  subgraph MD["手册 · 怎么做"]
     M1["00-05 基础章&lt;br/&gt;(环境/会话/总线/工具/Loop/持久化)"]
     M2["06-15 进阶章&lt;br/&gt;(扩展口/入口/组合/干预/轨迹/动态/异步/Cordis/scope/schema)"]
   end
@@ -44,9 +44,9 @@ flowchart LR
 | [03 关键处理流程](03-flows.md) | Turn/Step、工具管线、持久化、LLM 流式、启动组合五条时序 |
 | [04 产品面全解读](04-product-surface.md) | **十大议题**：模式设计、外部入口、Trajectory、干预面、审批、自我修改、resume、plan/goal、压缩与后台、skills |
 | [05 路线图与 Python 复现](05-roadmap.md) | 学习路线、概念映射表、迷你复现清单、实操资源索引 |
-| [06 附录与 HOWTO](06-appendix.md) | Python SDK、添加插件、HOWTO、参考速查、结语 |
+| [06 附录与 HOWTO](06-appendix.md) | Python SDK、添加插件、HOWTO、参考表、结语 |
 
-## 四维对照表（主题索引）
+## 四维对照表
 
 每一行是一个解读主题；mini 模块列给出对应实现位置，手册/报告列给出深入阅读的入口。
 
@@ -88,7 +88,7 @@ flowchart LR
 | `web 表面会话管理（上游无 CLI）` | `cli/session_cmds.py` | 07 | 04 议题 2 |
 | （工程化） | `.github/workflows/ci.yml + tests/test_real_api.py` | 00 | — |
 | `packages/client/connection + packages/api/gateway + packages/api/session-controller + packages/api/remotes + host/frontend-static + host/webserver` | `web/`（envelope + stream_protocol + mux + events + streams + api + approvals + server + frontend + launcher） | 07 §7.5 | 04 议题 2 |
-| （wire 速查，非上游包） | `docs/interface-wire.md`（与 `WebApi.ROUTES` 同步） | 07 §7.5.2 | — |
+| （wire 约定，非上游包） | `docs/interface-wire.md`（与 `WebApi.ROUTES` 同步） | 07 §7.5.2 | — |
 | （模块映射，非上游包） | `docs/architecture.md` | 08 + 各章 | 05 |
 | `packages/session-query/session-log-export（导出域）+ api/session-controller（端点约定面）` | `web/downloads.py` | 07 §7.5 | — |
 | `packages/bundle/web-app` + `packages/client` | `webui/`（产品化 React+TS+Vite 独立工程，只依赖 wire 约定）+ `web/static/`（vanilla SPA 教学参照，旧 SSE wire 不对新后端工作） | 07 §7.5.4 | 04 议题 2 |
@@ -111,13 +111,13 @@ flowchart LR
 
 <div class="card" markdown>
 
-**报告（md 章节体系）**＝ 地图层：解释"是什么、为什么、影响面"，按主题读，Mermaid 图渲染完整。
+**报告**讲上游与 mini 的设计：是什么、为什么、产品面与流程；按主题阅读，图在 MkDocs 中渲染。
 
 </div>
 
 <div class="card" markdown>
 
-**手册（md 章节体系）**＝ 施工图纸层：step-by-step 从 0 到 1 亲手实现，与 `miniharness/` 真实代码逐字一致（`docs/index.md` 首页有完整索引）。
+**手册**带你在 Python 里逐步实现，章节与 `miniharness/` 代码对应；章节目录见 [docs/index.md](../index.md)。
 
 </div>
 

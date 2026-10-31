@@ -26,11 +26,11 @@
 </div>
 
 !!! info "版本与格式策略"
-    基线为上游 `dsh-v0.2.0-rc.2`（developer preview，MIT 协议）。演进策略是"地基优先"：会话格式版本保持 `SESSION_FORMAT_VERSION`，**released 旧版本经相邻迁移链读入**（`session-format-v0-to-v1` / `-v1-to-v2` / `-v2-to-v3` / `-v3-to-v4` + `session-format-catalog`：读路径 decode→migrate→encodeCurrent，写后继 generation、不动旧代），仅未发布/未知版本双向 fail loud；`session-query` 检索域 SQLite 使用单调 `SCHEMA_VERSION`。
+    基线为上游 `dsh-v0.2.2-alpha.2`（developer preview，MIT 协议）。演进策略是"地基优先"：会话格式版本保持 `SESSION_FORMAT_VERSION`，**released 旧版本经相邻迁移链读入**（`session-format-v0-to-v1` / `-v1-to-v2` / `-v2-to-v3` / `-v3-to-v4` + `session-format-catalog`：读路径 decode→migrate→encodeCurrent，写后继 generation、不动旧代），仅未发布/未知版本双向 fail loud；`session-query` 检索域 SQLite 使用单调 `SCHEMA_VERSION`。
 
 ## 2. 分层架构
 
-仓库是 pnpm monorepo（Node ^22.19 || >=24，全 ESM）。自上而下分五层，各层之间只通过接口约定连接：
+下列表格描述**上游** monorepo 的五层（mini 仓库的 core / web / webui 三层边界见根目录 README 与 [architecture.md](../architecture.md) §3）。上游仓库是 pnpm monorepo（Node ^22.19 || >=24，全 ESM），各层之间只通过接口约定连接：
 
 | 层 | 位置 | 职责 | 关键事实 |
 |---|---|---|---|

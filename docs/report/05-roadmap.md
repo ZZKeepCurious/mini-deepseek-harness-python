@@ -1,6 +1,6 @@
 # 05 · 从 0 到吃透的路线图与 Python 复现清单
 
-<p class="lead">分阶段学习路线、概念映射表与迷你复现项目清单——这是把读到的理解变成亲手代码的施工图。</p>
+<p class="lead">分阶段学习路线、概念映射表与迷你复现项目清单——把报告里的理解落到可运行的 Python 与测试上。</p>
 
 <div class="pill-row">
   <span class="tag t-blue">everything is a plugin</span>
@@ -67,7 +67,7 @@
 ### 7.3 迷你复现项目清单（MiniHarness，用 Python）
 
 !!! note "与手册的关系"
-    从 0 到 1 实现核心系统的完整 step-by-step 教程（每章 = 概念讲解 → 最小可运行 Python 代码 → 逐段解释 → 硬性规定/测试 → 检查点练习）位于仓库的 <span class="path">docs/chapters/</span>（索引见 <span class="path">docs/index.md</span> 首页章节表），配套可运行代码包 <span class="path">miniharness/</span>。本表是手册的骨架索引。
+    从 0 到 1 实现核心系统的分章教程（每章 = 概念 → 最小可运行代码 → 解释 → 测试/硬性规定 → 可选练习）位于 <span class="path">docs/chapters/</span>（章节目录见 <span class="path">docs/index.md</span>），配套代码 <span class="path">miniharness/</span>。下表与手册 01~05 章骨架对应。
 
 建议用 6 个递进的项目把核心吃透。每个项目都要**配测试 + 配 README**，最后能跑通一个"文本 + 一个工具 + 会话持久化"的端到端 demo。
 
@@ -204,7 +204,7 @@
 | `DSH_CORDIS_CONFIG` | Python SDK 注入默认组合配置的方式（指定自定义 cordis.yml 路径） |
 | profile 模板 | `web` 与 `headless` 两个 profile 首次使用自动初始化；其它名字需 `initProfile` 显式创建 |
 
-### 关键文档 → 源码对照（学习导航）
+### 关键文档 → 源码对照
 
 | 主题 | 文档 | 首选源码入口 |
 |---|---|---|
@@ -219,7 +219,7 @@
 | 组合 / 启动 | <span class="path">packages/boot/app-boot/README.md</span> | <span class="path">apps/cli/src/{profile-boot,bin}.ts</span> |
 | Python SDK | <span class="path">python/sdk/README.md</span> | <span class="path">python/sdk/src/deepseek_harness</span> |
 
-### 学习检查清单
+### 学习自测
 
 <ul class="checklist">
   <li>能画出 5 层架构与 ctx 服务地图</li>

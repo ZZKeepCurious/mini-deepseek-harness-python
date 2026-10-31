@@ -50,7 +50,8 @@
 
 | 上游 | mini 现状 | 规划 |
 |---|---|---|
-| preset roster + per-agent mount | `miniharness/preset/{standard,minimal}/preset.json` + `preset/presets.py`：目录列表即名单、per-agent 挂载视图、host 缺工具 fail loud、进程级冲突拒绝挂载（手册 08 章） | — |
+| preset roster + per-agent mount | shipped 根 `miniharness/preset/{standard,minimal}/` + 用户 `$MINIHARNESS_HOME/.agent-presets`；`preset/presets.py` 目录发现即名单、per-agent 挂载视图、host 缺工具 fail loud、进程级冲突拒绝挂载；`agent.cordis.yml` 可翻译为 mini Preset。上游四模式里的 `code`/`cordis` 目录可拷入用户根接入（手册 08 章） | 声明式 `agent-preset-registry`（不扫目录）为上游 rc.2+ 形态，mini 仍以目录 roster 为主 |
+| PTC 模式（`ctx.ptcRuntime` + `run_code`） | `miniharness/ptc_runtime/` + 工具层 PTC 派发（`tool/ptc-dispatch*` 日志、Python worker 子进程、可选 `sandbox_mode` confine）；与 preset 解耦——`code` preset 目录未随包出厂，但运行时与 wire 已接线（`architecture.md` 映射表） | — |
 
 ## 议题 2：外部入口全景
 
@@ -118,6 +119,12 @@ bin.ts → args 解析（--profile/--patch/--dump-config，task 为位置参数�
 - 测试与 CI：测试位于 `tests/test_cli.py`（启动器 / 会话子命令）与 `tests/test_composition.py`（YAML 组合）；CI（`.github/workflows/ci.yml`：unittest + Python 3.10~3.13 matrix × ubuntu/windows + windows-acl 门控 e2e + demo 冒烟）；integration 标签真实 API 测试（`tests/test_real_api.py`，`MINIHARNESS_INTEGRATION=1` + key 缺一即跳过）。
 
 - 组合装载树与 Include（`miniharness/loader/`，L0，对齐上游 `vendor/loader` + `vendor/include`）：`boot()` 装 `Loader` 服务后挂根 Include 条目，把配置条目导入并激活为 live fiber。组件包括 `EntryTree`（扁平 store、`entries()` 递归子树、`resolve()`/`import_()`）、`Entry` 生命周期（`update` 三态 / `disabled` 上溯 / `!!js` 激活期求值）、`EntryGroup`/`Group`（组载体）、`Loader` 服务（`internal/config` 树载体字面 + 普通条目 interpolate、`internal/update` 写回 + 重载日志、`internal/plugin` 自销毁回写 disabled）、`Include` 文件背书子树（读/写、`initial` 首写、`apply_entry_patches`、`!!js` 原样回写）。启动期审计 `ACTIVE`/`FAILED`/`PENDING` 三态并点名未激活条目（对齐 `auditStartupEntries`）。测试位于 `tests/test_loader_tree.py` 与 `tests/test_loader_include.py`。
+
+- Host 插件面 Remote（`web/api.py` + `boot/plugin_*`）：`pluginInventory/list`（Loader 条目 + preset flatten）、`pluginManager/listPlugins|setPluginEnabled`（写 profile 补丁并对账）、`pluginMarket/listIndexes|setIndexes|search|readEntryDetail` + `pluginRegistryProbe/fastest`（HTTP(S) 索引与 Python 模块安装扩展，不跑 pnpm）；约定见 `interface-wire.md` §4.15。
+
+- 定时跟进 Web 面：`schedule/*` Remote（list/catalog/history/delete/update + `schedule/changed` 事件）与模型侧 `install_tool_schedule` 分离；`webui/` 消费同一 wire（Settings / 控制面板等与 `architecture.md` V4–V5 行一致）。
+
+- 工作流 + PTC 沙箱门：`miniharness/workflow/` + `workflow_ptc/` guest confine；实验面 `experimental/action_cards` opt-in 投影供 WebUI 按需渲染。
 
 ## 议题 3：Trajectory 轨迹台账
 
@@ -217,7 +224,7 @@ mini loop（`core/agent_loop/agent.py`）覆盖完整干预面：`followup` + in
 当模型调用需要人类点头的操作（危险命令、写文件、删除等）时，web 面板弹出 **Reject / Allow once** 两个按钮（`packages/client/ui-approval/src/client/ApprovalPanel.tsx`）。**没有"永远允许"**：每次授权只作用于被询问的那一个动作，下一次调用必须重新 ask。无人值守时可用 `never` 策略确定性拒绝，或由 ACP 机器应答（只给一次性 allow-once/reject-once 两个选项）。
 
 !!! warning "词汇澄清"
-    现仓库词汇是 `ApprovalOutcome` / `ApprovalPolicy` / `PreToolDecision`，不存在 `PermissionStatus`、`approvalContext` 等旧符号；且"allowed-once 豁免下一次"不存在——README 已知限制清单明示无 allow-always、无记忆规则、无撤销、无授权存储（`packages/interaction/user-approval/README.md:60`）。
+    现仓库词汇是 `ApprovalOutcome` / `ApprovalPolicy` / `PreToolDecision`，不存在 `PermissionStatus`、`approvalContext` 等旧符号；且"allowed-once 豁免下一次"不存在——`packages/interaction/user-approval/README.md` 已知限制明示无 allow-always、无记忆规则、无撤销、无授权存储（`README.md:60`）。
 
 ### 5.2 实现
 
@@ -327,7 +334,7 @@ sidebar 搜索 → ctx.sessions.search（runtime manager.ts:518-527）→ RPC se
 
 ### 7.4 mini 对照
 
-mini 持久化层采用 JSONL + fail-closed + interrupted 修复，且 `sessions` 子命令（`cli/session_cmds.py`）提供 CLI 版会话管理（list / resume / delete，教学扩展）。**缺口**：resume 会话选择与 history 分页窗口的 web 表层形态。headless 保持不支持恢复（同上游 startup.ts:31-56 只解析 task 位置参数）。
+mini 持久化层采用 JSONL + fail-closed + interrupted 修复，且 `sessions` 子命令（`cli/session_cmds.py`）提供 CLI 版会话管理（list / resume / delete，教学扩展）。**web 表层**：`webui/` + `session/list|create|page|search` 等 unary 与 `session/follow` 流（分页边界同议题 7.2）；`ensureSession` + `agents.resume` 走同一 Remote 约定。**登记简化**：跨会话 FTS 检索（上游 `session-query` + `openAt` 三态）在 mini 为可选域（`session_query/`，默认组合未必打开 SQLite FTS）；sidebar 全文搜索行为与上游 shipped bundle 默认可能不一致。headless 保持不支持恢复（同上游 startup.ts:31-56 只解析 task 位置参数）。
 
 ## 议题 8：plan mode 与 goal
 

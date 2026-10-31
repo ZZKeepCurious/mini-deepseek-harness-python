@@ -28,9 +28,9 @@ dsh 用一个极小的原语解决这个问题：**不透明的 scope 键（`Sco
 
 为什么需要"载波"而不是直接传 key 给 `emit`？因为 Cordis 的事件派发天然支持 `ctx.on(event, fn)` 注册一个监听器，监听器本身不带"我只关心哪个身份"的信息。dsh 的解法是：把"身份"焊进**接收器对象**（`scopeTarget` 的返回值），派发时检查监听器的接收器是否匹配当前事件的身份链——这样既有全局监听器、又有身份化监听器，且二者走同一条派发路径。
 
-## 14.3 代码 step-by-step
+## 14.3 实现
 
-### 步骤 1：`ScopeKey` 与 parent 关系（带环检测）
+### 1. `ScopeKey` 与 parent 关系（带环检测）
 
 ```python
 class ScopeKey:
@@ -69,7 +69,7 @@ def scope_chain_of(key):               # nearest-first: [key, parent, ...]
 
 对照上游 `index.ts:39-102`：`scopeParents` 是 `WeakMap<ScopeKey, ScopeKey>`；`linkScopeParent` 从 `parent` 沿父链走到根，撞上 `key` 即拒绝（每条链都走到根，确保无环）；`bindScopeParent` 已绑定键抛错，仅返回的 `ScopeParentBinding` 能 `rebind`——blank-session 重组（在新会话里按新根重建 scope 树）时，只有原绑定持有者能改父链接。mini 用 `WeakKeyDictionary` 承载弱引用语义，`ScopeKey` 用最小类（裸 `object()` 不可弱引用）。
 
-### 步骤 2：`create_scope` —— 铸一枚带身份的作用域
+### 2. `create_scope` —— 铸一枚带身份的作用域
 
 ```python
 def create_scope(ctx, key, parent=None, name="scope"):
@@ -83,7 +83,7 @@ def create_scope(ctx, key, parent=None, name="scope"):
 
 作用域上下文继承铸造方 fiber 的依赖 API，并**拥有**经它做出的每笔注册（fiber 拆解即逆序回滚，见第 2 章）。`Scope.dispose()` 记忆化 `quiesce_fiber`：先 `fiber.dispose()`，再跟随 `fiber.inertia` 排空。`inertia` 是 fiber 拆解期间在途的异步转换（第 2 章 §2.3），拆解后要等它到达静止点才能继续（同上游 `quiesceFiber`；mini 按"每个新惯性对象各消费一次"逼近上游"完成后置 undefined"的语义）。
 
-### 步骤 3：`scope_of` —— 读最近的身份标号
+### 3. `scope_of` —— 读最近的身份标号
 
 ```python
 def scope_of(ctx):
@@ -98,7 +98,7 @@ def scope_of(ctx):
 
 沿 parent 链向上找第一个带 `_scope_key` 的节点（上游 `ctx[kScope]` 的原型继承等价；`Scope` 包装经 `__getattr__` 代理亦可用）。无标号上下文返回 `None`——意味着"全局"。
 
-### 步骤 4：`scope_target` 载波 —— 事件只向上接纳
+### 4. `scope_target` 载波 —— 事件只向上接纳
 
 ```python
 class _ScopeCarrier:
@@ -130,7 +130,7 @@ def scope_target(base, key):
 
 这正是"注册向下、事件向上"的另一半：一个常驻组合（standing composition，进程启动时挂上、一直存在的宿主 root 就是这种）挂了祖先 scope 的监听器，就能收到其下每个 agent 的事件，而不必每个 agent 单独注册——这也是第 7、9 章里"一个会话店观察每个被组合 agent"的根基。
 
-### 步骤 5：`ScopedLayers` —— 注册表的 scope 感知存储
+### 5. `ScopedLayers` —— 注册表的 scope 感知存储
 
 `dsh_scope` 还提供注册表存储层（上游 `store.ts`），让"按 scope 归属 + 按 scope 继承"的注册表不用每次手写：
 

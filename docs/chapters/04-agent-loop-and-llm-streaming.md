@@ -59,9 +59,9 @@ sequenceDiagram
 
 另外，`step/end` 与 `turn/end` 都写在 `finally` 里：哪怕中途抛错，括号也一定会闭合。这是第 1 章"括号平衡"基座在循环这一层的落实。
 
-## 4.3 代码 step-by-step（llm.py）
+## 4.3 实现：`llm.py`
 
-### 步骤 1：统一流协议 StreamChunk
+### 1. 统一流协议 StreamChunk
 
 不同厂商的流式格式各不相同（Anthropic 是事件流，OpenAI 是 `choices[].delta`，还有各种原生 SSE）。让循环去关心这些差异是错的——它是整个系统里最不该感知厂商细节的地方。所以在适配器和循环之间插一层统一协议：
 
@@ -86,7 +86,7 @@ class StreamChunk(dict):
 
 约定这样定，循环就只认这几类 chunk。换厂商 = 换一个适配器，循环一行不改。
 
-### 步骤 2：适配器接口与错误收口
+### 2. 适配器接口与错误收口
 
 ```python
 class LlmFailure(Exception):
@@ -112,7 +112,7 @@ class LlmAdapter:
 
 错误码是闭集，`AUTH`、`RATE_LIMIT`、`CONTEXT_WINDOW_EXCEEDED`、`EMPTY_RESPONSE` 等各有含义。其中 `EMPTY_RESPONSE`（模型返回了空响应）按规范错误处理，默认允许重试——§4.9 会用到。
 
-### 步骤 3：FakeLlmAdapter —— 无 key 也能跑通
+### 3. FakeLlmAdapter —— 无 key 也能跑通
 
 ```python
 class FakeLlmAdapter(LlmAdapter):
@@ -145,7 +145,7 @@ class FakeLlmAdapter(LlmAdapter):
 
 行为很简单：第一次调用返回一次工具调用，之后返回最终文本。这样就能驱动"模型调工具 → 拿到结果 → 再回答"的完整回合，全程不需要真实模型。注意工具调用块里的 `arguments` 是 **JSON 字符串**而不是对象——模型侧协议里工具参数就是字符串，和上游 `ContentBlock` 一致。
 
-### 步骤 4：DeepSeekAdapter —— Messages 协议上的流式
+### 4. DeepSeekAdapter —— Messages 协议上的流式
 
 DeepSeek 的官方适配器走 **Anthropic 兼容的 Messages 协议**（上游已删除 Chat Completions 路径）。请求发到 `messages_api_root(base) + "/messages"`，头带 `x-api-key` 与 `anthropic-version`；响应是一串 SSE 事件：
 
@@ -192,9 +192,9 @@ async def stream(self, messages, tools, signal=None,
 !!! note "为什么传输层用 httpx"
     `urllib` 的阻塞读无法被真正取消，只能靠固定超时兜底；上游要求"读间隙超时可取消"（per-read watchdog）。`httpx` 是原生 asyncio 传输：取消信号一置位就关闭连接，读间隙超时按 300s 计，测试还能用 `httpx.MockTransport` 注入假响应而不用打真实网络。这就是本手册"成熟开源库优先"的取舍——有维护良好的异步 HTTP 库时，不手写传输层。
 
-## 4.4 代码 step-by-step（loop.py）
+## 4.4 实现：`loop.py`
 
-### 步骤 1：状态与入口
+### 1. 状态与入口
 
 ```python
 class AgentLoop:
@@ -219,7 +219,7 @@ class AgentLoop:
 
 输入为什么先入队、不直接处理？因为一次 `followup` 可能引发多轮工具调用。期间如果又来一条新输入，它必须排队等这一轮走完，不能插进来打断正在进行的回合。队列就是回合的边界。
 
-### 步骤 2：turn 生命周期
+### 2. turn 生命周期
 
 ```python
     def _open_turn(self):
@@ -242,7 +242,7 @@ class AgentLoop:
 
 `turn/start` / `turn/end` 是第 1 章的括号。`reason` 是个对象，默认 `{"kind": "completed"}`；被拒绝的回合写 `{"kind": "blocked"}`，被打断的写 `{"kind": "aborted", ...}`。编号从 1 起，每个 turn 内 `_step` 重置为 0、进入 step 时先自增再使用——与上游 `invariant.ts` 的 `nextTurn: 1, nextStep: 1` 一致。
 
-### 步骤 3：主循环
+### 3. 主循环
 
 ```python
     async def _pump(self):
@@ -260,7 +260,7 @@ class AgentLoop:
 
 循环条件是"还有排队输入，或还有工具回灌待续步"。`max_steps` 是死循环守卫：模型如果一直调工具不收敛，会在上限处报错而不是挂死。上游 `AgentLoop` 没有硬性 step 上限，这个守卫是 mini 补的安全网：默认 `DEFAULT_MAX_STEPS = 50`，可用构造参数或环境变量 `MINIHARNESS_MAX_STEPS` 覆盖。
 
-### 步骤 4：一个 step
+### 4. 一个 step
 
 ```python
     async def _run_step(self, claimed):
@@ -307,7 +307,7 @@ class AgentLoop:
 - **工具参数是分片到达的**：`tool-call-delta` 一批批送来 `name` 和 `argumentsDelta`，循环按 id 攒齐后才组装成完整调用。所以日志里存的是完整参数，不是碎片。
 - **`_continue = bool(tool_calls)`**：有工具调用就在同 turn 内续一步。第二次请求时，历史里已经多了上一轮的 `tool/result`。
 
-### 步骤 5：工具执行与落日志
+### 5. 工具执行与落日志
 
 ```python
     async def _run_tool(self, name, arguments):
@@ -399,15 +399,15 @@ print([e["type"] for e in session.events])
 
 对应 dsh：`packages/llm/llm/src/retry-policy.ts` + `packages/llm/llm-retry/src/index.ts` + `packages/core/agent/src/runtime-types.ts`（`agent/request-error`）。
 
-**扩展点。** 适配器抛 `LlmFailure` 时，循环派发 `agent/request-error` waterfall，payload `{agent, turn, step, provider, failure, retryPolicy, signal}`（与上游逐字段一致）。监听器返回 `{kind: 'retry'}` 且不调 `next()` 表示自己接管恢复；调 `next()` 委派下游；既不接管也没下游处理，则失败终局。重试规划器由装配方显式挂载（`AgentLoop` 构造本身不带副作用）：各入口在构造 loop 前调用 `apply_retry_planner(ctx)`（幂等）。
+扩展点：适配器抛 `LlmFailure` 时，循环派发 `agent/request-error` waterfall，payload `{agent, turn, step, provider, failure, retryPolicy, signal}`（与上游逐字段一致）。监听器返回 `{kind: 'retry'}` 且不调 `next()` 表示自己接管恢复；调 `next()` 委派下游；既不接管也没下游处理，则失败终局。重试规划器由装配方显式挂载（`AgentLoop` 构造本身不带副作用）：各入口在构造 loop 前调用 `apply_retry_planner(ctx)`（幂等）。
 
-**策略解析**（`llm/retry_policy.py`，同 retry-policy.ts）：
+策略解析（`llm/retry_policy.py`，同 retry-policy.ts）：
 
 - 两种模式：`normal`（`maxRetries` + 可重试码白名单）/ `always`（无限重试）；
 - 默认值：`maxRetries 5`、`initialDelayMs 500`、`maxDelayMs 10000`、`jitterRatio 0.1`，可重试码 `[EMPTY_RESPONSE, RATE_LIMIT, SERVER, TIMEOUT, TRANSPORT]`；
 - 严格校验：未知键拒绝；退避参数须为正有限且 `initial ≤ max`；`jitterRatio ∈ [0,1]`；`maxRetries` 为非负整数；可重试码非空无重复。解析结果冻结。
 
-**恢复决策**（`llm/retry.py`，同 llm-retry/index.ts）：
+恢复决策（`llm/retry.py`，同 llm-retry/index.ts）：
 
 1. 无策略 → 直接委派，不重试；
 2. `always`：派发前检查熔合信号（请求 signal 与重试插件 lifetime），已中止则失败终局；委派下游拿决策后**复查**熔合信号，中止压过决策；失败或无人接管则自己无限重试（不看 code）；
@@ -416,13 +416,13 @@ print([e["type"] for e in session.events])
 5. 延迟优先级：429 的 `Retry-After`（`providerRetryAfterMs`）有效时优先，超过 `maxDelayMs` 时 `normal` 放弃、`always` 改用本地退避；否则本地退避 `min(initial × 2^(retry-1), max) × (1 - jitter + 2·jitter·rand)`，再封顶 `maxDelayMs`；
 6. 等待可取消：请求 signal 与插件 lifetime 竞速（等价上游 `AbortSignal.any`），任一置位即醒。
 
-**生命周期。** 重试插件经 `ctx.on("agent/request-error", ...)` 挂监听器，并登记 effect teardown（拆解时注销监听器、abort lifetime、排干在途恢复）。拆解后的迟到回调命中陈旧守卫直接返回。
+生命周期：重试插件经 `ctx.on("agent/request-error", ...)` 挂监听器，并登记 effect teardown（拆解时注销监听器、abort lifetime、排干在途恢复）。拆解后的迟到回调命中陈旧守卫直接返回。
 
-**接线语义。** 重试是**同一 step 内重新发起请求**：`messages` 不变（失败的 attempt 只落 `assistant/attempt`，不产生消息事件，`derive_messages` 不受 `llm/retry` 影响），`request/header` 只落一次，成功的 `assistant/message` 内嵌成功 attempt 的压缩流，且因内嵌流自带边界而不带 `sourceEventSeqs`。`LlmFailure` 另带可选事实字段 `status` / `providerRetryAfterMs` / `requestId`（来自 `x-request-id` 或 `x-deepseek-request-id`）；socket 超时映射为 `TIMEOUT`。
+接线语义：重试是同一 step 内重新发起请求：`messages` 不变（失败的 attempt 只落 `assistant/attempt`，不产生消息事件，`derive_messages` 不受 `llm/retry` 影响），`request/header` 只落一次，成功的 `assistant/message` 内嵌成功 attempt 的压缩流，且因内嵌流自带边界而不带 `sourceEventSeqs`。`LlmFailure` 另带可选事实字段 `status` / `providerRetryAfterMs` / `requestId`（来自 `x-request-id` 或 `x-deepseek-request-id`）；socket 超时映射为 `TIMEOUT`。
 
-**上下文溢出降级。** `CONTEXT_WINDOW_EXCEEDED` 不在默认白名单，所以重试规划器不接管、委派下游。装配方在 `apply_retry_planner` 之后调用 `install_compaction(ctx)`（幂等）：压缩引擎监听 `agent/request-error`，对该码强制减容，且**仅当** surface 的 `replaceGeneration` 前进（检查点真的写入磁盘）才返回 `{kind:'retry'}`；计数上限 `maxOverflowRetries`，成功响应或回合结束时复位。既没压缩也没人接管，回合以 `turn/end {kind:'error'}` 终局。
+上下文溢出降级：`CONTEXT_WINDOW_EXCEEDED` 不在默认白名单，所以重试规划器不接管、委派下游。装配方在 `apply_retry_planner` 之后调用 `install_compaction(ctx)`（幂等）：压缩引擎监听 `agent/request-error`，对该码强制减容，且**仅当** surface 的 `replaceGeneration` 前进（检查点真的写入磁盘）才返回 `{kind:'retry'}`；计数上限 `maxOverflowRetries`，成功响应或回合结束时复位。既没压缩也没人接管，回合以 `turn/end {kind:'error'}` 终局。
 
-**可选的 tool-result 裁剪。** 与压缩互补的还有一个不送模型的服务 `ToolResultPruner`（注册为 `ctx.toolResultPruner`，经 `install_tool_result_pruner(ctx)` 装配）。它按预算（默认 `{thresholdChars 8192, headChars 4096, tailChars 1024}`，按 Unicode 码点计价）把超预算的 `tool/result` 节点原地裁剪为"保留 head + 固定标记 `[... tool result middle pruned ...]` + 保留 tail"，并补一条 log-only 的 `compaction/prune` 计价事件和一条带 replace 的 `tool/result` 替换事件。真正触发它的是压缩引擎：在摘要压缩**之前**先裁剪，若已降到阈值以下就不必再走模型摘要。装配顺序为 `apply_retry_planner` → `install_compaction` → `install_tool_result_pruner`。
+可选的 tool-result 裁剪：与压缩互补的还有一个不送模型的服务 `ToolResultPruner`（注册为 `ctx.toolResultPruner`，经 `install_tool_result_pruner(ctx)` 装配）。它按预算（默认 `{thresholdChars 8192, headChars 4096, tailChars 1024}`，按 Unicode 码点计价）把超预算的 `tool/result` 节点原地裁剪为"保留 head + 固定标记 `[... tool result middle pruned ...]` + 保留 tail"，并补一条 log-only 的 `compaction/prune` 计价事件和一条带 replace 的 `tool/result` 替换事件。真正触发它的是压缩引擎：在摘要压缩**之前**先裁剪，若已降到阈值以下就不必再走模型摘要。装配顺序为 `apply_retry_planner` → `install_compaction` → `install_tool_result_pruner`。
 
 验证：`python -m unittest tests.test_retry -v`（策略解析、退避边界、`Retry-After` 解析、全部分支、lifetime 信号与竞速等待、插件 teardown、loop 集成）；压缩与溢出见 `tests/test_compaction.py`。
 
@@ -430,9 +430,9 @@ print([e["type"] for e in session.events])
 
 文本回合走 §4.3 的适配器；带图的回合多一层**图像输入请求路由**。mini 对应 `miniharness/llm/deepseek_files/`（上游 `v0.1.6-alpha.1` 的 `common/*`），对照 `docs/architecture.md` 映射表。
 
-**路由目标**（`ImageRequestTarget`，request-image v6）：先算"这张图以什么规格请求"——按像素预算（detail 网格 + 4096 单边封顶），再和文本 token 一起交给定价器（`request-pricing.py`），得出请求成本。这是"请求前先知道要付多少"，不是请求后记账。
+路由目标（`ImageRequestTarget`，request-image v6）：先算"这张图以什么规格请求"——按像素预算（detail 网格 + 4096 单边封顶），再和文本 token 一起交给定价器（`request-pricing.py`），得出请求成本。这是"请求前先知道要付多少"，不是请求后记账。
 
-**文件管线**（`files_api.py` + `upload_index.py` + `file_store.py`）：
+文件管线（`files_api.py` + `upload_index.py` + `file_store.py`）：
 
 1. **file-id 优先**：同一会话内上传过的图片（存在 durable 索引 `files-v3.json` 里，内容寻址）直接复用 file-id，不重复上传；
 2. **新增则上传**：单飞共享同一个上传任务；配额用尽按 LRU 恢复；索引经 `filelock`（30s）+ `os.replace` 原子发布；
@@ -441,7 +441,9 @@ print([e["type"] for e in session.events])
 
 载体差异：上游走官方 Files API，mini 用 httpx 实现同一契约；上传状态索引是 mini 的生产就绪增量（上游无等价物，已登记）。
 
-**图像卸载投影**（`core/session/projections.py` + `compaction/image_offload.py`，对应上游 `compaction-image-offload`）。上下文压力过大时，除了逐字压缩，还可以把**最旧的输入图片**从历史里卸载掉，一次省一大块 token：
+#### 图像卸载投影
+
+`core/session/projections.py` + `compaction/image_offload.py`（对应上游 `compaction-image-offload`）。上下文压力过大时，除了逐字压缩，还可以把最旧的输入图片从历史里卸载掉，一次省一大块 token：
 
 - `image/offload` 是 durable 事件，记录要卸载的图片 occurrence（当前 surface 的 `user/message` 或 `tool/result` 节点 + 深度优先序号），由 `offload_oldest_images` 逐个挑选；选定集严格递增、拆分校验 fail-closed；
 - 读侧 `derive_messages` 经 `fold_projections` 把被选中的 occurrence 投影为不可变的 offloaded 副本——历史节点不删，只是内容变成占位文本；

@@ -3,6 +3,8 @@
 > 用 Python（成熟开源库优先，无语义等价库时才用标准库手写）清晰复现 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的核心约定，目标是可直接上生产。
 > 仓库：https://github.com/ZZKeepCurious/mini-deepseek-harness-python
 
+仓库根 [README.zh.md](https://github.com/ZZKeepCurious/mini-deepseek-harness-python/blob/main/README.zh.md) 有架构分层与常用命令；本页串联报告、手册与架构/wire 文档。
+
 ## 这是什么
 
 本手册用 Python（成熟开源库优先：SSE 传输 `httpx`、凭据跨进程写锁 `filelock`、文件监视 `watchdog`、YAML 配置 `pyyaml`）逐层实现一个 `MiniHarness`：一个以清晰复现为核心、面向生产就绪的 Agent 运行时，逐条复现 DeepSeek Harness（`dsh`）的**约定与硬性规定**。
@@ -17,14 +19,14 @@
 | 作用域化注册 + 工具管线 | typert 类型图 |
 | turn/step 状态机 + LLM 流式协议 | Web 客户端 / UI 卡片 |
 
-## 架构与上游对应（代码组织设计）
+## 架构与 wire
 
-- **[架构说明与上游对应](architecture.md)** —— `miniharness/` 代码自身的"建筑图纸"：目录组织（家族镜像原则）、模块 ↔ 上游映射表、依赖方向规则、公共 API 白名单/黑名单与教学扩展清单。
-- **[接口约定参考](interface-wire.md)** —— 前后端唯一耦合面的权威速查：web 传输层发布的全部 wire 约定（两信封 RPC、`/api/remote.mux` WS 帧、`$events`/`$events/result`、follow/control、审批瀑布、静态承载、会话导出）。unary 端点全集以 `miniharness/web/api.py` 的 `WebApi.ROUTES` 为准，不在教程章节里写死个数。产品化前端（`webui/`）只依赖这份约定。
+- **[架构说明与上游对应](architecture.md)** —— `miniharness/` 目录如何镜像上游包族、模块映射表、依赖方向、公共 API 与教学扩展清单。
+- **[接口约定参考](interface-wire.md)** —— 前后端耦合面：两信封 RPC、`/api/remote.mux`、Remote 帧、`$events`/`$events/result`、审批与用户提问 waterfall、静态承载、会话导出。unary 端点以 `miniharness/web/api.py` 的 `WebApi.ROUTES` 为准；`webui/` 只依赖这份约定。
 
-## 分析报告（主文档 · 体系化解读）
+## 分析报告
 
-- **[报告首页（阅读地图）](report/index.md)** —— 体系化入口：六个主题子页导航 + 四维对照表（上游包 ↔ mini 模块 ↔ 手册章节 ↔ 报告页面）。
+- **[报告首页](report/index.md)** —— 六个主题子页 + 四维对照表（上游包 ↔ mini 模块 ↔ 手册章节 ↔ 报告页面）。
   - [01 项目全景与分层架构](report/01-overview.md)
   - [02 系统架构与内核](report/02-architecture.md)
   - [03 关键处理流程](report/03-flows.md)
@@ -32,11 +34,11 @@
   - [05 路线图与 Python 复现](report/05-roadmap.md)
   - [06 附录与 HOWTO](report/06-appendix.md)
 
-## 教程手册（step-by-step · 施工图纸层）
+## 教程手册
 
-> 引导式教程：每章 = 概念讲解 → 最小可运行 Python 代码 → 逐段解释 → 硬性规定/测试验证 → 检查点练习。
+> 每章：概念 → 最小可运行代码 → 解释 → 测试/硬性规定 → 可选练习。
 
-### 学习地图
+### 章节顺序
 
 ```mermaid
 flowchart LR
@@ -96,8 +98,8 @@ python -m miniharness.demo
 
 - **报告**（Markdown 体系，站点已统一为 MkDocs）回答"系统长什么样、为什么这样设计"：分层架构、ctx 服务地图、技术核心、关键流程、**产品面十大议题**（模式/preset、外部入口、Trajectory、干预面、审批、自我修改、resume、plan/goal、压缩与后台、skills）——全部配 Mermaid 图，按主题分页。
 - **本手册**回答"系统怎么从零长出来"：一章一个主题，代码逐步构建，测试即硬性规定。
-- 报告 `index.md` 的四维对照表（上游包 ↔ mini 模块 ↔ 手册章节 ↔ 报告页面）是定位各主题的索引。
-- 报告第二部分 §7.3 的 6 个复现项目清单，就是本手册 01~05 章的骨架索引。
+- 报告 [index.md](report/index.md) 的四维对照表用来在包、mini 模块、手册章与报告页之间跳转。
+- 报告 [05-roadmap.md](report/05-roadmap.md) §7.3 的复现项目清单与手册 01~05 章骨架对应。
 
 ## 学完你能做到什么
 

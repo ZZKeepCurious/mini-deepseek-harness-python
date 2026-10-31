@@ -1,4 +1,4 @@
-﻿# 第 2 章：插件上下文与事件总线
+# 第 2 章：插件上下文与事件总线
 
 > 对应 dsh 真实源码：`vendor/cordis`（见 `docs/cordis-primer.md`）+ `packages/core/scope`
 > 前置：第 1 章。本章产出：`miniharness/core/scope.py`；测试 `tests/test_bus.py`、`tests/test_fiber.py`
@@ -75,9 +75,9 @@ flowchart LR
 !!! warning "同步实现里 parallel 与 serial 是同一个东西"
     Cordis 本体的 `parallel` 和 `serial` 是异步的：`parallel` 用 `Promise.all` 并发，`serial` 逐个 `await`，两者行为不同。mini 的教学实现是同步的——同步代码无法真正并发，所以 `parallel` 与 `serial` 都退化成"按注册序逐个调用、收集结果"，代码完全相同。并发与顺序的区别只体现在异步变体上——`aparallel`（`asyncio.gather`）与 `aserial`（逐个 `await`）语义不同；`aemit` / `awaterfall` 则是 `emit` / `waterfall` 的 async 版。仓库实现同时提供四套异步变体，`agent/pre-step` 等流水线走的是异步那套。
 
-## 2.3 代码 step-by-step
+## 2.3 实现
 
-### 步骤 1：Context 骨架与服务仓库
+### 1. Context 骨架与服务仓库
 
 ```python
 class Context:
@@ -120,7 +120,7 @@ class Context:
 
 `get(..., strict=True)` 默认只认"提供者已经激活"的服务。服务还在装载中或已卸载时，取到 `None` 而不是拿到一个半成品。这条规则让"依赖还没就绪"和"依赖已消失"变成同一种可观察状态，调用方只需处理 `None`。
 
-### 步骤 2：事件监听与四种派发
+### 2. 事件监听与四种派发
 
 ```python
 def on(self, event, fn):
@@ -194,7 +194,7 @@ async def aserial(self, event, payload=None):
     return results
 ```
 
-### 步骤 3：可逆副作用与 fiber
+### 3. 可逆副作用与 fiber
 
 `effect(execute)` 的参数是**执行体**，不是 disposer——注册的那一瞬间执行体就被调用：
 
@@ -228,7 +228,7 @@ FiberState: PENDING → LOADING → ACTIVE → UNLOADING → DISPOSED
 
 `dispose()` 幂等：重复调用会 join 已经在跑的拆解（fiber 的 `inertia` 记录在途转换，竞态调用共享同一完成）。拆解时全部同步 disposer 先逆序执行；遇到异步 disposer 就并发卸载，并返回一个可 `await` 的完成对象。异步拆解里冒出的错误被记为 fiber 的错误并记日志，既不会静默吞掉，也不会把拆解本身炸停。
 
-### 步骤 4：作用域与依赖驱动激活
+### 4. 作用域与依赖驱动激活
 
 作用域是"带独立 fiber 的子上下文"。中间件为每个 agent 开一个作用域，per-agent 的服务与监听器就各归各家：
 

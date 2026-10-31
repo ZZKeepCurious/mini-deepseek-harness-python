@@ -1,4 +1,4 @@
-﻿# 第 3 章：工具执行管线（Tool Execution Pipeline）
+# 第 3 章：工具执行管线（Tool Execution Pipeline）
 
 > 对应 dsh 真实源码：`packages/core/tools`（`docs/subsystems/tools.md`、`docs/tool-execution-pipeline.md`）
 > 前置：第 1、2 章。产出文件：`miniharness/core/tools.py` + `tests/test_tools.py`
@@ -43,9 +43,9 @@ flowchart TD
   G -->|deny| DEN
 ```
 
-## 3.3 代码 step-by-step
+## 3.3 实现
 
-### 步骤 1：JSON Schema 子集校验器
+### 1. JSON Schema 子集校验器
 
 ```python
 def validate_schema(value, schema):
@@ -59,7 +59,7 @@ def validate_schema(value, schema):
 
 一个容易漏的兼容点：参数此刻已经被 `deep_freeze` 冻结成了 `MappingProxyType` / `tuple`，校验器遍历时不能依赖 `isinstance(x, dict)` 判断结构——`MappingProxyType` 不是 `dict` 的子类。实现里对这两类都要认。
 
-### 步骤 2：领域对象
+### 2. 领域对象
 
 ```python
 @dataclass
@@ -96,7 +96,7 @@ class ToolResult:
 - `is_concurrency_safe = False` 是默认值：不确定安全就按不安全处理（串行屏障），宁可慢不能乱。第 12 章的并行化就靠这个标记调度。
 - `present_call` / `present_result` 是给 UI 的"挂起卡片"回调，纯函数，不影响管线语义。常规框架把 UI 逻辑塞进工具内部，dsh 把它抽出来挂在工具声明上。
 
-### 步骤 3：作用域化注册表
+### 3. 作用域化注册表
 
 ```python
 class ToolRegistry:
@@ -139,7 +139,7 @@ class ToolRegistry:
 
 重复注册直接抛错（fail loud），与第 2 章 `provide` 的行为一致。静默覆盖会让"我注册的工具为什么变成了别人的实现"成为谜。
 
-### 步骤 4：执行管线（核心）
+### 4. 执行管线（核心）
 
 ```python
 def run_pipeline(ctx, tool, args, exec_=None):

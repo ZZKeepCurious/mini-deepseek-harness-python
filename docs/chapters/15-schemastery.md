@@ -26,9 +26,9 @@ schemastery 的核心只有一个对象：**`Schema`**。它同时是：
 
 为什么需要"17 类 resolver + 一个分发器"而不是一堆 `validate_xxx` 函数？因为 schema 是递归嵌套的（object 的字段又是 schema，array 的 item 又是 schema），统一走 `Schema.resolve` 递归下降，配合 `Options`（autofix / ignore / path / strict）就能在任意深度上一致地处理默认值、宽松改写、错误路径前缀。
 
-## 15.3 代码 step-by-step
+## 15.3 实现
 
-### 步骤 1：Schema 节点 + resolve 分发
+### 1. Schema 节点 + resolve 分发
 
 ```python
 class Schema:
@@ -77,7 +77,7 @@ def resolve(data, schema, options=None, strict=False):
 
 递归下降的路径这样走：一棵 `S.object({"name": S.string()})` 在解析时，`resolve` 派发到 object resolver，后者对每个字段递归调用 `property`（`index.ts:698-719`），`property` 内部再 `Schema.resolve(data[key], field_schema, {path: [...path, key]})`。错误路径因此自然带上 `.name` 这样的前缀。
 
-### 步骤 2：meta 构建器（克隆语义）
+### 2. meta 构建器（克隆语义）
 
 每个链式方法都返回**新** Schema，旧节点不变（同上游所有 builder 调 `Schema({...self.meta, ...})`）：
 
@@ -105,7 +105,7 @@ def max(self, value):
 
 其余的构建器各管一段：`min` / `max` / `step` 在 number resolver 里做范围与步长校验（`checkWithinRange` `index.ts:602` 加 `isMultipleOf` `index.ts:629`）；`pattern` 在 string resolver 里校验（`index.ts:611`）；`role` / `link` 是给 config-doc 与 web 配置面用的元信息，不参加校验，只进 `toJSON`。
 
-### 步骤 3：ValidationError 的 `$path` 前缀
+### 3. ValidationError 的 `$path` 前缀
 
 `schema.resolve` 失败时不返回 `None`，而是抛 `SchemaValidationError`，消息带**从根到出错字段**的路径前缀：
 
@@ -121,7 +121,7 @@ except SchemaValidationError as e:
 
 `$` 是根，`$.name` 表示根对象的 `name` 字段，`$[0]` 表示数组第 0 项。Cordis 的 `resolveConfig` 把这类错误聚合成 `invalid config:\n  - <msg> (at <path>)`（上游 `fiber.ts`，对应 mini `core/schema.py` 的 `ValidationError` 聚合）——所以一个深层嵌套配置的错误，能精确指到 `$.sub.k` 这一级（这也是 `tests/test_bus.py` 里 `TestConfigValidation` 断言 `(at sub.k)` 的依据）。
 
-### 步骤 4：复合 resolver（object / union / intersect / transform / bitset）
+### 4. 复合 resolver（object / union / intersect / transform / bitset）
 
 - **object**：遍历 `self.dict` 每个字段递归 `resolve`；缺字段看 `required`/`default`（见步骤 2）。未知键：**非 strict 默认保留（merge 进结果）；`strict` 模式下不合并（丢弃）**（`schema.py:771-772`）。`loose` 与未知键无关——它只把 resolver 校验失败改写回默认值（`schema.py:426-429`）。`adapted` 回写让 resolver 能"改写后返回规整值"。
 - **array / dict / tuple**：对 item / 值 / 每个位置递归；`tuple` 按位置对 `list` 逐个 resolve，长度不符报错。
@@ -131,7 +131,7 @@ except SchemaValidationError as e:
 - **bitset**：工厂收**字典** `S.bitset({"a": 1, "b": 2})`（同上游，非数值项被过滤掉，`_build_bitset` `schema.py:975-976`）；解析时只收**数字**或**位名的 list/tuple**——`schema(["a","b"])` 得 `3`（`_resolve_bitset` `schema.py:696-717`；既不收单个字符串也不收 set，收 `"a"`/`{"a"}` 会报 `expected number or array`）。config-doc 用它渲染多选项。
 - **lazy**：`S.lazy(lambda: some_schema)` 延迟构造，打破递归 schema 的循环引用（上游 `index.ts:525`）。
 
-### 步骤 5：序列化与简化（toJSON / toString / i18n / simplify）
+### 5. 序列化与简化（toJSON / toString / i18n / simplify）
 
 配置面是"机器读 + 人读"两用的，schemastery 给两套投影：
 
@@ -140,7 +140,7 @@ except SchemaValidationError as e:
 - **`i18n` / `mergeDesc`**：多语言描述合并（`mergeDesc` `index.ts:319-330`，把 `$description` / `$desc` 按 locale 合并）——配置项的说明文字可随语言切换。
 - **`simplify(value)`**：把一份已解析数据再压成"最简化"表示（dict-aware 的 `deepEqual` 去掉冗余，上游 `index.ts:411-423`），常用于配置持久化时只存"与默认不同的部分"。
 
-### 步骤 6：`~standard` 协议面
+### 6. `~standard` 协议面
 
 这是 schemastery 与 Cordis 的连接点。`Schema` 暴露一个 `toJSON` 形状（即步骤 5 的规格），Cordis 的 `resolveConfig` 读取它来生成插件配置 UI：你写一个带 `.role()` / `.description()` / `.default()` 的 schema，框架就能渲染出对应的配置表单与校验。
 

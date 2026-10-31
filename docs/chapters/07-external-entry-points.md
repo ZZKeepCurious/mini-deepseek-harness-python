@@ -154,7 +154,10 @@ web 的 HTTP/WS 传输层、静态约定与前端都在 §7.5 讲解，`--profil
 
 hooks 的价值在于迁移成本：已经写好 Claude Code 钩子（安全策略、工作流检查）的用户，把这些钩子原样带进 dsh，而不是在 harness 里重写一遍。注意它只能挂在 harness 的**既有拦截点**上，不是新的独立入口。
 
-## 7.5 复现：web 传输层（`miniharness/web/`）
+## 7.5 Web 传输层（`miniharness/web/`）
+
+!!! tip "Wire 约定"
+    本章按实现顺序讲 web 传输层。端点、帧形状与错误码以 [`interface-wire.md`](../interface-wire.md) 为准（当前 unary 101 条，列表见 `miniharness/web/api.py` 的 `WebApi.ROUTES`）。改 wire 时先改实现与该文件，再同步本章叙述。
 
 > 对应 dsh 真实源码：`packages/client/connection`（两信封 RPC + HTTP 载体）+ `packages/api/gateway`（`stream-protocol.ts` + `stream-server.ts`：WS `/api/remote.mux` + `$events` 注册表）+ `packages/api/session-controller`（Typert Remote `session/*`）+ `packages/api/remotes`（Remote 事件瀑布 + `$events/result`）+ `packages/host/frontend-static`（SPA 静态载体）。上游把 web 面收拢为「typert 一元 RPC + 单 WebSocket mux」，mini 跟随这一形态。前端（`packages/bundle/web-app` + `packages/client`）mini 以独立 React 工程 `webui/` 承载产品面、vanilla SPA 作教学参照（§7.5.4）。
 >
@@ -249,7 +252,7 @@ MINIHARNESS_WEB_PORT=8000 python -m miniharness --profile web
 
 依赖是可选 extra：`pip install "miniharness[web]"`（fastapi + uvicorn + websockets）；测试 `tests/test_web_server.py` 用真实 uvicorn 线程 + httpx/websockets——WS mux 流式与跨线程唤醒依赖真实 transport，TestClient 的进程内缓冲无法覆盖。
 
-## 7.6 复现：JSON-RPC 信封最小子集（`miniharness/protocol/sdk.py`）
+## 7.6 JSON-RPC 信封最小子集（`miniharness/protocol/sdk.py`）
 
 > 对应 dsh 真实源码：`packages/sdk/protocol`（`transport.ts` + `types.ts`）。信封层完全一致，三个方法（initialize / session/prompt / shutdown）接在内存假模型上，"可编程驱动 harness"成立。
 
@@ -301,7 +304,7 @@ mini 的同步近似：上游是字节流 + async，mini 是"行馈送 + 内存�
 
 验证：`python tests/test_upstream_sdk_interop.py`（需环境变量 + pydantic）。
 
-## 7.7 复现：ACP 最小子集（`miniharness/protocol/acp.py`）
+## 7.7 ACP 最小子集（`miniharness/protocol/acp.py`）
 
 > 对应 dsh 真实源码：`packages/acp/acp`（`apply()` + `codec.ts`）。自动化专用约定完全一致，跑在假模型上。
 
@@ -341,7 +344,7 @@ mini 的同步近似：上游是字节流 + async，mini 是"行馈送 + 内存�
 - 上游经 cordis 插件挂载（`inject: ['agents']`）+ ACP SDK 的 stdio 连接；mini 直接操作服务对象；
 - inflight 拒绝在同步模型下只能手动置标志触发（真并发不存在）。
 
-## 7.8 复现：hooks 桥（`miniharness/protocol/hooks.py`）
+## 7.8 hooks 桥（`miniharness/protocol/hooks.py`）
 
 > 对应 dsh 真实源码：`packages/hooks/hook-protocol`（`codec.ts` + `matcher.ts` + `merge.ts` + `types.ts`）与 `hooks-claude-code/src/config.ts`。mini 复现 claude-code 一条桥，把既有 CC 钩子配置翻译成 harness 的四类拦截决策；审计以 `hook/invoked` + `hook/result` 配对入日志（log-only 非 surface）。
 

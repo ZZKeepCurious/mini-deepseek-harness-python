@@ -1,4 +1,4 @@
-﻿# 第 1 章：事件溯源会话（Event-Sourced Session）
+# 第 1 章：事件溯源会话（Event-Sourced Session）
 
 > 对应 dsh 真实源码：`packages/core/session`（`docs/subsystems/session.md`）
 > 前置：第 00 章。产出文件：`miniharness/core/session/`（包）+ `tests/test_session.py`
@@ -54,11 +54,11 @@ flowchart LR
 
 注意图里日志是唯一的起点，投影和持久化都是它的下游，两者互不直接打交道。这个结构后面会反复出现。
 
-## 1.3 代码 step-by-step
+## 1.3 实现
 
 每一步都先说"为什么这么写"，再给代码，然后讨论容易踩的坑。建议边读边敲。
 
-### 步骤 1：先定事件类型集合
+### 1. 先定事件类型集合
 
 ```python
 KNOWN_TYPES = frozenset({
@@ -74,7 +74,7 @@ SURFACE_TYPES = frozenset({"user/message", "assistant/message", "tool/result"})
 
 `SURFACE_TYPES` 是三种"会产生消息"的事件，单独拎出来是因为它们携带 `surfaceOp`（`append` 或 `replace`），直接决定历史投影怎么排、压缩时怎么替换。其余事件（turn/step 括号、attempt、tool/call）不产生消息，投影时会跳过。
 
-### 步骤 2：先解决"坏事件"问题——无损 JSON 强制 + 深度冻结
+### 2. 先解决"坏事件"问题——无损 JSON 强制 + 深度冻结
 
 日志是唯一真相，那么"坏数据进日志"就是最不能接受的事。坏在哪？两种：没法序列化（比如塞了个对象进去），或者序列化会悄悄丢信息（比如 `NaN`）。先写两个工具函数：
 
@@ -103,7 +103,7 @@ def deep_freeze(value):
 
 > 真实 dsh 在 `append()` 源头做同样的深度校验和冻结——坏事件永远进不了日志，这是"日志即真相"的硬保证。
 
-### 步骤 3：Session.append —— 唯一的写入口
+### 3. Session.append —— 唯一的写入口
 
 ```python
 class Session:
@@ -152,7 +152,7 @@ record = dict(event, seq=len(self._events))
 
 为什么写入口只有一个？因为"永远只有一个能改日志的地方"意味着任何新增事件都必须过同样的校验。要是到处都能 `session._events.append(...)`，校验就形同虚设。所以 `_events` 藏在类内部，外部只能通过 `events` 属性拿到**元组**——只读，连改的想法都不留。
 
-### 步骤 4：derive_messages —— 纯投影
+### 4. derive_messages —— 纯投影
 
 日志写好了，现在回答：模型历史从哪来？
 
@@ -199,7 +199,7 @@ def _apply_surface(messages, role: str, content: str, op: str) -> None:
 
 `_apply_surface` 里有个容易踩的坑：`replace` 找不到同 role 消息时，如果直接 `return`，这条消息就凭空消失了。所以代码里是"退化为 append"——宁可多一条，不能丢一条。这个细节值得写进测试用例。
 
-### 步骤 5：括号平衡 + 崩溃修复
+### 5. 括号平衡 + 崩溃修复
 
 日志里 `turn/start` 和 `turn/end` 必须配对，就像代码里的括号。为什么在意？因为 05 章会讲到，持久化重载时如果发现 turn 没闭合，说明进程在回合中途崩了——日志不完整。
 

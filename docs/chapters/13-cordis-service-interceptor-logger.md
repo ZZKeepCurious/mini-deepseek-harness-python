@@ -31,9 +31,9 @@
 
 `Service` 基类把"生命周期"从每个服务里抽出来，统一交给 fiber：你写服务只关心行为，注册与注销交给 `super().__init__`。服务因此是带生命周期的对象；把它当成一个值，会漏掉注册与注销这条线。
 
-## 13.3 代码 step-by-step
+## 13.3 实现
 
-### 步骤 1：`Service` 基类 —— 构造即登记
+### 1. `Service` 基类 —— 构造即登记
 
 ```python
 class Service:
@@ -71,7 +71,7 @@ def __call__(self, *args, **kwargs):
 
 为什么"构造即注册"而不是"调用方负责注册"？因为服务实例一旦被创建，它的存在就该立刻对依赖它的 fiber 可见（触发 epoch 重载，见第 2 章 §2.3 步骤 4）。如果交给调用方手动 `provide`，很容易漏注册或重复注册，基类把这条路径固定下来。
 
-### 步骤 2：`_resolve_config` —— 沿 intercept 链合并配置
+### 2. `_resolve_config` —— 沿 intercept 链合并配置
 
 服务常常需要"可覆写配置"。Cordis 的做法是：配置不放在服务自己身上，而是散布在**祖先上下文的 `intercept` 表里**，服务在被调用时现合并。
 
@@ -108,7 +108,7 @@ def _resolve_intercept(self, name):
 
 合并顺序是**近根者优先、base 最前、head 最后**（上游同款：祖先条目先 `unshift`，base 前置、head 后置）。这意味着"越靠近被调用点的 intercept 越有话语权"——父级给默认，子级能覆盖。
 
-### 步骤 3：`LoggerService` —— 内置可调用的日志服务
+### 3. `LoggerService` —— 内置可调用的日志服务
 
 `LoggerService` 是 `Service` 基类的标准样板，也是理解 `_invoke` / `intercept` / exporter 三件事的最佳实例（上游 `logger.ts:194-270`）。
 
@@ -156,7 +156,7 @@ class _LoggerView:
 
 这也解释了 `agent.ctx.logger("steer")` 记出的名字会跟随该 agent 作用域而不是根：`_LoggerView` 记住的是访问方 ctx，配置解析跟着"谁在调用"走。
 
-### 步骤 4：`extend` / `isolate` / `intercept` 三兄弟
+### 4. `extend` / `isolate` / `intercept` 三兄弟
 
 三者都是"不改父、给孩子叠一层"的子上下文工厂（上游 `context.ts:99-145`），区别在于叠什么：
 
@@ -168,7 +168,7 @@ class _LoggerView:
 
 mini 的 `extend` 是父链近似（非 JS 原型链），`isolate`/`intercept` 各自在子上下文写 `_isolate`/`_intercept` 遮蔽层，`_label_of` / `_resolve_intercept` 沿父链上溯解析——与上游 `Object.create` 原型继承等价。三者都不修改父上下文，所以"父不受影响、子可覆盖"的组合语义是可靠的。
 
-### 步骤 5：组装一个可配置服务（示例）
+### 5. 组装一个可配置服务（示例）
 
 把上面三块拼起来：定义一个带 `_invoke` + `_check` + intercept 配置的服务。
 

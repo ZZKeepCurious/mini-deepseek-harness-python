@@ -14,7 +14,7 @@
 > 载体实现：`web/server.py`（FastAPI）；语法层：`web/envelope.py` + `web/stream_protocol.py`；
 > 域实现：`web/api.py` + `web/streams.py` + `web/events.py` + `web/approvals.py` +
 > `web/questions.py` + `web/downloads.py` + `web/frontend.py`。教程对照：`docs/chapters/07-external-entry-points.md`
-> §7.5（按实现顺序讲解）；本文件是**约定的权威速查**，不讲实现细节。
+> 教程 [07-external-entry-points.md](chapters/07-external-entry-points.md) §7.5 按实现顺序讲解；本文件集中列出 wire 字段与端点，不展开 Python 实现细节。
 
 ## 1. 通道总览与载体状态码
 
@@ -769,7 +769,7 @@ id → `$events` waterfall → 浏览器经 `$events/result` 结算。
   为错误码文本（`HEAD` 无体）。
 - 前端只拼 `/api/file?path=`（有 token 时追加 `&token=`），不解析 Python 内部。
 
-## 10. 错误语义速查
+## 10. 错误语义
 
 1. 业务错误恒 200 + `server-response` + `result.ok=false`（unary 与 `$events/result` 同则）。
 2. 载体层 404/415/400/500 只在信封/HTTP 层面，不代表业务状态。

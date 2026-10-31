@@ -49,9 +49,9 @@ executionMode(exec: ToolExecutionInput): ToolExecutionMode {
 - **abort**：停止启动，排干已启动的；未启动的按模型序补 `TOOL_ABORTED_BEFORE_DISPATCH` 合成错误（先 `tool/call` 再 `tool/result`，replay 才有效）；
 - **调度器失败**：停止新派发，`Promise.allSettled` 排干，抛第一个错误，**不编造结果**（已记录的 `tool/call` 保留）。
 
-## 12.3 代码 step-by-step（`miniharness/core/scope.py`）
+## 12.3 实现：`core/scope.py`
 
-### 步骤 1：`_maybe_await` 与 async 派发
+### 1. `_maybe_await` 与 async 派发
 
 ```python
 async def _maybe_await(value):
@@ -81,9 +81,9 @@ async def awaterfall(self, event, payload=None, *, this_arg=None):
 
 短路语义与同步 `waterfall` 完全一致：不调 `next()` 就停在当前中间件。`aparallel` 用 `asyncio.gather` 真并发，结果按注册序。
 
-## 12.4 代码 step-by-step（`miniharness/core/tools.py`）
+## 12.4 实现：`core/tools.py`
 
-### 步骤 2：`Tool.is_concurrency_safe` 可调用化 + 分类器
+### 2. `Tool.is_concurrency_safe` 可调用化 + 分类器
 
 ```python
 @dataclass
@@ -108,7 +108,7 @@ def execution_mode(tool, args) -> str:
 
 bool 兼容保留（旧写法 `is_concurrency_safe=True` 仍工作）；callable 的抛错与非法返回值全部 fail 到 exclusive。
 
-### 步骤 3：管线拆段
+### 3. 管线拆段
 
 `run_pipeline` 重构为两段 + 规范化：
 
@@ -138,7 +138,7 @@ if tool.timeout_ms:
 
 `except asyncio.TimeoutError` 捕获的是 `wait_for` 到点抛出的超时。在 Python 3.11 及以上，`asyncio.TimeoutError` 就是内建 `TimeoutError` 的别名，此时工具自身抛出内建 `TimeoutError` 也会命中这个分支、按管线超时处理；Python 3.10 下两者是不同的类，只有 `wait_for` 自己的截止超时命中，工具抛出的 `TimeoutError` 走普通异常路径、规范化为错误结果。
 
-## 12.5 代码 step-by-step（`miniharness/core/agent_loop/tool_calls.py`）
+## 12.5 实现：`core/agent_loop/tool_calls.py`
 
 `schedule_tool_calls` 按模型序消费调用列表，一次处理一组：
 
@@ -167,7 +167,7 @@ if tool.timeout_ms:
 
 合成错误结果的写入顺序与上游 `appendSkippedToolCall` 一致：先 `tool/call`（引用 seq），再 `tool/result`（`sourceEventSeqs=[seq]` + `error: {name: "AbortError", code: TOOL_ABORTED_BEFORE_DISPATCH}`）。
 
-## 12.6 代码 step-by-step（`miniharness/core/agent_loop/agent.py`）
+## 12.6 实现：`core/agent_loop/agent.py`
 
 同步路径**一字未动**（第 4 章的 `_run_step` → `_stream_step` + `_execute_tools_sync`），新增异步路径：
 

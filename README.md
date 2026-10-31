@@ -2,287 +2,137 @@
 
 English | [中文](README.zh.md)
 
-**Mini DeepSeek Harness** is a Python agent runtime. It re-implements the core contracts of [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`, the open-source agent harness by [DeepSeek AI](https://deepseek.com)) layer by layer, and aims to be production-ready. It depends on `httpx` (DeepSeek SSE transport), `filelock` (credential cross-process writer locking), `watchdog` (file watch), and `pyyaml` (YAML config); the web transport layer is an optional extra installed with `pip install ".[web]"` (`fastapi` + `uvicorn`). Mature libraries are used directly; the standard library is kept only where no equivalent library fits.
+Full docs (MkDocs): https://zzkeepcurious.github.io/mini-deepseek-harness-python/ · In-repo hub [docs/index.md](docs/index.md)
 
-The upstream system is built on one idea, **everything is a plugin**, powered by [Cordis](https://github.com/cordiverse/cordis), a dependency-injection and event-bus framework described in [_A Programming Paradigm for Spatiotemporal Composability_](https://github.com/cordiverse/paper). This repository rebuilds its core contracts in Python: the event-sourced session log, the plugin event bus, the turn/step agent loop, and the capability-seam triangle (Service Definition / Service Provider / Consumer). Anyone with `python3` can read, run, and modify the code.
+**Mini DeepSeek Harness** is a Python agent runtime that re-implements the core contracts of [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`, the open-source harness by [DeepSeek AI](https://deepseek.com)), aiming to be production-ready. It depends on `httpx`, `filelock`, `watchdog`, and `pyyaml`; the web transport layer is an optional extra: `pip install ".[web]"` (`fastapi` + `uvicorn`).
 
-> **A production-oriented re-implementation, not a byte-for-byte port.** It is not affiliated with DeepSeek AI. We favor the parts that matter in real deployment: the wire contract, the event-sourced session log, and reliability / security / interop semantics. Deviations from upstream are documented, never silently assumed.
+Upstream is built on **everything is a plugin** and [Cordis](https://github.com/cordiverse/cordis) ([_A Programming Paradigm for Spatiotemporal Composability_](https://github.com/cordiverse/paper)). This repo rebuilds the event-sourced session log, plugin event bus, turn/step agent loop, and the capability-seam triangle (Service Definition / Provider / Consumer).
 
-> **Disclaimer**: a large part of this repository — including the analysis report and the handbook — was summarized, written, and re-implemented with the help of AI assistants. It may contain misunderstandings or inaccuracies about the upstream source code and documentation. The upstream repository itself is the only authoritative reference.
+> **Production-oriented re-implementation, not a byte-for-byte port.** Not affiliated with DeepSeek AI. Wire, session log, and reliability/security/interop semantics target production readiness; deviations from upstream are documented explicitly.
+>
+> **Disclaimer:** much of the analysis report and handbook was written with AI assistance and may misread upstream sources; treat the upstream `deepseek-harness` repo as authoritative.
 
-## Documentation
+## Architecture
 
-Two complementary documents (both in Chinese):
+At runtime the spine is: `boot` loads composition and plugins → the session appends events only → projections such as `derive_messages` build model-visible history → the agent runs turn/step loops over the model and tools → when you need a browser or automation, `web/` exposes upstream-compatible wire and `webui/` consumes only that contract.
 
-- **[Analysis report](docs/report/index.md)** — a deep dive into the upstream repository: five-layer architecture, the `ctx` service map, core techniques, and key processing flows, fully illustrated with Mermaid diagrams (landing page + six topic pages). Rendered on GitHub Pages via MkDocs: https://zzkeepcurious.github.io/mini-deepseek-harness-python/
-- **[Step-by-step handbook](docs/chapters/)** — how the system grows from zero, one chapter at a time: concepts → minimal runnable code → invariants/tests → checkpoint exercises.
+```mermaid
+flowchart TB
+  Boot["boot / loader<br/>YAML composition → plugin tree"]
+  Log["Session append-only event log"]
+  Proj["derive_messages & projections"]
+  Loop["Agent loop<br/>turn / step"]
+  Tools["Tools pipeline"]
+  Web["miniharness/web<br/>unary + WS mux"]
+  UI["webui/<br/>wire only"]
 
-See [ROADMAP.md](ROADMAP.md) for where this project is heading.
-
-## Capability navigation
-
-| If you need | Open |
-|---|---|
-| Per-module upstream ↔ mini map | [docs/architecture.md](docs/architecture.md) |
-| Web unary / Remote streams, errors, frames | [docs/interface-wire.md](docs/interface-wire.md) (`WebApi.ROUTES` in `miniharness/web/api.py` is authoritative) |
-| Building and running the React frontend | [webui/README.md](webui/README.md) |
-| Upstream architecture report | [docs/report/index.md](docs/report/index.md) |
-
-The grouped tables below are a reader-facing overview; module-level notes live only in the architecture map.
-
-## Capability overview
-
-### Core, session, and persistence
-
-| Capability | Upstream counterpart |
-|---|---|
-| Event-sourced session (envelope `{type,seq,time,data}`, 1-based turn/step, deep-freeze, `derive_messages`, interrupted repair) | `packages/core/session` |
-| Durable storage (JSONL / SQLite, zstd concatenated-frame container with one event per line by default, `root/--<projectKey>--/<encoded-id>/session.v4.jsonl[.zstd]` layout, header + `SESSION_FORMAT_VERSION=4` bidirectional refusal, encoding/layout mismatches rejected outright, flush barrier, crash recovery, multi-generation read-side that migrates released v0/v1 artifacts in-place via the upstream chain) | `packages/session/session-persistence` + `session-format-*` |
-| Plugin event bus (emit / waterfall / parallel / serial, scopes, dependency-driven activation, epoch reload via HMR service + `watch_user_patches`) | `vendor/cordis` + `vendor/hmr` + `core/scope` + `core/hmr` |
-| Config schema engine (full schemastery port: 17 resolvers, meta clone, toString/toJSON/i18n/simplify, `~standard` protocol face) | `vendor/schemastery/src/index.ts` |
-| Boot & composition (YAML/JSON overlays, `!!js` env interpolation, startup assertions) | `packages/boot` |
-| Plugin load tree (Loader service + EntryTree + live fibers: `{plugins}` dynamic load/unload, disabled/`!!js` evaluation at activation, `include` file-backed subtrees + patch expansion, startup inactive audit; `internal/config|update|plugin` hooks) | `vendor/loader` + `vendor/include` |
-| Session store service (`ctx.sessions`: create/prepare/enter/announce lifecycle, fork with 5 error codes, flush checkpoint, `session/created|disposed|event|flush` events) | `packages/core/session` (SessionStore) |
-| Session checkpoint policy (semantic durability barriers before a model request, a top-level tool body, and each step boundary; fail-closed checkpointing through `SessionStore.checkpoint`) | `packages/session/session-checkpoint-policy` |
-| Session projections (registry API, turnOutline/title/workingDirectory/permission wire units, `session_projcache` domain cache) | `packages/session/session-projection` (+ related units) |
-| Working directory seam (durable cwd decoupled from `header.cwd`; consumers read via `working_directory_of`) | `packages/session/working-directory` + `packages/session/tool-working-directory` |
-
-### Agent, model, and tools
-
-| Capability | Upstream counterpart |
-|---|---|
-| Tool registry + execution pipeline (schema validation, pre/execute/post, timeout; optional per-step `when` activation via `resolve_activation`) | `packages/core/tools` |
-| Filesystem domain (`ctx.fs` seam + local/sandbox backends + model-facing `read`/`read_image`/`write`/`edit`/`str_replace_editor`/`glob`/`grep` tools with registration switches and canonical `process_path` results; observed-state mutation guards + sandbox fence + watchdog-backed `watch`) | `packages/fs/{fs,fs-local,fs-sandbox,fs-observation-policy,tool-fs,tool-str-replace-editor,tool-fs-search}` |
-| Agent loop (async-driven turn/step state machine, sync facade driven by a process-wide resident event loop, pre-step rejection, tool-feedback continuation) | `core/agent-loop` |
-| LLM seam (async `stream(messages, tools, signal, session_id, purpose)` contract, fake adapter, official DeepSeek SSE adapter over `httpx` async streaming, four-level `reasoning_effort`) | `llm/llm` + `llm/llm-deepseek` |
-| pi-ai multi-provider adapter (anthropic-messages / openai-completions / openai-responses; `llm-pi-ai/request-headers` waterfall for extra HTTP headers; session/purpose in context, not the JSON body) | `packages/llm/pi-ai` |
-| Image-capable DeepSeek requests (catalog capability resolution, `ImageRequestTarget` projection geometry, provider vision-token pricing, Files API upload/reuse with a durable index, inline-base64 fallback, bounded stale-id retry, normalized-image diagnostics; `image/offload` durable omission with `IMAGE_OFFLOAD_REQUIRED` recovery) | `llm/llm-deepseek` (`common/*`) + `attachment/attachment-local` + `compaction/compaction-image-offload` |
-| Session-scoped file uploads (`ctx.fileUploads` receipts, streamed `POST /api/session/uploadFileBinary` without base64 aggregation, base64 `fileUploads/upload` fallback, `{type:'file',receiptId}` prompt admission with bind/commit/rollback and retirement on `user/message` or queue removal, subagent rejection) | `packages/client/file-upload` + `packages/attachment/attachment` |
-| DeepSeek account model catalog (`GET /models` listing decode with per-entry capability/requirement gating, `modelOverrides` layering, version gating raising `CLIENT_UPGRADE_REQUIRED`/`MODEL_UNSUPPORTED`, single-flight/background-refresh/last-known-good cache; `models` is no longer configurable; a missing credential yields an empty discovered catalog) | `llm/llm-deepseek-account` + `llm/llm-deepseek-api-key` |
-| DeepSeek request extensions (`ExtensionRegistry` + `prepare_request_extensions`: per-field preparation, omit-and-warn-once on failure, base-field collision and preparation failure raising `REQUEST_EXTENSION`, unserializable merged body falling back to the base request, acceptance committed only after HTTP 2xx) with the active-plugin package inventory contribution (`dsh_plugin_packages` = `{version:1, packages:[{name, version?}]}` resolved from active fibers via `importlib.metadata`, optional/absent tolerated) | `llm/deepseek-llm-api-extensions` + `llm/llm-deepseek/src/request-extensions.ts` + `llm/plugin-package-inventory-deepseek` |
-| PTC runtime seam + Python backend (`PtcRuntime` Service Definition + `run` in a fresh CPython subprocess with top-level await/return, line-JSON binding bridge, wall-clock/abort/output caps, orthogonal failure taxonomy, `programFormat`/`release(owner)` + `stateOwner` owner contract; `resolve` forwards `sandboxPolicy`, `sandbox_mode` enables confined workers) | `packages/ptc-runtime/{ptc-runtime,ptc-runtime-node}` + `packages/experimental/ptc-runtime-python` |
-| PTC mode `run_code` tool (language-aware schema flavor, nested tool sub-dispatch via the `tools` binding, `tool/ptc-dispatch*` event log, curated outer result, agent-scoped `stateOwner` released on disposal) | `packages/core/tools/src/ptc.ts` |
-| Model request retry / backoff (normal/always policy, `agent/request-error`, `llm/retry` audit pair, fused-signal pre-dispatch check, event-driven multi-signal race cancellable wait, plugin teardown draining in-flight recoveries) | `llm/llm-retry` + `llm/llm/src/retry-policy.ts` |
-| Token metering (incremental fold, usage anchor, 4 chars/token heuristic) | `llm/token-meter` |
-| Context compaction (pre-step pressure + `CONTEXT_WINDOW_EXCEEDED` recovery, surface-replace checkpoint transaction, optional tool-result pruner stage; pressure/retention budgets scaled by context window minus reserved completion tokens and `headroomTokens`) | `compaction/compaction-basic` + `compaction-tool-result-pruner` |
-| Dynamic tool updates (`ToolUpdate` route capability + `Session.toolHistory()` fold + live `developer/message` tool-addition/tool-removal emission + `projectToolUpdates` request projection; `startsSeries` is reason-independent and the tools-changed series trigger is suppressed on tool-update routes) | `packages/core/session` + `packages/core/agent-loop` + `packages/llm/llm` |
-| System prompt sections (ordered section registration + rendering into each request) | `core/system-prompt` |
-| Workflows (`ctx.workflowEngine` seam + Python workflow engine + `workflow` model tool; guest runs under workflow-ptc sandbox gate + PTC confine; script language JS→Python is the registered carrier difference) | `packages/workflow/{workflow,workflow-ptc,tool-workflow}` |
-| LSP tool family (opt-in profile entry; four semantic operations, no JSON-RPC escape hatch) | `packages/lsp/{lsp,lsp-stdio,tool-lsp}` |
-| Output spill (`ctx.spillStore` + post-execute policy; nested PTC omitted images re-injected as `ptc-mode` context) | `packages/spill/{spill,spill-local,spill-policy}` |
-
-### Interaction, plan, and permissions
-
-| Capability | Upstream counterpart |
-|---|---|
-| Background jobs (`job_output`/`job_list`/`job_kill` + completion notices, per-owner cap; one bounded output ring per job at absolute byte offsets — registry-pumped pull sources, consuming `read` + non-consuming `readAt`, scope-layered `events.subscribe`, `settled{cause,awaited}`; registry-issued `<kind>-<16-hex-uuid>` ids with collision retry; the registry appends `job/registered`/`job/settled` to the owner session with the creating `toolCall` and `producerReported`; archive admission answers the `job` family) | `packages/jobs` (jobs-local + tool-jobs) |
-| Plan mode (log-only `plan/mode` state, plan:policy prompt-section injection, queued in-turn commit) | `packages/plan/plan-mode` |
-| Plan review UI (`/plan` command, `exit_plan_mode` tool, user-questions channel, plan projection) | `packages/plan/plan-mode` |
-| User questions (`UserQuestionError` stable-code set incl. ASK_ABORTED / EMPTY_QUESTIONS / CALLER_NOT_LIVE / DELEGATED_CALLER / BAD_INTENT / NO_PROVIDER, `user-questions/request` waterfall with no-answerer fail-loud, `restore_user_question_error` wire recovery, `ask_user_question` tool with canonical `{"answers":[...]}` JSON render, web bridge over `$events/result`; the tool is registered only where the service is assembled — web composition + demo; timed face: `userQuestions` projection stateVersion 2, `TimedQuestionWait`, service `answer`/`attachWait` stream/`askTimed`, opt-in `timed` tool schema) | `packages/interaction/user-questions` + `tool-ask-user` + `bundle/client-ui-user-questions` |
-| Command surface (`/`-command registry, `command/run` + `command/done` pairing) | `packages/interaction/commands` |
-| Permission presets + approval policy (`ctx.permissionPresets`: preset table bundling sandbox mode + approval policy, derive/current/resolve/option_of, `set` writing `permission/preset` first then only changed knobs, `pinInitialPermission` for fresh/seeded sessions, Auto integration, `/permission` command, `permissions` projection with wire `currentValue`, `catalog` Remote; `ApprovalService` gains `approval:policy` context + `setPolicy` model notice) | `packages/interaction/{permission-presets,user-approval}` |
-| Human feedback (`feedback/record` session events + `/feedback` command with `recordInput:false` + `sessionFeedback` Remote; `messageFeedback` Remote list/put/delete with note validation first, target check against append-origin assistant messages, version CAS, idempotent delete, live/cold session paths) | `packages/feedback/{command-feedback,message-feedback}` |
-| Goals (`goal/change` event-sourced fold, `GoalService`, automatic goal-round continuation, `get_goal`/`create_goal`/`update_goal` tools, `/goal` command, `goals/*` Remote `get/create/edit/pause/resume/complete/clear` on the host plane) | `packages/goal` (goal + goal-round-driver + tool-goal + command-goal) |
-| Scheduled follow-ups (`ctx.schedule` service: six rule kinds `after`/`at`/`every`/`daily`/`weekly`/`cron` with Vixie semantics and DST handling, required `title`, host-authoritative `storage-domain` task table with a single host timer and due-batch session wake-up, `deliveryMode:'host'`, compare-and-update `schedule_update`, Remote `schedule/list|catalog|history|delete|update`, `schedule/changed` event, identity-cursor delivery history; model tools live in the separate `schedule/tool-schedule` surface (`install_tool_schedule`) and reject delegated subagent callers with `subagent_session`; legacy `schedule/change` session events remain read-only) | `packages/schedule/schedule` + `packages/schedule/tool-schedule` |
-
-### Web and composition management
-
-| Capability | Upstream counterpart |
-|---|---|
-| Headless one-shot entry (`--profile headless "task"`: stdout final text, exit code by turn/end reason) | `packages/bundle/headless` + `apps/cli` |
-| Web transport layer + browser frontend (`--profile web`; two-envelope RPC, `/api/remote.mux`, `$events`, follow/control, approval bridge, FastAPI carrier, session export, `/api/file` display route, `webui/` frontend; see details below) | `packages/api/gateway` + `packages/api/session-controller` + `packages/api/remotes` + `host/frontend-static` + `host/webserver` |
-| Model-visible web tools (`ctx.web` runtime + DeepSeek search provider + anonymous HTTP fetch provider + DeepSeek Search/Fetch API providers `deepseek-search-api`/`deepseek-fetch-api` + `web_search`/`web_fetch` tools: URL policy + credential checks, dual-provider registry with `WEB_DUPLICATE_PROVIDER`, six-branch execution selection, config fallback to `DSH_WEB_SEARCH_PROVIDER`/`DSH_WEB_FETCH_PROVIDER`, DNS-rebinding-safe whole-address public policy, byte/char caps, `redirect:'error'` 3xx rejection, citation snippets, round-robin dedup merge, markdown conversion) | `packages/web/{web,web-search-deepseek,web-fetch-http,web-deepseek-api}` + `packages/web/tool-web` |
-| Launcher options (`--patch`, `--dump-config` / `--dump-default-config` / `--dump-config-schema`, read-only composition dump) | `apps/cli/src/args.ts` |
-| Config schema export (`--dump-config-schema`: composed entry-list as a JSON Schema 2020-12 document — `$defs` entry/patch/loaderExpression/unknownConfig + per-plugin schemastery projections when a `Config` is declared, `x-cordis` profile/complete/entries/diagnostics annotations; boot-free) | `packages/boot/app-boot/src/config-schema` + `apps/cli/src/dump-config-schema.ts` |
-| Plugin inventory projection (`pluginInventory/list`: loader entries four fields `{entryId,moduleName,enabled,fiberPhase}` + preset composition rows flatten + `!!js` conditional; shared flatten tools in `preset/registry.py`) | `packages/host/plugin-inventory` + `packages/preset/agent-presets` |
-| Profile plugin enablement (`pluginManager/listPlugins` + `setPluginEnabled`: unique patch target or `readOnlyReason`, persisted to `cordis.patch.yml` with reconcile/rollback + `plugin-manager/changed`) | `packages/boot/plugin-manager` |
-| Plugin market Remote (`pluginMarket/listIndexes|setIndexes|search|readEntryDetail` + `pluginRegistryProbe/fastest`; HTTP(S) indexes and Python-module install extensions, no pnpm install) | `packages/boot/plugin-market` |
-| Action cards projection (opt-in `experimental/action_cards`: producer registration + session projection unit for WebUI) | `packages/experimental/action-cards` |
-| Declarative agent-preset registry (`ctx.agentPresets` `register(definition)` + declaration-row composition inventory: entry-list shape check, group-disabled inheritance, `!!js` conditional rows; `resolve_composition(id)` live-composition data `{tools, persona}` over a wired roster; no live-fiber standing mount — the tool-list carrier keeps directory discovery) | `packages/preset/agent-preset-registry` |
-
-### Host Remote, workspace, and terminals
-
-| Capability | Upstream counterpart |
-|---|---|
-| Session management CLI (`miniharness sessions` list/resume/delete/stats; mini teaching extension; `stats` renders sessionStats/tokenUsage projection + last-turn token accounting) | web surface (upstream) |
-| Terminal service domain + real PTY backend + model tool family (`ctx.terminals` seam; `terminal_bash` / `tool_terminal` / `terminal_controller` Remote `terminal/*`) | `packages/terminal/{terminal,terminal-bash,tool-terminal}` + `packages/api/terminal-controller` |
-| Persistent shell tools (opt-in `bash`/`pwsh` variants over a per-agent persistent PTY session) | `packages/shell/tool-bash-persistent` + `packages/shell/tool-pwsh-persistent` |
-| Storage hub (`ctx.storage`: named backend registry + schema-validated KV domains) | `packages/storage` (storage + storage-domain + storage-json) |
-| Workspace control Remote (`ctx.workspaceController`, namespace `workspace/*`) | `packages/api/workspace-controller` |
-| Workspace file preview Remote (`ctx.workspaceFiles`, namespace `workspaceFiles/*`) | `packages/api/workspace-files` |
-| Workspace change summaries (`ctx.workspaceChanges`) | `packages/deliverables/workspace-changes` |
-| Deliverables (`present` model tool) | `packages/deliverables/tool-present` |
-| Settings + credentials Remote (`ctx.settingsController` / `ctx.credentialsController`) | `packages/api/settings-controller` |
-| Request-context plugins (`miniharness/context`: time/tmux/file/session references, agent instructions) | `packages/context/{time-context,tmux-context,file-reference,file-reference-local,session-reference,agent-instructions}` |
-| Telemetry / usage stats (sessionStats + tokenUsage projections as real `projections.values` on `session/follow`/`session/control` and Remote snapshot/baseline; per-turn token accounting `derive_turn_token_usage` fail-closed on missing boundaries; opt-in `UsageStatsService` on `ctx.usageStats`) | `packages/session/session-stats` + `packages/llm/token-meter` |
-| Session telemetry reporting (`ctx.sessionTelemetry` seam + capture coordinator: live/on-demand, `session-telemetry/record` redaction waterfall, `sourceEvent` envelope, `agent/error` ops records, handoff cursor; shared `ctx.otel` service with a count-bounded event reporter and a byte-bounded session-log reporter (`session-log` OTLP record + `maxRequestBytes` ceiling); OTel backend `FEEDBACK_ONLY`/`DISABLED` with explicit OTLP/JSON over httpx) | `packages/telemetry/otel` + `packages/session/session-telemetry` + `session-telemetry-otel` + `packages/host/product-telemetry-otel` |
-| Session log request field (`dsh_session_log`: `enabled` live-volatile + `maxBytes` (8 MiB default) with longest-prefix byte bounding incl. `throughSeq` width, omit-and-warn on an oversized first event, accepted-suffix watermark from `session-log-deepseek/delivery-accepted`) | `packages/session/session-log-deepseek` |
-| Session projections (`ctx.sessionProjections` registry API v2: `ProjectionDefinition` state-driven units, eager drive over committed events, `is`-gated change feed, `stateOf`/`snapshot`/`cachedSnapshot`, checkpoint/restore/hydrate read ladder; telemetry registers sessionStats/tokenUsage units) | `packages/session/session-projection` |
-| Session turn outline (`turnOutline` projection unit: whole-log turn rail from `turn/start` anchors + first human prompts + settled responses; preview budgets 50/120, strictly-increasing schema) | `packages/session/session-turn-outline` |
-| Session titles (`ctx.sessionTitle`: normalization + UTF-8-safe fallback derivation, `title`/`titleInput` projection units, user rename pin, explicit refresh unpin, provider registry; automatic first-prompt generation — fallback lands first, the routed main request then runs the provider; first-prompt LLM provider frames the title request with word/CJK budgets, byte/token limits) | `packages/session/session-title` + `session-title-first-prompt-llm` |
-| Session projection cache (`ctx.sessionProjectionCache`: write-behind checkpoint persistence to the `session_projcache` storage domain — turn/end/create/dispose mandatory + count/interval throttling; lifecycle + formatVersion identity matching, zero-I/O listing reads, cold-read seeding with fail-soft write-back) | `packages/session/session-projection-cache` |
-| Subprocess seam (`ctx.subprocess`: resolve_executable / terminal_environment / scrubbed_parent_env consolidated as the upstream SubprocessRuntime service-definition face over existing helpers) | `packages/subprocess/{subprocess,subprocess-local}` |
-| Account Remote + Platform browser PKCE (`account/getState`/`getProfile`/`getBalance`/`startSignIn`/`cancelSignIn`/`signOut` + metadata `AccountClientMetadata` on every RPC and `getUnnotifiedBonuses`/`ackBonusNotified`/`hasRunningAccountTasks` + projection `watch` and no-replay `watchExpiry` streams over `ctx.deepseekAccount`; Platform attempts drive `/auth-api/v0/dsh/{auth_init,auth_exchange,auth_cancel}` with S256 PKCE, a fixed host `/oauth/callback`, durable grant/device records, profile/wallet/bonus reads and bounded logout revocation; `resolveToken`/`rejectToken` + `deepseek-account/signed-out`/`session-expired`/`model-sign-in-required` events + signed-out cancellation of running account-route agents; signed-out local fallback when credentials/authorization services are absent) | `packages/credentials/deepseek-account` + `deepseek-account-platform` + `packages/api/account-controller` |
-| Session query (`ctx.sessionQuery` + SQLite FTS5 index: cross-session / within-session full-text search, raw event windows, replacement/source traces, lineage; model tools `session_search`/`session_event_search`/`session_event_read`/`session_event_trace`/`session_trace`; log export via `web/downloads.py`) | `packages/session-query/{session-query,session-query-sqlite,tool-session-query}` |
-| Todo list (`to_todo_list` validation + `fold_todos` latest-write-wins fold + model tool `todo_write`; `todo/write` log-only event) | `packages/todo` |
-| Tool-call recovery (`ToolCallRecovery`: failed live steps record conservative `TOOL_OUTCOME_UNKNOWN`/`TOOL_NOT_STARTED` tool results before `step/end`, shared with crash-interrupted and fork-seed closers; replacement or other-turn results never acknowledge a pending call) | `packages/core/session` + `packages/core/agent-loop` |
-| Workspaces (`ctx.workspaces` registry: realpath-canonical path identity, stable uuid, ordered session account with attach/insertBefore/detach, live directory status; registry-global archive set with `workspace/session-activity` admission + `workspace/session-stop` and `stopActivity`, with the `turn` family answered by the agent registry's installed archive admission; registry-global pin set with most-recent-first order; first-use `initializeDefault` + durable `defaultWorkspaceId`) | `packages/workspace/workspace` |
-| User settings (`ctx.settings` provider: namespace registration, resolved value = schema defaults → composition base → user section, revision-guarded writes with `SETTINGS_CONFLICT`, secret redaction, file provider with watchdog reload; `SettingsForms` core — profile-entry-driven form read over `config-editor` `configuration()` three layers + writes persisting to the profile `cordis.patch.yml`, revision tracking, `configure({auto})` page policy, legacy `settings.yaml` import; **production wiring** — the web profile (`--profile web`) is boot/profile-driven: it seeds the default web composition into `$MINIHARNESS_HOME/profiles/web/cordis.yml`, boots it as a Loader entry tree (`cli/plugins/*`), and installs config-editor + SettingsForms so the settings Remote reads the live entry namespaces and persists edits to the profile patch) | `packages/settings/{settings,settings-file}` |
-
-### Extensions
-
-| Capability | Upstream counterpart |
-|---|---|
-| Capability seams (sandbox / credentials / authorization / subagent; see details below) | capability seams docs |
-| Continuable subagents (durable child sessions, async settlement, lifecycle events, archive admission, activation capacity, control tools, image prompt admission through the attachment store, `agent_preset` independent preset selection mounting the child composition; see details below) | `packages/subagent` |
-| Agent Teams (roster + mailbox + shared task DAG; see details below) | `packages/experimental/agent-team` + `tool-agent-team` |
-| MCP client (stdio / streamable-http, reconnect, tool ownership registration; see details below) | `packages/mcp/mcp-client` + `mcp-resources` |
-| Presets / agent intervention / trajectory / dynamic plugins / approval | `packages/preset` + `core/agent` + `interaction` |
-| Preset system (shipped `system` root + multi-root first-root-wins roster, `project_preset`/`project_session_agent_preset` projections, `PresetLockedError` on already-started sessions, shipped presets read-only to authoring, `agent.cordis.yml` → mini Preset translation; `miniharness presets list/show/select/delete` as a teaching-extension CLI for the upstream web Remote surface) | `packages/preset` (agent-presets) |
-| Protocol entries (ACP / JSON-RPC SDK / hooks bridge) | `acp` + `sdk` + `hooks` |
-| Official Python SDK interop (upstream `DeepSeekHarness` drives mini worker via `_launch_args`; `tests/test_upstream_sdk_interop.py`, skips without pydantic/upstream sources) | `python/sdk` |
-| Async event bus, parallel tool execution + barrier | `core/agent-loop` |
-| CI (GitHub Actions, Python 3.10~3.13, integration-tagged real-API tests) | — |
-
-### Capability details
-
-**Web transport layer + browser frontend.** Start the FastAPI host with `python -m miniharness.cli --profile web`. Transport matches upstream gateway: two-envelope unary (`POST /api/<namespace>/<method>`), one `/api/remote.mux` WebSocket for all Remote streams, and `$events/result` for approval and user-question waterfalls. See [docs/interface-wire.md](docs/interface-wire.md) for frames, error codes, multipart bytes, and the optional token gate. The product UI lives in `webui/` at the repo top (wire-only; build and dev proxy in [webui/README.md](webui/README.md)). `web/static/` is the legacy SSE teaching SPA and does not work against the current backend.
-
-**Capability seams.**
-
-- Sandbox: backend, policy service, and bash consumer executor, including `ctx.sandboxPolicy` resolution, `sandbox/mode` log override, and `ctx.shell` confined wrapping with three-way attribution.
-- Shell: the `ctx.shell` executor family returns a `ShellExecution` handle (`execute(spec)`; `resolve` fills `workdir` / `timeoutMs` / `onExpiry: kill|none` / output budgets; non-consuming `observed` readers beside a consuming `readOutput()`; `kill()`; memoized `result()`), local and sandbox-confined providers — bash and pwsh variants (`pwsh -NoLogo -NoProfile -NonInteractive -Command` with a UTF-8 encoding preamble and PATH/ProgramFiles resolution); the `ctx.shellEnv` registry (`DSH_HOME` / `DSH_SHELL` / `DSH_SESSION_ID`, plus reserved `DSH_PROFILE` / `DSH_PROFILE_DIR` from the profile context); and the `tool_bash`/`tool_pwsh` model tools with `run_in_background` and `promoteOnTimeout` (a foreground timeout is promoted to a background job with the `promoted` result kind and `stopped` reason; every result carries the resolved `cwd`).
-- Credentials: four layers in the managed-file-first order (`file` > process env > project `.env` > home `.env`; every reference is writable), plus a record service (`read` / `describe` / `list` / `modify` / `delete_record`), with `<scope>/<id>` key grammar, a 30s cross-process writer lock, `modifyRecord` as the only write path, unknown top-level keys kept on disk and warned, and the `ctx.credentials` Service plus `credentials/record-updated` event.
-- Authorization: `install_authorization(ctx)` provides `registerFlow` / `list` / `describe` / `cancel` / `begin` and the `authorization/settled` event, with the error-code set DUPLICATE_FLOW / NO_FLOW / UNKNOWN_METHOD / ALREADY_IN_FLIGHT / NOT_COMMITTED / DECLINED. Credential commits are booked through `credentials/record-updated` and rechecked with `describe_record`.
-- Subagent: ACP, SDK, and fork channels.
-
-**Continuable subagents.** `start_continuable` / `send_message` (with an optional initial prompt), durable child sessions with cold resume, settlement delivery, and async event-driven A8 (submit-and-return, `watchSettlement`, steer batch merge, ownership bookkeeping waiting / settled). Lifecycle events `subagent/start` / `subagent/end` pair by runId, fold `epochStopReason` / `foldConsumedWork` at the end, and dispatch through the delegating parent's scope carrier. A named provider registry (`register_provider`, publishing `subagent/provider-removed` on dispose) supports DRAINING admission cutoff (`drain` / `drain_descendants` with `assert_admitting`, verbatim refusal wording), an interrupt authority matrix (user / ancestor authority, absent-target no-op), and nested delegation (exec.agent as the authorization subject, grandchild settlement notices to the direct parent). Archive admission answers `workspace/session-activity` with running descendants and cancels them as the parent on `workspace/session-stop`; a process-local `ActivationPool` (shared through uninterrupted continuable parent links, `maxActiveSubagents` default 8, `maxDepth` default 1) throws `ACTIVATION_LIMIT_REACHED` at capacity. The model-side delegation tool `subagent` uses verbatim descriptions, a canonical `{kind:'activation',subagentId}` value with a `Tool.render` of `started subagent <id>`, an optional `cwd` parameter, and rejects the removed `persona`/`toolFilter` config (compose those through an Agent Preset instead). Control tools: `send_message` / `interrupt_agent` / `list_agents` (status `running` / `inactive`, `children` / `descendants` scope).
-
-**Agent Teams.** An implicit-root roster, a durable peer mailbox, and a shared task DAG. The four event types `team/member`(v2) / `team/task` / `team/message/queued` / `team/message/delivered` are all log-only, with the Team Lead session as the authoritative journal. Members are provisioned as `start_continuable` children. The task board uses CAS transitions for 8 actions, rejects cycles, and reports advisory write-scope overlap. The model side has 9 tools plus a `team:policy` prompt section. Spawn delivery runs both sync and async (inside the event loop). Wire and Remote endpoints are not carried; error semantics come from the `TeamError.code` closed set.
-
-**MCP client.** `apply(ctx, config)` supports stdio and streamable-http transports, reconnect with exponential back-off and a budget, tool ownership registration `${server}.${name}#${hash}` with `sync_tools` swap-on-change, `tools/list_changed` resync, a server-instructions byte cap with `failOnStartupError`, image projection, and darkfrozen output render. Carrier note (SDK 2.2): the stdio transport does not surface child EOF or exit (`_drain_stdout` blocks indefinitely), so mini uses a bounded RPC race (5s, aborted on `generation.lost`) plus a lifeline ping watchdog (15s heartbeat, 3s timeout).
-
-The upstream browser frontend (`packages/client`, React monorepo) is not reproduced verbatim: its wire surface matches upstream, so an upstream client pointed at the mini backend works. Two consumer fronts ship: the productized `webui/` (repo-top standalone React + TypeScript + Vite project, depends only on the wire contract; build & run: [`webui/README.md`](webui/README.md)), plus `web/static/` as a vanilla SPA teaching reference only (old SSE wire, does not work against the current backend).
-
-## Getting started
-
-Requirements: Python 3.10+. Required dependencies install with `pip install -e .`: `httpx` (DeepSeek SSE transport), `filelock` (credential cross-process writer locking), `watchdog` (HMR file watch), `pyyaml` (YAML config); the web transport layer needs `pip install ".[web]"`.
-
-```sh
-# run all tests
-python -m unittest discover -s tests -t .
-
-# end-to-end demo (fake model + tools + crash recovery, no API key needed)
-python -m miniharness.demo
-
-# multi-turn chat with the fake model
-python examples/chat_demo.py
-
-# plan mode + goal demo (/plan, exit_plan_mode review, /goal, goal-round continuation)
-python examples/plan_goal_demo.py --approve
-
-# one-shot task, like `dsh --profile headless "task"` (needs DEEPSEEK_API_KEY)
-python -m miniharness.cli --profile headless "run the tests"
-
-# start the web transport server (requires: pip install ".[web]")
-python -m miniharness.cli --profile web
-
-# read-only composition dump, like `dsh --dump-config`
-python -m miniharness.cli --dump-config
-
-# list / resume / delete persisted sessions
-python -m miniharness.cli sessions
-
-# agent presets: shipped system root + user presets (list/show/select/delete)
-python -m miniharness.cli presets list
+  Boot --> Log
+  Log --> Proj --> Loop --> Tools
+  Tools --> Log
+  Loop --> Log
+  Web --> Log
+  UI --> Web
 ```
 
-All CLI-written state lives under `MINIHARNESS_HOME` (default `~/.miniharness`): `--profile headless` sessions and `miniharness sessions` under `$MINIHARNESS_HOME/sessions`, user presets under `$MINIHARNESS_HOME/.agent-presets`. Point it elsewhere to relocate all durable state, e.g. `export MINIHARNESS_HOME=/data/miniharness`.
+The repo splits into three layers (dependency rules: [docs/architecture.md](docs/architecture.md), section 3):
 
-### Talk to the real DeepSeek API (optional)
+| Layer | Path | Role |
+|---|---|---|
+| Core | `miniharness/core/`, `llm/`, `boot/`, `loader/`, … | Domain logic; no HTTP/CLI coupling |
+| Web backend | `miniharness/web/`, `protocol/` | Consumes core; publishes the wire contract |
+| Frontend | top-level `webui/` | Wire-only; must not import Python internals |
+
+Per-module upstream mapping lives in [docs/architecture.md](docs/architecture.md). For how the upstream monorepo itself is layered, see [docs/report/01-overview.md](docs/report/01-overview.md).
+
+## Run it
+
+Python 3.10+. `pip install -e .` for core deps; add `pip install ".[web]"` for the web host.
 
 ```sh
-export DEEPSEEK_API_KEY=sk-...            # PowerShell: set DEEPSEEK_API_KEY=sk-...
+python -m unittest discover -s tests -t .          # all tests
+python -m miniharness.demo                           # fake model + crash recovery (no key)
+python examples/chat_demo.py
+python examples/plan_goal_demo.py --approve   # plan review + goal rounds (fake model)
+python -m miniharness.cli --profile headless "task"  # one-shot task (needs DEEPSEEK_API_KEY)
+python -m miniharness.cli --profile web              # web host (needs [web] extra)
+python -m miniharness.cli --dump-config              # read-only composition dump
+python -m miniharness.cli sessions                   # list / resume / delete (teaching-extension CLI)
+python -m miniharness.cli presets list               # preset roster (teaching-extension CLI)
+```
+
+```sh
+export DEEPSEEK_API_KEY=sk-...
 python examples/real_api_demo.py
 ```
 
-### Install as a CLI
-
 ```sh
 pip install -e .
-miniharness            # equivalent to `python -m miniharness.cli` (same entry point)
+miniharness    # same as python -m miniharness.cli
 ```
 
-## Project layout
+CLI state lives under `MINIHARNESS_HOME` (default `~/.miniharness`): sessions in `sessions/`, user presets in `.agent-presets/`.
+
+## Documentation
+
+| If you need… | See |
+|---|---|
+| Handbook home + 16-chapter map | [docs/index.md](docs/index.md) |
+| Module ↔ upstream package table | [docs/architecture.md](docs/architecture.md) |
+| Web unary, Remote frames, error codes | [docs/interface-wire.md](docs/interface-wire.md) (`WebApi.ROUTES` in `miniharness/web/api.py`) |
+| Upstream analysis (with Mermaid) | [docs/report/index.md](docs/report/index.md) |
+| Step-by-step implementation chapters | [docs/chapters/](docs/chapters/) |
+| Build `webui/` | [webui/README.md](webui/README.md) |
+| Roadmap and registered simplifications | [ROADMAP.md](ROADMAP.md) |
+
+## Entry points
+
+| Use | Command / form | Notes |
+|---|---|---|
+| Demo | `python -m miniharness.demo` | No API key; includes persistence demo |
+| Headless | `--profile headless "…"` | One-shot; final assistant text on stdout |
+| Web | `--profile web` | FastAPI + gateway-shaped wire; UI in `webui/` |
+| Protocols | `protocol/{acp,sdk,hooks}.py` | Minimal ACP / JSON-RPC SDK / hooks (handbook ch.07) |
+| Composition | `--dump-config` / `--patch` | Aligns with upstream profile-boot semantics |
+
+## Capability map
+
+This file groups capabilities by domain so you can orient quickly; per-module notes, carrier differences, and closure status stay in the [docs/architecture.md](docs/architecture.md) mapping table.
+
+| Domain | Summary | Upstream family (entry) |
+|---|---|---|
+| Session & persistence | Event envelope, V4 JSONL(zstd), migration chain, flush, `interrupted` repair | `core/session`, `session-persistence*` |
+| Plugins & composition | emit/waterfall, loader live tree, boot/YAML/`!!js` | `vendor/cordis`, `boot`, `vendor/loader` |
+| Agent & LLM | turn/step, DeepSeek Messages SSE, pi-ai, retry, token/compaction | `core/agent-loop`, `llm/*` |
+| Tools & runtime | Registry pipeline, fs sandbox, bash/pwsh/terminal, PTC `run_code`, workflow | `core/tools`, `fs/*`, `shell/*`, `ptc-runtime` |
+| Interaction & planning | plan/goal, approval, user-questions, schedule, jobs, skills | `interaction/*`, `plan`, `goal`, `schedule`, `jobs` |
+| Web & host Remote | session/workspace/terminal/settings/credentials/account, plugin market | `api/gateway`, `api/*-controller` |
+| Extensions | Subagent, seams (sandbox/credentials/auth), MCP, dynamic plugins, preset | `subagent`, `mcp/*`, `extensions/*`, `preset` |
+
+`--profile web` uses two-envelope unary RPC, a single `/api/remote.mux` WebSocket, and `$events/result` settlement—matching upstream gateway. Frames and errors: [docs/interface-wire.md](docs/interface-wire.md). Product UI: `webui/`; `web/static/` is a legacy SSE teaching page and does not work against the current backend.
+
+Deeper product topics and seams: [docs/report/04-product-surface.md](docs/report/04-product-surface.md), [docs/chapters/06-advanced-seams.md](docs/chapters/06-advanced-seams.md), [docs/chapters/07-external-entry-points.md](docs/chapters/07-external-entry-points.md).
+
+## Layout
 
 ```
 mini-deepseek-harness-python/
-├── miniharness/             # core package (mature OSS libraries first, family layout, see docs/architecture.md)
-│   ├── core/                # upstream packages/core
-│   │   ├── session/         # types / json / message / invariant / repair / surface / session
-│   │   │   ├── persistence.py
-│   │   │   ├── generation.py  # multi-generation read-side + migrate-on-open
-│   │   │   ├── released/      # released v0/v1 codecs + v0→v1→v2→v3 migration chain
-│   │   │   └── zstd_frames.py
-│   │   ├── scope.py         # Context / PluginManager
-│   │   ├── tools.py         # tool registry + execution pipeline
-│   │   └── agent_loop/      # agent.py + tool_calls.py
-│   ├── llm/                 # upstream packages/llm
-│   │   ├── protocol.py      # StreamChunk / LlmAdapter / LlmFailure / BlockAssembler
-│   │   ├── deepseek.py      # DeepSeek Messages API adapter (httpx)
-│   │   ├── deepseek_messages.py # Messages wire serialization + SSE translation
-│   │   ├── fake.py          # FakeLlmAdapter (no API key)
-│   │   ├── retry_policy.py  # retry policy parsing (normal/always)
-│   │   ├── retry.py         # agent/request-error recovery + backoff
-│   │   ├── token_meter.py   # TokenMeter incremental fold + usage anchor
-│   │   └── deepseek_files/  # DeepSeek Files API execution cluster (image requests)
-│   ├── compaction/          # upstream packages/compaction
-│   │   ├── engine.py        # pre-step pressure + request-error overflow recovery
-│   │   ├── region.py        # selectCompactableRange + checkpoint transaction
-│   │   ├── summarizer.py    # prefix-replay summarization + checkpoint framing
-│   │   └── config.py        # spec parsing (threshold / retain / retries)
-│   ├── boot/                # upstream packages/boot
-│   │   ├── boot.py          # startup + patch overlays
-│   │   ├── composition.py   # YAML config / !!js interpolation / dump rendering
-│   │   └── dotenv.py        # .env parsing (parse_dotenv)
-│   ├── loader/              # upstream vendor/loader + vendor/include (component live tree)
-│   │   ├── tree.py          # EntryTree (flat store + resolve / import_)
-│   │   ├── entry.py         # Entry (update / disabled / init)
-│   │   ├── group.py         # EntryGroup + Group plugin
-│   │   ├── loader.py        # Loader service (internal/config|update|plugin hooks)
-│   │   ├── include.py       # Include subtree (file rw + !!js-preserving write-back)
-│   │   └── patch.py         # apply_entry_patches
-│   ├── cli/                 # apps/cli
-│   │   ├── main.py          # launcher options (profile / patch / dump)
-│   │   ├── headless.py      # one-shot task entry
-│   │   ├── default_tools.py # default toolset for headless
-│   │   └── session_cmds.py  # session list / resume / delete
-│   ├── protocol/            # acp / sdk / hooks bridges
-│   ├── seams/               # sandbox / credentials (incl. CredentialsService) / authorization / subagent seams (incl. windows-acl kernel executor)
-│   ├── shell/               # ctx.shell bash + pwsh executor family (local + sandboxed)
-│   ├── goal/  plan/  jobs/  skills/  commands/  attachment/
-│   ├── web/                 # web transport subset (gateway / session-controller / webserver): envelope / api / streams / approvals / server / downloads / media / frontend / launcher
-│   ├── web/static/          # vanilla SPA teaching reference (old SSE wire; product frontend = ../webui)
-│   ├── web_tools/           # model-visible web tools (web + web-search-deepseek + web-fetch-http + tool-web)
-│   ├── preset/  extensions/  interaction/  feedback/  client/
-│   ├── tool_bash/  tool_pwsh/  tool_workflow/  # model-side bash / pwsh / workflow tools
-│   ├── session_projection/  session_turn_outline/  session_title/  session_projection_cache/  # session projection + title + cache
-│   ├── workflow/  workflow_ptc/  subprocess/  deepseek_account/  # workflow seam+engine, subprocess seam, account
-│   ├── demo.py              # end-to-end demo
-│   └── example_plugins.py   # boot demo plugins
-├── tests/                   # acceptance tests (unittest)
-├── examples/                # chat & real-API demos
-└── docs/
-    ├── index.md            # handbook index (learning map)
-    ├── architecture.md      # architecture + upstream mapping
-    ├── chapters/            # 00-setup ~ 15-schemastery tutorials
-    └── report/              # analysis report (MkDocs Markdown, Mermaid diagrams)
+├── miniharness/     # core package (family layout; full tree in architecture.md §1.2)
+│   ├── core/        # session, scope, tools, agent_loop
+│   ├── llm/ boot/ loader/ compaction/ …
+│   ├── web/         # wire transport (L3)
+│   ├── cli/ protocol/ preset/ seams/ jobs/ goal/ …
+│   └── demo.py
+├── webui/           # React frontend (standalone, wire-only)
+├── tests/ examples/
+└── docs/            # architecture · interface-wire · report · chapters
 ```
+
+File-level tree and dependency rules: [docs/architecture.md](docs/architecture.md).
 
 ## Acknowledgements
 
-- [DeepSeek AI](https://deepseek.com) and the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) team, for the original system and for open-sourcing it.
-- The [Cordis](https://github.com/cordiverse/cordis) project, for the plugin paradigm this project re-implements.
+- [DeepSeek AI](https://deepseek.com) and [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
+- [Cordis](https://github.com/cordiverse/cordis)
 
 ## License
 

@@ -8,7 +8,7 @@
 
 前四章的 `Session` 都在内存里，进程一退什么都没了。这一章解决两件事：
 
-1. **持久化**：`SessionPersistence` 扩展口 + 一整套纪律：`flush` 栅栏、fail-closed 加载、`interrupted` 崩溃修复。上游（当前基线 `dsh-v0.2.0-rc.2`）的持久化后端只有 JSONL 一种（`session-persistence-jsonl`）；本章为演示「扩展口可换实现」，教学 artifact 额外给了一个 SQLite 第二后端（教学扩展，上游没有对应实现——上游的 SQLite 只在 `session-query` 检索域使用）。
+1. **持久化**：`SessionPersistence` 扩展口 + 一整套纪律：`flush` 栅栏、fail-closed 加载、`interrupted` 崩溃修复。上游（release 基线 `dsh-v0.2.2-alpha.2`；JSONL 单后端自 `dsh-v0.2.0-rc.2` 起即如此）的持久化后端只有 JSONL 一种（`session-persistence-jsonl`）；本章为演示「扩展口可换实现」，教学 artifact 额外给了一个 SQLite 第二后端（教学扩展，上游没有对应实现——上游的 SQLite 只在 `session-query` 检索域使用）。
 2. **组合加载**：`boot()` 把配置、补丁、插件串成一次启动：加载配置 → 按 id 打补丁 → 依赖驱动激活 → 断言全部就绪。
 
 本章的验收是端到端的：**在一个回合中途崩溃再重启，日志平衡、可继续对话**。`python -m miniharness.demo` 演示的就是这个。
@@ -44,9 +44,9 @@ flowchart LR
 
 为什么是"扩展口"而不是直接写在 Session 里？因为存储策略（文件、数据库、未来可能的对象存储）不该和会话语义耦合。第 6 章会看到同样的思路在沙箱、凭据、子 agent 上重复出现。
 
-## 5.3 代码 step-by-step（persistence.py）
+## 5.3 实现：`persistence.py`
 
-### 步骤 1：扩展口接口
+### 1. 扩展口接口
 
 ```python
 class SessionPersistence:
@@ -58,7 +58,7 @@ class SessionPersistence:
 
 三个方法就是全部约定。谁实现这个接口，谁就能当后端的"可替换点"。
 
-### 步骤 2：JSONL 后端
+### 2. JSONL 后端
 
 ```python
 class JsonlPersistence(SessionPersistence):
@@ -112,7 +112,7 @@ class JsonlPersistence(SessionPersistence):
 
 **会话格式目录收口**（`released/catalog.py` + `released/dispositions.py`，对应上游 `session-format-catalog`）：迁移链要能"读旧头 → 迁旧事件"、"写新头 → 写新事件"，这两个方向的编码协议收敛成**目录三函数**——`read_released_header`（物理头分类：新发版本直读、旧发相邻迁移、未知/错格 fail-closed）、`encode_current_header` / `encode_current_event`（当前发布版本的主写路径）。新事件类型（含 `image/offload`、PTC `tool/ptc-dispatch*`，见第 4 章延伸）登记进目录后，迁移与校验就自动认识它们——这正是 §5.1 说的"格式是演进来的，不是重新发明的"：加类型 = 在目录里登记，而不是改三四个分支。
 
-### 步骤 3：SQLite 后端（单调 SCHEMA_VERSION）
+### 3. SQLite 后端（单调 SCHEMA_VERSION）
 
 ```python
 class SqlitePersistence(SessionPersistence):
@@ -148,7 +148,7 @@ class SqlitePersistence(SessionPersistence):
 
 版本检查是关键：`SCHEMA_VERSION` 不符就**拒绝加载**（fail loud）。为什么不自动迁移？因为迁移意味着"改写历史"，而改写历史意味着可能丢事实。dsh 的原则是"格式拒绝，不迁移"：版本落后去升级 harness，版本超前用更新的 harness 打开。这是把决策权交给用户而不是代码。
 
-### 步骤 4：fail-closed 加载 + 崩溃修复 + 回放
+### 4. fail-closed 加载 + 崩溃修复 + 回放
 
 ```python
 def load_events_checked(raw_events):
@@ -172,9 +172,9 @@ def repair_and_replay(persistence, session_id, session):
 
 `repair_and_replay` 就是第 1 章 `repair_interrupted_turn` 的消费方：load → 校验 → 补括号 → 重新 append 进内存 Session。回放 = 重新派生，`derive_messages` 自动重建历史，第 1 章的"回放 = 重新派生"在这里体现。
 
-## 5.4 代码 step-by-step（boot.py）——启动与组合
+## 5.4 实现：`boot.py`（启动与组合）
 
-### 步骤 1：补丁算法（纯函数）
+### 1. 补丁算法（纯函数）
 
 ```python
 def apply_patch(entries, patches):
@@ -201,7 +201,7 @@ def apply_patch(entries, patches):
 
 > 报告《流程》篇 §5.5（`docs/report/03-flows.md`）的关键设计：组合、`--dump-config`、标志派发共用同一个补丁算法（纯函数），三者永不漂移。我们把它写成模块级纯函数，测试直接固定。
 
-### 步骤 2：boot()
+### 2. boot()
 
 ```python
 def load_plugin(entry):
@@ -286,7 +286,7 @@ python -m unittest tests.test_persistence_boot -v
 | 细节 | 真实 dsh | 我们的简化 |
 |---|---|---|
 | JSONL 存储 | 默认 checksum + Zstandard 拼接帧容器（可选原始行） | **与上游一致**：默认 zstd 帧容器 + 一行一事件，明文模式可配（本章教学代码仍为明文逐行） |
-| SQLite 后端 | 上游（当前基线 `dsh-v0.2.0-rc.2`）**无 SQLite 持久化后端**（唯一后端是 JSONL；SQLite 仅用于 session-query 检索域） | 教学扩展：本章 SQLite 第二后端仅演示扩展口可换实现，上游没有对应实现 |
+| SQLite 后端 | 上游（release 基线 `dsh-v0.2.2-alpha.2`）**无 SQLite 持久化后端**（唯一后端是 JSONL；SQLite 仅用于 session-query 检索域） | 教学扩展：本章 SQLite 第二后端仅演示扩展口可换实现，上游没有对应实现 |
 | `time` 字段 | 每个事件 epoch 毫秒 | 教学 SQLite 后端无（JSONL 后端与上游一致） |
 | `sourceEventSeqs` | `assistant/message` 内嵌流且不能携带 `sourceEventSeqs`（fail-closed 拒绝）；其余 surface 事件可带非空引用 | 无（教学投影为扁平字符串） |
 | 可回放起点 | `session/end-seed` marker：fork 子会话恒 `{inherited:true}`、restore/普通 seed 补 `{}`；`inherited_cut` 由最后一个 marker 的 seq 派生（seeded 无 marker / unseeded 有 marker 双向 corrupt） | **与上游一致**（`persistence.py inherited_cut`） |

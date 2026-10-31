@@ -8,7 +8,7 @@
 - 基本的事件 / 回调 / 上下文概念。
 - 了解一个 Agent 回合的 wire 形状：`user message → assistant（可能带 tool call）→ tool result → assistant`。
 
-如果你不熟悉最后一条，先去报告第 6 章（学习路线图）把 P0 部分过一遍，那里有完整的回合样例。
+如果你不熟悉最后一条，先去 [`docs/report/05-roadmap.md`](../report/05-roadmap.md) 的「§6 从 0 到掌握的完整路线图」里 **P0 前置知识** 一行（必读 / 必做 / 验收），再对照手册第 4 章的回合时序。
 
 ## 0.2 目录结构
 
@@ -55,9 +55,9 @@ python -m miniharness.demo                  # 端到端演示（假模型 + 工�
 
 如果 `python` 不是 3.10+，用 `python3`。跑完 `demo` 会输出一个完整回合的日志，最后提示"演示完成"并给出临时目录路径——那是一个可回放的会话存档，第 5 章会解释它。
 
-## 0.4 运行期环境变量速查
+## 0.4 环境变量
 
-MiniHarness 的启动行为全部经环境变量驱动，下面是完整清单（实现位置见 `docs/architecture.md` 映射表；前端 webui 变量见仓库顶层 `webui/README.md`）：
+启动行为由环境变量驱动。常用变量如下（更多见 `docs/architecture.md` 映射表；webui 见 `webui/README.md`）：
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
