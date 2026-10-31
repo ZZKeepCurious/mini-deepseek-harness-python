@@ -474,11 +474,11 @@ class DeepSeekAdapter(LlmAdapter):
         if self._official_route is None:
             return
         from .deepseek_account import DEFAULT_MODELS_TIMEOUT_MS
-        from .deepseek_official import run_official_connect_abandonable
+        from ..core.agent_loop.resident_loop import run_abandonable_on_resident
 
         timeout_ms = (self._models_timeout_ms if self._models_timeout_ms is not None
                       else DEFAULT_MODELS_TIMEOUT_MS)
-        run_official_connect_abandonable(
+        run_abandonable_on_resident(
             self._official_route.connect,
             timeout_ms=timeout_ms,
         )

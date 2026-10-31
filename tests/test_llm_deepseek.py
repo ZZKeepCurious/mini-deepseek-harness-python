@@ -367,7 +367,12 @@ class SerializeMessagesTest(unittest.TestCase):
 
 
 def _stream(handler):
-    return DeepSeekAdapter(api_key='sk-test', transport=httpx.MockTransport(handler))
+    # 非官方 origin，避免 stream 前 officialRoute.connect 额外打 /models（listing）。
+    return DeepSeekAdapter(
+        api_key='sk-test',
+        base_url='https://example.test/anthropic',
+        transport=httpx.MockTransport(handler),
+    )
 
 
 MESSAGES = [{'role': 'user', 'content': [{'type': 'text', 'text': 'hi'}]}]

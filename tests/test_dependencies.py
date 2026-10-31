@@ -432,6 +432,12 @@ class ImportDirectionTest(unittest.TestCase):
                     # dsh-anonymous-user-id，package.json peerDependencies
                     # 声明）；identity 不得反向 import llm
                     continue
+                if (module_name == "miniharness.llm.deepseek"
+                        and dst == "miniharness.core.agent_loop.resident_loop"):
+                    # §5 显式例外（单方向）：official listing 同步 discover 经
+                    # run_abandonable_on_resident 提交常驻循环（对齐上游单 loop）；
+                    # resident_loop 不得反向 import llm
+                    continue
                 if dst_layer >= src_layer:
                     violations.append(
                         f"{module_name}: L{src_layer} 导入 {dst}（L{dst_layer}，违反 §5 规则 1）"

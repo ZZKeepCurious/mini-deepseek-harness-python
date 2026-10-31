@@ -5,8 +5,6 @@ packages/llm/llm-deepseek/src/listed-catalog.ts + listing-cache.ts。
 """
 from __future__ import annotations
 
-import asyncio
-import concurrent.futures
 import logging
 import sys
 from typing import Any, Callable
@@ -27,7 +25,6 @@ __all__ = [
     "build_official_route",
     "is_builtin_catalog",
     "model_listing_url",
-    "run_official_connect_abandonable",
     "should_follow_official_listing",
 ]
 
@@ -146,38 +143,6 @@ def build_official_route(*, base_url: str, supported, route_max_tokens: int,
         supported=supported,
         route_max_tokens=route_max_tokens,
     )
-
-
-def run_official_connect_abandonable(
-        connect: Callable[[], Any],
-        *,
-        timeout_ms: int) -> None:
-    """同步 discover 路径刷新 listing（对齐上游 event loop 内 abandonable `view()`）。
-
-    无 running loop → 在常驻循环上阻塞至 `connect()` 完成。
-    有 running loop → 在侧线程提交常驻循环执行，最多等待 ``timeout_ms``；
-    超时则放弃等待（后台 refresh 仍可完成，保留 last-known-good）。
-    """
-    from ..core.agent_loop.resident_loop import run_on_resident
-
-    timeout_s = timeout_ms / 1000.0
-
-    def run() -> None:
-        run_on_resident(connect())
-
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        run()
-        return
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    future = pool.submit(run)
-    try:
-        future.result(timeout=timeout_s)
-    except concurrent.futures.TimeoutError:
-        pass
-    finally:
-        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def present_api_key_from_adapter(adapter) -> str | None:

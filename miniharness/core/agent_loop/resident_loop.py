@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures as futures
 import threading
+from typing import Any, Callable
 
 _lock = threading.Lock()
 _loop: asyncio.AbstractEventLoop | None = None
@@ -62,6 +63,36 @@ def _wait_interruptible(future: futures.Future) -> any:
 def run_on_resident(coro) -> any:
     """把协程提交到常驻循环并阻塞至完成；异常向上抛（含 LlmFailure 冒泡）。"""
     return _wait_interruptible(asyncio.run_coroutine_threadsafe(coro, get_resident_loop()))
+
+
+def run_abandonable_on_resident(
+        connect: Callable[[], Any],
+        *,
+        timeout_ms: int) -> None:
+    """同步门面在常驻循环上运行 ``connect()``，带 abandonable 超时（对齐上游 listing refresh）。
+
+    无 running loop → 阻塞至 ``connect()`` 完成。
+    有 running loop → 侧线程提交常驻循环执行，最多等待 ``timeout_ms``；
+    超时则放弃等待（后台 refresh 仍可完成）。
+    """
+    timeout_s = timeout_ms / 1000.0
+
+    def run() -> None:
+        run_on_resident(connect())
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        run()
+        return
+    pool = futures.ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(run)
+    try:
+        future.result(timeout=timeout_s)
+    except futures.TimeoutError:
+        pass
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def shutdown_resident_loop() -> None:

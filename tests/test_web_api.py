@@ -410,7 +410,11 @@ class TestSessionSelectModel(WebApiTest):
         value = self._value(self.api.dispatch("session.modelCatalog", "rid", {}))
         self.assertEqual(value["default"], {"provider": "fake", "model": "fake-model"})
         self.assertEqual(value["routableProviders"], ["fake"])
-        self.assertEqual(value["groups"][0]["models"], [{"id": "fake-model", "name": "fake-model"}])
+        self.assertEqual(
+            value["groups"][0]["models"],
+            [{"id": "fake-model", "name": "fake-model",
+              "inputModalities": ["text", "image"]}],
+        )
         self.assertEqual(value["failures"], [])
 
     def test_catalog_and_discover_project_listing_badge(self):
