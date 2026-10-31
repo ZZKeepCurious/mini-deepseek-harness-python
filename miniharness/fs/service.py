@@ -12,12 +12,15 @@ from __future__ import annotations
 from typing import Any, AsyncIterator, Awaitable, Callable
 
 from ..core.scope import Context, Service
+from .patch_codec import PatchHunk
 from .types import (
+    FsDeleteOutcome,
     FsDirEntry,
     FsEditOutcome,
     FsEditRequest,
     FsError,
     FsInfo,
+    FsMoveOutcome,
     FsPathInfo,
     FsTarget,
     FsWriteIntent,
@@ -117,4 +120,22 @@ class FileSystem(Service):
                         expected: dict | None = None, signal: Any = None,
                         sandbox_policy: Any = None) -> FsEditOutcome:
         """原子字面编辑；`expected={'version': ...}` 先于匹配检查。"""
+        raise NotImplementedError
+
+    async def patch_text(self, target: FsTarget, hunks: list[PatchHunk],
+                         expected: dict | None = None, signal: Any = None,
+                         sandbox_policy: Any = None) -> FsEditOutcome:
+        """原子应用 parsed hunks（LF 归一化后恢复行尾风格）。"""
+        raise NotImplementedError
+
+    async def delete_file(self, target: FsTarget, expected: dict | None = None,
+                          signal: Any = None,
+                          sandbox_policy: Any = None) -> FsDeleteOutcome:
+        """删除常规文件。"""
+        raise NotImplementedError
+
+    async def move_file(self, source: FsTarget, destination: FsTarget,
+                        options: dict, signal: Any = None,
+                        sandbox_policy: Any = None) -> FsMoveOutcome:
+        """写入 destination（可选 patch）并尝试移除 source。"""
         raise NotImplementedError

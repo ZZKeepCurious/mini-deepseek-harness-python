@@ -22,6 +22,8 @@ __all__ = [
     "FsTargetKey",
     "FsVersion",
     "FsWriteOutcome",
+    "FsDeleteOutcome",
+    "FsMoveOutcome",
 ]
 
 FsTargetKey = str
@@ -41,6 +43,8 @@ FsErrorCode = Literal[
     "FS_AMBIGUOUS_EDIT",
     "FS_EDIT_NOT_FOUND",
     "FS_ABORTED",
+    "FS_PATCH_MISMATCH",
+    "FS_SAME_TARGET",
 ]
 
 FS_ERROR_CODES: frozenset[str] = frozenset(FsErrorCode.__args__)  # type: ignore[attr-defined]
@@ -125,6 +129,23 @@ class FsEditOutcome:
     version: FsVersion
     before: str
     after: str
+
+
+@dataclass(frozen=True)
+class FsDeleteOutcome:
+    """删除结果；`before` 为有界 LF 归一化移除文本，或 None。"""
+
+    before: str | None
+
+
+@dataclass(frozen=True)
+class FsMoveOutcome:
+    """移动/重命名结果（destination 已写入；source 可能仍保留）。"""
+
+    source_before: str | None
+    destination: FsWriteOutcome
+    source_deleted: bool
+    source_failure: dict | None = None
 
 
 class FsError(Exception):

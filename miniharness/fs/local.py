@@ -20,12 +20,15 @@ from watchdog.observers import Observer
 
 from ..core.scope import Context
 from .service import FileSystem
+from .patch_codec import PatchHunk, apply_hunks
 from .types import (
+    FsDeleteOutcome,
     FsDirEntry,
     FsEditOutcome,
     FsEditRequest,
     FsError,
     FsInfo,
+    FsMoveOutcome,
     FsPathInfo,
     FsTarget,
     FsWriteIntent,
@@ -518,6 +521,167 @@ class LocalFileSystem(FileSystem):
             )
         finally:
             lock.release()
+
+    async def patch_text(self, target: FsTarget, hunks: list[PatchHunk],
+                         expected: dict | None = None, signal: Any = None,
+                         sandbox_policy: Any = None) -> FsEditOutcome:
+        lock = self._lock_for(target.target_key)
+        lock.acquire()
+        try:
+            existing = self._require_file(target, expected, "patch")
+            original, line_endings = self._read_for_edit(target.target_key,
+                                                         target.display_path, signal)
+            after = self._patch_content(target, original, hunks)
+            content = _restore_line_endings(after, line_endings)
+            self._write_file_atomic(target.target_key, content, existing["mode"], signal,
+                                    display_path=target.display_path)
+            after_probe = _probe(target.target_key)
+            return FsEditOutcome(
+                version=self._version_after_write(after_probe, target),
+                before=original,
+                after=after,
+            )
+        finally:
+            lock.release()
+
+    async def delete_file(self, target: FsTarget, expected: dict | None = None,
+                          signal: Any = None,
+                          sandbox_policy: Any = None) -> FsDeleteOutcome:
+        lock = self._lock_for(target.target_key)
+        lock.acquire()
+        try:
+            self._require_file(target, expected, "delete")
+            before = self._read_text_for_diff(target.target_key,
+                                              self.config["diffBasisMaxBytes"], signal)
+            _throw_if_aborted(signal, "delete")
+            try:
+                os.remove(target.target_key)
+            except OSError as error:
+                raise FsError(
+                    f'cannot delete "{target.display_path}": {error}',
+                    "FS_IO_ERROR", error) from error
+            return FsDeleteOutcome(before=before)
+        finally:
+            lock.release()
+
+    async def move_file(self, source: FsTarget, destination: FsTarget,
+                        options: dict, signal: Any = None,
+                        sandbox_policy: Any = None) -> FsMoveOutcome:
+        if source.target_key == destination.target_key:
+            raise FsError(
+                f'cannot move "{source.display_path}" to itself',
+                "FS_SAME_TARGET")
+        keys = sorted({source.target_key, destination.target_key})
+        locks = [self._lock_for(key) for key in keys]
+        for lock in locks:
+            lock.acquire()
+        try:
+            source_info = self._require_file(source, options.get("expectedSource"), "move")
+            existing = self._write_target(destination, options.get("expectedDestination"))
+            original, line_endings = self._read_for_edit(source.target_key,
+                                                         source.display_path, signal)
+            hunks = options.get("hunks")
+            after = original if hunks is None else self._patch_content(source, original, hunks)
+            content = _restore_line_endings(after, line_endings)
+            before = None
+            if existing is not None and len(content.encode("utf-8")) < self.config["diffBasisMaxBytes"]:
+                before = self._read_text_for_diff(destination.target_key,
+                                                  self.config["diffBasisMaxBytes"], signal)
+            _throw_if_aborted(signal, "move")
+            create_if_absent = (
+                options.get("expectedDestination") is not None
+                and options["expectedDestination"].kind == "createIfAbsent"
+            )
+            self._write_file_atomic(
+                destination.target_key, content, source_info["mode"], None,
+                create_if_absent=create_if_absent and existing is None,
+                display_path=destination.display_path,
+            )
+            dest_probe = _probe(destination.target_key)
+            outcome = FsWriteOutcome(
+                operation="update" if existing else "create",
+                version=self._version_after_write(dest_probe, destination),
+                before=before,
+                after=_normalize_line_endings(content),
+            )
+            source_before = (original
+                             if len(original.encode("utf-8")) < self.config["diffBasisMaxBytes"]
+                             else None)
+            try:
+                os.remove(source.target_key)
+            except OSError as error:
+                fs_error = FsError(
+                    f'cannot delete "{source.display_path}": {error}',
+                    "FS_IO_ERROR", error)
+                return FsMoveOutcome(
+                    source_before=source_before,
+                    destination=outcome,
+                    source_deleted=False,
+                    source_failure={"code": fs_error.code, "message": str(fs_error)},
+                )
+            return FsMoveOutcome(
+                source_before=source_before,
+                destination=outcome,
+                source_deleted=True,
+            )
+        finally:
+            for lock in reversed(locks):
+                lock.release()
+
+    def _version_after_write(self, after: dict | None, target: FsTarget) -> str:
+        if after is not None:
+            return after["version"]
+        return f"missing:{target.target_key}"
+
+    def _write_target(self, target: FsTarget,
+                      expected: FsWriteIntent | None) -> dict | None:
+        existing = _probe(target.target_key)
+        if existing is not None and existing["type"] != "file":
+            raise FsError(
+                f'cannot write "{target.display_path}": not a regular file',
+                "FS_NOT_REGULAR_FILE")
+        if expected is not None and expected.kind == "replaceIfVersion":
+            if existing is None:
+                raise FsError(
+                    f'cannot write "{target.display_path}": file no longer exists',
+                    "FS_STALE_VERSION")
+            if existing["version"] != expected.version:
+                raise FsError(
+                    f'cannot write "{target.display_path}": file changed since it was read',
+                    "FS_STALE_VERSION")
+        elif expected is not None and expected.kind == "createIfAbsent" and existing is not None:
+            raise FsError(
+                f'cannot overwrite existing "{target.display_path}" without reading it first',
+                "FS_NOT_OBSERVED")
+        return existing
+
+    def _require_file(self, target: FsTarget, expected: dict | None,
+                      verb: str) -> dict:
+        existing = _probe(target.target_key)
+        if existing is None:
+            raise FsError(
+                f'cannot {verb} "{target.display_path}": file changed since it was read',
+                "FS_STALE_VERSION")
+        if existing["type"] != "file":
+            raise FsError(
+                f'cannot {verb} "{target.display_path}": not a regular file',
+                "FS_NOT_REGULAR_FILE")
+        if expected is not None and existing["version"] != expected.get("version"):
+            raise FsError(
+                f'cannot {verb} "{target.display_path}": file changed since it was read',
+                "FS_STALE_VERSION")
+        return existing
+
+    def _patch_content(self, target: FsTarget, before: str,
+                       hunks: list[PatchHunk]) -> str:
+        matched, payload = apply_hunks(before, hunks)
+        if not matched:
+            failure = payload
+            raise FsError(
+                f'cannot patch "{target.display_path}": hunk at patch line '
+                f"{failure.hunk_line_number} ({failure.stage}) does not match",
+                "FS_PATCH_MISMATCH")
+        return payload
 
     # ---------- 内部 IO ----------
 

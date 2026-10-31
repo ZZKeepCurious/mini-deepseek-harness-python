@@ -102,6 +102,10 @@ def run_headless(
     if task.strip() == "":
         raise ValueError("task is required")
     ctx = ctx or Context(name="headless")
+    from ..seams.credentials_local import install_credentials, wire_llm_adapter_credentials
+
+    install_credentials(ctx)
+    wire_llm_adapter_credentials(ctx, adapter)
     apply_retry_planner(ctx)
     install_compaction(ctx)
     install_tool_result_pruner(ctx)

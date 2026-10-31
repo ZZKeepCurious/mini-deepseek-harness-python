@@ -75,4 +75,11 @@ def default_tools(ctx: Context) -> ToolRegistry:
             and reg.resolve("present") is None):
         from ..deliverables import register_present_tool
         register_present_tool(reg, ctx)
+    if ctx.get("fs") is not None and reg.resolve("read") is None:
+        from ..fs import install_fs_observation_policy, install_fs_tools
+
+        install_fs_observation_policy(ctx)
+        if ctx.get("tools") is None:
+            ctx.provide("tools", reg)
+        install_fs_tools(ctx, apply_patch=True)
     return reg

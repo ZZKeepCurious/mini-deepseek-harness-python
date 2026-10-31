@@ -18,10 +18,13 @@ from typing import Any
 
 from ..core.scope import Context
 from .local import LocalFileSystem
+from .patch_codec import PatchHunk
 from .types import (
+    FsDeleteOutcome,
     FsEditOutcome,
     FsEditRequest,
     FsError,
+    FsMoveOutcome,
     FsTarget,
     FsWriteIntent,
     FsWriteOutcome,
@@ -115,6 +118,27 @@ class SandboxedFileSystem(LocalFileSystem):
                         sandbox_policy: Any = None) -> FsEditOutcome:
         return await super().edit_text(
             await self._checked_target(target, sandbox_policy), edit, expected, signal)
+
+    async def patch_text(self, target: FsTarget, hunks: list[PatchHunk],
+                         expected: dict | None = None, signal: Any = None,
+                         sandbox_policy: Any = None) -> FsEditOutcome:
+        return await super().patch_text(
+            await self._checked_target(target, sandbox_policy), hunks, expected, signal)
+
+    async def delete_file(self, target: FsTarget, expected: dict | None = None,
+                          signal: Any = None,
+                          sandbox_policy: Any = None) -> FsDeleteOutcome:
+        return await super().delete_file(
+            await self._checked_target(target, sandbox_policy), expected, signal)
+
+    async def move_file(self, source: FsTarget, destination: FsTarget,
+                        options: dict, signal: Any = None,
+                        sandbox_policy: Any = None) -> FsMoveOutcome:
+        policy = sandbox_policy if sandbox_policy is not None else self._policy()
+        checked_source = await self._checked_target(source, policy)
+        checked_dest = await self._checked_target(destination, policy)
+        return await super().move_file(
+            checked_source, checked_dest, options, signal, sandbox_policy)
 
     async def _checked_target(self, target: FsTarget, sandbox_policy: Any) -> FsTarget:
         policy = sandbox_policy if sandbox_policy is not None else self._policy()

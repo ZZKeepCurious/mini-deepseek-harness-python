@@ -31,6 +31,7 @@ __all__ = [
     "READ_MAX_BYTES",
     "READ_MAX_LINE_LENGTH",
     "STREAM_MIN_SIZE",
+    "apply_apply_patch_tool",
     "apply_edit_tool",
     "apply_read_image_tool",
     "apply_read_tool",
@@ -741,14 +742,15 @@ def _mount_read_image_tool(image_ctx: Context, _config: Any = None) -> None:
 
 
 def install_fs_tools(ctx: Context, *, read: bool = True, read_image: bool = True,
-                     write: bool = True, edit: bool = True,
+                     write: bool = True, edit: bool = True, apply_patch: bool = False,
                      read_limit: int = READ_LIMIT,
                      read_max_line_length: int = READ_MAX_LINE_LENGTH,
                      read_max_bytes: int = READ_MAX_BYTES,
                      read_stream_min_size: int = STREAM_MIN_SIZE) -> dict:
     """注册选定的文件工具（已注册同名则跳过）。返回工具表。
 
-    注册开关对齐上游 Config：`read`/`read_image`/`write`/`edit`（缺省 true）。
+    注册开关对齐上游 Config：`read`/`read_image`/`write`/`edit`（缺省 true）、
+    `apply_patch`（缺省 false，上游 preset 显式开启）。
     `read_image` 仅在有 attachment store 时注册（无持久化不可落盘图片字节）。
     """
     registry = ctx.get("tools")
@@ -772,5 +774,49 @@ def install_fs_tools(ctx: Context, *, read: bool = True, read_image: bool = True
         apply_write_tool(ctx, gate)
     if edit and registry.resolve("edit") is None:
         apply_edit_tool(ctx, gate)
+    if apply_patch and registry.resolve("apply_patch") is None:
+        apply_apply_patch_tool(ctx, gate)
     return {"read": registry.resolve("read"), "read_image": registry.resolve("read_image"),
-            "write": registry.resolve("write"), "edit": registry.resolve("edit")}
+            "write": registry.resolve("write"), "edit": registry.resolve("edit"),
+            "apply_patch": registry.resolve("apply_patch")}
+
+
+def apply_apply_patch_tool(ctx: Context, gate: FsSandboxGate) -> Tool:
+    from .patch_runner import execute_patch, patch_presentation_meta, patch_tool_value, render_patch
+
+    parameters: dict = {
+        "type": "object",
+        "properties": {
+            "input": {
+                "type": "string",
+                "description": (
+                    "Codex patch text: start with *** Begin Patch and end with *** End Patch. "
+                    "Use *** Add File: path with + lines; *** Update File: path with @@ hunks; "
+                    "*** Delete File: path to delete. Paths are relative to the session working directory."
+                ),
+            },
+        },
+        "required": ["input"],
+    }
+    if gate.escalation_modes:
+        parameters["properties"].update(_escalation_schema_fields(gate))
+
+    async def execute(args: dict, exec: Any) -> dict:
+        policy = gate.resolve_policy("apply_patch", args, exec)
+        report = await execute_patch(
+            ctx, gate, exec, patch=args["input"], sandbox_policy=policy)
+        return patch_tool_value(report)
+
+    tool = Tool(
+        name="apply_patch",
+        description=(
+            "Create, update, delete, or move UTF-8 text files with one Codex-style patch; "
+            "prefer it over multiple edit calls when a change spans several files or regions."
+        ),
+        parameters=parameters,
+        execute=execute,
+        render=lambda _args, value: [{"type": "text", "text": render_patch(value)}],
+        presentation_meta=lambda _args, value: patch_presentation_meta(value),
+    )
+    ctx.get("tools").register(tool)
+    return tool
