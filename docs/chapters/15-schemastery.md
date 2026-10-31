@@ -26,6 +26,15 @@ schemastery 的核心只有一个对象：**`Schema`**。它同时是：
 
 为什么需要"17 类 resolver + 一个分发器"而不是一堆 `validate_xxx` 函数？因为 schema 是递归嵌套的（object 的字段又是 schema，array 的 item 又是 schema），统一走 `Schema.resolve` 递归下降，配合 `Options`（autofix / ignore / path / strict）就能在任意深度上一致地处理默认值、宽松改写、错误路径前缀。
 
+```mermaid
+flowchart TD
+  In["原始 config 数据"]
+  Res["Schema.resolve&lt;br/&gt;按 type 分发"]
+  Out["规整值 或 ValidationError"]
+  In --> Res --> Out
+  Res --> Res
+```
+
 ## 15.3 实现
 
 ### 1. Schema 节点 + resolve 分发

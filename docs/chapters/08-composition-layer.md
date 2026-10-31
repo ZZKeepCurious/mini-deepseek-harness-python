@@ -42,6 +42,16 @@ realm 规则的直接后果：service 行不挂进 `isolate` realm 就会落到�
 
 ### 8.2.2 loader：从 YAML 到插件树
 
+```mermaid
+flowchart TD
+  YAML["cordis.yml / patch 层叠"]
+  Loader["Loader + Include&lt;br/&gt;EntryTree"]
+  Live["激活中的插件 fiber"]
+  Preset["preset 挂载&lt;br/&gt;agent 作用域"]
+  YAML --> Loader --> Live
+  Preset --> Live
+```
+
 loader 的 include 展开由 `@deepseek-ai/cordis-plugin-include` 实现（`packages/boot/app-boot/src/index.ts:16` 安装 `mountRootInclude`）。它做的核心事可压缩成三条：
 
 1. **include 展开**：组合里 `include: 'file.yml'` 的行先被替换成目标文件的内容（递归），这是"一个 preset 引用共享片段"的做法；

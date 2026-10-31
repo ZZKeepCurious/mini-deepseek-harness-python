@@ -2,15 +2,6 @@
 
 <p class="lead">Python SDK 驱动 harness、添加插件与贡献、常见 HOWTO 与参考表。</p>
 
-<div class="pill-row">
-  <span class="tag t-blue">everything is a plugin</span>
-  <span class="tag t-blue">event-sourcing</span>
-  <span class="tag t-blue">capability seams</span>
-  <span class="tag t-green">TypeScript strict</span>
-  <span class="tag t-green">Cordis vendored</span>
-  <span class="tag t-amber">Python SDK 存在</span>
-</div>
-
 ## 9. 用 Python SDK 驱动 harness
 
 ### 9.1 SDK 与 dsh 的关系和区别
@@ -198,18 +189,4 @@ UI 专用格式（fenced console、diff、相对路径）留在卡片投影里�
 
 ## 12. 结语
 
-DeepSeek Harness 可以用一段话概括：
-
-<div class="card" style="font-size:16px; text-align:center;" markdown>
-
-**一个"无特权内核 + 可逆副作用注册"的 Cordis 插件树，以事件溯源会话日志为唯一数据源，通过"Service Definition / Provider / Consumer"三段式能力扩展口把模型适配、工具执行、沙箱、子 agent 等一切能力做成可配置替换的插件；外层由 profile / bundle 补丁层组合出 Web / headless / SDK 等运行形态，并辅以内容寻址的生成器门禁与每文件 100% 覆盖率纪律。**
-
-</div>
-
-对想用 Python 深刻掌握并复现的你，最有价值的三件事依次是：
-
-1. 事件溯源日志作为唯一数据源；
-2. "注册 = 可逆副作用 + waterfall 短路"的插件语义；
-3. 能力扩展口三角色带来的整体可替换性。
-
-把这三件事用 Python 亲手实现一遍，对 dsh 的理解会超过大多数读过一遍文档的人。
+上游 dsh 把模型、工具、沙箱与子 agent 都做成可替换插件，会话事实只追加在事件日志里；外层用 profile 与 bundle 组合出 Web、headless、SDK 等形态。用 Python 复现时，优先亲手实现三件事：日志作唯一数据源、可逆副作用与 waterfall 短路、扩展口三角色（Definition / Provider / Consumer）。做完 [手册 01–05](../chapters/01-event-sourced-session.md) 与 [05 路线图 §7.3](05-roadmap.md)，再读上游源码会快很多。

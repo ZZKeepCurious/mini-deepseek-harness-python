@@ -14,6 +14,16 @@
 2. **kind 限定**：`define` 只支持 `kind new`，即铸造（mint，分配一个永不复用的唯一 id）一个新的动态包；
 3. **宿主耦合**：一个动态包分两半。宿主半边（host half）跑在 Node 宿主的 `node:vm` 沙箱里；客户端半边（browser half）跑在浏览器页面、由 Client runner 与审批 UI 加载。客户端半边带审批往返，agent 不能单方面获得它的能力。web 的审批（第 09 章）管的是"模型要运行什么"，这里的宿主管线管的是"模型要定义什么"。
 
+```mermaid
+stateDiagram-v2
+  [*] --> Defined: define
+  Defined --> Running: run
+  Running --> Running: run replace
+  Running --> Defined: stop
+  Defined --> [*]: undefine
+  Running --> [*]: undefine retract
+```
+
 ## 11.2 生命周期（对应 `runner.spec.ts:150-176` 的完整流程）
 
 上游测试里的标准路径：
@@ -42,6 +52,8 @@ registry.invoke(run["runId"], "dynDoubler", 21)  # 42
 registry.stop(run["runId"])
 registry.undefine(pkg_id)
 ```
+
+实现位于 `miniharness/extensions/dynamic.py`（`DynamicPluginRegistry`）。验收：`python -m unittest tests.test_dynamic -v`。
 
 ## 11.3 硬性规定
 

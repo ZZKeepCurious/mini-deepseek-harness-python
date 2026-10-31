@@ -31,6 +31,16 @@
 
 `Service` 基类把"生命周期"从每个服务里抽出来，统一交给 fiber：你写服务只关心行为，注册与注销交给 `super().__init__`。服务因此是带生命周期的对象；把它当成一个值，会漏掉注册与注销这条线。
 
+```mermaid
+flowchart LR
+  Init["Service.__init__"]
+  Prov["ctx.provide"]
+  Use["_invoke / __call__"]
+  Disp["fiber dispose&lt;br/&gt;自动注销"]
+  Init --> Prov --> Use
+  Prov --> Disp
+```
+
 ## 13.3 实现
 
 ### 1. `Service` 基类 —— 构造即登记

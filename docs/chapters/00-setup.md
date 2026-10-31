@@ -38,7 +38,7 @@ mini-deepseek-harness-python/        ← 仓库根
 │   ├── test_seams.py
 │   └── …（cli/composition/goal/plan/jobs/skills 等随对应家族展开）
 └── docs/                        ← 文档
-    ├── README.md                ← 本手册索引（学习地图）
+    ├── index.md                 ← 文档入口（报告 + 手册索引）
     ├── chapters/                ← 00-setup.md ~ 15-schemastery.md（本章所在目录）
     └── report/                  ← 分析报告（MkDocs 站点）
 ```

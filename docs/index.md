@@ -19,6 +19,30 @@
 | 作用域化注册 + 工具管线 | typert 类型图 |
 | turn/step 状态机 + LLM 流式协议 | Web 客户端 / UI 卡片 |
 
+## 运行时总览
+
+`boot` / `loader` 把 YAML 组合装成插件树；会话只追加事件；投影（如 `derive_messages`）从日志算出模型可见历史；Agent 在 turn/step 里调模型与工具，模型可见事实写回同一条日志。浏览器或自动化走 `web/` 的 wire，`webui/` 只依赖这份约定。
+
+```mermaid
+flowchart TB
+  Boot["boot / loader&lt;br/&gt;YAML 组合 → 插件树"]
+  Log["Session 追加式事件日志"]
+  Proj["derive_messages 等投影"]
+  Loop["Agent loop&lt;br/&gt;turn / step"]
+  Tools["Tools 管线"]
+  Web["miniharness/web&lt;br/&gt;unary + WS mux"]
+  UI["webui/&lt;br/&gt;只依赖 wire"]
+
+  Boot --> Log
+  Log --> Proj --> Loop --> Tools
+  Tools --> Log
+  Loop --> Log
+  Web --> Log
+  UI --> Web
+```
+
+L0–L3 依赖栈、core / web / webui 边界与目录映射见 [architecture.md](architecture.md) §1.0 与 §3。
+
 ## 架构与 wire
 
 - **[架构说明与上游对应](architecture.md)** —— `miniharness/` 目录如何镜像上游包族、模块映射表、依赖方向、公共 API 与教学扩展清单。

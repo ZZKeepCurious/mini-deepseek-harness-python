@@ -3,6 +3,30 @@
 > 说明 `miniharness/` 如何组织：目录布局、与上游包的对应、依赖方向、公共 API 边界。
 > `docs/report/` 解读上游「是什么、为什么」；`docs/chapters/` 带你在 Python 里逐步实现；本页面向改代码或查归属时定位文件。
 
+## 1.0 运行时主链
+
+一次回合的数据路径：`boot()` 经 `loader/` 展开组合并激活插件 → `Session` 只追加 `SessionEvent` → `derive_messages` 等纯函数投影模型历史 → `AgentLoop` 在 turn/step 里经 LLM 扩展口与 `ToolRegistry` 执行工具 → 所有模型可见输入以 durable 事件写回日志（持久化插件异步订阅 `session/event`，见第 5 章）。`web/` 与 `protocol/` 是 L3 入口，读写同一份会话约定；`webui/` 不 import Python 内核。
+
+```mermaid
+flowchart TB
+  Boot["boot / loader&lt;br/&gt;组合 + 插件激活"]
+  Log["Session 追加式事件日志&lt;br/&gt;（唯一数据源）"]
+  Proj["derive_messages / 投影"]
+  Loop["core/agent_loop&lt;br/&gt;turn · step · inbox"]
+  Tools["core/tools 管线"]
+  Pers["session/persistence&lt;br/&gt;JSONL 订阅"]
+  Web["web/ + protocol/&lt;br/&gt;wire 入口"]
+  UI["webui/&lt;br/&gt;wire 消费"]
+
+  Boot --> Log
+  Log --> Proj --> Loop --> Tools
+  Tools -->|"durable 写回"| Log
+  Loop -->|"durable 写回"| Log
+  Log --> Pers
+  Web --> Log
+  UI --> Web
+```
+
 ## 1. 目录组织
 
 ### 1.1 原则：目录按上游包家族镜像
@@ -571,6 +595,20 @@ miniharness/
 
 ## 3. 依赖方向规则
 
+```mermaid
+flowchart TB
+  L3["L3 应用与入口&lt;br/&gt;cli · protocol · web · seams · preset · shell …"]
+  L2["L2 编排&lt;br/&gt;agent_loop · compaction · jobs · plan · skills …"]
+  L1["L1 领域&lt;br/&gt;llm · tools · boot · fs · attachment …"]
+  L0["L0 地基&lt;br/&gt;session · scope · loader · schema …"]
+
+  L3 --> L2
+  L2 --> L1
+  L1 --> L0
+```
+
+L_n 只依赖更低层；显式例外见下文规则 1 与 `tests/test_dependencies.py` 的 `ImportDirectionTest`。
+
 分层如下（Python 没有编译期模块边界，规则由 `tests/test_dependencies.py` 的 import 方向断言固定，违反即测试失败）：
 
 | 层 | 内容 | 允许依赖 |
@@ -582,6 +620,16 @@ miniharness/
 | 教学层 | `demo.py`、`example_plugins.py` | 任意层，但不得被业务模块依赖 |
 
 **三层组织边界**（代码与结构上清晰分离、解耦）：
+
+```mermaid
+flowchart LR
+  Core["core 核心能力&lt;br/&gt;L0–L2 领域逻辑"]
+  Web["后端 web 服务&lt;br/&gt;web/ · protocol/"]
+  UI["前端 webui/&lt;br/&gt;独立工程"]
+
+  Core -->|"Python API"| Web
+  Web -->|"HTTP/WS wire"| UI
+```
 
 | 边界 | 内容 | 耦合面 |
 |---|---|---|

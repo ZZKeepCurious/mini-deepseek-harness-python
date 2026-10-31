@@ -2,15 +2,6 @@
 
 <p class="lead">全仓库面貌与五层架构：既看清整个 monorepo 的构成，也看清系统运行时每一层承担什么。</p>
 
-<div class="pill-row">
-  <span class="tag t-blue">everything is a plugin</span>
-  <span class="tag t-blue">event-sourcing</span>
-  <span class="tag t-blue">capability seams</span>
-  <span class="tag t-green">TypeScript strict</span>
-  <span class="tag t-green">Cordis vendored</span>
-  <span class="tag t-amber">Python SDK 存在</span>
-</div>
-
 ## 1. 项目全景
 
 **DeepSeek Harness（`dsh`）** 是 DeepSeek AI 开源的一款 **Agent 运行时（agent harness）**：它把"大模型对话 + 工具调用 + 会话管理 + 权限策略 + 沙箱执行"组装成一个可配置、可替换、可组合的运行时产品。通常的 agent 框架把主循环、工具注册、会话存储写死在框架里，只留少量扩展点；dsh 的定位反过来——它介于"框架"与"应用"之间：既提供完整可运行的 CLI / Web 产品，又提供可编程的插件生态。
@@ -36,7 +27,7 @@
 |---|---|---|---|
 | **应用层** | `apps/cli`、`apps/web` | CLI bin（`dsh`）与 Web GUI | CLI 源码经 `node --import tsx/esm` 启动；bin 是"瘦自执行组合" |
 | **组合层** | `packages/bundle`、`preset`、`examples` | profile / bundle / preset 三种组合原语 | bundle = 可分发补丁层；preset = 会话级 agent 组合；覆盖所有运行形态 |
-| **能力层** | `packages/<group>/<pkg>` | 50 个包组、265 个包级 package.json（workspace glob `packages/*/*`），全部能力扩展口 | 每包遵循 Service Definition / Provider / Consumer 三段式 |
+| **能力层** | `packages/<group>/<pkg>` | **52** 个包组、**369** 个子包（pnpm workspace `packages/*/*` 下含 `package.json` 的目录；基线 tag `dsh-v0.2.2-alpha.2` / commit `f3803c96974` 树内计数），全部为能力扩展口 | 每包遵循 Service Definition / Provider / Consumer 三段式 |
 | **框架层** | `vendor/` | vendored Cordis + 生态（cosmokit、schemastery、loader、include、hmr 等） | 全部改名 `@deepseek-ai/*`（含 `@deepseek-ai/cordis`）；18 项本地修改有详单与测试 |
 | **外部 SDK** | `python/`、`packages/sdk` | Python SDK 与 TypeScript JSON-RPC SDK，跨进程驱动运行时 | 协议：stdio 换行分隔 JSON-RPC；Python 侧有官方 `deepseek_harness` 包 |
 
@@ -53,7 +44,7 @@ flowchart TD
     B2["bundle 可分发补丁层"]
     B3["preset 会话级 agent 组合"]
   end
-  subgraph L3["能力层 · 50 包组 / 265 包 · 全部为能力扩展口"]
+  subgraph L3["能力层 · 52 包组 / 369 包 · 全部为能力扩展口"]
     C1["core：session / tools / agent / agent-loop"]
     C2["llm 适配 · shell · fs · sandbox"]
     C3["subagents · web · skills · persistence"]

@@ -1,6 +1,6 @@
 # 04 · 产品面全解读
 
-<p class="lead">前三个子页回答"系统是什么、怎么运转"；本页回答用户与宿主看到的是什么、哪些设计塑造了使用体验。十个议题，每个按四段展开：产品体验（使用者看到什么）、实现（怎么做到）、源码证据（文件与行号）、mini 对照（现状与差异）。</p>
+<p class="lead">Web、headless、SDK/ACP/hooks 等入口背后，用户看到的是 preset 模式、Trajectory、审批弹窗、plan/goal 与长会话压缩——这些都由同一条事件日志驱动，而不是第二份产品状态。本页按十个议题说明上游产品面如何设计，以及 mini 在哪一层复现。</p>
 
 !!! note "定位说明"
     本页内容全部可定位到上游源码或 docs；产品体验的归纳（如四种模式中文名）来自 `apps/cli/config/agent-presets/*/preset.yml` 的 description 字段直译，属上游真实存在。上游存在多处*命名换代*（如审批词汇、包路径），相关澄清见各议题。
@@ -50,7 +50,7 @@
 
 | 上游 | mini 现状 | 规划 |
 |---|---|---|
-| preset roster + per-agent mount | shipped 根 `miniharness/preset/{standard,minimal}/` + 用户 `$MINIHARNESS_HOME/.agent-presets`；`preset/presets.py` 目录发现即名单、per-agent 挂载视图、host 缺工具 fail loud、进程级冲突拒绝挂载；`agent.cordis.yml` 可翻译为 mini Preset。上游四模式里的 `code`/`cordis` 目录可拷入用户根接入（手册 08 章） | 声明式 `agent-preset-registry`（不扫目录）为上游 rc.2+ 形态，mini 仍以目录 roster 为主 |
+| preset roster + per-agent mount | 出厂内置根 `miniharness/preset/{standard,minimal}/` + 用户 `$MINIHARNESS_HOME/.agent-presets`；`preset/presets.py` 目录发现即名单、per-agent 挂载视图、host 缺工具 fail loud、进程级冲突拒绝挂载；`agent.cordis.yml` 可翻译为 mini Preset。上游四模式里的 `code`/`cordis` 目录可拷入用户根接入（手册 08 章） | 声明式 `agent-preset-registry`（不扫目录）为上游 rc.2+ 形态，mini 仍以目录 roster 为主 |
 | PTC 模式（`ctx.ptcRuntime` + `run_code`） | `miniharness/ptc_runtime/` + 工具层 PTC 派发（`tool/ptc-dispatch*` 日志、Python worker 子进程、可选 `sandbox_mode` confine）；与 preset 解耦——`code` preset 目录未随包出厂，但运行时与 wire 已接线（`architecture.md` 映射表） | — |
 
 ## 议题 2：外部入口全景
@@ -61,17 +61,17 @@
 
 ### 2.2 实现
 
-```text
-启动链路（每个入口相同）：
-bin.ts → args 解析（--profile/--patch/--dump-config，task 为位置参数透传） → profile-boot 层
-  → loadProfile：定位 profile.yml（内置 bundle 根 + home 用户根双锚点）
-  → composeEntries：bundle 层 + 用户 patch 层叠（header 行 + 增量行）
-  → boot()：loader 结算组合树（插件加载、include 展开）
-  → 应用提供方（startup）：挂 surface 服务（web 端口 / headless 单任务）
-  → watchUserPatches：用户 patch 热更新（仅开发 profile）
-```
+每个入口共用同一条启动链：解析 profile 与 patch → 层叠 bundle 条目 → `boot()` 经 Loader 激活插件树 → 各 surface 的 startup 插件挂 web 端口或 headless 单任务。内置 bundle 根提供出厂组合，home 用户根提供覆盖；`composeEntries` 只层叠配置，真正加载在 `boot()`。
 
-两种锚点的用途不同：内置 bundle 根提供出厂组合，home 用户根提供用户覆盖。`composeEntries` 只做层叠、不实例化插件，真正加载发生在 `boot()`。四种入口共用同一条链路，区别只在 startup 挂哪种 surface 服务。
+```mermaid
+flowchart TD
+  Bin["apps/cli bin&lt;br/&gt;--profile · --patch · task"]
+  Prof["loadProfile&lt;br/&gt;profile.yml 双锚点"]
+  Comp["composeEntries&lt;br/&gt;bundle + patch 层叠"]
+  Boot["boot() + Loader&lt;br/&gt;插件树激活"]
+  Surf["surface startup&lt;br/&gt;web · headless · acp · sdk"]
+  Bin --> Prof --> Comp --> Boot --> Surf
+```
 
 | 入口 | 形态 | 协议/载体 | 说明 |
 |---|---|---|---|
@@ -91,40 +91,17 @@ bin.ts → args 解析（--profile/--patch/--dump-config，task 为位置参数�
 
 ### 2.4 mini 对照
 
-- headless 一次性任务入口（`miniharness/cli/headless.py` + `cli/main.py`）：stdout 最后一条非空 assistant 文本、退出码按 turn/end reason、空任务拒绝、未知 profile fail loud、不开端口、`ctx.appExit` 宿主钩子（手册 07 章）。
+mini 用同一套「组合 boot → surface 分裂」：`cli/` 承载 headless 与启动器选项；`web/` 发布与上游 gateway 对齐的 unary + `/api/remote.mux` + `$events`/`$events/result`；`protocol/` 承载 SDK/ACP/hooks 最小子集；`loader/` + `boot/` 承载组合树。字段级端点与帧语义以 [interface-wire.md](../interface-wire.md) 为准（与 `WebApi.ROUTES` 同步），模块归属见 [architecture.md](../architecture.md) 映射表。
 
-- 协议入口最小子集：JSON-RPC 信封（`miniharness/protocol/sdk.py`，07 章 §7.6）、ACP（`miniharness/protocol/acp.py`，07 章 §7.7）、hooks 桥（`miniharness/protocol/hooks.py`，07 章 §7.8）。
+| 面 | mini | 深读 |
+|---|---|---|
+| headless / 启动器 | `cli/headless.py`、`cli/main.py` | [手册 07](../chapters/07-external-entry-points.md) §7.2 |
+| web 传输 | `miniharness/web/` | interface-wire、[手册 07 §7.5](../chapters/07-external-entry-points.md) |
+| 三协议 | `protocol/{sdk,acp,hooks}.py` | 手册 07 §7.6–§7.8 |
+| 组合 / Loader | `boot/`、`loader/` | 手册 08、报告 [03 §5.5](03-flows.md) |
+| 插件 Remote | `web/api.py`、`boot/plugin_*` | interface-wire §4.15 |
 
-- web 传输层（`miniharness/web/`，07 章 §7.5）由以下约定组成：
-
-  - 两信封 RPC：`server.py` 严格 `{args}` 解包，信封为 `client-request`/`server-response`；
-  - WebApi unary 会话服务（`api.py`）：list/search/create/selectModel/modelCatalog/…/page unary；
-  - Remote 流 wire（`stream_protocol.py`）：单条 `/api/remote.mux` WebSocket 承载 open/cancel/item/end/error 帧 + `$events/result` unary 结算；
-  - `$events` 注册表（`events.py`）：ready 首帧 + api-session/* 转发 + waterfall；
-  - 六条流（`streams.py`）：`session/follow` = snapshot{header,cursor,records,hasMore,projections} + 逐帧；`session/control` = baseline{projections} + 替换帧；`terminal/retain` 一帧后保持，`terminal/attach` = snapshot{writable,inputWindow?} + 有序 output·state·ack（双工）；`workspace/follow` = baseline + upsert·remove·order·archived·pinned 增量；`workspaceFiles/changes` = ready + change；
-  - 审批桥（`approvals.py`）：async tools/ask 闸门 ↔ `$events` waterfall 经 result 结算 + `approval/asked|decided` 审计；
-  - 会话导出下载（`downloads.py`）：`GET /api/session.export`，root + 子代理后代 + 被引用媒体 zip，200/400/404/501/500 状态码链，错误走私有信封外壳；
-  - FastAPI 载体（`server.py`）：同 gateway `stream-server.ts` 状态码链 + client/connection 一元信封 + frontend-static 约定；
-  - `--profile web` 启动器（`launcher.py` + `cli/main.py`）。
-
-约定层与上游真实约定一致（上游 React 客户端指向 mini 后端可工作）。浏览器前端有两种形态：产品化的 `webui/`（仓库顶层独立 React+TS+Vite 工程，只依赖 wire 约定：会话列表/新建、Trajectory（虚拟化窗口 + Overview 折叠跳转 + 全文 search）、审批瀑布、队列/作业；`vite build` 产物经 `MINIHARNESS_WEBUI_DIST` 由后端静态承载）；`web/static/` 是 vanilla SPA 教学参照（旧 SSE wire，不对新后端工作）。
-
-- 异步化与并行工具执行（`miniharness/core/agent_loop/tool_calls.py` + core/scope async 变体 + `execution_mode` 分类器，手册 12 章）：屏障 / 滚动池 / 模型序提交 / 取消排干与上游 `agent-loop/src/tool-calls.ts` 逐条一致。
-
-- 模型请求重试/退避（`miniharness/llm/retry_policy.py` + `miniharness/llm/retry.py` + `core/agent_loop/agent.py` 接线，手册 04 章 §4.9）：`agent/request-error` waterfall 扩展点、normal/always 策略、有界指数退避 + 对称抖动、`providerRetryAfterMs`（429 Retry-After）优先、durable `llm/retry` + `llm/retry-started` 审计对；派发前熔合信号检查（请求 signal + 重试插件 lifetime，等价 `AbortSignal.any`）、事件驱动多信号竞速等待、插件 effect teardown（注销监听器 + lifetime.abort + 排干在途恢复）与陈旧回调守卫；上下文溢出/认证不在默认可重试白名单 → 终局降级，同上游 `llm-retry/src/index.ts` 与 `retry-policy.ts`。
-
-- YAML 配置 + `!!js` 插值子集（`miniharness/boot/composition.py`）：pyyaml 硬依赖承载 YAML；`process.env.<NAME>` 子集（其它表达式 fail loud，全量 JS eval 有意不复制、仅放开 env 子集为目标）；`.env` 加载（ENOENT 静默 / 其它 warn / 已存在不覆盖、bootstrap-only 物化前整体拒绝、`home=` 层对 HTTP_PROXY 等代理名豁免——HOME_LAYER_PROXY_NAMES 同款）；组合 dump 渲染。
-- 启动器选项（`miniharness/cli/main.py`）：`--patch` 可重复；`--dump-config`/`--dump-default-config` 互斥且 boot-free；dump 不接受任务参数、default 不接受 `--patch`；行级 `# ==` 来源注释 + `!!js` 原样未求值 + skipped patch warn 不失败 + 单文档可再加载。
-- 会话管理子命令（`miniharness/cli/session_cmds.py`，mini 教学扩展——上游会话管理在 web 表层）。
-- 测试与 CI：测试位于 `tests/test_cli.py`（启动器 / 会话子命令）与 `tests/test_composition.py`（YAML 组合）；CI（`.github/workflows/ci.yml`：unittest + Python 3.10~3.13 matrix × ubuntu/windows + windows-acl 门控 e2e + demo 冒烟）；integration 标签真实 API 测试（`tests/test_real_api.py`，`MINIHARNESS_INTEGRATION=1` + key 缺一即跳过）。
-
-- 组合装载树与 Include（`miniharness/loader/`，L0，对齐上游 `vendor/loader` + `vendor/include`）：`boot()` 装 `Loader` 服务后挂根 Include 条目，把配置条目导入并激活为 live fiber。组件包括 `EntryTree`（扁平 store、`entries()` 递归子树、`resolve()`/`import_()`）、`Entry` 生命周期（`update` 三态 / `disabled` 上溯 / `!!js` 激活期求值）、`EntryGroup`/`Group`（组载体）、`Loader` 服务（`internal/config` 树载体字面 + 普通条目 interpolate、`internal/update` 写回 + 重载日志、`internal/plugin` 自销毁回写 disabled）、`Include` 文件背书子树（读/写、`initial` 首写、`apply_entry_patches`、`!!js` 原样回写）。启动期审计 `ACTIVE`/`FAILED`/`PENDING` 三态并点名未激活条目（对齐 `auditStartupEntries`）。测试位于 `tests/test_loader_tree.py` 与 `tests/test_loader_include.py`。
-
-- Host 插件面 Remote（`web/api.py` + `boot/plugin_*`）：`pluginInventory/list`（Loader 条目 + preset flatten）、`pluginManager/listPlugins|setPluginEnabled`（写 profile 补丁并对账）、`pluginMarket/listIndexes|setIndexes|search|readEntryDetail` + `pluginRegistryProbe/fastest`（HTTP(S) 索引与 Python 模块安装扩展，不跑 pnpm）；约定见 `interface-wire.md` §4.15。
-
-- 定时跟进 Web 面：`schedule/*` Remote（list/catalog/history/delete/update + `schedule/changed` 事件）与模型侧 `install_tool_schedule` 分离；`webui/` 消费同一 wire（Settings / 控制面板等与 `architecture.md` V4–V5 行一致）。
-
-- 工作流 + PTC 沙箱门：`miniharness/workflow/` + `workflow_ptc/` guest confine；实验面 `experimental/action_cards` opt-in 投影供 WebUI 按需渲染。
+浏览器端：`webui/` 只依赖 wire；`web/static/` 为旧 SSE 教学参照。`cli/session_cmds.py` 为教学扩展（上游会话列表在 web 面）。并行工具、重试、YAML 组合、CI 等与入口正交，不在此重复，见 architecture 映射表与手册 04/05/12。
 
 ## 议题 3：Trajectory 轨迹台账
 
@@ -137,19 +114,20 @@ Trajectory 是 **web 专属**的"Agent 的 DevTools"：一个按 turn 组织的�
 
 ### 3.2 实现
 
-```text
-数据流：
-会话日志（唯一数据源）
-  → session/page RPC（throughSeq/beforeSeq/maxMessages 游标向前分页，按 append-origin 消息边界切页）
-  → ConversationNodeAssembler 折叠（`packages/client/ui-conversation/src/client/conversation/assembler.ts`）
-      · 折叠窗口 = 当前滚动区间的节点
-      · 每个 target（user/assistant/tool/steering…）用独立 definition 物化
-  → TrajectorySnapshot = { eventNodes, eventLocations, requests, callSchemas, partial, runningCalls }
-      （trajectory-contract.ts:60-68）
-  → 渲染 + 虚拟化（只挂载可见行窗口 + overscan）
+Trajectory 从**同一份会话日志**出发：`session/page` 按消息边界向前分页，浏览器端用纯函数折叠定义物化节点，再虚拟化渲染。TTFT（time to first token，首 token 延迟）与 Overview 都从折叠结果重算，不另建采集系统。
+
+```mermaid
+flowchart LR
+  Log["Session 日志&lt;br/&gt;唯一数据源"]
+  Page["session/page RPC&lt;br/&gt;消息边界分页"]
+  Fold["折叠 definition&lt;br/&gt;match · update · finalNode"]
+  Snap["TrajectorySnapshot"]
+  UI["webui Trajectory&lt;br/&gt;虚拟化 · 搜索"]
+
+  Log --> Page --> Fold --> Snap --> UI
 ```
 
-分页边界取 append-origin 消息边界，折叠窗口内不会出现半截消息。折叠定义是纯函数（`match` / `update` / `finalNode`），所以 Trajectory 是日志投影而非状态机。虚拟化只挂载可见行窗口（阈值 100 行、overscan 12），长会话翻页加载。
+分页边界取 append-origin 消息边界，折叠窗口内不会出现半截消息。虚拟化只挂载可见行窗口（阈值 100 行、overscan 12），长会话向上翻页加载更早记录。
 
 - **折叠引擎是纯函数**：每个折叠定义由 `match/update/finalNode` 构成（trajectory-*-definition.ts），无副作用、可重入——这是"日志投影"而非"状态机"的本质；
 - **保留边界**：设计笔记明确拒绝"把日志拍平成裸记录流"——Turn/Step/Request 边界保留因果结构（.agents/notes/implemented/feature/2026-07-27-trajectory-inspection-ledger.md:44）；
@@ -182,6 +160,21 @@ Trajectory 是 **web 专属**的"Agent 的 DevTools"：一个按 turn 组织的�
 宿主（web UI、hooks 桥、ACP 客户端、编排程序）通过 `Agent` handle 干预运行中的 agent：**唤醒**（下一条消息）、**转向**（打断当前思路改道）、**注入**（静默加料）、**取消**（清空排队 + 中止）、**等待静默**（整机 quiescence）、**维护任务**（非回合的后台活）。干预全部经会话日志可查——inbox 每次变更先落 `agent/inbox/spliced`，取消留下 `turn/end {kind:'aborted'}`。
 
 ### 4.2 实现：Agent 接口与干预通道
+
+所有输入先进**双列 inbox**：`followup` 进 next-turn（下一回合唤醒），`steer`/`inject` 进 next-step（下一 step 边界消费）。`cancel` 清排队并协作式中止；pre-step / request / pre-execute 瀑布在 driver 路径上叠加策略。
+
+```mermaid
+flowchart TD
+  Host["宿主 followup · steer · inject · cancel"]
+  Inbox["inbox&lt;br/&gt;next-turn | next-step"]
+  Pre["agent/pre-step waterfall"]
+  Loop["driver turn/step"]
+  Log["Session 日志&lt;br/&gt;inbox/spliced · turn/*"]
+
+  Host --> Inbox --> Loop
+  Pre --> Loop
+  Loop --> Log
+```
 
 Agent 接口定义于 `packages/core/agent/src/runtime-types.ts:164`：
 
@@ -228,18 +221,18 @@ mini loop（`core/agent_loop/agent.py`）覆盖完整干预面：`followup` + in
 
 ### 5.2 实现
 
-```text
-一次审批的数据流：
-tools/pre-execute 瀑布（core/tools）→ 返回 {kind:'ask'}（PreToolDecision，tools/src/index.ts:588-591）
-  → serviceAsk（tools/src/index.ts:1475-1481, 1689-1729）
-      · ctx.get('approval') 缺省/无 agent → 降级 deny
-      · 必须处于 open turn（否则 throw，不落任何日志，index.ts:257-265）
-  → approval.request({agent, toolName, callId, reason, signal})
-      · append 'approval/asked'（审计，log-only）
-      · decide()：aborted→cancelled；never→rejected；否则 waterfall('approval/request', …)
-        监听器异常/非词汇值 → 'unavailable'（fail-closed）
-      · append 'approval/decided'（同一 ApprovalRequestId 关联）
-  → 结果映射回工具流水线：allowed-once→{kind:'allow'}；其余→deny+reason
+工具管线在 `tools/pre-execute` 返回 `{kind:'ask'}` 时进入审批：`ctx.approval.request` 先写 log-only 的 `approval/asked`，再经 `approval/request` waterfall 收集 answerer（web / ACP / hooks），写 `approval/decided`，最后映射为 allow 或 deny。唯一放行是 `allowed-once`；`never` 策略在进 waterfall 前即拒绝。
+
+```mermaid
+flowchart LR
+  Pre["tools/pre-execute&lt;br/&gt;kind ask"]
+  Svc["ctx.approval.request"]
+  Asked["approval/asked"]
+  WF["approval/request waterfall"]
+  Dec["approval/decided"]
+  Pipe["工具管线 allow/deny"]
+
+  Pre --> Svc --> Asked --> WF --> Dec --> Pipe
 ```
 
 - **闭合四值**：`'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'`（`packages/interaction/user-approval/src/types.ts:29`），唯一放行是 allowed-once；
@@ -298,6 +291,24 @@ web 中打开历史会话有两种不同深度：**读历史窗口**（滚动回
 
 ### 7.2 实现
 
+读历史与 resume 是两条路径：`session/page` 只拉日志窗口，不激活 agent；`ensureSession` + `agents.resume` 才重建运行中的 agent。分页按 append-origin 消息边界切页，不在消息中段截断。
+
+```mermaid
+flowchart TB
+  subgraph Read ["读历史（不 resume）"]
+    Page["session/page&lt;br/&gt;beforeSeq · maxMessages"]
+    Follow["session/follow 实时帧"]
+  end
+  subgraph Run ["恢复运行"]
+    Ens["ensureSession"]
+    Res["agents.resume&lt;br/&gt;prepare + publish"]
+  end
+  Log["持久化 Session 日志"]
+  Log --> Page
+  Log --> Follow
+  Log --> Ens --> Res
+```
+
 ```text
 会话检索与恢复：
 sidebar 搜索 → ctx.sessions.search（runtime manager.ts:518-527）→ RPC session/search
@@ -319,7 +330,7 @@ sidebar 搜索 → ctx.sessions.search（runtime manager.ts:518-527）→ RPC se
 ```
 
 - **分页语义**（session-controller/src/index.ts session/page，原 api-proxy.ts:282-313 已随 apiproxy 删除）：`beforeSeq` 缺省=尾页；从尾部倒着数 maxMessages 个 **append-origin 消息**（user/assistant message 且 isAppendSurfaceEvent）；replacement 拷贝不占配额；派生事件经 `sourceEventSeqs` 归并到所属消息（如 `tool/result` 引其 `tool/call`；V2 起 assistant 消息内嵌流自带边界、禁带 `sourceEventSeqs`），**绝不在消息中段切页**；`compaction/summary` 与其 replacement 同页；
-- **全文检索是 opt-in**：session-query 家族（服务定义 + SQLite FTS5 实现，`packages/session-query/`）索引六类事件（user/message、assistant/message、tool/call name+arguments、tool/result content+error、todo/write、turn/end reason）；结构性事件不产生文档（extraction.ts:13-42）；shipped bundle 默认 `openAt: never`（SQLite 永不打开，搜索抛 `SESSION_QUERY_SEARCH_DISABLED`），此时 sidebar 退化为本地子串匹配（bundle/base/cordis.patch.yml:109-121）；
+- **全文检索是 opt-in**：session-query 家族（服务定义 + SQLite FTS5 实现，`packages/session-query/`）索引六类事件（user/message、assistant/message、tool/call name+arguments、tool/result content+error、todo/write、turn/end reason）；结构性事件不产生文档（extraction.ts:13-42）；出厂 base bundle 默认 `openAt: never`（SQLite 永不打开，搜索抛 `SESSION_QUERY_SEARCH_DISABLED`），此时 sidebar 退化为本地子串匹配（bundle/base/cordis.patch.yml:109-121）；
 - **读历史从不 resume 或发布 Agent**（packages/api/session-controller/src/index.ts）——两条路径刻意分离；
 - **headless 无 --session**：startup.ts:31-56 只解析 task 位置参数；headless.spec.ts:90 的 resume 桩直接 reject 证明从不调用。
 
@@ -334,7 +345,7 @@ sidebar 搜索 → ctx.sessions.search（runtime manager.ts:518-527）→ RPC se
 
 ### 7.4 mini 对照
 
-mini 持久化层采用 JSONL + fail-closed + interrupted 修复，且 `sessions` 子命令（`cli/session_cmds.py`）提供 CLI 版会话管理（list / resume / delete，教学扩展）。**web 表层**：`webui/` + `session/list|create|page|search` 等 unary 与 `session/follow` 流（分页边界同议题 7.2）；`ensureSession` + `agents.resume` 走同一 Remote 约定。**登记简化**：跨会话 FTS 检索（上游 `session-query` + `openAt` 三态）在 mini 为可选域（`session_query/`，默认组合未必打开 SQLite FTS）；sidebar 全文搜索行为与上游 shipped bundle 默认可能不一致。headless 保持不支持恢复（同上游 startup.ts:31-56 只解析 task 位置参数）。
+mini 持久化层采用 JSONL + fail-closed + interrupted 修复，且 `sessions` 子命令（`cli/session_cmds.py`）提供 CLI 版会话管理（list / resume / delete，教学扩展）。**web 表层**：`webui/` + `session/list|create|page|search` 等 unary 与 `session/follow` 流（分页边界同议题 7.2）；`ensureSession` + `agents.resume` 走同一 Remote 约定。**登记简化**：跨会话 FTS 检索（上游 `session-query` + `openAt` 三态）在 mini 为可选域（`session_query/`，默认组合未必打开 SQLite FTS）；sidebar 全文搜索行为与上游出厂 base bundle 默认可能不一致。headless 保持不支持恢复（同上游 startup.ts:31-56 只解析 task 位置参数）。
 
 ## 议题 8：plan mode 与 goal
 
@@ -343,6 +354,8 @@ mini 持久化层采用 JSONL + fail-closed + interrupted 修复，且 `sessions
 **plan mode**：`/plan` 进入"先规划后动手"的软引导模式——模型先产出 markdown 计划，经人确认（Approve / Keep planning）后 `exit_plan_mode` 退出。它不锁任何工具，只是把一段指导文本加进每轮请求的 system prompt。**goal**：给 agent 立一个带验收标准的多轮目标，系统自动把目标变成一轮一轮的"goal round"消息喂回 agent，直到完成/暂停/超轮次。
 
 ### 8.2 实现
+
+plan 与 goal 都只靠会话日志恢复：plan 折叠 `plan/mode` 决定是否注入 `plan:policy`；goal 折叠 `goal/change` 得到快照，round 驱动器在 agent **idle** 且目标 active+armed 时经 `followup` 排入下一轮 goal 消息，**pre-step** 再做 reservation 校验（失败 → `turn/end {kind:'blocked'}`）。
 
 #### plan mode（`packages/plan/plan-mode/`，ctx.planMode）
 
@@ -359,6 +372,27 @@ mini 持久化层采用 JSONL + fail-closed + interrupted 修复，且 `sessions
 - **pre-step 消费**：goal 消息**走 enter 而非 reject**；驱动器在 proposed messages 中认出 goal 来源，下游之前/之后各校验一次完整 reservation（active/armed、revision、round==roundsStarted+1、phase==claimed），校验失败才 reject（或下游 reject 时标记 blocked，code `prompt-rejected`）（index.ts:334-414）；
 - **容量与并发**：轮次上限 `maxGoalRounds` 超限自动 block（code `round-limit`，index.ts:166-172）；按 agent 串行化——同一时刻最多一个在飞 round（index.ts:208-241）；resume/fork 后需人授权重新 armed；预留前先 `ctx.sessions.flush()` 检查点保证 goal/changed 持久义务（index.ts:142-154）。
 
+<p class="fig-cap">图 8：goal round 驱动（快照 → followup → pre-step reservation）</p>
+
+```mermaid
+flowchart TD
+  Mut["goal/change 写入日志&lt;br/&gt;goal/changed 通知"]
+  Fold["fold 快照&lt;br/&gt;active · armed · round 预算"]
+  Idle["agent idle"]
+  Drv["goal-round-driver&lt;br/&gt;至多一个在飞 round"]
+  Fu["followup&lt;br/&gt;source: goal"]
+  Pre["agent/pre-step&lt;br/&gt;reservation 校验"]
+  Turn["普通 FIFO turn"]
+  Block["turn/end blocked&lt;br/&gt;round-limit · prompt-rejected"]
+
+  Mut --> Fold
+  Fold --> Idle
+  Idle --> Drv --> Fu --> Pre
+  Pre -->|enter| Turn
+  Pre -->|reject| Block
+  Turn --> Idle
+```
+
 ### 8.3 源码证据
 
 - `packages/plan/plan-mode/src/index.ts:46-55,63-67,129-138,205-233,305-393,425-460` —— plan 全链路
@@ -371,51 +405,15 @@ mini 持久化层采用 JSONL + fail-closed + interrupted 修复，且 `sessions
 
 ### 8.4 mini 对照
 
-mini 的 plan 全链路（状态机 + 审查 UI，`miniharness/plan/`，见下方 §8.5）与 goal 域（事件溯源 + 自动续跑驱动 + 三工具 + `/goal` 命令，`miniharness/goal/`，见 §8.6）在手册 09/11 章展开。
+wire 与折叠语义与上游一致：`plan/mode`、`goal/change`、goal 消息 `source.kind==='goal'`、pre-step reservation 与图 8 主链。实现细节与登记简化不在此展开，见映射表与手册。
 
-### 8.5 mini 实现：plan mode 状态机 + 审查 UI（`miniharness/plan/`）
+| 域 | mini | 深读 |
+|---|---|---|
+| plan mode + 审查 | `miniharness/plan/`、`interaction/user_questions.py` | [architecture.md](../architecture.md) `plan/*` 行；演示 `examples/plan_goal_demo.py` |
+| goal 服务 + 驱动 + 工具 | `miniharness/goal/` | [手册 09 §9.2](../chapters/09-agent-intervention.md)（干预 + goal round 消费）；`tests/test_goal*.py` |
+| 命令 | `miniharness/commands/`、`/plan`、`/goal` | 手册 11（动态扩展口旁及 plan 装配序） |
 
-同上游 `packages/plan/plan-mode/` 的 wire/约定核心：
-
-- **状态只写日志**：唯一事实来源是 `plan/mode {active:boolean}`（log-only、非 surface、整值替换），生效状态 = `fold_plan_mode` 沿日志前缀折叠、最后一条胜出；resume/fork 无需 live mirror。`plan/mode` 已入 KNOWN_TYPES，seed 回放 fail-closed。
-- **set() 四态**（index.ts:425-445）：`committed`（idle 立即 append）/ `queued`（turn 运行中记 pending，在下一个被接受的 in-turn pre-step 提交）/ `cancelled`（反向 pending 选择被清除、生效状态已匹配目标）/ `noop`（选择与生效或已 pending 状态一致）；被拒绝（reject）或中止的 step 不提交。上游同语义：先记 pending 再判 open turn，commit 一律 append。
-- **plan:policy 节**（order 50，index.ts:225-233）：plan mode 生效（含 pending 选择）期间向每次模型请求注入部署方指引；实现经 `core/system_prompt.py` 分节渲染（基底 + 有序非空节，`\n\n` 连接，同上游 renderPrompt）。
-- **叙述**：仅当最近一次 request/header 描述另一模式时注入一句 user 消息（idle 经 `agent.inject` 入 inbox，queued 经 pre-step 决策 messages）；模型可见 ⟺ 已记录。
-- **审查 UI**（review.py + projection.py）：`exit_plan_mode` 工具（跨模式保持注册、要求 `# ` 标题的非空 markdown、批准 → 排队 silent 退出在下一个被接受的 in-turn pre-step 提交、Keep planning 是带反馈的失败调用、取消则提示等待）；`/plan` 命令四态文案逐字一致（index.ts:274-301）；userQuestions 审查通道（经 `interaction/user_questions.py` 完整服务 `.ask({questions:[...], agent, signal})`，对齐 upstream user-questions seam）；plan 投影单元（session-projection 的 `plan` 键，纯双事件折叠：`command/run`(name='plan') 记录已写入的选择、`plan/mode` 清空 pending）。
-- **命令约定**（`miniharness/commands/`）：`command/run` + `command/done` 按 commandId 配对（log-only 非 surface），命令进入 handler 前先落 run（durable before dispatch）；未命中已注册命令的斜杠行是普通文本；handler 抛错结算为 `kind:'error'`。`command/run|done` 已入 KNOWN_TYPES。
-
-mini 与上游的差异（教学范围，须在文档中标注）：
-
-- **canonical value + `Tool.render` 分离**：`plan/review.py:163-164` 返回 canonical `{"approved": true}`，`_render_approved` 经 `render=` 承担模型可见文案，`present_call`/`present_result` 提供 UI 卡片（`plan/review.py:188-200`，对应上游 index.ts:319/382-392）；
-- **userQuestions 完整服务**（`interaction/user_questions.py`）：UserQuestionError 稳定码 + ask 派发 + restore + ASK_CANCELLED；上游 ask 前后还有 `disposed`（插件纤维重载）守卫，mini 无运行中插件重载故不适用；
-- **`system-prompt`** 提供 assemble waterfall + contexts/tools/variables 提供器 + `{{variable}}` 严格插值；
-- **保留的简化**：scope 层叠未复现（单全局层）；assembly.tools 提供器结果不直接成为请求工具列表（请求工具来自 ToolRegistry）；
-- **运行时上下文快照**经 loop 侧投影注入会话消息流（`core/agent_loop/runtime_context.py`，同上游 RuntimeContextProjection）；
-- **`install_plan_mode`** 要求 ctx 已提供 systemPrompt 服务（缺失抛 KeyError，fail loud）；装配序：`install_system_prompt` → `install_plan_mode` →（可选）`install_plan_review`。
-
-### 8.6 mini 实现：goal 域（`miniharness/goal/`）
-
-同上游 `packages/goal/{goal, goal-round-driver, tool-goal, command-goal}` 的 wire/约定核心：
-
-- **事件溯源**：唯一 durable 事实是 `goal/change`（全快照或 clear 墓碑，version 1）+ 进程内通知 `goal/changed`（`{change: notification}`）；`goal/change` 已入 KNOWN_TYPES，seed 回放 fail-closed。严格重放 fold：decode 校验 kind/version/操作/字段集，非 create 操作要求精确推进一个 revision 且保持计数器/时间戳（同 domain.ts / fold.ts）。
-- **round 驱动**（GoalDriver）：每条 round 是 goal 来源 user 消息（`source:{kind:'goal', goalId, revision, round}`）经 `agent.followup()` 入 inbox；pre-step 做 fail-closed reservation 校验（active/armed、revision、round==roundsStarted+1、预算），校验失败 reject → turn 以 `{kind:'blocked'}` 闭合。两层驱动表面都与上游一致：
-  - **driver 模式（web/ACP/SDK 的 async 表面）**：GoalDriver 订阅 `agent/status`(idle) 与 `goal/changed`，在 idle 且目标 active+armed 时自动排恰好一个下一轮（同上游 goal-round-driver 的 turn/end → continue 事件驱动续跑）；reservation 持久到该 round 回合结束（idle 到达才清除），避免 driver 模式 `followup` 只入队、pre-step 仍需 reservation 校验的竞态。
-  - **同步门面（demo/headless 的 run()）**：无嵌套 asyncio.run，仍由宿主显式 `continue_rounds(loop)` 驱动（保留 pull 式约定；其 reservation 在 `followup` 后 `finally` 清除，因同步模式回合在 followup 内跑完）。
-  - round 预算用尽自动 block（code `round-limit`）、被拒 block `prompt-rejected`、max-tokens → disarm、aborted → pause，两条路径语义一致。
-- **服务**（GoalService，ctx.goals）：compare-and-set 变更全族（create/edit/pause/resume/complete/block/clear）；错误码与上游一致（GOAL_ALREADY_EXISTS / GOAL_STALE_REVISION / GOAL_INVALID_TRANSITION / GOAL_INVALID_OBJECTIVE / GOAL_INVALID_MAX_ROUNDS / GOAL_INVALID_BLOCK_REASON / GOAL_INVALID_EDIT / GOAL_INVALID_STATE / GOAL_NOT_FOUND）；create 仅当前无目标或 complete 时允许；resume 校验 round 预算余量。
-- **模型工具**（tool-goal）：`get_goal` / `create_goal` / `update_goal`（description、参数 schema、canonical 输出 JSON 逐字一致）；update 是 compare-and-set（stale ref → GOAL_STALE_REVISION，非法引用 → GOAL_TOOL_INVALID_UPDATE）；blocked 需 `{code:'model-reported', message}` 且 goal 轮次内未达连续轮数阈值（默认 3）时拒绝（GOAL_TOOL_BLOCK_THRESHOLD）；`tool:goal` prompt section（order 114）。
-- **人类命令**（command-goal）：`/goal [<objective>|clear|edit <objective>|pause|resume]`，文案逐字一致（show / create / edit / pause / resume / clear / 错误提示）。
-- **装配序**（示例 `examples/plan_goal_demo.py`）：`install_system_prompt` → `install_commands` → `install_plan_mode` → `install_plan_review` → `install_goals` → `register_goal_tools` → `install_goal_driver` → `install_goal_commands`。
-
-mini 与上游的差异（教学范围，须在文档中标注）：
-
-- **agent registry + assertLive**：`core/agents.py` AgentRegistry + install_agents，goal `_prepare_mutation`（全公共方法必经）顶部 `assert_live_agent(agent)`；
-- **canonical value + `Tool.render`**：goal 三工具 execute 返回结构化 canonical 输出、`render=` 承担模型可见文案（不再直接返回模型可见文本）；
-- **无 Typert remote 边界**（remoteExport* 未复现）；
-- **driver 模式同上游事件驱动续跑**（`agent/status` idle + `goal/changed` → 自动排下一轮），同步门面保留 `continue_rounds` pull 式约定；
-- **无 competingQueued 竞争护栏**（armed 目标在任意 idle 都会续跑，不区分是否刚有人类提示）；
-- **无 reserved attempt 集与 deferred wrapup 摘要注入**（同步模型下 reservation 只在排队→pre-step 间存活，driver 模式延长到回合结束 idle）；
-- **权威判定**用"当前 step 在 goal 轮次中"近似（authority.kind==='goal-round'，completionAuthority 模块未复现）。
+登记简化（须在映射表核对）：plan scope 层叠未复现；goal 无 Typert remote、无 competingQueued、completionAuthority 近似为「当前 step 在 goal 轮次中」；工具 canonical 值与 `Tool.render` 分离（plan/goal 三工具同上游 JSON 契约）。
 
 ## 议题 9：上下文压缩与后台作业
 
@@ -424,6 +422,19 @@ mini 与上游的差异（教学范围，须在文档中标注）：
 **长会话自动压缩**：上下文压力超过阈值时自动把旧消息折叠成摘要并替换（surface 上留一个检查点消息），前缀重放复用 provider 的 KV cache；provider 报上下文超限时强制减容后重试。**后台作业**：bash/subagent 可 `run_in_background: true`，返回 job id，模型用 `job_output/job_list/job_kill` 收集/管理。**可继续子代理**：子代理以 durable 子会话运行，父 agent 可随时继续喂消息，进程重启后冷恢复。
 
 ### 9.2 实现
+
+压缩在 `agent/pre-step` 看 token 压力，在 `agent/request-error` 处理 overflow；一次成功压缩是 start → 摘要 LLM 调用 → 带 `surfaceOp replace` 的检查点 user/message → end 的事务，失败也要补带 error 的 end。
+
+```mermaid
+flowchart LR
+  Meter["ctx.tokenMeter fold"]
+  Pre["agent/pre-step 压力检查"]
+  Sum["compaction 摘要 LLM"]
+  CP["user/message 检查点&lt;br/&gt;surfaceOp replace"]
+  End["compaction/end"]
+
+  Meter --> Pre --> Sum --> CP --> End
+```
 
 #### compaction（`packages/compaction/`：seam + compaction-basic + pruner + command-compact）
 

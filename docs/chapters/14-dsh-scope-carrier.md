@@ -16,6 +16,18 @@ dsh 用一个极小的原语解决这个问题：**不透明的 scope 键（`Sco
 
 两个方向不对称，这正是整套模型的关键：注册往子树看，事件往祖先看。
 
+```mermaid
+flowchart TB
+  Root["根 scope"]
+  Child["子 agent scope"]
+  Reg["ScopedLayers 注册&lt;br/&gt;向下继承"]
+  Ev["scopeTarget 事件&lt;br/&gt;向上接纳"]
+  Root --> Child
+  Child --> Reg
+  Child --> Ev
+  Ev -.-> Root
+```
+
 ## 14.2 概念：ScopeKey 与载波
 
 | 概念 | 作用 |

@@ -14,7 +14,7 @@
 
 ## 架构与分层
 
-运行时围绕一条主链：`boot` 加载组合与插件 → 会话只追加事件 → 投影出模型可见历史 → Agent 在 turn/step 里调模型与工具 → 需要浏览器或自动化时，由 `web/` 暴露与上游一致的 wire，`webui/` 只消费这份约定。
+运行时围绕一条主链：`boot` / `loader` 加载组合与插件 → 会话只追加事件 → 投影（如 `derive_messages`）算出模型可见历史 → Agent 在 turn/step 里调模型与工具，模型可见事实写回同一条日志 → 需要浏览器或自动化时，由 `web/` 暴露与上游一致的 wire，`webui/` 只消费这份约定。详图见 [docs/index.md](docs/index.md) 与 [docs/architecture.md](docs/architecture.md) §1.0。
 
 ```mermaid
 flowchart TB
@@ -83,6 +83,7 @@ CLI 写入的状态在 `MINIHARNESS_HOME`（默认 `~/.miniharness`）：会话�
 | 分章实现教程 | [docs/chapters/](docs/chapters/) |
 | 构建 `webui/` | [webui/README.md](webui/README.md) |
 | 规划与登记简化 | [ROADMAP.md](ROADMAP.md) |
+| 本地构建文档站 | `pip install mkdocs-material pymdown-extensions` 后 `python -m mkdocs build --strict`（产出在 `site/`） |
 
 ## 入口
 

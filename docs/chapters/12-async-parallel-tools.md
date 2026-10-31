@@ -14,6 +14,15 @@
 
 ## 12.2 概念：上游怎么调度的
 
+```mermaid
+flowchart TD
+  Calls["模型产出的 tool-call 列表"]
+  Bar["exclusive 屏障"]
+  Pool["parallel 滚动池&lt;br/&gt;有界并发"]
+  Ord["按模型序提交结果"]
+  Calls --> Bar --> Pool --> Ord
+```
+
 ### 执行模式（`execution_mode`）
 
 上游 `packages/core/tools/src/index.ts:1311-1319`：

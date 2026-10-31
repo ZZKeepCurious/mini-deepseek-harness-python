@@ -37,6 +37,34 @@ flowchart LR
 
 <p class="fig-cap">图 A：三层阅读结构——源码是唯一权威，报告回答"是什么/为什么"，手册回答"怎么亲手做出来"。基础章沿主线把核心约定立起来；进阶章每章独立，可按需选读。</p>
 
+## 上游 monorepo 与 mini 仓库对照
+
+上游 [01 全景](01-overview.md) 用五层（应用 / 组合 / 能力 / 框架 / 外部 SDK）描述 **dsh** monorepo；mini 用 **core + web + webui** 三层组织可运行产物，并用 L0–L3 约束 Python 包依赖（[architecture.md](../architecture.md) §1.0、§3）。读法：先在上游建立全景，再在 mini 里找对应模块与 wire。
+
+```mermaid
+flowchart TB
+  subgraph Up["上游 dsh（五层 · 学习归纳）"]
+    U1["应用 apps"]
+    U2["组合 bundle / preset"]
+    U3["能力 packages/*/*"]
+    U4["框架 vendor/"]
+    U5["外部 SDK python/ · packages/sdk"]
+    U1 --> U2 --> U3 --> U4
+    U5 -.stdio JSON-RPC.-> U1
+  end
+  subgraph Mini["mini（三层 + L0–L3）"]
+    M0["boot / loader → Session 日志 → agent_loop"]
+    M1["web/ · protocol/ · cli/"]
+    M2["webui/（wire only）"]
+    M0 --> M1
+    M1 --> M2
+  end
+  U3 -.约定对齐.-> M0
+  U1 -.surface 语义.-> M1
+```
+
+<p class="fig-cap">图 B：左侧是上游仓库分层（报告 01）；右侧是 mini 运行时主链与传输/前端边界（architecture §1.0）。产品面细节不在此展开，见 [04 产品面](04-product-surface.md) 与 [architecture 映射表](../architecture.md#2-模块--上游映射)。</p>
+
 | 子页 | 内容 |
 |---|---|
 | [01 项目全景与分层架构](01-overview.md) | 仓库构成、五层架构（应用/组合/能力/框架/外部 SDK） |
@@ -92,7 +120,7 @@ flowchart LR
 | （模块映射，非上游包） | `docs/architecture.md` | 08 + 各章 | 05 |
 | `packages/session-query/session-log-export（导出域）+ api/session-controller（端点约定面）` | `web/downloads.py` | 07 §7.5 | — |
 | `packages/bundle/web-app` + `packages/client` | `webui/`（产品化 React+TS+Vite 独立工程，只依赖 wire 约定）+ `web/static/`（vanilla SPA 教学参照，旧 SSE wire 不对新后端工作） | 07 §7.5.4 | 04 议题 2 |
-| `packages/skill/（skill + skill-filesystem + tool-skill + skill-badge）` | `skills/`（registry + filesystem + tool_skill） | 13 | 04 议题 10 |
+| `packages/skill/（skill + skill-filesystem + tool-skill + skill-badge）` | `skills/`（registry + filesystem + tool_skill） | —（入口装配见 demo/headless/07） | 04 议题 10 |
 | `vendor/schemastery/src/index.ts` | `core/schema.py` | 15 | — |
 | `packages/core/scope（dsh-scope 协议原语）` | `core/dsh_scope.py` | 14 | 02 §4.5 |
 | `vendor/hmr + packages/boot/app-boot（watchUserPatches）` | `core/hmr.py + boot/boot.py（watch_user_patches）` | 02 | 02 §4.1 |
@@ -111,7 +139,7 @@ flowchart LR
 
 <div class="card" markdown>
 
-**报告**讲上游与 mini 的设计：是什么、为什么、产品面与流程；按主题阅读，图在 MkDocs 中渲染。
+**报告**讲上游与 mini 的设计：是什么、为什么、产品面与流程；按主题阅读，图在 MkDocs 中渲染。[04 产品面](04-product-surface.md) 各议题的 wire 字段与模块归属以 [interface-wire.md](../interface-wire.md)、[architecture.md](../architecture.md) 映射表为准，避免在本页重复第二份长清单。
 
 </div>
 

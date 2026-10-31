@@ -9,6 +9,14 @@
 
 Trajectory 是 web 专属的"Agent 的 DevTools"：按 turn 组织的事件台账，带 Overview 时间线（TTFT 两色）、局部检查器、搜索、虚拟化滚动。设计上它不是独立数据系统——没有 session-timeline 包，不额外写入磁盘，就是同一份会话日志的浏览器端折叠（`packages/client/ui-trajectory/README.md`）。这样日志是唯一数据源，折叠永远可重放、可纠正。
 
+```mermaid
+flowchart LR
+  Log["Session 事件日志"]
+  Fold["fold_trajectory&lt;br/&gt;纯函数"]
+  Out["终端 / JSON / webui"]
+  Log --> Fold --> Out
+```
+
 上游折叠的三个要点：
 
 1. **折叠是纯函数**：每个折叠 target 用独立 definition（`match/update/finalNode`）物化，无副作用、可重入（`trajectory-*-definition.ts`）；

@@ -90,35 +90,36 @@
 
 **RpcError 的 `code` 是命名空间闭集**（统一为 `<namespace>/<name>` 形式，键集与 typert
 `RemoteErrorDetailsMap` 一致：基础设施 `gateway/*` 加各域可扩展注册；`web/envelope.py`
-`RPC_ERROR_CODES` 收 63 码（`rpc_error` 对越界码 fail loud），下方全量枚举——其中 30 码在
-`miniharness/web/` 模块内直接构造，30 码为各域注册的码，另 3 码（`gateway/interactions-forbidden`、
-`gateway/peer-disposed`、`remote-access/denied`）为上游客房声明的兜底码（mini 组合暂无生产者，域缺席时仍可兜底拒绝）；
-路由层边界校验收 `gateway/input-invalid`，未知端点折算为 `gateway/invocation-unavailable`）：
+`RPC_ERROR_CODES` 收 **80** 码（与 `miniharness/web/envelope.py` 中 `RPC_ERROR_CODES` 同集；运行时以 `len(RPC_ERROR_CODES)` 为准；`rpc_error` 对越界码 fail loud）。下方全量枚举按字母序排列；路由层边界校验收 `gateway/input-invalid`，未知端点折算为 `gateway/invocation-unavailable`：
 
 ```
-gateway/arguments-invalid    gateway/bad-request            gateway/cancelled
-gateway/input-invalid        gateway/internal               gateway/invocation-unavailable
-gateway/interactions-forbidden  gateway/peer-disposed
-gateway/lookup-not-found     gateway/protocol               gateway/uplink-overflow
-session/not-found            session/conflict               session/agent-busy
-session/attachment-invalid   session/queue-item-not-found   session/steer-unavailable
-session/title-invalid        session/fork-unavailable       session/invalid-time-zone
-session/migration-required   session/model-unavailable      session/provider-credentials-unavailable
-session/provider-models-unavailable    session/projections-unavailable
-session/workspace-attach-failed        session/writer-held
-workspace/not-found          workspace/session-active       workspace/invalid-path
-workspace/move-invalid       workspace/name-conflict
-workspace-file/not-found     workspace-file/not-directory   workspace-file/not-regular-file
-workspace-file/not-text      workspace-file/outside-workspace  workspace-file/too-large
-workspace-file/watch-unsupported
-subagent/not-found           subagent/catalog-diagnostic    subagent/unauthorized
-agent-preset/conflict        agent-preset/not-found         agent-preset/invalid
-agent-preset/locked          agent-preset/read-only         permission/auto-unavailable
-permission/duplicate-auto    permission/invalid             terminal/unavailable
-terminal/control-unavailable terminal/limit-reached         settings/conflict
-remote-access/denied         settings/rejected              job/not-found
-credential/rejected          note-blank                     note-too-large
-session-not-found            target-not-found               version-conflict
+agent-preset/conflict  agent-preset/invalid  agent-preset/locked
+agent-preset/not-found  agent-preset/read-only  credential/rejected
+directory-picker/create-failed  directory-picker/exists  directory-picker/unavailable
+directory-picker/unreadable  gateway/arguments-invalid  gateway/bad-request
+gateway/cancelled  gateway/input-invalid  gateway/interactions-forbidden
+gateway/internal  gateway/invocation-unavailable  gateway/lookup-not-found
+gateway/peer-disposed  gateway/protocol  gateway/uplink-overflow
+job/not-found  llm/model-discovery-rejected  note-blank
+note-too-large  office-to-pdf/convert-failed  office-to-pdf/engine-unavailable
+office-to-pdf/invalid-input  permission/auto-unavailable  permission/duplicate-auto
+permission/invalid  plugin-market/detail-unavailable  plugin-market/fetch-failed
+plugin-market/invalid-index  plugin-market/invalid-index-url  plugin-market/invalid-query
+plugin-market/settings-unavailable  plugin-market/unknown-index  plugin-market/unknown-plugin
+remote-access/denied  session-not-found  session/agent-busy
+session/attachment-invalid  session/conflict  session/fork-unavailable
+session/invalid-time-zone  session/migration-required  session/model-unavailable
+session/not-found  session/projections-unavailable  session/provider-credentials-unavailable
+session/provider-models-unavailable  session/queue-item-not-found  session/steer-unavailable
+session/title-invalid  session/workspace-attach-failed  session/writer-held
+settings/conflict  settings/rejected  subagent/attachment-invalid
+subagent/catalog-diagnostic  subagent/not-found  subagent/unauthorized
+target-not-found  terminal/control-unavailable  terminal/limit-reached
+terminal/unavailable  version-conflict  workspace-file/not-directory
+workspace-file/not-found  workspace-file/not-regular-file  workspace-file/not-text
+workspace-file/outside-workspace  workspace-file/too-large  workspace-file/watch-unsupported
+workspace/invalid-path  workspace/move-invalid  workspace/name-conflict
+workspace/not-found  workspace/session-active
 ```
 
 > 部分码带具体签发点：`session/model-unavailable` 由 `session/selectModel`

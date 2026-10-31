@@ -156,6 +156,21 @@ hooks 的价值在于迁移成本：已经写好 Claude Code 钩子（安全策�
 
 ## 7.5 Web 传输层（`miniharness/web/`）
 
+```mermaid
+flowchart LR
+  UI["webui"]
+  Unary["POST /api/&lt;endpoint&gt;&lt;br/&gt;两信封 RPC"]
+  Mux["WS /api/remote.mux&lt;br/&gt;Remote 流"]
+  Ev["$events / $events/result"]
+  Core["AgentLoop + Session"]
+
+  UI --> Unary
+  UI --> Mux
+  Mux --> Ev
+  Unary --> Core
+  Mux --> Core
+```
+
 !!! tip "Wire 约定"
     本章按实现顺序讲 web 传输层。端点、帧形状与错误码以 [`interface-wire.md`](../interface-wire.md) 为准（当前 unary 101 条，列表见 `miniharness/web/api.py` 的 `WebApi.ROUTES`）。改 wire 时先改实现与该文件，再同步本章叙述。
 

@@ -2,15 +2,6 @@
 
 <p class="lead">分阶段学习路线、概念映射表与迷你复现项目清单——把报告里的理解落到可运行的 Python 与测试上。</p>
 
-<div class="pill-row">
-  <span class="tag t-blue">everything is a plugin</span>
-  <span class="tag t-blue">event-sourcing</span>
-  <span class="tag t-blue">capability seams</span>
-  <span class="tag t-green">TypeScript strict</span>
-  <span class="tag t-green">Cordis vendored</span>
-  <span class="tag t-amber">Python SDK 存在</span>
-</div>
-
 ## 6. 从 0 到掌握的完整路线图
 
 下面把学习分为六个阶段。每一阶段都给出：目标、必读文档、必做练习、验收标准。建议用**笔记 + 一个"复现仓库"**贯穿始终（见第 7 章）。

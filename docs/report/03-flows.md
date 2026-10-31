@@ -2,15 +2,6 @@
 
 <p class="lead">五条核心时序：Turn/Step 循环、工具执行管线、会话持久化、LLM 流式适配、启动与组合。每条给出事件序列与源码路径。</p>
 
-<div class="pill-row">
-  <span class="tag t-blue">everything is a plugin</span>
-  <span class="tag t-blue">event-sourcing</span>
-  <span class="tag t-blue">capability seams</span>
-  <span class="tag t-green">TypeScript strict</span>
-  <span class="tag t-green">Cordis vendored</span>
-  <span class="tag t-amber">Python SDK 存在</span>
-</div>
-
 ## 5. 关键处理流程
 
 ### 5.1 Turn / Step 循环

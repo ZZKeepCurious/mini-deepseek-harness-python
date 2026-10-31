@@ -31,6 +31,21 @@
 4. **生命周期三态**：对外只暴露 `idle | running`（内部另有 maintenance）；`running` 是"驱动级排干区间"而非 turn 是否开着；quiescence = 无活跃 driver 且无 maintenance。
 5. **干预通道不止七个方法**：`agent/pre-step` 瀑布（决策 `{kind:'reject'}|{kind:'enter',messages}`，`agent.ts:265-283`，reject → `turn/end {kind:'blocked'}`）、`agent/request` 瀑布（请求派生前改配置）、`tools/pre-execute` 瀑布（审批，见报告 04 页议题 5）。
 
+<p class="fig-cap">图 9-1：干预输入 → 双列 inbox → driver（与报告 04 议题 4 同构）</p>
+
+```mermaid
+flowchart TD
+  Host["followup · steer · inject · cancel"]
+  Inbox["inbox&lt;br/&gt;next-turn | next-step"]
+  Pre["agent/pre-step waterfall"]
+  Loop["AgentLoop turn/step"]
+  Log["Session 日志&lt;br/&gt;inbox/spliced · turn/*"]
+
+  Host --> Inbox --> Loop
+  Pre --> Loop
+  Loop --> Log
+```
+
 ## 9.2 mini 复现：干预面实现
 
 mini 的 loop 是"单一 async 驱动 + 同步门面"：`_pump_async` 是唯一主循环，`followup`/`steer` 在 driver 已起时只入队并线程安全唤醒，没有 driver 时经同步门面直接驱动一轮。干预语义落在三处：双列 inbox、协作式取消标记、驻留标记。

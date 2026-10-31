@@ -2,15 +2,6 @@
 
 <p class="lead">核心包脊柱、ctx 服务地图、事件体系与外围接入面；技术核心：Cordis 插件模型、事件溯源日志、能力扩展口、类型技术、作用域注册与生成器门禁。</p>
 
-<div class="pill-row">
-  <span class="tag t-blue">everything is a plugin</span>
-  <span class="tag t-blue">event-sourcing</span>
-  <span class="tag t-blue">capability seams</span>
-  <span class="tag t-green">TypeScript strict</span>
-  <span class="tag t-green">Cordis vendored</span>
-  <span class="tag t-amber">Python SDK 存在</span>
-</div>
-
 ## 3. 系统架构与核心包
 
 ### 3.1 核心包脊柱（packages/core）——Turn 循环穿过的包
@@ -53,7 +44,7 @@ flowchart LR
 
 <p class="mermaid-note">agent-loop 是 `Agent` 约定的唯一默认实现（Provider）；换一个 Provider 即换掉整个主循环。</p>
 
-### 3.2 ctx 服务地图（能力扩展口速览）
+### 3.2 ctx 服务地图（能力扩展口）
 
 | 能力 | Service（ctx key） | Provider 实现示例 | Consumer（模型面向工具） |
 |---|---|---|---|

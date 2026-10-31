@@ -14,7 +14,7 @@ Upstream is built on **everything is a plugin** and [Cordis](https://github.com/
 
 ## Architecture
 
-At runtime the spine is: `boot` loads composition and plugins → the session appends events only → projections such as `derive_messages` build model-visible history → the agent runs turn/step loops over the model and tools → when you need a browser or automation, `web/` exposes upstream-compatible wire and `webui/` consumes only that contract.
+At runtime the spine is: `boot` / `loader` loads composition and plugins → the session appends events only → projections such as `derive_messages` build model-visible history → the agent runs turn/step loops over the model and tools, writing durable facts back to the same log → when you need a browser or automation, `web/` exposes upstream-compatible wire and `webui/` consumes only that contract. See [docs/index.md](docs/index.md) and [docs/architecture.md](docs/architecture.md) section 1.0 for diagrams.
 
 ```mermaid
 flowchart TB
@@ -83,6 +83,7 @@ CLI state lives under `MINIHARNESS_HOME` (default `~/.miniharness`): sessions in
 | Step-by-step implementation chapters | [docs/chapters/](docs/chapters/) |
 | Build `webui/` | [webui/README.md](webui/README.md) |
 | Roadmap and registered simplifications | [ROADMAP.md](ROADMAP.md) |
+| Build the doc site locally | After `pip install mkdocs-material pymdown-extensions`, run `python -m mkdocs build --strict` (output in `site/`) |
 
 ## Entry points
 
