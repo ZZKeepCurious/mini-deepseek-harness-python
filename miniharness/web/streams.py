@@ -191,6 +191,7 @@ class GatewayStreams:
             "account/watch": "account_watch",
             "account/watchExpiry": "account_watch_expiry",
             "userQuestions/attachWait": "user_questions_attach_wait",
+            "remoteAccess/follow": "remote_access_follow",
         }
 
     def uplink_codecs(self) -> dict[str, Any]:
@@ -268,6 +269,8 @@ class GatewayStreams:
             return _with_uplink(
                 self._user_questions_attach_wait(payload["args"], invocation),
                 invocation)
+        if kind == "remote_access_follow":
+            return _with_uplink(self._remote_access_follow(invocation), invocation)
         return _with_uplink(self._control(invocation), invocation)
 
     # ---------- session/follow（历史跟随流） ----------
@@ -654,6 +657,18 @@ class GatewayStreams:
             yield frame
 
     # ---------- account/watch（安全账户投影流） ----------
+
+    async def _remote_access_follow(self, invocation: StreamInvocation):
+        """`remoteAccess/follow`：owner 代次只发 baseline 后保持到取消（上游 owner 分支）。"""
+        service = self.ctx.get("remoteAccess")
+        if service is None:
+            raise RemoteStreamError(
+                "gateway/invocation-unavailable",
+                "typert gateway: remoteAccess/follow: remoteAccess namespace is not mounted")
+        signal = invocation.signal
+        yield service.snapshot_for({"kind": "owner"})
+        while not self._is_aborted(signal):
+            await asyncio.sleep(FOLLOW_POLL_INTERVAL)
 
     async def _account_watch(self, invocation: StreamInvocation):
         """`account/watch`：当前投影一帧，之后每次投影变化一帧（上游 account-controller）。

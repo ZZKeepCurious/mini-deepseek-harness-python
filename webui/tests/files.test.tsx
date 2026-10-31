@@ -5,6 +5,12 @@ import { FilesPanel } from "../src/ui/FilesPanel";
 import type { MuxServerFrame, StreamHandle } from "../src/wire/mux";
 import type { WorkspaceServices } from "../src/wire/workspace";
 
+vi.mock("../src/wire/officeToPdf", () => ({
+  renderOfficeToPdf: vi.fn(),
+  getOfficeToPdfGeneration: vi.fn(),
+}));
+import { renderOfficeToPdf } from "../src/wire/officeToPdf";
+
 interface FakeStream extends StreamHandle {
   push: (frame: MuxServerFrame) => void;
   closed: boolean;
@@ -121,10 +127,39 @@ describe("DocumentPreview", () => {
     expect(image.getAttribute("src")).toContain("/api/file?path=");
   });
 
-  it("reports the missing office conversion", () => {
+  it("shows office conversion errors from the backend", async () => {
+    vi.mocked(renderOfficeToPdf).mockRejectedValue(
+      new Error("office-to-pdf/engine-unavailable: LibreOffice (soffice) is not available"),
+    );
     render(
       <DocumentPreview sessionId="s1" path="report.docx" services={services()} onClose={() => undefined} />,
     );
-    expect(screen.getByText(/officeToPdf/)).toBeTruthy();
+    expect((await screen.findByRole("alert")).textContent).toMatch(/engine-unavailable/);
+  });
+
+  it("renders converted office documents as pdf iframes", async () => {
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL: vi.fn(() => "blob:mock-pdf"),
+      revokeObjectURL: vi.fn(),
+    });
+    vi.mocked(renderOfficeToPdf).mockResolvedValue({
+      absolutePath: "C:/work/report.docx",
+      offset: 0,
+      eof: true,
+      bytes: 4,
+      data: new Uint8Array([37, 80, 68, 70]),
+      missingFonts: [],
+      generation: "gen_test",
+    });
+    render(
+      <DocumentPreview sessionId="s1" path="report.docx" services={services()} onClose={() => undefined} />,
+    );
+    const frame = await waitFor(() => {
+      const element = document.querySelector("iframe.preview-frame");
+      if (!element) throw new Error("missing iframe");
+      return element;
+    });
+    expect(frame.getAttribute("src")).toMatch(/^blob:/);
   });
 });

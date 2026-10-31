@@ -123,6 +123,8 @@ LAYER_UNITS = [
     ("mcp", 3),
     ("web", 3),
     ("webhook", 3),
+    ("office_to_pdf", 3),
+    ("remote_access", 3),
     ("shell", 3),
     ("feedback", 3),
 ]
@@ -418,6 +420,10 @@ class ImportDirectionTest(unittest.TestCase):
                 if src_unit == "web" and dst_unit == "seams":
                     # §5 显式例外（单方向）：GitHub webhook 验签读 credentials 管理文件
                     # / env 回退（同 settings-controller 读凭据面）；seams 不得反向 import web
+                    continue
+                if src_unit == "web" and dst_unit in ("office_to_pdf", "remote_access"):
+                    # §5 显式例外（单方向）：WebApi 默认 profile 装配 document/office-to-pdf
+                    # 与 api/remote-access（同 cli→workspace_files 先例）；两域不得反向 import web
                     continue
                 if src_unit == "llm" and dst_unit == "identity":
                     # §5 显式例外（单方向）：llm-deepseek 请求头

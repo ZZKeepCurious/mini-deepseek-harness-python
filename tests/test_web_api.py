@@ -1050,6 +1050,7 @@ class TestDispatch(WebApiTest):
             "workspace/pinSession", "workspace/unpinSession",
             "workspaceFiles/read", "workspaceFiles/readBytes",
             "workspaceFiles/stat", "workspaceFiles/list",
+            "officeToPdf/render", "officeToPdf/getGeneration",
             "settings/describe", "settings/update",
             "settings/replace", "settings/mutate", "settings/openSettingsDocument",
             "credentials/describe", "credentials/set", "credentials/unset",

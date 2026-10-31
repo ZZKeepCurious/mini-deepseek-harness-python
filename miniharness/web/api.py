@@ -388,6 +388,10 @@ class WebApi:
             register_working_directory_tool(ctx, self.tools)
         self.attachments = ctx.get("attachments")
         self.file_uploads = install_file_uploads(ctx)
+        from ..office_to_pdf import install_office_to_pdf
+        from ..remote_access import install_remote_access
+        install_office_to_pdf(ctx)
+        install_remote_access(ctx)
         self._agents: dict[str, AgentLoop] = {}
         # selectModel 记录（advisory：单适配器部署回落恒单模型，不驱动路由）
         self._selections: dict[str, dict] = {}
@@ -445,6 +449,8 @@ class WebApi:
         "workspaceFiles/readBytes": "workspace_files_read_bytes",
         "workspaceFiles/stat": "workspace_files_stat",
         "workspaceFiles/list": "workspace_files_list",
+        "officeToPdf/render": "office_to_pdf_render",
+        "officeToPdf/getGeneration": "office_to_pdf_get_generation",
         "settings/describe": "settings_describe",
         "settings/update": "settings_update",
         "settings/replace": "settings_replace",
@@ -872,6 +878,27 @@ class WebApi:
         scope = self.workspace_file_scope(payload)
         return self._remote_call(
             lambda: self._workspace_files().list(scope, payload.get("path")))
+
+    # ---------- officeToPdf 域（document/office-to-pdf Remote 面） ----------
+
+    def _office_to_pdf(self):
+        service = self.ctx.get("officeToPdf")
+        if service is None:
+            raise _Reject("gateway/invocation-unavailable",
+                          "officeToPdf namespace is not mounted in this deployment", {})
+        return service
+
+    def office_to_pdf_render(self, payload: dict) -> dict:
+        scope = self.workspace_file_scope(payload)
+        priority = payload.get("priority") or "foreground"
+        workspace_files = self._workspace_files()
+        return self._remote_call(
+            lambda: self._office_to_pdf().render(
+                workspace_files, scope, payload.get("path"), priority))
+
+    def office_to_pdf_get_generation(self, payload: dict) -> dict:
+        del payload
+        return self._remote_call(lambda: self._office_to_pdf().get_generation())
 
     # ---------- settings / credentials 域（settings-controller 的 Remote 方法面） ----------
 

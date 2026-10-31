@@ -240,6 +240,13 @@ _SPECS: dict[str, dict[str, tuple[str, bool]]] = {
         "workspaceFileScopeId": (STR, True),
         "path": (STR, True),
     },
+    "officeToPdf/render": {
+        "workspaceFileScopeId": (STR, True),
+        "path": (STR, True),
+        "priority": (STR, False),
+    },
+    "officeToPdf/getGeneration": {},
+    "remoteAccess/follow": {},
     "workspaceFiles/changes": {
         "workspaceFileScopeId": (STR, True),
         "path": (STR, True),
