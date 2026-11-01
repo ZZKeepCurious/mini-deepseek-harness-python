@@ -43,7 +43,7 @@ export function parseScheduleList(value: unknown): ScheduleRecord[] {
   return sortSchedules(out);
 }
 
-export function sortSchedules(records: ScheduleRecord[]): ScheduleRecord[] {
+export function sortSchedules<T extends ScheduleRecord>(records: T[]): T[] {
   return [...records].sort((a, b) => {
     const at = a.scheduledAt.localeCompare(b.scheduledAt);
     if (at !== 0) return at;
