@@ -85,6 +85,21 @@ nav:
   - Super-agent 设计参照:
       - 首页: design/super-agent/index.md
       - 设计抽象（主文）: design/super-agent/design-abstract.md
+      - Python 参照框架: design/super-agent/superagent-framework.md
+      - 源码走读:
+          - 走读首页: design/super-agent/source_implement/index.md
+          - 运行容器: design/super-agent/source_implement/container.md
+          - 生命周期:
+              - "1 Trigger 摄入": design/super-agent/source_implement/lifecycle/01-trigger-receive.md
+              - "2 Eval 与 accept": design/super-agent/source_implement/lifecycle/02-eval-decide-accept.md
+              - "3 Assignment": design/super-agent/source_implement/lifecycle/03-assignment-lifecycle.md
+              - "4 Outbox 回复": design/super-agent/source_implement/lifecycle/04-outbox-reply.md
+              - "5 evaluateDue": design/super-agent/source_implement/lifecycle/05-evaluate-due.md
+              - "6 Policy 变更": design/super-agent/source_implement/lifecycle/06-policy-changed.md
+              - "7 Thread 关闭": design/super-agent/source_implement/lifecycle/07-thread-close-github.md
+          - 侧路径: design/super-agent/source_implement/side-paths.md
+          - 侧链: design/super-agent/source_implement/sidechain.md
+          - 语义与模块参照: design/super-agent/source_implement/reference-semantics.md
       - 出处: design/super-agent/sources.md
       - 显式采纳治理: design/super-agent/00-governance.md
       - 已采纳台账: design/super-agent/adopted.md

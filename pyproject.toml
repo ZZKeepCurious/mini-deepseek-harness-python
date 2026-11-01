@@ -31,7 +31,8 @@ miniharness = "miniharness.cli:main"
 web = ["fastapi>=0.110", "uvicorn>=0.29", "websockets>=12", "requests-toolbelt>=1.0"]
 
 [tool.setuptools.packages.find]
-include = ["miniharness*"]
+where = [".", "superagent"]
+include = ["miniharness*", "superagent*"]
 
 [tool.setuptools.dynamic]
 version = { attr = "miniharness.core.version.__version__" }

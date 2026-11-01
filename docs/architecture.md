@@ -631,7 +631,10 @@ flowchart LR
 
  Core -->|"Python API"| Web
  Web -->|"HTTP/WS wire"| UI
+ SA["superagent/&lt;br/&gt;旁路编排对照"]
 ```
+
+**Super-agent 并列工程**：顶层 `superagent/` 镜像旁路 `dsh-superagent-prototype` 的 Engine/Store/Passes，与 [source_implement](design/super-agent/source_implement/index.md)、[superagent-framework](design/super-agent/superagent-framework.md) 配套；不 import 进 `miniharness`，不增本章 §2 行级映射；进入 mini 产品仅经 [adopted.md](design/super-agent/adopted.md)。
 
 | 边界 | 内容 | 耦合面 |
 |---|---|---|

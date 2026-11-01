@@ -28,7 +28,16 @@
 | [paper-01](paper-01-motivation-and-four-traits.md)–[06](paper-06-experiments-and-open.md) | 各节 `!!! note` 英文 + `!!! quote` 中文，小节一一对应 | 本页 + [offloop 工程文](https://offloop.org/learn/deepseek-super-agent-design) |
 | [proto-000](proto-000-philosophy.md)–[008](proto-008-cookbook.md) | 各节 `!!! note` 英文 + `!!! quote` 中文，与旁路 `docs/00x-*.md` 小节一一对应（007 按 major `##` 分段；008 为扩展 Source 食谱） | 本页与旁路 `dsh-superagent-prototype/docs/` 同步维护；旁路 commit 见 `superagent-baseline.md` |
 
-维护 B 线时：upstream 文档变更时同步改对应 `proto-*` 英中块，并回链 [design-abstract](design-abstract.md) 对应节，**不在**延伸页另起一套 Mermaid 解读（见 [00-governance.md](00-governance.md)）。
+旁路 `docs/` 变更时：同步对应 `proto-*` 英中块，并回链 [design-abstract](design-abstract.md) 对应节；`src/` 变更时同步 [source_implement/](source_implement/index.md)。延伸页**不在**另起一套与主文/走读重复的 Mermaid（见 [00-governance.md](00-governance.md)）。
+
+## 源码走读 source_implement {#sec-source-walkthrough}
+
+| 项 | 约定 |
+|----|------|
+| 代码行为真源 | 旁路 `dsh-superagent-prototype/src/` @ `superagent-baseline.md` 记录 commit |
+| mini 文档 | [source_implement/index.md](source_implement/index.md)（`container` + `lifecycle/` 1–7 + `reference-semantics`；92 文件索引） |
+| Python 参照 | 仓库顶层 `superagent/README.md`（见 [superagent-framework.md](superagent-framework.md)） |
+| 旁路 pull 后 | 先 diff `src/` 与 `docs/007-architecture.md`，再更新走读与 `proto-*` 译文 |
 
 ## 治理文档
 

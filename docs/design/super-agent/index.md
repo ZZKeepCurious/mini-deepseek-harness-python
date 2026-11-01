@@ -29,10 +29,11 @@ flowchart TB
 
 ## 阅读顺序
 
-1. **[设计抽象（主文）](design-abstract.md)** — 流程与架构图、对照表、与 mini 边界；系统解读的单一事实源  
-2. [出处与治理](sources.md) — 原文链接、旁路上游 commit、[译文粒度说明](sources.md#sec-translation-granularity)、[00-governance.md](00-governance.md) 采纳规则  
-3. [候选原则总表](principles.md) 与 [adopted.md](adopted.md) — 全部 `SA-*`；**生效 subset 仅见 adopted**  
-4. **延伸阅读（译文）** — 需要逐句核对英文时打开论文卷 / Prototype 卷；页首指向主文对应节，不在延伸页重复维护解读  
+1. **[设计抽象（主文）](design-abstract.md)** — 流程与架构图、对照表、与 mini 边界；产品级抽象单一事实源  
+2. **[源码走读（source_implement）](source_implement/index.md)** — 旁路 `src/` **代码行为**解读真源：`container` → `lifecycle/` 1–7 → `side-paths` → 按需 `reference-semantics` / `sidechain`  
+3. [出处与治理](sources.md) — 原文链接、旁路上游 commit、[译文粒度说明](sources.md#sec-translation-granularity)、[走读维护](sources.md#sec-source-walkthrough)、[00-governance.md](00-governance.md) 采纳规则  
+4. [候选原则总表](principles.md) 与 [adopted.md](adopted.md) — 全部 `SA-*`；**生效 subset 仅见 adopted**  
+5. **延伸阅读（译文）** — 需要逐句核对英文时打开论文卷 / Prototype 卷；页首指向主文对应节，不在延伸页重复维护解读  
 
 | 卷 | 入口 |
 |----|------|

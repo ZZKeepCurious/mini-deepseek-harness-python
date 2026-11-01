@@ -13,7 +13,7 @@ web 半（传输层 + 浏览器前端）的 wire 面与上游一致：两信封 
 
 下一主线候选：插件示例集（教程用插件 + 真实工具演示）；在 agent-team 之外的更多 agent 编排；遥测上报面（telemetry-capture / OpenTelemetry，需远端数据面）。
 
-Super-agent 设计参照（论文 + prototype 译文与候选原则）见 [docs/design/super-agent/](docs/design/super-agent/index.md)（先读 [设计抽象](docs/design/super-agent/design-abstract.md)）；**采纳状态仅看** [adopted.md](docs/design/super-agent/adopted.md)，未登记者不构成开发义务。
+Super-agent 设计参照（论文 + prototype 译文与候选原则）见 [docs/design/super-agent/](docs/design/super-agent/index.md)（[设计抽象](docs/design/super-agent/design-abstract.md) + [源码走读 source_implement](docs/design/super-agent/source_implement/index.md)）；旁路编排对照包见 [superagent/README.md](superagent/README.md)（非 A 线 wire）。**采纳状态仅看** [adopted.md](docs/design/super-agent/adopted.md)，未登记者不构成 `miniharness` 开发义务。
 
 ## 扩展能力
 
