@@ -1,7 +1,7 @@
 # ROADMAP：MiniHarness 的方向与规划
 
 > 项目目标：用 Python（成熟开源库优先，无语义等价库时才用标准库手写）从 0 到 1 复现 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的核心约定，逐模块对照上游（`deepseek-harness/`）解读与重写；目标是**面向产品化的生产就绪**——凡真实部署中构成可靠性/安全/互操作/体验实质风险的项，不因「教学/demo 可接受」豁免，按生产就绪标准补齐或立项。
-> 原则：每个阶段可独立运行、有测试、可演示；优先"约定正确"而非"功能齐全"。
+> 原则：每个阶段可独立运行、有测试、可演示；优先"约定正确"而非"功能齐全"。分阶段学习路线见 [docs/guides/learning-paths.md](docs/guides/learning-paths.md) 与 [docs/report/05-roadmap.md](docs/report/05-roadmap.md) Mini P0～P5；模块总图见 [docs/system-map.md](docs/system-map.md)。
 
 ## 覆盖范围
 

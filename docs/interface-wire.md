@@ -13,10 +13,10 @@
 >
 > 载体实现：`web/server.py`（FastAPI）；语法层：`web/envelope.py` + `web/stream_protocol.py`；
 > 域实现：`web/api.py` + `web/streams.py` + `web/events.py` + `web/approvals.py` +
-> `web/questions.py` + `web/downloads.py` + `web/frontend.py`。教程对照：`docs/chapters/07-external-entry-points.md`
-> 教程 [07-external-entry-points.md](chapters/07-external-entry-points.md) §7.5 按实现顺序讲解；本文件集中列出 wire 字段与端点，不展开 Python 实现细节。
+> `web/questions.py` + `web/downloads.py` + `web/frontend.py`。教程对照：`docs/chapters/07-web-transport.md`
+> 教程 [07-web-transport.md](chapters/07-web-transport.md#sec-7-5) 按实现顺序讲解 web 传输层；本文件集中列出 wire 字段与端点，不展开 Python 实现细节。
 
-## 1. 通道总览与载体状态码
+## 1. 通道总览与载体状态码 {#wire-1}
 
 | 通道 | 载体 | 覆盖范围 | 载体状态码 |
 |---|---|---|---|
@@ -36,16 +36,16 @@
 `create_app(token=)` / `run_web(token=)`）后：
 
 - **覆盖面**：`/api/*` 全域（unary POST、`$events/result`、WS mux 升级、`session.export`）；
-  SPA 静态不设门（浏览器从页面 URL 携带 token 调 API）。
+ SPA 静态不设门（浏览器从页面 URL 携带 token 调 API）。
 - **token 载体**（任一命中即可）：`Authorization: Bearer <token>` 头；`?token=<token>`
-  查询参数（浏览器原生 WebSocket 无法设头，webui 从页面 URL `?token=` 读取：unary 走
-  Bearer 头、WS 追加到 mux URL——`webui/src/wire/auth.ts`）。
+ 查询参数（浏览器原生 WebSocket 无法设头，webui 从页面 URL `?token=` 读取：unary 走
+ Bearer 头、WS 追加到 mux URL——`webui/src/wire/auth.ts`）。
 - **拒绝形态**：http → `401 {"error":"unauthorized"}`；WS 升级 → 经 ASGI
-  `websocket.http.response.*` 写 HTTP 401 响应后 `websocket.close(1008)`（与上游
-  `rejectRemoteStreamUpgrade` 同形，uvicorn 支持）。比较为常数时间。
+ `websocket.http.response.*` 写 HTTP 401 响应后 `websocket.close(1008)`（与上游
+ `rejectRemoteStreamUpgrade` 同形，uvicorn 支持）。比较为常数时间。
 - **部署纪律**：通配地址（`0.0.0.0`/`::` 及等价拼写）加载期即拒绝（`web/launcher.py`
-  `_resolve_bind` → `web/host.is_wildcard_host`，对齐上游 webserver index.ts:283）；监听
-  非回环具体地址时**必须**已配置 token，否则启动即 `ValueError`（非回环裸听 fail loud）。
+ `_resolve_bind` → `web/host.is_wildcard_host`，对齐上游 webserver index.ts）；监听
+ 非回环具体地址时**必须**已配置 token，否则启动即 `ValueError`（非回环裸听 fail loud）。
 
 ### 1.2 unary 载体状态码语义（`web/server.py`）
 
@@ -55,7 +55,7 @@
 - `500`：信封合法但实现崩溃（纯文本 `handler failure: <error>`）。
 - `200`：**一切业务结果**——业务错误恒 200 + `server-response` 且 `result.ok=false`，不借 HTTP 状态码表达业务错误。
 - 200 的响应体有两种 `content-type`：`application/json`（默认）与 `multipart/form-data`
-  （结果含二进制，见 §3.1）。
+ （结果含二进制，见 §3.1）。
 
 路径约束：endpoint 段匹配 `[A-Za-z0-9_$.-]+`（`$` 是真实约定：`$events`、`$events/result` 为网关
 内端点）；body `client-request` 的 `payload` 必须**恰**为 `{args:{...}}` 单字段 plain object
@@ -67,11 +67,11 @@
 - `1008`：文本非 JSON / 帧形状非法 / 重复 `open` 同一 `streamId`。
 - `1011`：某流 `error` 帧自身发送失败。
 - 心跳：每条连接每 **2s** 一次 transport 级协议 Ping（`web/launcher.py` uvicorn
-  `ws_ping_interval=2`），连续 miss 判死预算 **4s**（`ws_ping_timeout=4`，
-  ≈ 上游 `MAX_MISSED_HEARTBEATS=2 × interval=2s`）——僵死连接被回收，与上游
-  gateway heartbeat 约定一致（`websocketHeartbeatIntervalMs` @default 2000，见 §4.4）。
+ `ws_ping_interval=2`），连续 miss 判死预算 **4s**（`ws_ping_timeout=4`，
+ ≈ 上游 `MAX_MISSED_HEARTBEATS=2 × interval=2s`）——僵死连接被回收，与上游
+ gateway heartbeat 约定一致（`websocketHeartbeatIntervalMs` @default 2000，见 §4.4）。
 
-## 2. 信封层（`web/envelope.py`）
+## 2. 信封层（`web/envelope.py`） {#wire-2}
 
 判别联合只有两型，判别字段 = `type`（`server-request`/`client-response` 四象限在当前基线 wire 中不存在）：
 
@@ -93,33 +93,33 @@
 `RPC_ERROR_CODES` 收 **80** 码（与 `miniharness/web/envelope.py` 中 `RPC_ERROR_CODES` 同集；运行时以 `len(RPC_ERROR_CODES)` 为准；`rpc_error` 对越界码 fail loud）。下方全量枚举按字母序排列；路由层边界校验收 `gateway/input-invalid`，未知端点折算为 `gateway/invocation-unavailable`：
 
 ```
-agent-preset/conflict  agent-preset/invalid  agent-preset/locked
-agent-preset/not-found  agent-preset/read-only  credential/rejected
-directory-picker/create-failed  directory-picker/exists  directory-picker/unavailable
-directory-picker/unreadable  gateway/arguments-invalid  gateway/bad-request
-gateway/cancelled  gateway/input-invalid  gateway/interactions-forbidden
-gateway/internal  gateway/invocation-unavailable  gateway/lookup-not-found
-gateway/peer-disposed  gateway/protocol  gateway/uplink-overflow
-job/not-found  llm/model-discovery-rejected  note-blank
-note-too-large  office-to-pdf/convert-failed  office-to-pdf/engine-unavailable
-office-to-pdf/invalid-input  permission/auto-unavailable  permission/duplicate-auto
-permission/invalid  plugin-market/detail-unavailable  plugin-market/fetch-failed
-plugin-market/invalid-index  plugin-market/invalid-index-url  plugin-market/invalid-query
-plugin-market/settings-unavailable  plugin-market/unknown-index  plugin-market/unknown-plugin
-remote-access/denied  session-not-found  session/agent-busy
-session/attachment-invalid  session/conflict  session/fork-unavailable
-session/invalid-time-zone  session/migration-required  session/model-unavailable
-session/not-found  session/projections-unavailable  session/provider-credentials-unavailable
-session/provider-models-unavailable  session/queue-item-not-found  session/steer-unavailable
-session/title-invalid  session/workspace-attach-failed  session/writer-held
-settings/conflict  settings/rejected  subagent/attachment-invalid
-subagent/catalog-diagnostic  subagent/not-found  subagent/unauthorized
-target-not-found  terminal/control-unavailable  terminal/limit-reached
-terminal/unavailable  version-conflict  workspace-file/not-directory
-workspace-file/not-found  workspace-file/not-regular-file  workspace-file/not-text
-workspace-file/outside-workspace  workspace-file/too-large  workspace-file/watch-unsupported
-workspace/invalid-path  workspace/move-invalid  workspace/name-conflict
-workspace/not-found  workspace/session-active
+agent-preset/conflict agent-preset/invalid agent-preset/locked
+agent-preset/not-found agent-preset/read-only credential/rejected
+directory-picker/create-failed directory-picker/exists directory-picker/unavailable
+directory-picker/unreadable gateway/arguments-invalid gateway/bad-request
+gateway/cancelled gateway/input-invalid gateway/interactions-forbidden
+gateway/internal gateway/invocation-unavailable gateway/lookup-not-found
+gateway/peer-disposed gateway/protocol gateway/uplink-overflow
+job/not-found llm/model-discovery-rejected note-blank
+note-too-large office-to-pdf/convert-failed office-to-pdf/engine-unavailable
+office-to-pdf/invalid-input permission/auto-unavailable permission/duplicate-auto
+permission/invalid plugin-market/detail-unavailable plugin-market/fetch-failed
+plugin-market/invalid-index plugin-market/invalid-index-url plugin-market/invalid-query
+plugin-market/settings-unavailable plugin-market/unknown-index plugin-market/unknown-plugin
+remote-access/denied session-not-found session/agent-busy
+session/attachment-invalid session/conflict session/fork-unavailable
+session/invalid-time-zone session/migration-required session/model-unavailable
+session/not-found session/projections-unavailable session/provider-credentials-unavailable
+session/provider-models-unavailable session/queue-item-not-found session/steer-unavailable
+session/title-invalid session/workspace-attach-failed session/writer-held
+settings/conflict settings/rejected subagent/attachment-invalid
+subagent/catalog-diagnostic subagent/not-found subagent/unauthorized
+target-not-found terminal/control-unavailable terminal/limit-reached
+terminal/unavailable version-conflict workspace-file/not-directory
+workspace-file/not-found workspace-file/not-regular-file workspace-file/not-text
+workspace-file/outside-workspace workspace-file/too-large workspace-file/watch-unsupported
+workspace/invalid-path workspace/move-invalid workspace/name-conflict
+workspace/not-found workspace/session-active
 ```
 
 > 部分码带具体签发点：`session/model-unavailable` 由 `session/selectModel`
@@ -130,7 +130,7 @@ workspace/not-found  workspace/session-active
 寄送方签发 `rpcId`（实践中 UUID 即可，递增非零即可）；`transport_error` 把载体层异常折进
 `result.ok=false` 分支，兜底码恒 `gateway/internal`。
 
-## 3. unary 会话服务端点（`web/api.py`，`session/*`）
+## 3. unary 会话服务端点（`web/api.py`，`session/*`） {#wire-3}
 
 端点命名与上游 typert 一致：`<namespace>/<method>`（gateway `endpointOf` = `${namespace}/${method}`，
 client `connection/src/client/rpc.ts` 按 `/` 切两段）；`web/args.canonical_endpoint` 兼容历史
@@ -162,7 +162,7 @@ client `connection/src/client/rpc.ts` 按 `/` 切两段）；`web/args.canonical
 > 顶层字段 JSON 类型错 → `gateway/input-invalid`（`wire field "x" failed boundary validation`，
 > details 带 `field`）。枚举/范围/非空/跨字段语义仍留在 handler 以业务码表达，故上表
 > `gateway/bad-request` 等仍涵盖业务语义错误。逐字段形状与错误 `details` 以 `api.py` 对应
-> handler docstring 为准，教程见 07 章 §7.5.2；子代理所属会话被访问时统一折
+> handler docstring 为准，教程见 [07 章 §7.5](chapters/07-web-transport.md#sec-7-5)；子代理所属会话被访问时统一折
 > `session/agent-busy`（上游 `apiSessionSubagentOwnershipError`）。
 
 ### 3.1 结果里的二进制附件（`web/attachments.py`）
@@ -172,19 +172,19 @@ client `connection/src/client/rpc.ts` 按 `/` 切两段）；`web/args.canonical
 `attachments` 描述，载体改用 `multipart/form-data`。
 
 - 触发面：结果含 `bytes`/`bytearray`/`memoryview` 的 unary 端点（`workspaceFiles/readBytes`
-  的 `data`）。失败分支与纯 JSON 结果仍是 `200` + `application/json`。
+ 的 `data`）。失败分支与纯 JSON 结果仍是 `200` + `application/json`。
 - 分帧：`metadata` 文本 part 装 `{type, rpcId, result:{ok:true, value}, attachments}`，
-  第 `i` 个二进制 part 名 `bytes-<i>`、`Content-Type: application/octet-stream`，出体流式。
+ 第 `i` 个二进制 part 名 `bytes-<i>`、`Content-Type: application/octet-stream`，出体流式。
 - 附件描述符 `{"path": ["data"], "codec": "bytes", "part": "bytes-0"}`；`path` 段为对象键
-  字符串或数组下标整数，按发现顺序编号。
+ 字符串或数组下标整数，按发现顺序编号。
 - 客户端（`webui/src/wire/rpc.ts`）按 `path` 把 part 写回 `Uint8Array`：part 名重复、
-  非 `bytes` codec、路径走不通、占位不是 `null`、有 part 未被声明都拒（`TypeError`）。
+ 非 `bytes` codec、路径走不通、占位不是 `null`、有 part 未被声明都拒（`TypeError`）。
 - 结果值有循环引用 → 200 + `gateway/internal`（`gateway: circular RPC result`）。
 
-## 4. Remote 流（`WS /api/remote.mux`，`web/mux.py` + `web/stream_protocol.py` + `web/uplink.py`）
+## 4. Remote 流（`WS /api/remote.mux`，`web/mux.py` + `web/stream_protocol.py` + `web/uplink.py`） {#wire-4}
 
 单一路径承载**全部** Remote 流：一条连接上可并行多条逻辑流，每条由客户端自编的 `streamId`
-标识（非空字符串即可——上游 `stream-client.ts:120` 用 `randomUUID()`；数字 id 属字段形状非法，
+标识（非空字符串即可——上游 `stream-client.ts` 用 `randomUUID`；数字 id 属字段形状非法，
 关 WS 1008），彼此隔离——单流失败只发该流的 `error` 帧，不关连接、不波及其它流。
 帧分两个方向：浏览器上行四型（`open`/`item`/`end`/`cancel`），宿主下行三型（`item`/`end`/
 `error`），两向都要求字段集合精确匹配（客户端帧违例关 WS 1008）。三条长期流——会话历史流
@@ -194,57 +194,57 @@ client `connection/src/client/rpc.ts` 按 `/` 切两段）；`web/args.canonical
 **浏览器 → 宿主**（文本帧四型；每型字段集合精确匹配，多一个键或缺一个键都拒并关 WS 1008）：
 
 ```json
-{"type": "open",   "streamId": "<id>", "endpoint": "<endpoint>", "payload": {...}}
-{"type": "item",   "streamId": "<id>", "value": "<任意值，可省>"}
-{"type": "end",    "streamId": "<id>"}
+{"type": "open", "streamId": "<id>", "endpoint": "<endpoint>", "payload": {...}}
+{"type": "item", "streamId": "<id>", "value": "<任意值，可省>"}
+{"type": "end", "streamId": "<id>"}
 {"type": "cancel", "streamId": "<id>"}
 ```
 
 **宿主 → 浏览器**（文本帧三型，同样字段集合精确匹配）：
 
 ```json
-{"type": "item",  "streamId": "<id>", "value": "<任意值，可省>"}
-{"type": "end",   "streamId": "<id>"}
+{"type": "item", "streamId": "<id>", "value": "<任意值，可省>"}
+{"type": "end", "streamId": "<id>"}
 {"type": "error", "streamId": "<id>", "error": {"code": "...", "message": "...", "details": {...}}}
 ```
 
 - 每条 open 立即按 `endpoint` 分发（§4.1/4.2/4.3）；`open` 内抛错 → 该流先发 `error` 帧再 `end`，
-  **不关 WS**（单流失败与其它流隔离）；流中途失败同理；`error` 帧本身发送失败 → close 1011。
+ **不关 WS**（单流失败与其它流隔离）；流中途失败同理；`error` 帧本身发送失败 → close 1011。
 - 每条 open 同时建一条**有界上行 inbox**（`web/uplink.py`）：单消费者，缓冲按整帧 UTF-8 字节
-  记账，上限 262144 字节（`create_app(stream_inbox_bytes=...)` 可调，同上游 `streamInboxBytes`）。
-  `end` 是半关（已缓冲的 `item` 仍可读尽）；`end` 之后再收 `item` → 该流以 Remote failure 中止，
-  终态 `error` 帧 code `gateway/protocol`；缓冲超限 → `gateway/uplink-overflow`（消息带字节上限，
-  `details` 带 `{endpoint}`）。两者都只杀本流、不关 WS。
-  紧跟 open 的 `item` 会排在该流 inbox 里等消费者，不因「先建流后派发」而丢。
-  `$events` 由网关自有（不走上行），open 即释放；其余端点的上行活到该流结束/取消/断连时释放。
-- 上行项由方法侧逐项解码（`web/uplink.py` 的 `UplinkItems`，上游 `GatewayInvocation.uplink()`
-  的 `UplinkDecoder`）：过该 endpoint 声明的 codec，未声明则走无损 JSON 校验（`NaN`/Infinity、
-  `-0`、循环引用、Date、函数、symbol、不可枚举属性等一律拒），解码结果本身也再校验一次。
-  被拒项 → 该流以 `gateway/input-invalid` 中止，终态 `error` 帧消息
-  `typert gateway: <endpoint>: wire field "uplink" failed boundary validation`，
-  `details` 为 `{endpoint, field: "uplink"}`。每次调用 `uplink()` 只能取一次（第二次抛错）；
-  出厂 Remote 方法多为 `In = never`，唯 `terminal/attach` 声明了强类型 `In`（`TerminalInput`
-  判别联合，codec = `decode_terminal_input`），故 `GatewayStreams.uplink_codecs()` 出厂只含该项
-  ——声明点即 typert 生成的描述符 `uplink.codec`（`packages/typert/protocol/src/types.ts:355-357`，
-  上游同样只由 terminal-controller 的类型图生成）。
+ 记账，上限 262144 字节（`create_app(stream_inbox_bytes=...)` 可调，同上游 `streamInboxBytes`）。
+ `end` 是半关（已缓冲的 `item` 仍可读尽）；`end` 之后再收 `item` → 该流以 Remote failure 中止，
+ 终态 `error` 帧 code `gateway/protocol`；缓冲超限 → `gateway/uplink-overflow`（消息带字节上限，
+ `details` 带 `{endpoint}`）。两者都只杀本流、不关 WS。
+ 紧跟 open 的 `item` 会排在该流 inbox 里等消费者，不因「先建流后派发」而丢。
+ `$events` 由网关自有（不走上行），open 即释放；其余端点的上行活到该流结束/取消/断连时释放。
+- 上行项由方法侧逐项解码（`web/uplink.py` 的 `UplinkItems`，上游 `GatewayInvocation.uplink`
+ 的 `UplinkDecoder`）：过该 endpoint 声明的 codec，未声明则走无损 JSON 校验（`NaN`/Infinity、
+ `-0`、循环引用、Date、函数、symbol、不可枚举属性等一律拒），解码结果本身也再校验一次。
+ 被拒项 → 该流以 `gateway/input-invalid` 中止，终态 `error` 帧消息
+ `typert gateway: <endpoint>: wire field "uplink" failed boundary validation`，
+ `details` 为 `{endpoint, field: "uplink"}`。每次调用 `uplink` 只能取一次（第二次抛错）；
+ 出厂 Remote 方法多为 `In = never`，唯 `terminal/attach` 声明了强类型 `In`（`TerminalInput`
+ 判别联合，codec = `decode_terminal_input`），故 `GatewayStreams.uplink_codecs` 出厂只含该项
+ ——声明点即 typert 生成的描述符 `uplink.codec`（`packages/typert/protocol/src/types.ts`，
+ 上游同样只由 terminal-controller 的类型图生成）。
 - `endpoint` 全集（`GatewayStreams.stream_kinds`，十二条）：`$events`、`session/follow`、
-  `session/control`、`terminal/retain`、`terminal/attach`、`workspace/follow`、
-  `workspaceFiles/changes`、`job/list`、`job/follow`、`account/watch`、`account/watchExpiry`、
-  `userQuestions/attachWait`；未知 endpoint → `error` 帧
-  `gateway/invocation-unavailable`
-  （消息 `typert gateway: <endpoint>: no active Remote method exports this endpoint`）。
+ `session/control`、`terminal/retain`、`terminal/attach`、`workspace/follow`、
+ `workspaceFiles/changes`、`job/list`、`job/follow`、`account/watch`、`account/watchExpiry`、
+ `userQuestions/attachWait`；未知 endpoint → `error` 帧
+ `gateway/invocation-unavailable`
+ （消息 `typert gateway: <endpoint>: no active Remote method exports this endpoint`）。
 - 每条 open 的命名空间未挂载（`ctx` 无 `terminalController`/`workspaceController`/
-  `workspaceFiles`）→ 该流 `error` 帧 `gateway/invocation-unavailable`；args 缺字段/类型不符
-  → `gateway/arguments-invalid`。
+ `workspaceFiles`）→ 该流 `error` 帧 `gateway/invocation-unavailable`；args 缺字段/类型不符
+ → `gateway/arguments-invalid`。
 - `workspaceFiles/changes`（`{args:{workspaceFileScopeId, path}}`）：先以 `ctx.fs.watch`
-  建立目标监听（目录须在工作区内），成功给 `{kind:'ready'}`，随后命中目标的失效重 stat
-  产出 `{kind:'change', change:{absolutePath, version}}`（目标已删除则 `{absolutePath, absent:true}`）；
-  watch 不可用 → `workspace-file/watch-unsupported`，目录越界 → `workspace-file/outside-workspace`。
-  前端（`webui/src/wire/workspace.ts` `createWorkspaceServices().watch`）为根目录与每个展开目录
-  各开一条流（上游 `ui-sidebar-files` 的 `DirectoryNode` 同构），`change` 帧只触发**该层**重列，
-  同层请求在途时合并为一次后续读取。
-  同 ns 的 unary `readBytes` 取 `options:{range?:{offset,length}, baseFile?}`，服务值为原生字节、
-  wire 层走 §3.1 的二进制附件。
+ 建立目标监听（目录须在工作区内），成功给 `{kind:'ready'}`，随后命中目标的失效重 stat
+ 产出 `{kind:'change', change:{absolutePath, version}}`（目标已删除则 `{absolutePath, absent:true}`）；
+ watch 不可用 → `workspace-file/watch-unsupported`，目录越界 → `workspace-file/outside-workspace`。
+ 前端（`webui/src/wire/workspace.ts` `createWorkspaceServices.watch`）为根目录与每个展开目录
+ 各开一条流（上游 `ui-sidebar-files` 的 `DirectoryNode` 同构），`change` 帧只触发**该层**重列，
+ 同层请求在途时合并为一次后续读取。
+ 同 ns 的 unary `readBytes` 取 `options:{range?:{offset,length}, baseFile?}`，服务值为原生字节、
+ wire 层走 §3.1 的二进制附件。
 
 ### 4.1 `session/follow`（历史跟随流）
 
@@ -254,29 +254,29 @@ client `connection/src/client/rpc.ts` 按 `/` 切两段）；`web/args.canonical
 ```json
 {"type": "snapshot",
  "header": {"version": 2, "id": "...", "createdAt": ..., "isSeeded": false,
-            "cwd": "...?", "parentSession": "...?", "origin": "...?",
-            "delegationDepth": ...?, "agentPreset": "...?"},
+ "cwd": "...?", "parentSession": "...?", "origin": "...?",
+ "delegationDepth": ...?, "agentPreset": "...?"},
  "cursor": <seq>,
  "records": [{"type": "event", "event": <事件信封>}...],
  "hasMore": <bool>,
  "projections": {"asOfSeq": <seq>,
-                 "values": {"sessionStats": {"turns","steps","llmMs","toolMs","ttftMs","ttftSteps","decodeMs","decodeTokens"},
-                            "tokenUsage": {"uncachedInputTokens","outputTokens","cacheReadTokens","cacheWriteTokens"}}}}
+ "values": {"sessionStats": {"turns","steps","llmMs","toolMs","ttftMs","ttftSteps","decodeMs","decodeTokens"},
+ "tokenUsage": {"uncachedInputTokens","outputTokens","cacheReadTokens","cacheWriteTokens"}}}}
 ```
 
-  header 是平铺 `SessionWireHeader`（`api.py _wire_header`，上游 history.ts wireHeader 用
-  `isSeeded` boolean）；records 严格 `{type:'event', event}` 包装。事件信封统一形态
-  `{type, seq, time, data}`（`seq` 0 基严格递增：`seq == 追加前日志长度`，同上游 EventLog
-  `seq: this.log.length` 后 push；首事件 seq=0）。`maxMessages` 溢出时只取尾段并置
-  `hasMore=true`；`cursor` = 最后一条已提交事件 seq（0 基 inclusive，空日志 -1）。
-  `projections.values` 是真实视图（sessionStats 八键加 tokenUsage 四键，等价于现场折叠，
-  见 `telemetry.projection_values` 与 architecture 映射表；`contextPressure` 不承载）。
+ header 是平铺 `SessionWireHeader`（`api.py _wire_header`，上游 history.ts wireHeader 用
+ `isSeeded` boolean）；records 严格 `{type:'event', event}` 包装。事件信封统一形态
+ `{type, seq, time, data}`（`seq` 0 基严格递增：`seq == 追加前日志长度`，同上游 EventLog
+ `seq: this.log.length` 后 push；首事件 seq=0）。`maxMessages` 溢出时只取尾段并置
+ `hasMore=true`；`cursor` = 最后一条已提交事件 seq（0 基 inclusive，空日志 -1）。
+ `projections.values` 是真实视图（sessionStats 八键加 tokenUsage 四键，等价于现场折叠，
+ 见 `telemetry.projection_values` 与 architecture 映射表；`contextPressure` 不承载）。
 - 续帧：`{"type":"event", "event": <事件信封>}`，活体帧从 `snapshot.cursor + 1` 起、
-  `event.seq` 严格递增；客户端按 seq 去重拼接（webui `TrajectoryBuffer`）。
+ `event.seq` 严格递增；客户端按 seq 去重拼接（webui `TrajectoryBuffer`）。
 - 错误：`gateway/arguments-invalid` / `session/not-found`（未知会话）。
 - 上游 wire **无 `since` 字段**（见 §4.4）：`follow`/`control` 每次（重）连都重开流并重投完整
-  `snapshot`/`baseline`，客户端按 seq 去重即无缺口；mini 相同。follow 活体帧的 mini 载体是
-  ≤50ms 短轮询批量提取，进程内日志现成可读，帧形状与顺序同上游。
+ `snapshot`/`baseline`，客户端按 seq 去重即无缺口；mini 相同。follow 活体帧的 mini 载体是
+ ≤50ms 短轮询批量提取，进程内日志现成可读，帧形状与顺序同上游。
 
 ### 4.2 `session/control`（宿主级 live control）
 
@@ -286,59 +286,59 @@ client `connection/src/client/rpc.ts` 按 `/` 切两段）；`web/args.canonical
 ```json
 {"type": "baseline",
  "value": {"projections": {"<sessionId>": {"asOfSeq": <seq>,
-                                           "values": {"sessionStats": {...8 键...},
-                                                      "tokenUsage": {...4 键...},
-                                                      "inbox": {"next-turn": [...], "next-step": [...]},
-                                                      "agentPreset": "..."}}}}
+ "values": {"sessionStats": {...8 键...},
+ "tokenUsage": {...4 键...},
+ "inbox": {"next-turn": [...], "next-step": [...]},
+ "agentPreset": "..."}}}}
 ```
 
-  control baseline 的 projections 覆盖**全部 live 会话**（空会话也各放一条空块）；
-  projections.values 与 follow 同源（`telemetry.projection_values` 现场折叠 + 注册表快照，
-  见 4.1）。**已移除 queues/jobs 帧**（`queue`/`jobs` 替换帧与 baseline
-  queues/jobs 块均不再发）；队列数据经 `inbox` 投影单元（`{next-turn, next-step}` 待处理
-  消息）暴露，作业经 job-controller 的 `job/list` 流（§4.7）暴露。
+ control baseline 的 projections 覆盖**全部 live 会话**（空会话也各放一条空块）；
+ projections.values 与 follow 同源（`telemetry.projection_values` 现场折叠 + 注册表快照，
+ 见 4.1）。**已移除 queues/jobs 帧**（`queue`/`jobs` 替换帧与 baseline
+ queues/jobs 块均不再发）；队列数据经 `inbox` 投影单元（`{next-turn, next-step}` 待处理
+ 消息）暴露，作业经 job-controller 的 `job/list` 流（§4.7）暴露。
 
 - 续帧（替换语义）：`{"type":"projection", "sessionId": "...", "key": "inbox",
-  "value": {...}, "seq": <int>}`——投影单元整体替换（`sessionProjections.onChanged`
-  广播），会话 dispose → 不再有对应投影帧。
+ "value": {...}, "seq": <int>}`——投影单元整体替换（`sessionProjections.onChanged`
+ 广播），会话 dispose → 不再有对应投影帧。
 - `inbox` 投影值：`{next-turn: PendingMessage[], next-step: PendingMessage[]}`（上游
-  InboxState）；PendingMessage = `{id, role, content: ContentBlock[], source}`（同消息模型）。
+ InboxState）；PendingMessage = `{id, role, content: ContentBlock[], source}`（同消息模型）。
 
 ### 4.3 `$events`（远程事件流，`web/events.py`）
 
 - open payload 必须**恰** `{args:{}}`（非空 args → 该流 `error` 帧 `gateway/arguments-invalid`）。
 - 首帧 `ready`：`{"type":"ready", "clientId": "<uuid>", "host": {"home": "<宿主 home>"}}`
-  （`host.home` 仅用于前端缩写本机路径显示）。
+ （`host.home` 仅用于前端缩写本机路径显示）。
 - 下游帧三种：
 
 ```json
-{"type": "emit",      "event": "...", "args": [...]}
+{"type": "emit", "event": "...", "args": [...]}
 {"type": "waterfall", "event": "...", "eventId": "...", "agentId": "...", "request": {...}}
-{"type": "cancel",    "eventId": "..."}
+{"type": "cancel", "eventId": "..."}
 ```
 
 - emit 转发源（api-session/* 族）：`session/created → api-session/added`（初始 list row）、
-  `session/disposed → api-session/removed`、`agent/status → api-session/status`（running 位）、
-  `agent/error → api-session/error`、user `user/message → api-session/activity`。
+ `session/disposed → api-session/removed`、`agent/status → api-session/status`（running 位）、
+ `agent/error → api-session/error`、user `user/message → api-session/activity`。
 - 前端：`webui/src/wire/session-roster.ts` + `useBackend` 消费 `api-session/added|removed|status`
-  增量维护会话列表；`SubagentPanel` 按 `parentSessionId` 列子会话并跳转。
+ 增量维护会话列表；`SubagentPanel` 按 `parentSessionId` 列子会话并跳转。
 - 历史分页：`session/page`（`throughSeq` + `beforeSeq`）+ follow 快照 `hasMore` →
-  Chat/Trajectory「加载更早消息」（`unwrapPageRecords`）。
+ Chat/Trajectory「加载更早消息」（`unwrapPageRecords`）。
 - 无重命名转发（`API_REMOTE_FORWARDED_EVENTS`，dsh-v0.2.0-rc.2）：`settings/document-updated`
-  （`[ns, revision]`）、`deepseek-account/session-expired`、`deepseek-account/model-sign-in-required`、
-  `credentials/record-updated`/`credentials/reference-updated`（`[subject]`）、`schedule/changed`、
-  `plugin-manager/changed`、`permission-presets/catalog-changed`（后两者无参数：`mode: 'emit'`，
-  只表示「缓存失效，请重读」，见 `remote-events.ts:43-47`）。
+ （`[ns, revision]`）、`deepseek-account/session-expired`、`deepseek-account/model-sign-in-required`、
+ `credentials/record-updated`/`credentials/reference-updated`（`[subject]`）、`schedule/changed`、
+ `plugin-manager/changed`、`permission-presets/catalog-changed`（后两者无参数：`mode: 'emit'`，
+ 只表示「缓存失效，请重读」，见 `remote-events.ts`）。
 - `hasLiveClient`：仅当某条 `$events` 流的 signal 未中止时为 true（裸 socket 不计）。
 - waterfall：审批问询 `event="approval/request"`、`agentId=<会话 id>`、
-  `request={toolName, callId?, reason?, displayReason?}`（上游 `ApprovalRequest`）：
-  `callId` 取本次工具执行（前端据此把审批挂到对应工具卡片），`reason`/`displayReason`
-  是闸门决策 `kind:'ask'` 自带的审批理由（`reason` 为审计原文，`displayReason` 为
-  `{zh, en}` 本地化副本，两者可省）。由首个客户端的 `$events/result` 结算（§5）。
+ `request={toolName, callId?, reason?, displayReason?}`（上游 `ApprovalRequest`）：
+ `callId` 取本次工具执行（前端据此把审批挂到对应工具卡片），`reason`/`displayReason`
+ 是闸门决策 `kind:'ask'` 自带的审批理由（`reason` 为审计原文，`displayReason` 为
+ `{zh, en}` 本地化副本，两者可省）。由首个客户端的 `$events/result` 结算（§5）。
 - waterfall 提问：`event="user-questions/request"`、`agentId=<会话 id>`、
-  `request={questions, agent, wait?}`（`agent` 写成 id，见 §6.1；timed 带
-  `wait:{callId, timed}`）。`planReviewOf` 命中时前端渲染计划审查；未命中走通用
-  `QuestionComposer`（含 timed 倒计时 / hide / continued RPC）。
+ `request={questions, agent, wait?}`（`agent` 写成 id，见 §6.1；timed 带
+ `wait:{callId, timed}`）。`planReviewOf` 命中时前端渲染计划审查；未命中走通用
+ `QuestionComposer`（含 timed 倒计时 / hide / continued RPC）。
 
 ### 4.4 重连语义与心跳（三流统一约定）
 
@@ -347,16 +347,16 @@ are **not** replayed after reconnect」「always return a complete opening snaps
 by deltas」。
 
 - **`session/follow` / `session/control`**：每次 open（含重连）都重投完整 `snapshot` / `baseline`
-  快照帧，随后以续帧增量推进。客户端只需「重开即重启，按 seq 与替换帧语义收敛」，无需游标
-  参数（wire 无 `since`）。
+ 快照帧，随后以续帧增量推进。客户端只需「重开即重启，按 seq 与替换帧语义收敛」，无需游标
+ 参数（wire 无 `since`）。
 - **`$events`**：新代次先发 `ready`（新 `clientId`）；对旧代次已转发过的单向 emit **不重放**
-  （无 since 恢复游标，不算缺口）；**挂起的 waterfall 保留 `eventId` 跨代次重投**（新客户端
-  open 即收到，首个 `$events/result` 结算，幂等 no-op）。
+ （无 since 恢复游标，不算缺口）；**挂起的 waterfall 保留 `eventId` 跨代次重投**（新客户端
+ open 即收到，首个 `$events/result` 结算，幂等 no-op）。
 - **心跳**：transport 级（不归 `web/mux.py`，前端无感）：每连接每 2s 一次协议 Ping，
-  连续 2 周期无 Pong 判死（`ws_ping_timeout=4`，约等于上游 `MAX_MISSED_HEARTBEATS=2`，
-  即 stream-server.ts 的 terminate）；由 uvicorn 的 websockets 实现透传
-  （`web/launcher.py` 的 `uvicorn_options`，间隔取上游 `websocketHeartbeatIntervalMs`
-  @default 2000）。
+ 连续 2 周期无 Pong 判死（`ws_ping_timeout=4`，约等于上游 `MAX_MISSED_HEARTBEATS=2`，
+ 即 stream-server.ts 的 terminate）；由 uvicorn 的 websockets 实现透传
+ （`web/launcher.py` 的 `uvicorn_options`，间隔取上游 `websocketHeartbeatIntervalMs`
+ @default 2000）。
 
 ### 4.5 `terminal/retain` / `terminal/attach`（终端持有与双工恢复流）
 
@@ -364,17 +364,17 @@ by deltas」。
 
 - open payload：`{args:{sessionId, id}}`（取 sessionId，不需要 `agentId`）。
 - 唯一一帧确认 `{"type":"retained"}`，此后**不再出帧**，流保持到本流被 `cancel`/断连，
-  或该身份被 `terminal/close`（含会话 owner 拆解、控制器 dispose）关闭。进程自己退出
-  **不**结束持窗（上游 `retention.ts` 的 `lifetime` 闩只随身份关闭而落）。
+ 或该身份被 `terminal/close`（含会话 owner 拆解、控制器 dispose）关闭。进程自己退出
+ **不**结束持窗（上游 `retention.ts` 的 `lifetime` 闩只随身份关闭而落）。
 - 载体差异（已登记）：上游 holders 集合的唯一作用是抑制「无人值守空闲回收」调度，
-  mini 无该调度器，故持有不改变清理时机。
+ mini 无该调度器，故持有不改变清理时机。
 - 错误：身份缺失/已关闭/owner 正在清理 → `terminal/unavailable`；命名空间未挂载 →
-  `gateway/invocation-unavailable`（同 §4 头）。
+ `gateway/invocation-unavailable`（同 §4 头）。
 
 `terminal/attach` —— 附加到一个终端（**双工**），**不把进程生命周期绑到传输**。
 
 - open payload：`{args:{agentId, id}}`。附加即独占输入控制（较晚附加接管输入，旧的降为
-  只读），分离不杀进程。
+ 只读），分离不杀进程。
 - 首帧 `snapshot`（完整有界屏幕，含滚出历史；行尾空白裁剪、尾随空行去除）：
 
 ```json
@@ -382,45 +382,45 @@ by deltas」。
  "info": {<WebTerminalInfo>}, "writable": <bool>, "inputWindow": {<RemoteUplinkWindow>}?}
 ```
 
-  `info` = `{id, title, shell:{path,args,name}, cwd, cols, rows, state, exitCode, error?}`，
-  `state` ∈ `running|exited|failed`；`exited` 带 `exitCode`，`failed` 带 `error`。`cwd` 是创建时
-  工作目录，shell 内 `cd` 不回写该字段。`writable` 是本附加此刻是否持有输入控制；
-  `inputWindow` 只在载体提供了窗口时出现（`{maxBytes, frameOverheadBytes}`，见下）。
+ `info` = `{id, title, shell:{path,args,name}, cwd, cols, rows, state, exitCode, error?}`，
+ `state` ∈ `running|exited|failed`；`exited` 带 `exitCode`，`failed` 带 `error`。`cwd` 是创建时
+ 工作目录，shell 内 `cd` 不回写该字段。`writable` 是本附加此刻是否持有输入控制；
+ `inputWindow` 只在载体提供了窗口时出现（`{maxBytes, frameOverheadBytes}`，见下）。
 - 续帧（有序，四型与上游 `TerminalFrame` 一一对应）：
 
 ```json
 {"type": "output", "sequence": <int>, "data": "<本段输出>"}
-{"type": "state",  "info": {<WebTerminalInfo>}, "writable": <bool>}
-{"type": "ack",    "sequence": <int>, "refusal": "read-only" | "not-running"?}
+{"type": "state", "info": {<WebTerminalInfo>}, "writable": <bool>}
+{"type": "ack", "sequence": <int>, "refusal": "read-only" | "not-running"?}
 ```
 
-  `state` 帧的 `writable` 逐 follower 独立计算（输入控制易手时，接管的收到 `true`、被降级的
-  收到 `false`）；`state` 也会在 `resize`（cols/rows）、`rename`（title）、进程结算时出现。
-- 上行（`TerminalInput` 判别联合，经 `invocation.uplink()`，codec = `decode_terminal_input`）：
+ `state` 帧的 `writable` 逐 follower 独立计算（输入控制易手时，接管的收到 `true`、被降级的
+ 收到 `false`）；`state` 也会在 `resize`（cols/rows）、`rename`（title）、进程结算时出现。
+- 上行（`TerminalInput` 判别联合，经 `invocation.uplink`，codec = `decode_terminal_input`）：
 
 ```json
-{"type": "write",  "sequence": <int>, "data": "<键入>"}
+{"type": "write", "sequence": <int>, "data": "<键入>"}
 {"type": "resize", "sequence": <int>, "cols": <int>, "rows": <int>}
 ```
 
-  `sequence` 从 1 起**连续编号**（每个附加独立），缺口即失败整条附加（普通失败 → 流错误帧，
-  不折 refusal）。每条命令回一帧 `ack`：成功 `{"type":"ack","sequence":n}`；写/调整不可用
-  （无输入控制/进程未运行）→ 带 `refusal`（`read-only`|`not-running`）的 `ack`，且**输出附加
-  保持有效**（上游 `terminal/control-unavailable` 语义）。`write` 超 `maxInputBytes`、`resize`
-  越界（`cols<2` / `cols>maxCols` / `rows<1` / `rows>maxRows`）为普通失败。
+ `sequence` 从 1 起**连续编号**（每个附加独立），缺口即失败整条附加（普通失败 → 流错误帧，
+ 不折 refusal）。每条命令回一帧 `ack`：成功 `{"type":"ack","sequence":n}`；写/调整不可用
+ （无输入控制/进程未运行）→ 带 `refusal`（`read-only`|`not-running`）的 `ack`，且**输出附加
+ 保持有效**（上游 `terminal/control-unavailable` 语义）。`write` 超 `maxInputBytes`、`resize`
+ 越界（`cols<2` / `cols>maxCols` / `rows<1` / `rows>maxRows`）为普通失败。
 - `inputWindow`（`RemoteUplinkWindow`）：载体给客户端的写入窗口提示——`maxBytes` 为上行
-  inbox 字节上限，`frameOverheadBytes` 为单帧 JSON 封装开销。客户端据此自限上行批量。
+ inbox 字节上限，`frameOverheadBytes` 为单帧 JSON 封装开销。客户端据此自限上行批量。
 - 终态：进程退出/失败先投一帧 `state`（`state` 转 `exited`/`failed`），**队列里剩余帧投完后
-  流才 `end`**（上游 `TerminalFollower.finish`）。
+ 流才 `end`**（上游 `TerminalFollower.finish`）。
 - 慢消费者：单 follower 排队字节超 `maxBufferedBytes`（缺省 2 MiB）→ 该流以
-  `gateway/internal` 中止（消息 `Terminal output consumer exceeded its buffer; reconnect to
-  recover the current screen`）；重连开新代次从 `snapshot` 恢复当前屏幕。
+ `gateway/internal` 中止（消息 `Terminal output consumer exceeded its buffer; reconnect to
+ recover the current screen`）；重连开新代次从 `snapshot` 恢复当前屏幕。
 - 错误：未知 `agentId` → `session/not-found`；身份缺失/已关闭 → `terminal/unavailable`；
-  命名空间未挂载 → `gateway/invocation-unavailable`。
+ 命名空间未挂载 → `gateway/invocation-unavailable`。
 - 前端：`webui/src/wire/terminal.ts` 的 `createTerminalServices` 组装 unary 调用与
-  `retain`/`attach` 两条流；`TerminalConnection` 管写/尺寸上行队列（按 `ack` 序号放行，
-  `read-only`/`not-running` 呈现为拒绝态），`TerminalScreen` 用 xterm 渲染 `snapshot.screen`
-  与 `output.data`，`TerminalPanel` 管多终端 tab 与 shell 选择。
+ `retain`/`attach` 两条流；`TerminalConnection` 管写/尺寸上行队列（按 `ack` 序号放行，
+ `read-only`/`not-running` 呈现为拒绝态），`TerminalScreen` 用 xterm 渲染 `snapshot.screen`
+ 与 `output.data`，`TerminalPanel` 管多终端 tab 与 shell 选择。
 
 ### 4.6 `workspace/follow`（工作区投影流）
 
@@ -430,48 +430,48 @@ by deltas」。
 ```json
 {"type": "baseline",
  "value": {"items": [{<WorkspaceView>}, ...],
-           "archivedSessionIds": ["<sessionId>", ...],
-           "pinnedSessionIds": ["<sessionId>", ...]}}
+ "archivedSessionIds": ["<sessionId>", ...],
+ "pinnedSessionIds": ["<sessionId>", ...]}}
 ```
 
-  `WorkspaceView` = `{workspaceId, path, title, sessionIds, createdAt, updatedAt}`（`sessionIds`
-  是该工作区名下按人工顺序记的会话）；`pinnedSessionIds` 是**注册表全局**钉选集（最近钉选在前）。
+ `WorkspaceView` = `{workspaceId, path, title, sessionIds, createdAt, updatedAt}`（`sessionIds`
+ 是该工作区名下按人工顺序记的会话）；`pinnedSessionIds` 是**注册表全局**钉选集（最近钉选在前）。
 - 续帧五型（插入/替换语义，同上游 `WorkspaceFollowIncrement`）：
 
 ```json
-{"type": "upsert",   "workspace": {<WorkspaceView>}}
-{"type": "remove",   "workspaceId": "..."}
-{"type": "order",    "workspaceIds": ["..."]}
+{"type": "upsert", "workspace": {<WorkspaceView>}}
+{"type": "remove", "workspaceId": "..."}
+{"type": "order", "workspaceIds": ["..."]}
 {"type": "archived", "archivedSessionIds": ["..."]}
-{"type": "pinned",   "pinnedSessionIds": ["..."]}
+{"type": "pinned", "pinnedSessionIds": ["..."]}
 ```
 
 - 一次变更的出帧顺序固定：先按新顺序给**新身份**发 `upsert`（已知名不再 upsert），顺序真变才发
-  `order`，再 `archived`，最后 `pinned`（上游 `feed.ts` 的 `changed`）。`archived`/`pinned`
-  都是全量替换（不是增量 diff）。
+ `order`，再 `archived`，最后 `pinned`（上游 `feed.ts` 的 `changed`）。`archived`/`pinned`
+ 都是全量替换（不是增量 diff）。
 - 断连期间的增量不重放：重连即新代次重发 `baseline`，消费者按「重开即全量」收敛（§4.4）。
 - 前端：`webui/src/wire/workspaces.ts` 折叠 roster；`SessionList` 用 `archivedSessionIds`
-  过滤活跃会话，归档/取消归档走 `workspace/archiveSession|unarchiveSession`。
+ 过滤活跃会话，归档/取消归档走 `workspace/archiveSession|unarchiveSession`。
 
 ### 4.7 `job/list` / `job/follow`（后台作业 roster 与输出流）
 
 `job` namespace（上游 `packages/api/job-controller`，web-app 默认挂载）：
 
 - `job/list`（`{args:{sessionId}}`）：一次会话可见作业集的**整集替换**帧流。首帧即刻，
-  此后每次触及可见作业的 lifecycle 提交（registered/progress/stopping/settled/removed）
-  合并 100ms 后发下一整集；纯 output 追加不刷新 roster：
+ 此后每次触及可见作业的 lifecycle 提交（registered/progress/stopping/settled/removed）
+ 合并 100ms 后发下一整集；纯 output 追加不刷新 roster：
 
 ```json
 {"type": "rows", "jobs": [{<JobView>}, ...]}
 ```
 
-  `JobView` = `{id, kind, label, owner?, outputLimitBytes?, status, progress?, detail?,
-  startedAt, finishedAt?, output:{total, earliest, spillPaths?}}`（`status` ∈
-  `running|stopping|completed|killed|failed`）。
+ `JobView` = `{id, kind, label, owner?, outputLimitBytes?, status, progress?, detail?,
+ startedAt, finishedAt?, output:{total, earliest, spillPaths?}}`（`status` ∈
+ `running|stopping|completed|killed|failed`）。
 - `job/follow`（`{args:{sessionId?, jobId, from?}}`）：一作业 retained 输出的观察流。
-  `from` 缺省 = 最老保留字节；`from` 显式提供时须为非负整数（否则 `gateway/arguments-invalid`）。
-  帧序：`opened{job, from}` → `output{chunks, next, lossy?}`* → `status{job}`（终态投影后流正常
-  关闭）：
+ `from` 缺省 = 最老保留字节；`from` 显式提供时须为非负整数（否则 `gateway/arguments-invalid`）。
+ 帧序：`opened{job, from}` → `output{chunks, next, lossy?}`* → `status{job}`（终态投影后流正常
+ 关闭）：
 
 ```json
 {"type": "opened", "job": {<JobView>}, "from": 0}
@@ -479,12 +479,12 @@ by deltas」。
 {"type": "status", "job": {<JobView>}}
 ```
 
-  output 帧按 64 KiB 软字节预算切帧（单块超预算整块带走，lossy 只随首帧）；`next` 是下一
-  帧的绝对字节偏移，重连时作为 `from` 传入恢复。已结算且排空（`cursor >= output.total`）发
-  `status` 后正常关闭；owner teardown 移除作业则以移除时的终态投影发 `status` 并关闭。
+ output 帧按 64 KiB 软字节预算切帧（单块超预算整块带走，lossy 只随首帧）；`next` 是下一
+ 帧的绝对字节偏移，重连时作为 `from` 传入恢复。已结算且排空（`cursor >= output.total`）发
+ `status` 后正常关闭；owner teardown 移除作业则以移除时的终态投影发 `status` 并关闭。
 - `job/kill`（unary `POST /api/job/kill`，`{args:{sessionId, jobId}}`）：请求取消一个作业，
-  返回 `{"outcome": "requested" | "already-finished"}`；未知/外会话作业 →
-  `job/not-found`（details `{sessionId, jobId}`）。
+ 返回 `{"outcome": "requested" | "already-finished"}`；未知/外会话作业 →
+ `job/not-found`（details `{sessionId, jobId}`）。
 - `job` namespace 未挂载（`ctx` 无 `jobs`）→ `gateway/invocation-unavailable`。
 
 ### 4.8 `account`（账户 Remote 面）
@@ -501,17 +501,17 @@ unary `POST /api/account/<method>`；除 `getState`/`hasRunningAccountTasks`/`ca
 - `account/ackBonusNotified`（`{accountId, orderId, client}`）→ boolean；无账户 → false。
 - `account/hasRunningAccountTasks`（`{args:{}}`）→ boolean（mini 单适配器无账户路由 → false）。
 - `account/startSignIn`（`{client, callbackOrigin, loginSource:'web'|'desktop'}`）→
-  当前 attempt view；`callbackOrigin` 只接受 loopback `http://localhost|127.0.0.1|[::1]:port`，
-  返回的 `authorizeUrl` 指向 Platform 授权页。
+ 当前 attempt view；`callbackOrigin` 只接受 loopback `http://localhost|127.0.0.1|[::1]:port`，
+ 返回的 `authorizeUrl` 指向 Platform 授权页。
 - `account/cancelSignIn`（`{attemptId}`）→ 当前 attempt view；仅 `committing` 前可取消，
-  未知 id no-op。
+ 未知 id no-op。
 - `account/signOut`（带 client）→ `AccountView`。
 - `account/watch`（Remote 流，`{args:{}}`）：首帧当前 `AccountView`，随后仅在投影变化时
-  再发一帧；无游标，重开流即当前投影。上游 `account-controller/src/index.ts:119` 委托账户
-  服务的推送迭代，mini 账户服务未声明订阅面，以短轮询同一投影 + 深度相等门控发布
-  （`web/streams.py` `_account_watch`）。命名空间未挂 → `gateway/invocation-unavailable`。
+ 再发一帧；无游标，重开流即当前投影。上游 `account-controller/src/index.ts` 委托账户
+ 服务的推送迭代，mini 账户服务未声明订阅面，以短轮询同一投影 + 深度相等门控发布
+ （`web/streams.py` `_account_watch`）。命名空间未挂 → `gateway/invocation-unavailable`。
 - `account/watchExpiry`（Remote 流，`{args:{}}`）：无重放地订阅 `deepseek-account/session-expired`，
-  订阅期间每事件产一帧 `'session-expired'`；命名空间未挂 → `gateway/invocation-unavailable`。
+ 订阅期间每事件产一帧 `'session-expired'`；命名空间未挂 → `gateway/invocation-unavailable`。
 
 浏览器回调是固定宿主路由 `GET /oauth/callback?state=<state>&code=<code>`（不在
 `/api` 下，因而不经 token gate）：成功 302 到 Platform `authorized_url`（web 追加
@@ -526,28 +526,28 @@ unary `POST /api/account/<method>`；除 `getState`/`hasRunningAccountTasks`/`ca
 
 - `schedule/list`（`{args:{sessionId}}`）→ 该会话的 active 记录数组。
 - `schedule/catalog`（`{args:{}}`）→ 全部 active/inactive 记录（带 `sessionId`/`status`，
-  按 `scheduledAt` 升序、`id` 字典序），可含 `lastDelivery`。
+ 按 `scheduledAt` 升序、`id` 字典序），可含 `lastDelivery`。
 - `schedule/history`（`{args:{sessionId, id, limit(1..100), before?}}`）→ 分页交付记录，
-  或 `{id, code:'schedule_not_found'}`。
+ 或 `{id, code:'schedule_not_found'}`。
 - `schedule/delete`（`{args:{sessionId, id}}`）→ `{id, deleted}` 或
-  `{id, deleted:false, code:'schedule_not_found'}`。
+ `{id, deleted:false, code:'schedule_not_found'}`。
 - `schedule/update`（`{args:{sessionId, id, expected, change?, title?, prompt?}}`，compare-and-update）
-  → 提交的记录、无操作/查找失败结果，或 `ScheduleToolError`。
+ → 提交的记录、无操作/查找失败结果，或 `ScheduleToolError`。
 - `schedule/changed` 经 `$events` 转发（无 args；任务集变更时客户端重取目录）。
 - 命名空间未挂 → `gateway/invocation-unavailable`。
 - 前端：`webui/src/wire/schedule.ts` + `useSchedules` + 右侧栏 `SchedulePanel`（按会话
-  `schedule/list`、删除走 `schedule/delete`、监听 `schedule/changed`）。
+ `schedule/list`、删除走 `schedule/delete`、监听 `schedule/changed`）。
 
 ### 4.10 `userQuestions`（timed 提问 Remote 面）
 
 `userQuestions` namespace（上游 `packages/interaction/user-questions`，dsh-v0.2.0-rc.2）：
 
 - `userQuestions/answer`（unary `{args:{agentId, callId, answer:{answers}}} `）→ boolean
-  （该提问是否仍为 continued）。回复以 `user-question-reply` 来源的 user 消息 steer 进 agent；
-  批次须逐问一次命中（否则 `UserQuestionError BAD_ANSWER`），已有排队回复 → `REPLY_QUEUED`。
+ （该提问是否仍为 continued）。回复以 `user-question-reply` 来源的 user 消息 steer 进 agent；
+ 批次须逐问一次命中（否则 `UserQuestionError BAD_ANSWER`），已有排队回复 → `REPLY_QUEUED`。
 - `userQuestions/attachWait`（Remote 流 `{args:{agentId, callId}}`）：持有一条 live timed
-  等待，产出一帧 `{remainingMs}`（客户端持有时 Host 计时暂停）；未知 callId/非 continued
-  无帧即结束。
+ 等待，产出一帧 `{remainingMs}`（客户端持有时 Host 计时暂停）；未知 callId/非 continued
+ 无帧即结束。
 - 命名空间未挂 → `gateway/invocation-unavailable`。
 
 > 会话投影：`userQuestions` 单元（stateVersion 2，view `{active, settled}`）——fold
@@ -562,45 +562,45 @@ unary `POST /api/account/<method>`；除 `getState`/`hasRunningAccountTasks`/`ca
 三个 unary `POST /api/<endpoint>`：
 
 - `agentPresets/list`（`{args:{}}`）→ `AgentPresetRoster`：
-  `{presets: [{id, isDefault, name?, description?, broken?}]}`。dsh-v0.2.0-rc.2 删除了
-  `modeSelectionEnabled` 字段（roster 形状收窄）。未知端点集合不固定——roster
-  是当前部署的声明列表。
+ `{presets: [{id, isDefault, name?, description?, broken?}]}`。dsh-v0.2.0-rc.2 删除了
+ `modeSelectionEnabled` 字段（roster 形状收窄）。未知端点集合不固定——roster
+ 是当前部署的声明列表。
 - `agentPresets/read`（`{args:{agentPreset}}`）→ `AgentPresetDocument`：
-  `{agentPreset, content, name?, description?}`；`content` 是声明行/组合的 entry-list YAML
-  （mini JSON 载体 → `rows: []`）。未知 id → `agent-preset/not-found`（details
-  `{agentPreset, available}`）。
+ `{agentPreset, content, name?, description?}`；`content` 是声明行/组合的 entry-list YAML
+ （mini JSON 载体 → `rows: []`）。未知 id → `agent-preset/not-found`（details
+ `{agentPreset, available}`）。
 - `agentPresets/select`（`{args:{sessionId, agentPreset}}`）→ 提交的 preset id（字符串）。
-  **首回合前锁**：`turnBoundary` 投影判定 `openTurnStartSeq !== null || lastTurn > 0` →
-  `agent-preset/locked`（details `{sessionId, agentPreset}`，消息 "This session has already
-  started"）；合法则解析（未知 → `agent-preset/not-found`）并 append durable
-  `agent-preset/selected {agentPreset}` 落盘后返回 id。
+ **首回合前锁**：`turnBoundary` 投影判定 `openTurnStartSeq !== null || lastTurn > 0` →
+ `agent-preset/locked`（details `{sessionId, agentPreset}`，消息 "This session has already
+ started"）；合法则解析（未知 → `agent-preset/not-found`）并 append durable
+ `agent-preset/selected {agentPreset}` 落盘后返回 id。
 - 错误码闭集新增 `agent-preset/locked`（`agent-preset/not-found`/`agent-preset/invalid` 既有）；
-  未挂载 roster → `gateway/invocation-unavailable`。
+ 未挂载 roster → `gateway/invocation-unavailable`。
 - 会话投影：`agentPreset` 单元（stateVersion 1，init = `session.meta.agentPreset ?? null`，
-  fold `agent-preset/selected` 整值替换，有 wire）——`session/projections` 与 control
-  projection 帧暴露该单元。
+ fold `agent-preset/selected` 整值替换，有 wire）——`session/projections` 与 control
+ projection 帧暴露该单元。
 
 ### 4.12 `goals` / `skills` / `fileReferences`（前端补全面）
 
 三个随前端功能面补入的 Host namespace：
 
 - `goals`（上游 `packages/goal/goal`，host plane + `goal-round-driver`）。unary
-  `POST /api/goals/<method>`，Agent 身份的 wire 名为 `agentId`：
-  - `goals/get`（`{args:{agentId}}`）→ `GoalView|null`（无当前目标 → null）。
-  - `goals/create`（`{args:{agentId, request:{objective, maxGoalRounds?}}}`）→
-    `{ref:{id, revision}}`（上游 `remoteExportCreate` 形状）。
-  - `goals/edit`（`{args:{agentId, ref, request:{objective?, maxGoalRounds?}}}`）→ `GoalView`。
-  - `goals/pause|resume|complete|clear`（`{args:{agentId, ref}}`）→ `GoalView`；`clear` 返回
-    tombstone `{id, revision}`（revision = 清空前 +1）。
-  - 域错误（stale revision / not found / invalid transition）折 `gateway/internal`，消息保留
-    `GoalError` 文本；命名空间未挂 → `gateway/invocation-unavailable`。
+ `POST /api/goals/<method>`，Agent 身份的 wire 名为 `agentId`：
+ - `goals/get`（`{args:{agentId}}`）→ `GoalView|null`（无当前目标 → null）。
+ - `goals/create`（`{args:{agentId, request:{objective, maxGoalRounds?}}}`）→
+ `{ref:{id, revision}}`（上游 `remoteExportCreate` 形状）。
+ - `goals/edit`（`{args:{agentId, ref, request:{objective?, maxGoalRounds?}}}`）→ `GoalView`。
+ - `goals/pause|resume|complete|clear`（`{args:{agentId, ref}}`）→ `GoalView`；`clear` 返回
+ tombstone `{id, revision}`（revision = 清空前 +1）。
+ - 域错误（stale revision / not found / invalid transition）折 `gateway/internal`，消息保留
+ `GoalError` 文本；命名空间未挂 → `gateway/invocation-unavailable`。
 - `skills/list`（上游 `packages/api/session-controller/src/skill-catalog.ts`）：
-  `{args:{request:{sessionId}}}` → `{skills:[{name, path?, description, whenToUse?,
-  modelInvocable}]}`，只列 user-invocable 条目；未知会话 → `session/not-found`，
-  request 形状错 → `gateway/arguments-invalid`。
+ `{args:{request:{sessionId}}}` → `{skills:[{name, path?, description, whenToUse?,
+ modelInvocable}]}`，只列 user-invocable 条目；未知会话 → `session/not-found`，
+ request 形状错 → `gateway/arguments-invalid`。
 - `fileReferences/list`（上游 `session-controller/src/file-references.ts`）：
-  `{args:{agentId, query?}}` → `[{path, kind:'file'|'directory'}]`（目录带尾 `/`），由
-  `ctx.fileReferences` provider 排序；未挂 provider → `gateway/invocation-unavailable`。
+ `{args:{agentId, query?}}` → `[{path, kind:'file'|'directory'}]`（目录带尾 `/`），由
+ `ctx.fileReferences` provider 排序；未挂 provider → `gateway/invocation-unavailable`。
 
 > 登记差异：`skills/list` 只服务 store 内会话与全局注册表（无 cold observation /
 > preset-scoped registry）；`goals/*` 对 cold 会话沿用 attach-on-demand 口径。
@@ -611,47 +611,47 @@ unary `POST /api/account/<method>`；除 `getState`/`hasRunningAccountTasks`/`ca
 - `llm/listProviders`（`{args:{}}`）→ `[{id,name}]`（适配器路由；pi-ai 多 profile）。
 - `llm/listConfigurableProviders`（`{args:{}}`）→ 适配器声明的目录条目；未声明 → `[]`。
 - `llm/discoverModels`（`{args:{settingsNs, request:{provider?, baseURL?, api?, apiKey?}}}`）→
-  `[{id, name?, inputModalities?}]`；未知 provider/仅 baseURL → `llm/model-discovery-rejected`。
+ `[{id, name?, inputModalities?}]`；未知 provider/仅 baseURL → `llm/model-discovery-rejected`。
 - `commands/list`（`{args:{agentId}}`）→ `[{name, description, input?:{hint}}]`。
 - `commands/execute`（`{args:{agentId, line, submittedAttachments}}`）→
-  `{commandId, result}` 或 `null`（非命令行/未知命令）；命令未声明 `input.attachments` 时
-  非空附件结算为 `{kind:'error', text:'/<name> does not accept attachments'}`。
+ `{commandId, result}` 或 `null`（非命令行/未知命令）；命令未声明 `input.attachments` 时
+ 非空附件结算为 `{kind:'error', text:'/<name> does not accept attachments'}`。
 - `directoryPicker/list`（`{args:{path?}}`）→ `{path, home, crumbs, entries, truncated}`
-  （只列直接子目录；`path` 缺省宿主 home；相对路径 → `directory-picker/unreadable`）。
+ （只列直接子目录；`path` 缺省宿主 home；相对路径 → `directory-picker/unreadable`）。
 - `directoryPicker/createDirectory`（`{args:{path, name}}`）→ 新目录绝对路径；
-  已存在 → `directory-picker/exists`；非法段名 → `gateway/bad-request`。
+ 已存在 → `directory-picker/exists`；非法段名 → `gateway/bad-request`。
 - `directoryPicker/pick`（`{args:{}}`）→ browse 载体恒 `directory-picker/unavailable`
-  `{capability:'browse'}`（native chooser 未组合）。
+ `{capability:'browse'}`（native chooser 未组合）。
 
 ### 4.14 `settings` / `credentials` / `permissionPresets`（配置面）
 
 - `settings/describe`（`{args:{}}`）→ `{writable, hasDocument, namespaces:[...]}`；每个
-  namespace `{ns, autoGenerate, schema, value, applies:'live', revision, base?, user?,
-  secrets:[{path,set}]}`。读面恒脱敏：secret 路径（上游 schema `role('secret')`）从
-  `value`/`base`/`user` 剥离，只在 `secrets` 里报是否已设置；mini 无 schemastery，
-  `schema` 恒 `{}`（前端按值类型渲染表单）。
+ namespace `{ns, autoGenerate, schema, value, applies:'live', revision, base?, user?,
+ secrets:[{path,set}]}`。读面恒脱敏：secret 路径（上游 schema `role('secret')`）从
+ `value`/`base`/`user` 剥离，只在 `secrets` 里报是否已设置；mini 无 schemastery，
+ `schema` 恒 `{}`（前端按值类型渲染表单）。
 - `settings/update`（`{args:{ns, patch, expectedRevision?}}`）、`settings/replace`
-  （`{args:{ns, section, expectedRevision?}}`）、`settings/mutate`
-  （`{args:{ns, ops:[{op:'set',path,value}|{op:'unset',path}], expectedRevision?}}`）
-  成功均回写后的 namespace 视图；`expectedRevision` 与读到的 `revision` 不符 →
-  `settings/conflict` `details:{ns, expected, actual}`；其余拒绝（含未知 `ns`）→
-  `settings/rejected` `details:{ns}`。写经 `config-editor` 持久化 profile
-  `cordis.patch.yml`，在场插件按 live 语义重新装配。
+ （`{args:{ns, section, expectedRevision?}}`）、`settings/mutate`
+ （`{args:{ns, ops:[{op:'set',path,value}|{op:'unset',path}], expectedRevision?}}`）
+ 成功均回写后的 namespace 视图；`expectedRevision` 与读到的 `revision` 不符 →
+ `settings/conflict` `details:{ns, expected, actual}`；其余拒绝（含未知 `ns`）→
+ `settings/rejected` `details:{ns}`。写经 `config-editor` 持久化 profile
+ `cordis.patch.yml`，在场插件按 live 语义重新装配。
 - `settings/openSettingsDocument`（`{args:{}}`）→ 上游回 `{opened:true}`；mini 无原生桌面
-  打开器（`native-command` 无对应物），恒 `gateway/internal`
-  `path open failed: no native desktop opener is available in this deployment`
-  ——前端如实展示部署能力，不伪造成功。
+ 打开器（`native-command` 无对应物），恒 `gateway/internal`
+ `path open failed: no native desktop opener is available in this deployment`
+ ——前端如实展示部署能力，不伪造成功。
 - `settings/document-updated` 经 `$events` 转发 `[ns, revision]`（`web/events.py`）。
 - `credentials/describe`（`{args:{refs}}`；≤64 个、`^[A-Za-z_][A-Za-z0-9_]*$`，越界 →
-  `gateway/bad-request`）→ `{<ref>:{configured, source?, writable}}`。`credentials/set`
-  （`{args:{ref, value}}`，value 必须非空字符串）与 `credentials/unset`（`{args:{ref}}`）
-  成功后无值返回；拒绝恒 `credential/rejected` `details:{ref}`。值只进不出，任何读面都
-  不回显已存密钥。
+ `gateway/bad-request`）→ `{<ref>:{configured, source?, writable}}`。`credentials/set`
+ （`{args:{ref, value}}`，value 必须非空字符串）与 `credentials/unset`（`{args:{ref}}`）
+ 成功后无值返回；拒绝恒 `credential/rejected` `details:{ref}`。值只进不出，任何读面都
+ 不回显已存密钥。
 - `permissionPresets/catalog`（`{args:{}}`）→ `{options, defaultOptions, defaultPreset}`
-  （进程级：全部预设 / 可作新会话缺省的子集 / 当前缺省）。会话内当前预设走
-  `session/projections.permissions.currentValue`，不在此读面。新会话缺省由
-  `permission-presets` 命名空间的 `defaultPreset` 字段决定（组合条目必须透传该键，
-  否则写入持久化却不生效）。
+ （进程级：全部预设 / 可作新会话缺省的子集 / 当前缺省）。会话内当前预设走
+ `session/projections.permissions.currentValue`，不在此读面。新会话缺省由
+ `permission-presets` 命名空间的 `defaultPreset` 字段决定（组合条目必须透传该键，
+ 否则写入持久化却不生效）。
 
 ### 4.15 `pluginInventory` / `pluginManager` / `pluginMarket` / `pluginRegistryProbe`
 
@@ -660,17 +660,17 @@ Host 插件管理面（上游 `packages/host/plugin-inventory` + `packages/boot/
 `gateway/invocation-unavailable`。
 
 - `pluginInventory/list`（`{args:{}}`）→ Loader 条目数组 `{entryId, moduleName, enabled,
-  fiberPhase}`；`PluginManager` 在场时附加 `managementAvailable: true`。
+ fiberPhase}`；`PluginManager` 在场时附加 `managementAvailable: true`。
 - `pluginManager/listPlugins`（`{args:{}}`）→ 组合行 `{id, name?, enabled, patchId?,
-  readOnlyReason?}`。
+ readOnlyReason?}`。
 - `pluginManager/setPluginEnabled`（`args:{id, enabled}`）→ 写 profile `cordis.patch.yml`
-  并 reconcile；失败回滚；成功 emit `plugin-manager/changed`。
+ 并 reconcile；失败回滚；成功 emit `plugin-manager/changed`。
 - `pluginMarket/listIndexes` / `setIndexes`（`urls` 字符串数组，绝对 http(s) URL）→ 持久化
-  用户索引列表；非法 URL → `plugin-market/invalid-index-url`。
+ 用户索引列表；非法 URL → `plugin-market/invalid-index-url`。
 - `pluginMarket/search`（`{url, query?, limit?}`）→ `{url, plugins:[...]}`；索引抓取失败 →
-  `plugin-market/index-fetch-failed` 等 `MarketFault.code`。
+ `plugin-market/index-fetch-failed` 等 `MarketFault.code`。
 - `pluginMarket/readEntryDetail`（`{url, name}`）→ 单条插件元数据（含 install 形状；Python
-  模块安装为 `source.type: python` 扩展）。
+ 模块安装为 `source.type: python` 扩展）。
 - `pluginRegistryProbe/fastest`（`{args:{urls}}`）→ `{url, latencyMs}` 或探测失败码。
 - 前端：`webui` 设置与插件相关面板经 `wire` 调用上述端点；npm 安装子进程不在 mini 载体。
 
@@ -692,9 +692,9 @@ outcome 三型：
 
 结算语义（同 `receiveRemoteEventResult`）：`result` → 终局（首个投出者唯一放行）；`next` →
 该客户端让位、全部客户端耗尽 → `'next'`；`rejected` → `'rejected'`；**已结算/被取代的 eventId
-幂等 no-op**；注册表 `dispose()` 时全量 pending 折 `'cancelled'`。
+幂等 no-op**；注册表 `dispose` 时全量 pending 折 `'cancelled'`。
 
-## 6. 审批桥（`tools/ask` ↔ `approval/request` waterfall，`web/approvals.py`）
+## 6. 审批桥（`tools/ask` ↔ `approval/request` waterfall，`web/approvals.py`） {#wire-6}
 
 接线（教学简化）：工具管线 `tools/ask` 闸门 → 落审计事件 `approval/asked` → 以
 `approval/request` waterfall 投递给所有 `$events` 客户端 → 浏览器经 `$events/result` 结算 →
@@ -707,7 +707,7 @@ outcome 归一（`APPROVAL_OUTCOMES = {allowed-once, rejected, cancelled, unavai
 | `result` 且 value ∈ APPROVAL_OUTCOMES | 原样 |
 | `result` 但值非法 | `unavailable`（fail-closed，不放行） |
 | `rejected` | `unavailable`（fail-closed） |
-| `next` | 委托 `nxt()`（无其它 answerer 时终值） |
+| `next` | 委托 `nxt`（无其它 answerer 时终值） |
 | `cancelled` | `cancelled` |
 
 前端应答 value 取 `{"kind":"allowed-once"|"rejected", "sessionId"?, "approvalId"?}`。
@@ -719,8 +719,8 @@ id → `$events` waterfall → 浏览器经 `$events/result` 结算。
 
 | 汇合 | 结果 |
 |---|---|
-| `result` | 原样 `{answers:[...]}` 回给 `ask()` |
-| `next` | 委托 `nxt()`（链尾无应答者则 `NO_PROVIDER`） |
+| `result` | 原样 `{answers:[...]}` 回给 `ask` |
+| `next` | 委托 `nxt`（链尾无应答者则 `NO_PROVIDER`） |
 | `rejected` 带 UserQuestionError 形状 | 还原为域错误 |
 | `rejected` 无 `code` | `RuntimeError`（消息透传） |
 | `cancelled` / dispose | `ASK_ABORTED` |
@@ -737,20 +737,20 @@ id → `$events` waterfall → 浏览器经 `$events/result` 结算。
 ## 7. SPA 静态承载（`web/frontend.py`）
 
 - `DIST_ROOT` 默认 `web/static/`（教学参照），经 **`MINIHARNESS_WEBUI_DIST`** env 可指向产品化
-  前端构建产物（`webui/dist/`）；`serve_static` 约定不变。
+ 前端构建产物（`webui/dist/`）；`serve_static` 约定不变。
 - 只服务 `GET`/`HEAD`，其它方法 405；非 `/api/` 前缀。
 - 约定（同 `packages/host/frontend-static`）：目录遍历出根 → 403；未命中 → 回退 `index`
-  200（SPA 客户端路由）；MIME 按扩展（未知 → `application/octet-stream`）；index taps 恒
-  identity（不注入，mini 无 boot-manifest）。
+ 200（SPA 客户端路由）；MIME 按扩展（未知 → `application/octet-stream`）；index taps 恒
+ identity（不注入，mini 无 boot-manifest）。
 
 ## 8. 会话导出（`GET /api/session.export`，`web/downloads.py`）
 
 - query：`sessionId`（必须）、`includeDescendants`（`true`/`false`/缺省，其余 400）。
 - 状态码链：200 / 400 / 404（缺根）/ 501（后端不支持）/ 500；响应头
-  `Content-Disposition: attachment; filename="dsh-session-<safe>.zip"`。
+ `Content-Disposition: attachment; filename="dsh-session-<safe>.zip"`。
 - zip 条目序：根制品以**逐字原始文件名**入档（`session.v4.jsonl[.zstd]`，generation 版本化
-  文件名，压缩 0/none 时为 `session.jsonl`）→ 后代 `subagents/<safe-id>/<同名制品>`
-  （parentSession BFS + seen-set 去重）→ 媒体 `media/<attachmentId>.<ext>`；压缩等级 0-9。
+ 文件名，压缩 0/none 时为 `session.jsonl`）→ 后代 `subagents/<safe-id>/<同名制品>`
+ （parentSession BFS + seen-set 去重）→ 媒体 `media/<attachmentId>.<ext>`；压缩等级 0-9。
 - 错误正文统一私有外壳（`session log export failed to prepare the stored artifact`），不泄路径细节。
 
 ## 9. 文件展示（`GET`/`HEAD /api/file`，`web/media.py`）
@@ -759,15 +759,15 @@ id → `$events` waterfall → 浏览器经 `$events/result` 结算。
 提供执行世界路径与访问策略，`ctx.attachments.image_limits.maxImageBytes` 提供字节上限。
 
 - query：`path` 必须非空且为宿主绝对路径；缺失/空 → 400 `missing path`，
-  含 NUL 或相对路径 → 400 `absolute path required`。
+ 含 NUL 或相对路径 → 400 `absolute path required`。
 - `GET`：经 `fs.resolve` + `fs.read_bytes(path, maxBytes)` 返回原始字节；`HEAD`：
-  只做 `stat`，`file` 之外（目录等）→ 403 `not a regular file`。
+ 只做 `stat`，`file` 之外（目录等）→ 403 `not a regular file`。
 - 成功头：`Content-Type`（按路径 MIME，未知 `application/octet-stream`）、`Content-Length`、
-  `Cache-Control: private, no-store`、`X-Content-Type-Options: nosniff`、
-  `Content-Security-Policy: sandbox; default-src 'none'`。
+ `Cache-Control: private, no-store`、`X-Content-Type-Options: nosniff`、
+ `Content-Security-Policy: sandbox; default-src 'none'`。
 - `FsError` 映射：`FS_NOT_FOUND` 404、`FS_NOT_REGULAR_FILE`/`FS_PERMISSION_DENIED`/
-  `FS_SANDBOX_DENIED` 403、`FS_TOO_LARGE` 413、`FS_ABORTED` 499，其余 500；错误体
-  为错误码文本（`HEAD` 无体）。
+ `FS_SANDBOX_DENIED` 403、`FS_TOO_LARGE` 413、`FS_ABORTED` 499，其余 500；错误体
+ 为错误码文本（`HEAD` 无体）。
 - 前端只拼 `/api/file?path=`（有 token 时追加 `&token=`），不解析 Python 内部。
 
 ## 10. 错误语义
@@ -777,6 +777,16 @@ id → `$events` waterfall → 浏览器经 `$events/result` 结算。
 3. 流内错误 = `error` 帧（单流隔离），不关 WS；`close` 码只留给协议/形状/危险级错误。
 4. 审批 fail-closed：非 APPROVAL_OUTCOMES 合法值一律 `unavailable`，绝不误放行。
 5. 事件 `seq` 严格递增、0 基（`seq == 追加前日志长度`）；未知事件类型持久化读路径 fail-closed（除非带 `ignorable: true` 豁免放行），不做静默吞掉。
+
+### 10.1 网关与远程访问（声明码）
+
+下列码在 `miniharness/web/envelope.py` 的 `RPC_ERROR_CODES` 中登记，供与上游 gateway 对齐的 fail-closed 响应；mini 默认组合未必产生每一码，但客户端与测试须识别（见 `tests/test_web_envelope.py`）。导读：[wire-tour.md](guides/wire-tour.md)。
+
+| 码 | 含义 |
+|---|---|
+| `gateway/interactions-forbidden` | 当前 peer 或会话状态不允许该交互（例如 disposed 后仍发起需 live agent 的调用）。 |
+| `gateway/peer-disposed` | mux 对端或宿主已 dispose，挂起流与 RPC 按 fail-closed 结束。 |
+| `remote-access/denied` | 远程访问策略拒绝（token / 绑定 / 命名空间门控）。 |
 
 ## 11. 与前端实现的映射
 
@@ -788,8 +798,8 @@ id → `$events` waterfall → 浏览器经 `$events/result` 结算。
 | `mux.ts` | §4 客户端 open/item/end/cancel 帧（`StreamHandle.send`/`endUplink`/`close`/`next`）+ item/end/error 消费（流队列 + waiter；断连即 `failAll` 终结本连接全部流） |
 | `json-value.ts` | §4 上行项无损 JSON 校验（`isRemoteUplinkItem`，同上游 typert `isRemoteUplinkItem`） |
 | `events.ts` | §4.3 `$events` ready/emit/waterfall/cancel + §5 结算（settled 集合 fail-closed） |
-| `follow.ts` | §4.1 snapshot/event 帧 + seq 去重（`TrajectoryBuffer`；`pushHistory`/`pushLive` 分离历史快照与实时追加，`liveEvents()` 供帧级额度提示） |
-| `control.ts` | §4.2 的 baseline/projection 帧——`applyControlFrame` 折叠成逐会话投影 map（baseline 全量替换 / projection 逐键替换），队列经 `inboxQueue()` 从 `inbox` 投影展开（next-turn + next-step） |
+| `follow.ts` | §4.1 snapshot/event 帧 + seq 去重（`TrajectoryBuffer`；`pushHistory`/`pushLive` 分离历史快照与实时追加，`liveEvents` 供帧级额度提示） |
+| `control.ts` | §4.2 的 baseline/projection 帧——`applyControlFrame` 折叠成逐会话投影 map（baseline 全量替换 / projection 逐键替换），队列经 `inboxQueue` 从 `inbox` 投影展开（next-turn + next-step） |
 | `jobs.ts` | §4.7 `job/list` roster 流（`{type:'rows', jobs:[JobView]}` 整集替换）+ `JobView` 形状（`isJobListFrame`）+ `job/kill` 辅助（`isJobKillable`、`jobKillArgs`） |
 | `schedule.ts` | §4.9 `schedule/list|delete`（`ScheduleRecord` 解析/排序/展示、`loadSessionSchedules`、`deleteSessionSchedule`；`schedule/changed` 由 `useSchedules` 订阅重读） |
 | `session-roster.ts` | §4.3 `api-session/*` 补丁 + `session/list` 行解析（`upsertSessionSummary`、`childSessionsOf`、`parentSessionOf`） |

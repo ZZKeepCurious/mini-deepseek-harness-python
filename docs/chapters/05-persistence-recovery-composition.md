@@ -4,6 +4,10 @@
 >（`docs/subsystems/persistence.md`、`docs/subsystems/session-projection.md`）
 > 前置：第 1~4 章。产出文件：`miniharness/core/session/persistence.py`、`miniharness/boot/boot.py`、`example_plugins.py` + `tests/test_persistence_boot.py`
 
+## 在 system-map 中的位置
+
+本章对应 [system-map Fig S1](../system-map.md#fig-s1) 的 **05 Persistence_boot**（Kernel；体裁：**实现**）。磁盘真相源走查：[T2 持久化](../guides/traces/persistence-kill-resume.md)。主验收：`tests/test_persistence_boot.py`。
+
 ## 5.1 这一章要做什么
 
 前四章的 `Session` 都在内存里，进程一退什么都没了。这一章解决两件事：
@@ -301,6 +305,8 @@ python -m unittest tests.test_persistence_boot -v
 - **JSONL 载体与上游默认形态一致**：zstd 拼接帧容器 + 一行一事件（V4 事件格式：模型流内嵌 `assistant/message`、tool 角色平铺结果、`developer/message`）+ format.ts 目录布局 `root/--<projectKey(cwd)>--/<encodeSegment(id)>/session.v4.jsonl[.zstd]`；generation 版本化文件名，v0 旧名 `session.jsonl` 保留拒读，编码互斥、遗留布局直接拒绝；帧容器见 `zstd_frames.py` 与 `tests/test_persistence_zstd.py`。
 - **组合装载**：本章 `boot()` 是静态数组形态（`json.load` + 逐条 `root.plugin()` + `_drain`）；仓库是 Loader 活树 + 根 Include 条目（`miniharness/loader/`），经 `mount_root_include` 装载，补丁展开由 `loader.patch.apply_entry_patches` 承担，启动三态审计。完整语义见第 08 章 §8.3.1 与 `docs/architecture.md` §2 的 `loader/` 行。
 - **崩溃演示**：`python -m miniharness.demo` 以"手动构造未闭合回合"（只写 `turn/start` 不写 `turn/end`）模拟崩溃尾部，不是真实 kill 进程。
+
+打开 `packages/session/session-persistence-jsonl` 与 `packages/boot` 启动组合：对照 JSONL 目录布局、generation 迁移链与 `boot()` 激活顺序。mini 走查：[T2 持久化](../guides/traces/persistence-kill-resume.md)；测试 `tests/test_persistence_boot.py`。
 
 ## 5.9 收尾
 

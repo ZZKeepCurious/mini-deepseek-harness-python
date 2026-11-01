@@ -2,7 +2,7 @@
 
 <p class="lead">分阶段学习路线、概念映射表与迷你复现项目清单——把报告里的理解落到可运行的 Python 与测试上。</p>
 
-## 6. 从 0 到掌握的完整路线图
+## 6. 从 0 到掌握的完整路线图 {#roadmap-6}
 
 下面把学习分为六个阶段。每一阶段都给出：目标、必读文档、必做练习、验收标准。建议用**笔记 + 一个"复现仓库"**贯穿始终（见第 7 章）。
 
@@ -18,6 +18,19 @@
 
 !!! success "学习顺序建议"
     不要一上来读所有子系统页。按 **P1 → P3 → P4 → P5 → P2 → P6** 的顺序最有收益：先懂循环与日志，再懂框架，再动手跑。能力扩展口逐个横向扫读放在 P6 之后。
+
+### Mini P0～P5（本仓库 Python 路线）
+
+与上表并列：只读 mini 时按下列阶段推进；模块总图与章节验收见 [system-map.md](../system-map.md)，走读/复现模式见 [learning-paths.md](../guides/learning-paths.md)。
+
+| 阶段 | 目标 | 必读 | 必做 | 验收 |
+|---|---|---|---|---|
+| **Mini P0** | 环境与主链直觉 | [index.md](../index.md) · [system-map.md](../system-map.md) · [00-setup](../chapters/00-setup.md) | `python -m unittest discover -s tests -t .`；`python -m miniharness.demo` | 能指认 Session / Context / loop / web 在 Fig S1 中的位置 |
+| **Mini P1** | 事件日志 + 总线 | 章节 01～02 | 读 `core/session/`、`core/scope.py`；做 02 章 pre-execute 练习 | `tests/test_session.py` · `tests/test_bus.py` |
+| **Mini P2** | 工具 + 回合 | 章节 03～04 · [report/03 §5.1](03-flows.md#flows-51) | 跑 `tests/test_loop.py`；可选 `examples/real_api_demo.py` | 能口述 turn/step 与 reject 留痕 |
+| **Mini P3** | 持久化 + 启动 | 章节 05 · [T2 走查](../guides/traces/persistence-kill-resume.md) | `tests/test_persistence_boot.py` | kill 后会话可 repair / 继续 |
+| **Mini P4** | 产品表面 | 章节 07 · [wire-tour](../guides/wire-tour.md) | `tests/test_web_server.py` 子集；`--profile web` | unary + mux 三泳道能对应模块 |
+| **Mini P5** | 扩展与组合 | 06 / 08 / 09 按需 · [learning-paths 目标表](../guides/learning-paths.md) | Capstone 一项 + 对应单测 | 换 Provider 或 preset 行为可观测 |
 
 ## 7. 用 Python 深刻掌握与复现技术核心
 
@@ -45,7 +58,7 @@
 | 工具 schema DSL + JSON Schema 子集 | `jsonschema` 库 + 自写参数/输出校验器 | 输出必须有 canonical schema；参数先物化再冻结 |
 | turn/step 状态机（agent-loop） | `asyncio.Task` 状态机（idle/running） | turn 打开于认领前；"零 step turn"也须持久化 |
 | 流式 StreamChunk 协议 | dataclass + `AsyncIterator[StreamChunk]` | usage 在 finish 前；tool 参数保持原始 JSON 字符串 |
-| 作用域化注册（per-agent ctx） | 每 agent 一个注册表实例，父子链式查找（继承/遮蔽） | 作用域注册卸载即回滚；restrict 过滤继承工具 |
+| 作用域化注册（per-agent ctx） | 每 agent 一个注册表实例，父子链式查找（继承/遮蔽） | 作用域注册随 fiber 卸载而撤销；restrict 过滤继承工具 |
 | JSONL 持久化 + 崩溃恢复 | **zstd 拼接帧容器** + 一行一事件 + generation 文件名 `session.v4.jsonl[.zstd]`（`compression='none'` 退回明文 `.jsonl`）；启动回放时合成 `interrupted` turn（`commit_repair` 追加 closers），torn 尾部读路径截断；released 旧格式经相邻迁移链（v0→v1→v2→v3→v4）读入 | seq 连续；未知事件类型拒绝加载（fail-closed，`ignorable: true` 豁免放行）；`SESSION_FORMAT_VERSION = 4` 双向拒读 |
 | 组合层（bundle / patch） | YAML 配置 + 按 id 的整段覆盖 + insert 列表 | 补丁算法单一实现，导出纯函数，禁止复制粘贴 |
 | DeepSeek Files API 执行簇（图像输入请求路由） | `httpx` 异步 + `deepseek_files/` 十二模块 + `ImageRequestTarget`（request-image v6） | 路由目标（token 网格 / 像素预算 + 4096 单边封顶）→ 定价 → file-id 上传/复用（durable `files-v3.json` 索引 + filelock 30s + os.replace 原子发布）→ 含图请求 image-capable 路径：file-id 优先 → base64 回退 → stale-id 有界重试；wire 为 Anthropic 兼容 Messages（Chat Completions 已上游删除） |

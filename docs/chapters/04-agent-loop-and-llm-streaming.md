@@ -4,6 +4,10 @@
 > （`docs/agent-lifecycle.md`、`docs/subsystems/llm-streaming.md`）
 > 前置：第 1~3 章。本章产出：`miniharness/llm/`、`miniharness/core/agent_loop/`；测试 `tests/test_loop.py`
 
+## 在 system-map 中的位置
+
+本章对应 [system-map Fig S1](../system-map.md#fig-s1) 的 **04 AgentLoop_LLM**（Kernel；体裁：**实现**）。Turn/Step 详图：[Fig S3](../system-map.md#fig-s3) · [report/03 §5.1](../report/03-flows.md#flows-51)。主验收：`tests/test_loop.py`。
+
 ## 4.1 这一章要做什么
 
 前三章备好了三样东西：一条事件日志（第 1 章）、一个插件底座（第 2 章）、一条工具管线（第 3 章）。这一章把它们串起来，让一个对话回合真正跑完：
@@ -12,6 +16,15 @@
 2. **`loop.py`** —— turn/step 状态机：输入排队、pre-step 拒绝、工具结果回灌后续步、turn 括号闭合。
 
 用内置的 `FakeLlmAdapter` 不需要 API key 就能跑通"文本 + 工具调用"的完整回合，测试和 demo 都靠它。
+
+章内 **`llm.py` / `loop.py`** 是教学简称，仓库路径如下：
+
+| 章内简称 | 仓库主路径 |
+|---|---|
+| `llm.py`（流协议与适配器） | `miniharness/llm/protocol.py`、`deepseek.py`、`fake.py` 等 |
+| `loop.py`（turn/step 泵） | `miniharness/core/agent_loop/agent.py` |
+| 常驻循环驱动 | `miniharness/core/agent_loop/resident_loop.py` |
+| 并行 tool 调度 | `miniharness/core/agent_loop/tool_calls.py` |
 
 ## 4.2 概念：turn、step 与"落日志"
 
@@ -398,6 +411,24 @@ print([e["type"] for e in session.events])
 ## 4.9 重试/退避与上下文溢出降级
 
 对应 dsh：`packages/llm/llm/src/retry-policy.ts` + `packages/llm/llm-retry/src/index.ts` + `packages/core/agent/src/runtime-types.ts`（`agent/request-error`）。
+
+```mermaid
+sequenceDiagram
+  participant Loop as agent_loop
+  participant Retry as llm_retry_planner
+  participant Compact as compaction_engine
+  participant LLM as adapter
+  Loop->>LLM: stream request
+  LLM-->>Loop: LlmFailure
+  Loop->>Loop: agent/request-error waterfall
+  alt code in retry whitelist
+    Retry-->>Loop: kind retry same step
+  else CONTEXT_WINDOW_EXCEEDED
+    Compact-->>Loop: surface replace ok then retry
+  else no handler
+    Loop->>Loop: turn/end error
+  end
+```
 
 扩展点：适配器抛 `LlmFailure` 时，循环派发 `agent/request-error` waterfall，payload `{agent, turn, step, provider, failure, retryPolicy, signal}`（与上游逐字段一致）。监听器返回 `{kind: 'retry'}` 且不调 `next()` 表示自己接管恢复；调 `next()` 委派下游；既不接管也没下游处理，则失败终局。重试规划器由装配方显式挂载（`AgentLoop` 构造本身不带副作用）：各入口在构造 loop 前调用 `apply_retry_planner(ctx)`（幂等）。
 

@@ -11,7 +11,15 @@
 
 复现的目标是掌握约定，不逐行移植 TypeScript：
 
-| 保留（技术核心本身） | 跳过（非核心） |
+| 术语 | 含义 |
+|---|---|
+| **durable** | 事件已 append 进 Session 日志；模型可见历史由此投影，不另存副本 |
+| **turn / step** | turn 是一次对话回合括号；step 是 turn 内一次模型请求（可含工具链） |
+| **waterfall** | 插件链式决策：调用 `next()` 才继续下游；可短路 |
+| **wire** | `web/` 与 `webui/` 之间的 HTTP/WS 与 Remote 帧约定（见 interface-wire） |
+| **体裁** | 章节表列：**实现**（跟做内核）、**解读**（对照成品与上游）、**对照**（测与源码对齐） |
+
+| 保留（技术 core） | 跳过（非核心） |
 |---|---|
 | 事件溯源会话 + `deriveMessages` 投影 | 声明合并（`declare module`） |
 | 插件可逆副作用 + waterfall 短路 | 双面打包 / 生成器门禁 |
@@ -21,27 +29,9 @@
 
 ## 运行时总览
 
-`boot` / `loader` 把 YAML 组合装成插件树；会话只追加事件；投影（如 `derive_messages`）从日志算出模型可见历史；Agent 在 turn/step 里调模型与工具，模型可见事实写回同一条日志。浏览器或自动化走 `web/` 的 wire，`webui/` 只依赖这份约定。
+`boot` / `loader` 装组合 → Session 只追加事件 → 投影与 Agent loop 读写同一条日志 → `web/` 发布 wire、`webui/` 只消费约定。功能模块如何挂在同一运行时上（Fig S1～S6、章节验收表）见 **[system-map.md](system-map.md)**；走读或空白复现见 **[guides/learning-paths.md](guides/learning-paths.md)**。
 
-```mermaid
-flowchart TB
-  Boot["boot / loader&lt;br/&gt;YAML 组合 → 插件树"]
-  Log["Session 追加式事件日志"]
-  Proj["derive_messages 等投影"]
-  Loop["Agent loop&lt;br/&gt;turn / step"]
-  Tools["Tools 管线"]
-  Web["miniharness/web&lt;br/&gt;unary + WS mux"]
-  UI["webui/&lt;br/&gt;只依赖 wire"]
-
-  Boot --> Log
-  Log --> Proj --> Loop --> Tools
-  Tools --> Log
-  Loop --> Log
-  Web --> Log
-  UI --> Web
-```
-
-L0–L3 依赖栈、core / web / webui 边界与目录映射见 [architecture.md](architecture.md) §1.0 与 §3。
+L0–L3 与 core / web / webui 边界见 [architecture.md](architecture.md) 第 3 节（Fig S2 摘要见 system-map）。
 
 ## 架构与 wire
 
@@ -64,45 +54,28 @@ L0–L3 依赖栈、core / web / webui 边界与目录映射见 [architecture.md
 
 ### 章节顺序
 
-```mermaid
-flowchart LR
-  A["00 环境准备"] --> B["01 事件溯源会话&lt;br/&gt;（整个框架的地基）"]
-  B --> C["02 插件上下文 + 事件总线"]
-  C --> D["03 工具执行管线"]
-  D --> E["04 Agent Loop + LLM 流式"]
-  E --> F["05 持久化 + 崩溃恢复 + 组合"]
-  F --> G["06 进阶扩展口（选做）"]
-  F --> H["07 外部入口：表面 + 协议（选做）"]
-  H --> I["08 组合层深读（vendor/cordis loader + 配置树 + preset）"]
-  H --> J["09 Agent 干预面（steer/cancel/approval/quiescence）"]
-  H --> K["10 轨迹投影引擎（Trajectory 折叠）"]
-  H --> L["11 运行时自我修改（动态插件）"]
-  H --> M["12 异步化与并行工具"]
-  H --> N["13 Cordis 进阶：Service 基类与 intercept"]
-  H --> O["14 dsh_scope 载波派发模型"]
-  H --> P["15 schemastery 配置引擎"]
-```
+依赖与 Capstone 见 [system-map Fig S6](system-map.md#fig-s6)。
 
-### 章节表
+### 章节表 {#chapter-table}
 
-| 章节 | 内容 | 对应 dsh 真实源码 | 预计 |
-|---|---|---|---|
-| [00 环境准备](chapters/00-setup.md) | 运行环境、包结构、跑通测试 | — | 1 小时 |
-| [01 事件溯源会话](chapters/01-event-sourced-session.md) | `Session` 追加式日志、seq 连续、deep-freeze、`derive_messages` 投影、崩溃修复 | `packages/core/session` | 2-3 天 |
-| [02 插件上下文 + 事件总线](chapters/02-plugin-context-and-event-bus.md) | `Context` 服务仓库、四种派发（emit/waterfall/parallel/serial）、可逆副作用、作用域、依赖驱动激活 | `vendor/cordis` + `core/scope` | 2 天 |
-| [03 工具执行管线](chapters/03-tool-execution-pipeline.md) | 作用域化注册表、schema 校验、pre/execute/post waterfall、超时、规范化 | `packages/core/tools` | 2 天 |
-| [04 Agent Loop + LLM 流式](chapters/04-agent-loop-and-llm-streaming.md) | turn/step 状态机、inbox、StreamChunk 协议、DeepSeek Messages（Anthropic 兼容）SSE 适配器、模型请求重试/退避（§4.9：retry-policy + llm-retry + agent/request-error） | `core/agent-loop` + `llm/llm` + `llm/llm-deepseek` + `llm/llm-retry` | 3 天 |
-| [05 持久化 + 崩溃恢复 + 组合](chapters/05-persistence-recovery-composition.md) | JSONL 后端（对齐上游）、SQLite 教学扩展、flush 栅栏、fail-closed、interrupted 修复、boot + patch | `session/session-persistence` + `boot` | 2 天 |
-| [06 进阶扩展口](chapters/06-advanced-seams.md) | 沙箱 / 凭据 / 子 agent —— "换 Provider 不改 Consumer"；§6.9 进阶实现（真沙箱后端 / 凭据四层 / 远程三通道） | `capability-seams` 各页 | 2-3 天 |
-| [07 外部入口](chapters/07-external-entry-points.md) | 两个产品表面（web/headless）+ 三个协议入口（ACP/SDK/hooks）、headless 深读与复现、web 传输层复现（§7.5：两信封 RPC + `/api/remote.mux` WebSocket 承载 Remote 流 + `$events`/`$events/result` + follow/control + 审批 waterfall 桥 + 静态服务 + vanilla SPA）、JSON-RPC 信封子集（§7.6）、ACP 最小子集（§7.7）与 hooks 桥（§7.8）复现 | `apps/cli` + `bundle/{headless,web-app}` + `api/gateway` + `api/session-controller` + `host/frontend-static` + `{acp,sdk,hooks}` | 2-3 天 |
-| [08 组合层深读](chapters/08-composition-layer.md) | vendor/cordis loader、host/agent plane、isolate realm、配置树三层归属、preset 四模式；mini：loader 活树（`miniharness/loader/`）+ preset roster + 挂载视图 | `vendor/{cordis,loader,include}` + `packages/preset` + `apps/cli/config/agent-presets` | 3-4 天 |
-| [09 Agent 干预面](chapters/09-agent-intervention.md) | steer/inject/cancel/whenIdle/runMaintenance、pre-step/request 瀑布、quiescence 语义、审批能力 seam（ask/never + 审计对）；mini：loop 干预面五方法 + approval.py | `core/agent` + `core/agent-loop` + `interaction/user-approval` | 2-3 天 |
-| [10 轨迹投影引擎](chapters/10-trajectory-projection.md) | 折叠定义 → TrajectorySnapshot，Python 复现；headless summarize 的演进 | `packages/client/ui-trajectory` | 2-3 天 |
-| [11 运行时自我修改](chapters/11-runtime-self-modification.md) | extensions 七工具、进程内存动态插件生命周期（define/run/stop） | `packages/extensions/*` | 2 天 |
-| [12 异步化与并行工具](chapters/12-async-parallel-tools.md) | asyncio 事件总线、并行调度器（屏障/滚动池/模型序提交/取消排干）、`is_concurrency_safe` 分类 | `core/agent-loop` 并行编排 + `core/context` 并发模型 | 2-3 天 |
-| [13 Cordis 进阶：Service 基类与 intercept](chapters/13-cordis-service-interceptor-logger.md) | `Service` 基类（构造即登记 / 可调用 `_invoke` / `_check` / `_init`）、`_resolve_config` 沿 intercept 链合并、`LoggerService` 内置日志（exporter / 绑定视图）、`extend`/`isolate`/`intercept` 三兄弟 | `vendor/cordis/src/service.ts` + `context.ts` + `logger.ts` | 2 天 |
-| [14 dsh_scope 载波派发模型](chapters/14-dsh-scope-carrier.md) | `ScopeKey` 身份键、`scopeParents` 关系（注册向下 / 事件向上）、`scopeTarget` 载波、`ScopedLayers`/`NamedEntries`/`AnonymousEntries` 注册表存储 | `packages/core/scope/src/index.ts` + `store.ts` | 1-2 天 |
-| [15 schemastery 配置引擎](chapters/15-schemastery.md) | `Schema` 可调用节点 + `resolve` 分发（17 类 resolver）、meta 克隆语义、`ValidationError` 的 `$path` 前缀、`toJSON`/`toString`/i18n/simplify、`~standard` 协议面 | `vendor/schemastery/src/index.ts` | 2 天 |
+| 章 | 模块边界 | 体裁 | 主验收 | 内容摘要 | 上游（入口） |
+|---|---|---|---|---|---|
+| [00](chapters/00-setup.md) | 环境与纪律 | 准备 | 全量 unittest + demo | 包结构、变量、简化立场 | — |
+| [01](chapters/01-event-sourced-session.md) | Session 日志与投影 | 实现 | `test_session.py` | append、derive_messages、repair | `packages/core/session` |
+| [02](chapters/02-plugin-context-and-event-bus.md) | Context / 总线 | 实现 | `test_bus.py` | 四种派发、scope、可逆副作用 | `vendor/cordis` |
+| [03](chapters/03-tool-execution-pipeline.md) | 工具管线 | 实现 | `test_tools.py` | pre/execute/post、schema | `packages/core/tools` |
+| [04](chapters/04-agent-loop-and-llm-streaming.md) | Loop + LLM | 实现 | `test_loop.py` | turn/step、SSE、§4.9 重试 | `core/agent-loop` |
+| [05](chapters/05-persistence-recovery-composition.md) | 持久化 + boot | 实现 | `test_persistence_boot.py` | JSONL、boot、patch | `session-persistence` |
+| [06](chapters/06-advanced-seams.md) | 能力扩展口 | 实现+延伸 | `test_seams.py` | 沙箱 / 凭据 / 子 agent | capability-seams |
+| [07](chapters/07-external-entry-points.md) | 入口 + web + 协议（多页） | 解读 | `test_web_*.py` | headless、gateway 形态 wire | `api/gateway` 等 |
+| [08](chapters/08-composition-layer.md) | loader + preset | 解读 | `test_composition.py` | EntryTree、roster | `vendor/loader` |
+| [09](chapters/09-agent-intervention.md) | 干预 + 审批 | 对照 | loop + `tests/test_web_approvals.py` 等 | steer、cancel、ask | `interaction/user-approval` |
+| [10](chapters/10-trajectory-projection.md) | Trajectory 折叠 | 实现 | `tests/test_trajectory.py` | fold_trajectory | `ui-trajectory` |
+| [11](chapters/11-runtime-self-modification.md) | 动态插件 | 边界 | `tests/test_dynamic.py` | define/run 生命周期 | `packages/extensions` |
+| [12](chapters/12-async-parallel-tools.md) | 并行工具 | 对照 | `tests/test_loop.py`、tool_calls 相关 | async 派发、屏障 | `core/agent-loop` |
+| [13](chapters/13-cordis-service-interceptor-logger.md) | Service / intercept | 实现 | `tests/test_bus.py` | LoggerService | `vendor/cordis` |
+| [14](chapters/14-dsh-scope-carrier.md) | dsh_scope 载波 | 实现 | scope 相关单测 | scopeTarget 载波 | `core/scope` |
+| [15](chapters/15-schemastery.md) | schemastery | 实现 | `tests/test_schema_full.py` | resolve / ValidationError | `vendor/schemastery` |
 
 ## 快速开始
 
@@ -120,10 +93,11 @@ python -m miniharness.demo
 
 ## 手册与报告的关系
 
-- **报告**（Markdown 体系，站点已统一为 MkDocs）回答"系统长什么样、为什么这样设计"：分层架构、ctx 服务地图、技术核心、关键流程、**产品面十大议题**（模式/preset、外部入口、Trajectory、干预面、审批、自我修改、resume、plan/goal、压缩与后台、skills）——全部配 Mermaid 图，按主题分页。
-- **本手册**回答"系统怎么从零长出来"：一章一个主题，代码逐步构建，测试即硬性规定。
-- 报告 [index.md](report/index.md) 的四维对照表用来在包、mini 模块、手册章与报告页之间跳转。
-- 报告 [05-roadmap.md](report/05-roadmap.md) §7.3 的复现项目清单与手册 01~05 章骨架对应。
+- **[system-map.md](system-map.md)**：功能模块在整体架构中的位置（Fig S1～S6）与章节验收表。
+- **[guides/learning-paths.md](guides/learning-paths.md)**：走读对照 / 空白复现、按目标选章。
+- **报告**回答上游「是什么、为什么」；**章节**在共享内核上逐块走读或复现（实现章 vs 解读章见上表「体裁」列）。
+- 上游包 ↔ mini 模块 ↔ **手册章号** ↔ 报告页：以 [architecture.md §2](architecture.md#sec-2) 映射表为行级单源；[report/index.md](report/index.md) 四维表作跳转索引。
+- 复现清单：[report/05-roadmap.md](report/05-roadmap.md) §7.3 与 01～05 章；Mini 分阶段路线见同页 Mini P0～P5。
 
 ## 学完你能做到什么
 

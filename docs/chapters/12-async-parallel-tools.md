@@ -2,6 +2,10 @@
 
 > 对应 dsh 真实源码：`packages/core/agent-loop/src/tool-calls.ts`（并行调度器）+ `packages/core/tools/src/index.ts`（`executionMode` 分类器）+ `vendor/cordis`（Context 的异步派发）。上游从内到外都是 async（Node 事件循环），mini 前 11 章是同步近似。本章实现 asyncio 化的事件总线、并行工具调度与取消排干。
 
+## 在 system-map 中的位置
+
+本章对应 [system-map Fig S1](../system-map.md#fig-s1) 的 **12 async parallel tools**（体裁：**对照**）。与 [章节 04 §4.8](04-agent-loop-and-llm-streaming.md) 教学 vs 仓库表互证。
+
 ## 12.1 这一章要做什么
 
 前 11 章里，工具是**串行**执行的：模型一次产出多个 tool-call，mini 逐个 `_run_tool`。上游不是——`dsh-agent-loop` 的 `executeToolCalls` 是真正的调度器：可以并发、有上限、可以取消、按模型序提交。差别很直观：一个"读三个文件"的回合，上游三个工具同时在跑，mini 逐个跑。
@@ -16,35 +20,35 @@
 
 ```mermaid
 flowchart TD
-  Calls["模型产出的 tool-call 列表"]
-  Bar["exclusive 屏障"]
-  Pool["parallel 滚动池&lt;br/&gt;有界并发"]
-  Ord["按模型序提交结果"]
-  Calls --> Bar --> Pool --> Ord
+ Calls["模型产出的 tool-call 列表"]
+ Bar["exclusive 屏障"]
+ Pool["parallel 滚动池&lt;br/&gt;有界并发"]
+ Ord["按模型序提交结果"]
+ Calls --> Bar --> Pool --> Ord
 ```
 
 ### 执行模式（`execution_mode`）
 
-上游 `packages/core/tools/src/index.ts:1311-1319`：
+上游 `packages/core/tools/src/index.ts`：
 
 ```ts
 executionMode(exec: ToolExecutionInput): ToolExecutionMode {
-  const tool = this.resolveExecution(exec.name, exec.agent, exec.parent !== undefined)
-  if (!tool?.isConcurrencySafe) return { kind: 'exclusive' }
-  try {
-    const concurrencySafe: unknown = tool.isConcurrencySafe(exec.arguments)
-    return concurrencySafe === true ? { kind: 'parallel' } : { kind: 'exclusive' }
-  } catch {
-    return { kind: 'exclusive' }
-  }
+ const tool = this.resolveExecution(exec.name, exec.agent, exec.parent !== undefined)
+ if (!tool?.isConcurrencySafe) return { kind: 'exclusive' }
+ try {
+ const concurrencySafe: unknown = tool.isConcurrencySafe(exec.arguments)
+ return concurrencySafe === true ? { kind: 'parallel' } : { kind: 'exclusive' }
+ } catch {
+ return { kind: 'exclusive' }
+ }
 }
 ```
 
-（关键在 `try/catch`，位于 `index.ts:1314-1318`：分类器抛错同样 fail 到 exclusive。）
+（关键在 `try/catch`，位于 `index.ts`：分类器抛错同样 fail 到 exclusive。）
 
 - `isConcurrencySafe` 是**函数**（按参数判定，比如"读模式可并行、写模式必须独占"）；
 - 未声明 / `false` / **抛错** / **返回非布尔** → `exclusive`（fail 到独占，绝不冒险并行）；
-- 分类器不进模型 schema（`execution-mode.spec.ts:124`：模型看到的定义里没有 `isConcurrencySafe`）。
+- 分类器不进模型 schema（`execution-mode.spec.ts`：模型看到的定义里没有 `isConcurrencySafe`）。
 
 ### 调度器（`tool-calls.ts`）
 
@@ -64,31 +68,31 @@ executionMode(exec: ToolExecutionInput): ToolExecutionMode {
 
 ```python
 async def _maybe_await(value):
-    while inspect.iscoroutine(value) or isinstance(value, Awaitable):
-        value = await value
-    return value
+ while inspect.iscoroutine(value) or isinstance(value, Awaitable):
+ value = await value
+ return value
 ```
 
-注意是**循环**而不是单次 `await`：中间件 `return nxt(p)` 会直接返回下一层的 coroutine（不展开），同步中间件包 async 中间件时可能叠两层。单层解包会在"async 中间件 return nxt()"时拿到未 await 的 coroutine 泄漏出去（第 12 章测试 `test_async_middleware_can_await_before_delegating` 固定的就是它）。
+注意是**循环**而不是单次 `await`：中间件 `return nxt(p)` 会直接返回下一层的 coroutine（不展开），同步中间件包 async 中间件时可能叠两层。单层解包会在"async 中间件 return nxt"时拿到未 await 的 coroutine 泄漏出去（第 12 章测试 `test_async_middleware_can_await_before_delegating` 固定的就是它）。
 
 ```python
 async def awaterfall(self, event, payload=None, *, this_arg=None):
-    listeners = self._hooks_for(event, this_arg)
-    idx = 0
-    async def step(cur):
-        nonlocal idx
-        if idx >= len(listeners):
-            return cur
-        fn = listeners[idx]
-        idx += 1
-        result = fn(cur, lambda new=cur: step(new))
-        return await _maybe_await(result)
-    return await step(payload)
+ listeners = self._hooks_for(event, this_arg)
+ idx = 0
+ async def step(cur):
+ nonlocal idx
+ if idx >= len(listeners):
+ return cur
+ fn = listeners[idx]
+ idx += 1
+ result = fn(cur, lambda new=cur: step(new))
+ return await _maybe_await(result)
+ return await step(payload)
 ```
 
-`this_arg` 是派发目标，可以是一个**载波**（scope carrier）——第 14 章的身份路由对象，携带一个 scope 键，把事件只送给该键及其祖先上的监听器。传载波时走根扁平 hook 表 + 载波过滤：全局监听器无条件收到；**打标监听器**（注册时带了载波的监听器）按"载波键或键的祖先"接纳（admit，`_ScopeCarrier.admit` 的判定）。传 `None` 时回退祖先链 `_listeners_for`。完整路由模型见第 14 章（`scope.py:1412-1425` 的 `_hooks_for`、`1466-1487` 的 `awaterfall`）。
+`this_arg` 是派发目标，可以是一个**载波**（scope carrier）——第 14 章的身份路由对象，携带一个 scope 键，把事件只送给该键及其祖先上的监听器。传载波时走根扁平 hook 表 + 载波过滤：全局监听器无条件收到；**打标监听器**（注册时带了载波的监听器）按"载波键或键的祖先"接纳（admit，`_ScopeCarrier.admit` 的判定）。传 `None` 时回退祖先链 `_listeners_for`。完整路由模型见第 14 章（`scope.py` 的 `_hooks_for`、`1466-1487` 的 `awaterfall`）。
 
-短路语义与同步 `waterfall` 完全一致：不调 `next()` 就停在当前中间件。`aparallel` 用 `asyncio.gather` 真并发，结果按注册序。
+短路语义与同步 `waterfall` 完全一致：不调 `next` 就停在当前中间件。`aparallel` 用 `asyncio.gather` 真并发，结果按注册序。
 
 ## 12.4 实现：`core/tools.py`
 
@@ -97,22 +101,22 @@ async def awaterfall(self, event, payload=None, *, this_arg=None):
 ```python
 @dataclass
 class Tool:
-    ...
-    is_concurrency_safe: Callable[[dict], bool] | bool = False
+ ...
+ is_concurrency_safe: Callable[[dict], bool] | bool = False
 
 def execution_mode(tool, args) -> str:
-    if tool is None:
-        return "exclusive"
-    declared = tool.is_concurrency_safe
-    if isinstance(declared, bool):
-        return "parallel" if declared else "exclusive"
-    if callable(declared):
-        try:
-            safe = declared(dict(args))
-        except Exception:
-            return "exclusive"
-        return "parallel" if safe is True else "exclusive"
-    return "exclusive"
+ if tool is None:
+ return "exclusive"
+ declared = tool.is_concurrency_safe
+ if isinstance(declared, bool):
+ return "parallel" if declared else "exclusive"
+ if callable(declared):
+ try:
+ safe = declared(dict(args))
+ except Exception:
+ return "exclusive"
+ return "parallel" if safe is True else "exclusive"
+ return "exclusive"
 ```
 
 bool 兼容保留（旧写法 `is_concurrency_safe=True` 仍工作）；callable 的抛错与非法返回值全部 fail 到 exclusive。
@@ -131,16 +135,16 @@ bool 兼容保留（旧写法 `is_concurrency_safe=True` 仍工作）；callable
 
 ```python
 if tool.timeout_ms:
-    task = asyncio.create_task(_execute_async(tool, frozen_args, exec_))
-    try:
-        raw = await asyncio.wait_for(asyncio.shield(task), tool.timeout_ms / 1000)
-    except asyncio.TimeoutError:
-        exec_.signal.set()
-        try:
-            await task      # 排干：工具观察到 signal 后自行中止
-        except Exception:
-            pass            # timer-wins：工具体的中止错误被下面的超时结果替换
-        return tool_timeout_result(tool.timeout_ms)
+ task = asyncio.create_task(_execute_async(tool, frozen_args, exec_))
+ try:
+ raw = await asyncio.wait_for(asyncio.shield(task), tool.timeout_ms / 1000)
+ except asyncio.TimeoutError:
+ exec_.signal.set
+ try:
+ await task # 排干：工具观察到 signal 后自行中止
+ except Exception:
+ pass # timer-wins：工具体的中止错误被下面的超时结果替换
+ return tool_timeout_result(tool.timeout_ms)
 ```
 
 `wait_for` 经 `shield` 包裹保证超时不取消底层任务。超时先置位 `exec_.signal`（工具协作中止，如子进程工具 `terminate`），再 `await task` 排干到静止点；无论工具体返回什么，一律替换为 `tool_timeout_result` 的 `TOOL_TIMEOUT` 结构化错误（timer-wins）。execute 返回普通值时 `_execute_async` 经 `_maybe_await` 原样透传；返回 coroutine 时直接 `await`。
@@ -170,7 +174,7 @@ if tool.timeout_ms:
 | 组内重分类 exclusive → break | `fill_pool` 里 `next_to_start > 0` 时重新 `execution_mode` |
 | `prepare` 按序 await（pre-execute 有序） | `start_call` 顺序 `await pipeline_policy_async` |
 | 通过后 `dispatch`（body 并发） | `asyncio.create_task(pipeline_async_body(...))` |
-| abort：排干 + 未启动补合成 | `signal.signal.is_set()` → 同（`_aborted_result` + `TOOL_ABORTED_BEFORE_DISPATCH`） |
+| abort：排干 + 未启动补合成 | `signal.signal.is_set` → 同（`_aborted_result` + `TOOL_ABORTED_BEFORE_DISPATCH`） |
 | scheduler failure：排干 + 抛第一个 | `scheduler_failure` 收集，`gather(return_exceptions=True)` 排干后 `raise` |
 | `maxParallelToolCalls`（默认 10） | `max_parallel` 参数 + `DEFAULT_MAX_PARALLEL_TOOL_CALLS` |
 
@@ -182,7 +186,7 @@ if tool.timeout_ms:
 
 - `run_async(content)` → `_pump_async` → `_run_step_async`：pre-step 走 `awaterfall`，工具走 `_execute_tools_async`；
 - `_execute_tools_async` 构造共享 `ToolExec`（`self._step_signal`）传给调度器；
-- `cancel()` 在 async 路径多一步：置位 `_step_signal.signal`——调度器检测后停止补池、排干已启动、未启动补合成错误。turn 仍以 `{kind:'aborted'}` 闭合（既有约定不变）；
+- `cancel` 在 async 路径多一步：置位 `_step_signal.signal`——调度器检测后停止补池、排干已启动、未启动补合成错误。turn 仍以 `{kind:'aborted'}` 闭合（既有约定不变）；
 - `AgentLoop(max_parallel_tool_calls=10)` 同上游配置项。
 
 LLM 流式已原生异步（httpx 传输）：`adapter.stream` 是真 async 迭代器，与工具执行体共用同一事件循环；abort 置位即关闭连接（无遗留线程）。
@@ -208,6 +212,10 @@ LLM 流式已原生异步（httpx 传输）：`adapter.stream` 是真 async 迭�
 4. 构造一次中途取消：哪些结果真实、哪些合成，顺序如何；
 5. 说出 mini 相对上游的简化：schemastery 引擎已在 mini 移植（`core/schema.py`，17 类 resolver 加 builder、序列化/i18n/simplify，见第 15 章；载体差异是 callback 不做字符串求值，只收 callable）；重试等待以多信号竞速 `asyncio.Event` 近似上游 `AbortSignal.any`；`asyncio.subprocess` 尚未接入工具执行。
 
-## 12.9 收尾
+## 12.9 回到 dsh：真实源码对照
+
+阅读 `packages/core/agent-loop/src/tool-calls.ts` 的 exclusive 屏障、滚动池与 abort 排干。mini 对应 `core/agent_loop/tool_calls.py`；同步门面仍经 `resident_loop.py` 驱动（见第 4 章）。
+
+## 12.10 收尾
 
 两条路径共用一套日志与管线：同步路径保持第 4 章的行为不变，异步路径把 pre-step 与工具调度都换到 `awaterfall` 与滚动池上。并行的收益落在执行体上，政策段、日志提交与结果顺序仍然严格按模型序。

@@ -71,6 +71,15 @@ markdown_extensions:
 
 nav:
   - 首页: index.md
+  - 系统地图: system-map.md
+  - 学习路径:
+      - 路径与模式: guides/learning-paths.md
+      - Wire 导读: guides/wire-tour.md
+      - 走查 T1 headless: guides/traces/headless-one-task.md
+      - 走查 T2 持久化: guides/traces/persistence-kill-resume.md
+      - 走查 T3 Web unary: guides/traces/web-unary-session.md
+      - 走查 T4 审批流: guides/traces/web-follow-approval.md
+      - 走查 T5 SDK: guides/traces/sdk-stdio.md
   - 架构与对齐: architecture.md
   - 接口契约参考: interface-wire.md
   - 分析报告:
@@ -89,7 +98,16 @@ nav:
       - 04 Agent Loop + LLM 流式: chapters/04-agent-loop-and-llm-streaming.md
       - 05 持久化 + 崩溃恢复 + 组合: chapters/05-persistence-recovery-composition.md
       - 06 进阶扩展口: chapters/06-advanced-seams.md
-      - 07 外部入口: chapters/07-external-entry-points.md
+      - 07 外部入口:
+          - 导读与 profile: chapters/07-external-entry-points.md
+          - 7.2 headless: chapters/07-headless.md
+          - 7.3 web 表面: chapters/07-web-surface.md
+          - 7.4 协议入口: chapters/07-protocol-overview.md
+          - 7.5 Web 传输层: chapters/07-web-transport.md
+          - 7.6 JSON-RPC SDK: chapters/07-sdk.md
+          - 7.7 ACP: chapters/07-acp.md
+          - 7.8 hooks 桥: chapters/07-hooks.md
+          - 7.9 总表与检查点: chapters/07-external-summary.md
       - 08 组合层深读: chapters/08-composition-layer.md
       - 09 Agent 干预面: chapters/09-agent-intervention.md
       - 10 轨迹投影引擎: chapters/10-trajectory-projection.md

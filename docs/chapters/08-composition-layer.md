@@ -3,6 +3,10 @@
 > 对应 dsh 真实源码：`vendor/cordis`（loader/组合结算）+ `packages/preset`（per-session agent composition）+ `packages/boot/app-boot`（profile 组合）。
 > 前置：第 2、5 章。本章产出：`miniharness/loader/`、`miniharness/preset/presets.py`；测试 `tests/test_presets.py`、`tests/test_loader_tree.py`、`tests/test_loader_include.py`。
 
+## 在 system-map 中的位置
+
+本章对应 [system-map Fig S1](../system-map.md#fig-s1) 的 **08 loader preset**（体裁：**解读**）。入口组合见 [Fig S5](../system-map.md#fig-s5)。
+
 ## 8.1 这一章要做什么
 
 前几章的内核只回答"一个 agent 怎么跑"。dsh 的现实是：
@@ -44,15 +48,15 @@ realm 规则的直接后果：service 行不挂进 `isolate` realm 就会落到�
 
 ```mermaid
 flowchart TD
-  YAML["cordis.yml / patch 层叠"]
-  Loader["Loader + Include&lt;br/&gt;EntryTree"]
-  Live["激活中的插件 fiber"]
-  Preset["preset 挂载&lt;br/&gt;agent 作用域"]
-  YAML --> Loader --> Live
-  Preset --> Live
+ YAML["cordis.yml / patch 层叠"]
+ Loader["Loader + Include&lt;br/&gt;EntryTree"]
+ Live["激活中的插件 fiber"]
+ Preset["preset 挂载&lt;br/&gt;agent 作用域"]
+ YAML --> Loader --> Live
+ Preset --> Live
 ```
 
-loader 的 include 展开由 `@deepseek-ai/cordis-plugin-include` 实现（`packages/boot/app-boot/src/index.ts:16` 安装 `mountRootInclude`）。它做的核心事可压缩成三条：
+loader 的 include 展开由 `@deepseek-ai/cordis-plugin-include` 实现（`packages/boot/app-boot/src/index.ts` 安装 `mountRootInclude`）。它做的核心事可压缩成三条：
 
 1. **include 展开**：组合里 `include: 'file.yml'` 的行先被替换成目标文件的内容（递归），这是"一个 preset 引用共享片段"的做法；
 2. **插件加载**：每条 entry 的 `plugin` 字段导入真实模块，取回 `inject`/`apply` 元数据（插件声明里的 `provides` 字段已废除——服务在 apply 期动态登记，与 §8.3.2 的 `Preset.provides` 不是一回事）；
@@ -78,32 +82,32 @@ roster 与上游 alpha.1 的多根分层一致：`shipped root`（随包分发�
 清单文件双读：`preset.json`，或上游形态 `agent.cordis.yml` 经 `translate_cordis_composition` 翻译。本章演示以仓库自带目录为例：
 
 ```
-miniharness/preset/               # shipped root（system trust）
-├── standard/preset.json    # 标准模式：8 工具 + 运行时上下文
-└── minimal/preset.json     # 极简模式：2 工具 + fixed-prompt（complete: true）
+miniharness/preset/ # shipped root（system trust）
+├── standard/preset.json # 标准模式：8 工具 + 运行时上下文
+└── minimal/preset.json # 极简模式：2 工具 + fixed-prompt（complete: true）
 ```
 
 ### 8.3.1 装载：Loader 活树与根 Include（`miniharness/loader/`）
 
-`boot()` 把 YAML 变成活的插件树，靠的是一套 cordis loader 的整件移植（对齐上游 `vendor/loader` + `vendor/include`）：
+`boot` 把 YAML 变成活的插件树，靠的是一套 cordis loader 的整件移植（对齐上游 `vendor/loader` + `vendor/include`）：
 
-- **`EntryTree`**——条目树的载体：扁平 `store`（`id → Entry`）、`entries()` 递归子树、`resolve('include:candies')` 这类 `SEP` 下钻 id、`import_('cordis:include')` 取内建插件；
-- **`Entry`**——一个可配置插件节点：`update()` 三态（已激活则 diff 后经 `internal/update` 重载、未激活则 `init()`、禁用则 dispose），`disabled` 沿 parent 链上溯并对 `!!js` 表达式求值；
+- **`EntryTree`**——条目树的载体：扁平 `store`（`id → Entry`）、`entries` 递归子树、`resolve('include:candies')` 这类 `SEP` 下钻 id、`import_('cordis:include')` 取内建插件；
+- **`Entry`**——一个可配置插件节点：`update` 三态（已激活则 diff 后经 `internal/update` 重载、未激活则 `init`、禁用则 dispose），`disabled` 沿 parent 链上溯并对 `!!js` 表达式求值；
 - **`EntryGroup` / `Group`**——`group: true` 条目的子列表宿主（组载体）；
 - **`Loader` 服务**——挂三个钩子：`internal/config`（树载体配置保持字面、普通条目激活期 interpolate）、`internal/update`（写回 `entry.options.config` 并持久化）、`internal/plugin`（插件自销毁时回写 `disabled: true`）；
 - **`Include`**——文件背书子树：读/写目标文件、`initial` 首写、`apply_entry_patches` 展开补丁、YAML 回写时 `!!js` 原样保留。
 
-`boot()` 的形态因此是：
+`boot` 的形态因此是：
 
 ```python
 root = Context(name="root")
 root.baseUrl = os.path.dirname(os.path.abspath(config_path))
-root.plugin(Loader, {"baseUrl": root.baseUrl})                   # 装载服务
+root.plugin(Loader, {"baseUrl": root.baseUrl}) # 装载服务
 mount_root_include(root, os.path.abspath(config_path),
-                   overlay_patches, bin_name)                   # 挂根 cordis:include 条目
+ overlay_patches, bin_name) # 挂根 cordis:include 条目
 loader = root.get("loader")
-_settle_loader(loader)                                          # 排空在途转换
-_assert_loader_activated(loader, bin_name)                      # 三态审计，未激活即 fail loud
+_settle_loader(loader) # 排空在途转换
+_assert_loader_activated(loader, bin_name) # 三态审计，未激活即 fail loud
 ```
 
 组合的**依赖驱动激活**仍是第 2 章 `RegistryService` 的机制：每条 entry 的 `inject` 缺失即保持 `PENDING`，提供方在 apply 期 `provide` 后经依赖追踪唤醒到 `ACTIVE`；`_assert_loader_activated` 在启动末尾逐条检查——`ACTIVE` 通过、`FAILED` 重抛原错误、`PENDING` 点名缺失的注入服务。条目 YAML 用上游同款方言 `entryListSchema`（JSON_SCHEMA + `!!js`）解析：只有 JSON 标量与 `!!js` 节点，`yes`/日期等保持字符串。条目级 `isolate`/`intercept` 选项同样实现（`loader/isolate.py`：Local/Global realm + `loader/patch-context` 迁实现 + realm GC；`loader.await` 门控由 loader 服务的检查谓词承担）；Node ESM 的 `internal.ts` 在 Python 包系统里没有对应物，属架构不适用。
@@ -115,71 +119,71 @@ _assert_loader_activated(loader, bin_name)                      # 三态审计�
 ```python
 @dataclass(frozen=True)
 class PersonaConfig:
-    complete: bool = False                       # True = 系统提示即全部上下文
-    include_runtime_context: bool = True
-    system_prompt: str | None = None
-    suffix: str | None = None                    # 尾节（complete 为真时压制）
+ complete: bool = False # True = 系统提示即全部上下文
+ include_runtime_context: bool = True
+ system_prompt: str | None = None
+ suffix: str | None = None # 尾节（complete 为真时压制）
 
 @dataclass(frozen=True)
 class Preset:
-    id: str
-    name: str
-    description: str
-    order: int
-    tools: list[str] = field(default_factory=list)
-    persona: PersonaConfig = field(default_factory=PersonaConfig)
-    provides: list[str] = field(default_factory=list)   # 进程级服务声明（默认空）
-    broken: str | None = None   # 发现期健康标记：缺 preset.json / 清单损坏 → 挂载期拒绝
-    trust: PresetTrust = "user"  # 'system' = shipped 只读
-    path: Path | None = None     # 组合文件路径（preset.json 或 agent.cordis.yml）
+ id: str
+ name: str
+ description: str
+ order: int
+ tools: list[str] = field(default_factory=list)
+ persona: PersonaConfig = field(default_factory=PersonaConfig)
+ provides: list[str] = field(default_factory=list) # 进程级服务声明（默认空）
+ broken: str | None = None # 发现期健康标记：缺 preset.json / 清单损坏 → 挂载期拒绝
+ trust: PresetTrust = "user" # 'system' = shipped 只读
+ path: Path | None = None # 组合文件路径（preset.json 或 agent.cordis.yml）
 ```
 
 ### 8.3.3 roster：目录列表即名单
 
 ```python
 class PresetRoster:
-    def _scan(self) -> dict[str, Preset]:
-        by_id: dict[str, Preset] = {}
-        self._source = {}
-        for root in self.resolved_roots:
-            for pid, preset in self._scan_root(root).items():
-                if pid in by_id:
-                    continue              # first-root-wins（上游同名取先）
-                by_id[pid] = preset
-                self._source[pid] = root
-        return by_id
+ def _scan(self) -> dict[str, Preset]:
+ by_id: dict[str, Preset] = {}
+ self._source = {}
+ for root in self.resolved_roots:
+ for pid, preset in self._scan_root(root).items:
+ if pid in by_id:
+ continue # first-root-wins（上游同名取先）
+ by_id[pid] = preset
+ self._source[pid] = root
+ return by_id
 
-    def _scan_root(self, root: PresetRoot) -> dict[str, Preset]:
-        presets: dict[str, Preset] = {}
-        try:
-            children = sorted(root.path.iterdir())
-        except FileNotFoundError:
-            return presets                # 根缺失 → 空（上游 ENOENT → []）
-        for child in children:
-            if not child.is_dir() or not PRESET_ID.match(child.name):
-                continue                  # 只认合法 preset id 的目录
-            if not self._has_composition(child):
-                # 缺清单 → 占位 broken 行：目录仍占用 id，须删除目录或补齐文件
-                presets[child.name] = Preset(
-                    id=child.name, name=child.name, description="", order=0,
-                    trust=root.trust,
-                    broken="the composition file preset.json is missing — "
-                           "the directory still occupies the id; "
-                           "delete it or restore the file")
-                continue
-            try:
-                p = load_preset(child, root.trust)
-            except Exception as error:
-                # 组合损坏 → 同样是 broken 占位行（上游 compositionProblem → broken）
-                presets[child.name] = Preset(
-                    id=child.name, name=child.name, description="", order=0,
-                    trust=root.trust, broken=f"the composition is unloadable: {error}")
-                continue
-            presets[p.id] = p
-        return presets
+ def _scan_root(self, root: PresetRoot) -> dict[str, Preset]:
+ presets: dict[str, Preset] = {}
+ try:
+ children = sorted(root.path.iterdir)
+ except FileNotFoundError:
+ return presets # 根缺失 → 空（上游 ENOENT → []）
+ for child in children:
+ if not child.is_dir or not PRESET_ID.match(child.name):
+ continue # 只认合法 preset id 的目录
+ if not self._has_composition(child):
+ # 缺清单 → 占位 broken 行：目录仍占用 id，须删除目录或补齐文件
+ presets[child.name] = Preset(
+ id=child.name, name=child.name, description="", order=0,
+ trust=root.trust,
+ broken="the composition file preset.json is missing — "
+ "the directory still occupies the id; "
+ "delete it or restore the file")
+ continue
+ try:
+ p = load_preset(child, root.trust)
+ except Exception as error:
+ # 组合损坏 → 同样是 broken 占位行（上游 compositionProblem → broken）
+ presets[child.name] = Preset(
+ id=child.name, name=child.name, description="", order=0,
+ trust=root.trust, broken=f"the composition is unloadable: {error}")
+ continue
+ presets[p.id] = p
+ return presets
 ```
 
-`ids()` 按 `order` 排序返回名单；`resolve(preset_id)` 未知 id → `KeyError`（fail loud）。已开 sessions 的 preset 选择在会话开始（首 turn/start）后锁定（`PresetLockedError`）。新增一个 preset = 新建一个目录，roster 代码一行不改。
+`ids` 按 `order` 排序返回名单；`resolve(preset_id)` 未知 id → `KeyError`（fail loud）。已开 sessions 的 preset 选择在会话开始（首 turn/start）后锁定（`PresetLockedError`）。新增一个 preset = 新建一个目录，roster 代码一行不改。
 
 ### 8.3.4 挂载：只在 agent 作用域开视图
 
@@ -187,29 +191,29 @@ class PresetRoster:
 
 ```python
 def mount(self, ctx, agent_scope, host_tools) -> ToolRegistry:
-    if self.broken is not None:
-        raise PresetMountError(self.id, f"preset {self.id} is broken: {self.broken}")
-    missing = [t for t in self.tools if host_tools.resolve(t) is None]
-    if missing:
-        raise PresetMountError(
-            self.id,
-            f"preset {self.id} 声明了 host 未提供的工具: {', '.join(missing)}")
-    for key in self.provides:
-        if ctx.get(key) is not None:
-            raise PresetMountError(
-                self.id,
-                f"preset {self.id} 声明进程级服务 {key}，但 host 已提供"
-                f"（拒绝挂载，避免与下个会话冲突）")
-    if not agent_scope.is_scope():
-        raise PresetMountError(
-            self.id,
-            "refusing to mount into a non-scoped context; "
-            "its registrations would leak into every agent")
-    agent_scope._isolate.setdefault("tools", object())
-    view = ToolRegistry(agent_scope)
-    for name in self.tools:
-        view.register(host_tools.resolve(name), scope=agent_scope)
-    return view
+ if self.broken is not None:
+ raise PresetMountError(self.id, f"preset {self.id} is broken: {self.broken}")
+ missing = [t for t in self.tools if host_tools.resolve(t) is None]
+ if missing:
+ raise PresetMountError(
+ self.id,
+ f"preset {self.id} 声明了 host 未提供的工具: {', '.join(missing)}")
+ for key in self.provides:
+ if ctx.get(key) is not None:
+ raise PresetMountError(
+ self.id,
+ f"preset {self.id} 声明进程级服务 {key}，但 host 已提供"
+ f"（拒绝挂载，避免与下个会话冲突）")
+ if not agent_scope.is_scope:
+ raise PresetMountError(
+ self.id,
+ "refusing to mount into a non-scoped context; "
+ "its registrations would leak into every agent")
+ agent_scope._isolate.setdefault("tools", object)
+ view = ToolRegistry(agent_scope)
+ for name in self.tools:
+ view.register(host_tools.resolve(name), scope=agent_scope)
+ return view
 ```
 
 - **broken 先拒**：发现期标了 `broken` 的行在挂载期直接抛 `PresetMountError`，不让坏组合进入会话；
@@ -223,11 +227,11 @@ def mount(self, ctx, agent_scope, host_tools) -> ToolRegistry:
 挂载返回的 `ToolRegistry` 视图可直接喂给 `AgentLoop`：
 
 ```python
-roster = builtin_roster()
+roster = builtin_roster
 agent_scope = host.create_scope("agent:1")
 view = roster.resolve("minimal").mount(host, agent_scope, registry)
 loop = AgentLoop(session, adapter, view, ctx,
-                 system_prompt=roster.resolve("minimal").persona.system_prompt)
+ system_prompt=roster.resolve("minimal").persona.system_prompt)
 ```
 
 两个 preset 用同一个 host 注册表、两个 agent 作用域——一个进程同时跑标准与极简 agent 的形态就成立了。
@@ -247,9 +251,13 @@ loop = AgentLoop(session, adapter, view, ctx,
 ## 8.5 检查点
 
 1. 说出组合树三层归属，并解释"进程级服务挂载时被拒绝"为什么比"下个会话撞车"好。
-2. 给 `PresetRoster` 新增一个 preset 目录，`ids()` 自动包含它（一行代码不改）。
+2. 给 `PresetRoster` 新增一个 preset 目录，`ids` 自动包含它（一行代码不改）。
 3. 手动构造一个 `provides` 与 host 冲突的 preset，观察挂载被拒绝且 host 服务未被覆盖。
 4. 说出 mini 相对上游的载体简化（YAML→JSON）与语义一致（组合选择语义不变）。
 5. 画一棵含 `include` 与 `group` 的条目树，说出 `EntryTree.resolve('include:candies')` 如何下钻、`PENDING` 条目在启动审计时报什么。
+
+## 8.6 回到 dsh：真实源码对照
+
+打开 `vendor/loader` 与 `packages/boot/plugin-manager`：对照 EntryTree、Include 回写与 preset roster。mini 见 `loader/`、`preset/` 与 `tests/test_composition.py`。
 
 > 下一章：Agent 干预面——宿主怎么唤醒、转向、取消一个运行中的 agent（steer/inject/cancel/whenIdle）。

@@ -3,6 +3,10 @@
 > 对应 dsh 真实源码：`vendor/cordis`（见 `docs/cordis-primer.md`）+ `packages/core/scope`
 > 前置：第 1 章。本章产出：`miniharness/core/scope.py`；测试 `tests/test_bus.py`、`tests/test_fiber.py`
 
+## 在 system-map 中的位置
+
+本章对应 [system-map Fig S1](../system-map.md#fig-s1) 的 **02 Context / 总线**（Kernel 层；体裁：**实现**）。
+
 ## 2.1 这一章要做什么
 
 第 1 章解决"事实怎么存"——一条只追加的事件日志。这一章解决"功能怎么插"。
@@ -284,6 +288,14 @@ python -m unittest tests.test_bus tests.test_fiber -v
 1. **写一个权限插件**：挂到 `tools/pre-execute`（waterfall），对 `name == "rm"` 的调用返回 `{"kind": "deny", "reason": "blocked"}`（不调 `next`），其余调 `next`。写测试断言拒绝路径。
 2. **验证隔离**：root → scopeA → scopeB；在 root 提供 `svc`，断言 A、B 都取得到；再让 A 用另一个隔离标签提供同名 `svc`，断言 B 仍取到 root 的那份、A 取到自己的那份。
 3. **模拟热重载**：装载一个插件 → 确认服务在场 → dispose → 断言服务消失，且重新装载同名插件不发生冲突。
+
+### 本章教学代码与仓库实现的差异
+
+| 本章教学形态 | 仓库实现 |
+|---|---|
+| 同步派发为主 | 另提供 `aemit` / `awaterfall` / `aparallel` / `aserial`（agent 路径已 async 化） |
+| 简化 fiber 装载 | `core/scope.py` 完整 fiber + `core/hmr.py` 配置 watch（第 13 章） |
+| `ctx.get` 教学语义 | 按隔离标签键控的全局 store；`provide` 动态登记，无 upstream `reflect` 全协议 |
 
 ## 2.6 回到 dsh：真实源码对照
 

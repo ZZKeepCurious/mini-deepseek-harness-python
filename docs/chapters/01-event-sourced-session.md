@@ -3,6 +3,10 @@
 > 对应 dsh 真实源码：`packages/core/session`（`docs/subsystems/session.md`）
 > 前置：第 00 章。产出文件：`miniharness/core/session/`（包）+ `tests/test_session.py`
 
+## 在 system-map 中的位置
+
+本章对应 [system-map Fig S1](../system-map.md#fig-s1) 的 **01 Session**（Kernel；体裁：**实现**）。主验收：`tests/test_session.py`（见 [功能模块表](../system-map.md#module-chapter-verify)）。
+
 ## 1.1 这一章要做什么，以及为什么它是整个框架的地基
 
 这一章是整个手册的地基。

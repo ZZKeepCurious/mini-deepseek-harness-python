@@ -3,6 +3,19 @@
 > 对应 dsh 真实源码：`docs/capability-seams.md` + 各子系统页（sandbox / credentials / subagent）
 > 前置：第 1~5 章。产出文件：`miniharness/seams/subagent/`（基础三件套）+ `seams/sandbox_local.py`、`seams/credentials_local.py`（真后端）+ `tests/test_seams.py`、`tests/test_stage6.py`
 
+## 在 system-map 中的位置
+
+本章对应 [system-map Fig S1](../system-map.md#fig-s1) 的 **06 capability seams**（体裁：**实现+延伸**）。§6.6～§6.9 的 PTC、检查点、Agent Teams 等见下表与 [architecture.md §2](../architecture.md#sec-2) 映射行。
+
+### 延伸域索引（未单独开章）
+
+| 域 | mini 路径 | 主测试 / 入口 |
+|---|---|---|
+| PTC / workflow | `ptc_runtime/`、`workflow/`、`tool_workflow/` | architecture §2；demo 装配 |
+| 沙箱 / shell / 凭据 / 子 agent | `seams/`、`shell/` | `tests/test_seams.py` · §6.9 |
+| 存储中心 | `storage/` | 映射表 `storage/` 行 |
+| jobs / plan / goal | `jobs/`、`plan/`、`goal/` | report/04 议题 8～9 |
+
 ## 6.1 这一章要做什么
 
 前面几章反复出现一个模式：接口 + 可替换实现 + 只依赖接口的消费方。这一章把这个模式正式化——"能力扩展口三角色"，并围绕同一性质实现三个扩展口：换掉 Provider，Consumer 代码不动，行为就跟着变。
@@ -17,11 +30,11 @@
 
 ```mermaid
 flowchart LR
-  D["Service Definition&lt;br/&gt;接口 + 生命周期 + 错误码约定"]
-  P["Service Provider&lt;br/&gt;实现（可整体替换）"]
-  C["Consumer&lt;br/&gt;只依赖接口"]
-  P -->|"实现"| D
-  C -->|"依赖"| D
+ D["Service Definition&lt;br/&gt;接口 + 生命周期 + 错误码约定"]
+ P["Service Provider&lt;br/&gt;实现（可整体替换）"]
+ C["Consumer&lt;br/&gt;只依赖接口"]
+ P -->|"实现"| D
+ C -->|"依赖"| D
 ```
 
 一个角色单独不构成扩展口。新增能力 = 同时设计三个角色：定义接口（Service Definition）、提供实现（Provider）、写消费逻辑（Consumer）。三者缺一，替换性就不成立——没有接口，Consumer 直接依赖具体实现，一换就炸。
@@ -32,38 +45,38 @@ flowchart LR
 
 ```python
 class Sandbox:
-    """Service Definition：把 argv 包裹进受限执行环境。"""
-    def wrap(self, argv):
-        raise NotImplementedError
+ """Service Definition：把 argv 包裹进受限执行环境。"""
+ def wrap(self, argv):
+ raise NotImplementedError
 
 class PassthroughSandbox(Sandbox):
-    """本地直通（danger：不设防，等同 danger-full-access）。"""
-    def wrap(self, argv):
-        return argv
+ """本地直通（danger：不设防，等同 danger-full-access）。"""
+ def wrap(self, argv):
+ return argv
 
 class ReadOnlySandbox(Sandbox):
-    """模拟只读沙箱：含写操作标志的命令直接拒绝（失败即拒）。"""
-    WRITE_MARKERS = ("-w ", "--write", "-o ", ">", ">>", "rm ", "mv ", "touch ", "mkdir ")
+ """模拟只读沙箱：含写操作标志的命令直接拒绝（失败即拒）。"""
+ WRITE_MARKERS = ("-w ", "--write", "-o ", ">", ">>", "rm ", "mv ", "touch ", "mkdir ")
 
-    def wrap(self, argv):
-        cmd = " ".join(argv)
-        if any(marker in cmd for marker in self.WRITE_MARKERS):
-            raise PermissionError(f"只读沙箱拒绝写操作: {cmd}")
-        return argv
+ def wrap(self, argv):
+ cmd = " ".join(argv)
+ if any(marker in cmd for marker in self.WRITE_MARKERS):
+ raise PermissionError(f"只读沙箱拒绝写操作: {cmd}")
+ return argv
 
 class CommandConsumer:
-    """Consumer：只依赖 Sandbox 接口。换 Provider 即换行为。"""
-    def __init__(self, sandbox):
-        self._sandbox = sandbox
+ """Consumer：只依赖 Sandbox 接口。换 Provider 即换行为。"""
+ def __init__(self, sandbox):
+ self._sandbox = sandbox
 
-    def run(self, command):
-        if os.name == "nt":
-            argv = self._sandbox.wrap([command])
-            proc = subprocess.run(argv[0], shell=True, capture_output=True, text=True, timeout=10)
-        else:
-            argv = self._sandbox.wrap(shlex.split(command))
-            proc = subprocess.run(argv, capture_output=True, text=True, timeout=10)
-        return proc.stdout.strip() or proc.stderr.strip()
+ def run(self, command):
+ if os.name == "nt":
+ argv = self._sandbox.wrap([command])
+ proc = subprocess.run(argv[0], shell=True, capture_output=True, text=True, timeout=10)
+ else:
+ argv = self._sandbox.wrap(shlex.split(command))
+ proc = subprocess.run(argv, capture_output=True, text=True, timeout=10)
+ return proc.stdout.strip or proc.stderr.strip
 ```
 
 常规做法是把安全策略写死在工具内部（"这个工具自己小心点"）。dsh 反过来：策略是独立的 Provider，工具（Consumer）只声明"我要执行一个命令"，至于在什么环境里执行，由注入的沙箱决定。
@@ -71,11 +84,11 @@ class CommandConsumer:
 `PassthroughSandbox` 对应 `danger-full-access`（不设防），`ReadOnlySandbox` 对应 `read-only` 的简化模拟。验收测试的关键是 Consumer 代码一字不改：
 
 ```python
-passthrough = CommandConsumer(PassthroughSandbox())
-readonly = CommandConsumer(ReadOnlySandbox())
+passthrough = CommandConsumer(PassthroughSandbox)
+readonly = CommandConsumer(ReadOnlySandbox)
 # Consumer 代码不变，只换 Provider
 with self.assertRaises(PermissionError):
-    readonly.run("echo a > tmp_evil.txt")
+ readonly.run("echo a > tmp_evil.txt")
 assert passthrough.run("echo ok") == "ok"
 ```
 
@@ -87,21 +100,21 @@ assert passthrough.run("echo ok") == "ok"
 
 ```python
 class CredentialProvider:
-    """Service Definition：按操作解析凭据；配置只存引用，绝无明文。"""
-    def resolve(self, key):
-        raise NotImplementedError
+ """Service Definition：按操作解析凭据；配置只存引用，绝无明文。"""
+ def resolve(self, key):
+ raise NotImplementedError
 
 class EnvCredentialProvider(CredentialProvider):
-    """env-over-.env：配置项 -> 环境变量名（引用），每次调用解析。"""
-    def __init__(self, mapping=None):
-        self._mapping = mapping or {"api_key": "DEEPSEEK_API_KEY"}
+ """env-over-.env：配置项 -> 环境变量名（引用），每次调用解析。"""
+ def __init__(self, mapping=None):
+ self._mapping = mapping or {"api_key": "DEEPSEEK_API_KEY"}
 
-    def resolve(self, key):
-        env_name = self._mapping[key]
-        value = os.environ.get(env_name, "")
-        if not value:
-            raise KeyError(f"凭据 {key}（环境变量 {env_name}）未配置")
-        return value
+ def resolve(self, key):
+ env_name = self._mapping[key]
+ value = os.environ.get(env_name, "")
+ if not value:
+ raise KeyError(f"凭据 {key}（环境变量 {env_name}）未配置")
+ return value
 ```
 
 常规做法是配置文件里直接写 key（或者至少把 key 读进内存常驻）。dsh 的纪律是：配置里存的是 `apiKeyEnv` 这样的**引用**，不是明文；`ctx.credentials` 让 API key **每次调用**解析——改环境变量不用重启进程，而且配置仓库里永远找不到一个真实的 key。
@@ -112,25 +125,25 @@ class EnvCredentialProvider(CredentialProvider):
 
 ```python
 class SubAgent:
-    def run(self, task): raise NotImplementedError
+ def run(self, task): raise NotImplementedError
 
 class SubAgentProvider:
-    """Service Definition：子 agent 工厂。"""
-    def spawn(self, name, system_prompt): raise NotImplementedError
+ """Service Definition：子 agent 工厂。"""
+ def spawn(self, name, system_prompt): raise NotImplementedError
 
 class InProcessSubAgentProvider(SubAgentProvider):
-    """in-process Provider：复用主循环（真实还有 fork / ACP / Codex / Claude Code）。"""
-    def __init__(self, make_loop):
-        self._make_loop = make_loop
-    def spawn(self, name, system_prompt):
-        return _InProcessSubAgent(self._make_loop(system_prompt))
+ """in-process Provider：复用主循环（真实还有 fork / ACP / Codex / Claude Code）。"""
+ def __init__(self, make_loop):
+ self._make_loop = make_loop
+ def spawn(self, name, system_prompt):
+ return _InProcessSubAgent(self._make_loop(system_prompt))
 
 class _InProcessSubAgent(SubAgent):
-    def __init__(self, loop):
-        self._loop = loop
-    def run(self, task):
-        self._loop.followup(task)
-        return self._loop.last_response()
+ def __init__(self, loop):
+ self._loop = loop
+ def run(self, task):
+ self._loop.followup(task)
+ return self._loop.last_response
 ```
 
 子 agent 的 Provider 选择直接决定"子 agent 跑在哪"：同进程复用主循环（in-process）、独立进程（fork）、外部协议（ACP）、甚至另一个商业 CLI（Codex / Claude Code）。Consumer（`subagent` 工具）只依赖 `spawn + run`，不知道也不关心子 agent 背后是什么。
@@ -149,16 +162,16 @@ class _InProcessSubAgent(SubAgent):
 
 ```python
 class TeamProjection:
-    """从 Lead 会话日志折叠成员列表（全量投标，最后一条胜出）。"""
-    def __init__(self, log):
-        self._members = {}
-        for ev in log:
-            if ev.type == "team/member":
-                self._members.update(ev.data["member"])
+ """从 Lead 会话日志折叠成员列表（全量投标，最后一条胜出）。"""
+ def __init__(self, log):
+ self._members = {}
+ for ev in log:
+ if ev.type == "team/member":
+ self._members.update(ev.data["member"])
 
-    @property
-    def ids(self):
-        return list(self._members)
+ @property
+ def ids(self):
+ return list(self._members)
 ```
 
 任务板的"状态机"不是 switch：每个动作是 `claimed -> in_progress -> completed` 这样的边，`team_task_update` 校验**当前状态允许这条边**，然后 append 一条 `team/task` 全量投标取代旧快照（revision 从 1 连续，CAS 即"版本号对得上"。两个 agent 同时改同一任务，后写者因 revision 冲突被拒）。
@@ -166,8 +179,8 @@ class TeamProjection:
 投递有两个载体，取决于宿主有没有事件循环：
 
 ```python
-service.spawn_teammate(name, system_prompt)      # 无循环态（harness/CLI）：同步 spawn
-await service.spawn_teammate_async(...)          # 事件循环内（驱动载体）：checkpoint await 让出控制
+service.spawn_teammate(name, system_prompt) # 无循环态（harness/CLI）：同步 spawn
+await service.spawn_teammate_async(...) # 事件循环内（驱动载体）：checkpoint await 让出控制
 ```
 
 > 真实 dsh 是纯 async 形态，没有同步载体；mini 的同步门面是给无 driver 的同步 harness/CLI 用的。事件循环内绝不能用 `time.sleep` 等成员 checkpoint——会把整个循环卡死，这也是异步载体存在的唯一原因。
@@ -188,7 +201,7 @@ await service.spawn_teammate_async(...)          # 事件循环内（驱动载�
 
 ```python
 # 语义示意（seams/session_checkpoint.py）
-SessionStore.checkpoint(session, boundary)   # 经 ctx.checkpointService 派发
+SessionStore.checkpoint(session, boundary) # 经 ctx.checkpointService 派发
 # 有持久化参与者才真正 flush；无参与者 → fail-closed 抛 SessionCheckpointError
 ```
 
@@ -259,9 +272,9 @@ landlock 梯队由 `seams/landlock_run.py` 的 ctypes 自限制执行器真执�
 
 ### 沙箱策略与 fail-closed
 
-`seams/sandbox_policy.py` + `shell/`（对应上游 `sandbox/sandbox-policy`、`session-mode.ts`、`shell/bash-sandbox`）把策略与强制拆成两个服务。`ctx.sandboxPolicy` 是唯一的共享策略家：Config `{mode: 缺省 read-only, workspaceRoot}` fail-loud 校验；`resolve()` 的优先级是显式 mode > 会话日志最后一条 `sandbox/mode` > 部署缺省；workspace 根先 canonical 后词法规范化，会话 cwd 即 workspace-write 边界。`ctx.sandbox` 把模式物化为 runner argv。会话覆盖以会话日志为存储：`set_sandbox_mode` 追加恰一条 `sandbox/mode` log-only 事件，`effective_sandbox_mode` 纯 fold 逆序取最后——切换即事件本身，重放即状态。三档策略文案经 systemPrompt `.context('sandbox:policy', order=110)` 进模型可见上下文（loop 侧在上下文变化时把快照铸成 durable user 消息注入对话流，见 `core/agent_loop/runtime_context.py`）。
+`seams/sandbox_policy.py` + `shell/`（对应上游 `sandbox/sandbox-policy`、`session-mode.ts`、`shell/bash-sandbox`）把策略与强制拆成两个服务。`ctx.sandboxPolicy` 是唯一的共享策略家：Config `{mode: 缺省 read-only, workspaceRoot}` fail-loud 校验；`resolve` 的优先级是显式 mode > 会话日志最后一条 `sandbox/mode` > 部署缺省；workspace 根先 canonical 后词法规范化，会话 cwd 即 workspace-write 边界。`ctx.sandbox` 把模式物化为 runner argv。会话覆盖以会话日志为存储：`set_sandbox_mode` 追加恰一条 `sandbox/mode` log-only 事件，`effective_sandbox_mode` 纯 fold 逆序取最后——切换即事件本身，重放即状态。三档策略文案经 systemPrompt `.context('sandbox:policy', order=110)` 进模型可见上下文（loop 侧在上下文变化时把快照铸成 durable user 消息注入对话流，见 `core/agent_loop/runtime_context.py`）。
 
-消费者在 `shell/` 层：`bash_local.py` 是 `ctx.shell` 缺省 provider（`execute(spec) -> ShellExecution`，`bash -c` 直跑句柄，带 `observed` 非消耗偏移读、消费式 `read_output()`、`kill()` 与 memoized `result()`；`resolve` 补齐 `onExpiry`(kill|none) 与输出预算），`bash_sandbox.py` 子类每次调用把精确 argv 经 confine 包裹后 spawn 并报告 `{mode, denied, enforcement}`。工具面（`tool_bash/`，经 `cli/default_tools.py` 装配）检测到 `ctx.shell` 时把教学 stub 换成真执行器，逐调用以调用方会话决议策略；jobs 在场时前台超时提升为后台作业、`run_in_background` 直接开作业，`ctx.shellEnv` 注入托管 `DSH_*`；headless 入口 `run_headless(..., sandbox=配置)` 一键装配全栈。载体差异：无 `ctx.subprocess` 托管范围/spill（Popen + 读线程 + 内存增长缓冲）；pwsh 变体（M16）未复现。
+消费者在 `shell/` 层：`bash_local.py` 是 `ctx.shell` 缺省 provider（`execute(spec) -> ShellExecution`，`bash -c` 直跑句柄，带 `observed` 非消耗偏移读、消费式 `read_output`、`kill` 与 memoized `result`；`resolve` 补齐 `onExpiry`(kill|none) 与输出预算），`bash_sandbox.py` 子类每次调用把精确 argv 经 confine 包裹后 spawn 并报告 `{mode, denied, enforcement}`。工具面（`tool_bash/`，经 `cli/default_tools.py` 装配）检测到 `ctx.shell` 时把教学 stub 换成真执行器，逐调用以调用方会话决议策略；jobs 在场时前台超时提升为后台作业、`run_in_background` 直接开作业，`ctx.shellEnv` 注入托管 `DSH_*`；headless 入口 `run_headless(..., sandbox=配置)` 一键装配全栈。载体差异：无 `ctx.subprocess` 托管范围/spill（Popen + 读线程 + 内存增长缓冲）；pwsh 变体（M16）未复现。
 
 沙箱层"命令绝不裸跑"的 fail-closed 约定：
 
@@ -275,7 +288,7 @@ landlock 梯队由 `seams/landlock_run.py` 的 ctypes 自限制执行器真执�
 
 ### 凭据四层
 
-`credentials_local.py`（对应上游 `credentials-local`）：`env > file > project-env > user-env` 按信任度排序——继承环境只读胜出（CI secret / `-e` 是显式意图且进程内不可编辑）、管理文件层可写（`set`/`unset` 读-改-写补丁单键，外部编辑合并、删掉的条目不残留）、project `.env` 优先于 user `.env`。文档解析严格：非映射根 / 非 POSIX 标识符 key / 非字符串 / 空串值整体拒绝，绝不静默跳过；`describe` 报告 `{configured, source, writable}`（只有 env 层不可写）；env 已提供时 `set`/`unset` 拒绝（写了也被遮蔽成无效果）；POSIX 上组/其他可读的文档读前直接拒绝（Windows 无 mode 可查则跳过）。载体简化/决策：文档用 JSON 替代 YAML（解析语义不变；JSON 重复键 fail-closed 更稳，为受评审设计决策）；跨进程写锁用 `filelock` 实现（同 `withFileLock`，`credentials_local.py:553`，写入等待 30s——`DOCUMENT_LOCK_WAIT_SECONDS` 覆盖 atomic-write 2s 默认）。凭据变更感知双通道：**① 读侧热重载（缺省 pull 兜底）**——`resolve`/`describe`/`read_record` 等读入口先 `_refresh_if_changed()`——`os.stat` 比对 mtime/size，变了才重解析整表（外部编辑/删除即时生效），写路径 `_reconcile_from_disk` 折叠不变；无撕裂（atomic write os.replace），读侧不需锁。**② 可选文件 watch（显式开启）**——`LocalCredentialProvider(watch=True)`（或 `CredentialsService` 装配）以 watchdog 主动监听外部编辑（同上游 chokidar watch + reconcileFromDisk 文本比对 + 逐 entry fan-out），缺省关闭（与 ACP 持久化同构，避免默认起线程）；watch 事件去抖单飞折叠，逐 entry 发 `credentials/reference-updated`/`credentials/record-updated`（经 `CredentialsService` 转发 ctx 事件），自写 echo 由文本比对抑制。`credentials_local.py` 还实现记录（record）服务侧五件套：`read_record`/`describe_record`/`list_records`/`modify_record`/`delete_record`（modify_record 是唯一写路径：持锁内 reconcile 折叠外部编辑 → mutate 收到当前记录返回替换/拒绝 → 写前准入与读路径同一套 → 原子写入磁盘；`<scope>/<id>` 键语法 `[a-z][a-z0-9-]*`，段非法逐字 TypeError）。
+`credentials_local.py`（对应上游 `credentials-local`）：**0.2.1 起 resolve 层序**为 `$DSH_HOME/.credentials.yaml`（管理文件，可写，胜出）→ 继承进程 env（回退，本 provider 不写 env）→ 调用 cwd 的 `.env`（project-env）→ `$DSH_HOME/.env`（user-env）。启动环境（CI secret / `-e`）只在引用未存文件值时适用；`set`/`unset` 只补丁管理文件，让回退层重新暴露。project `.env` 优先于 user `.env`。文档解析严格：非映射根 / 非 POSIX 标识符 key / 非字符串 / 空串值整体拒绝，绝不静默跳过；`describe` 报告 `{configured, source, writable}`（只有 env 层不可写）；env 已提供时 `set`/`unset` 拒绝（写了也被遮蔽成无效果）；POSIX 上组/其他可读的文档读前直接拒绝（Windows 无 mode 可查则跳过）。载体简化/决策：文档用 JSON 替代 YAML（解析语义不变；JSON 重复键 fail-closed 更稳，为受评审设计决策）；跨进程写锁用 `filelock` 实现（同 `withFileLock`，`credentials_local.py`，写入等待 30s——`DOCUMENT_LOCK_WAIT_SECONDS` 覆盖 atomic-write 2s 默认）。凭据变更感知双通道：**① 读侧热重载（缺省 pull 兜底）**——`resolve`/`describe`/`read_record` 等读入口先 `_refresh_if_changed`——`os.stat` 比对 mtime/size，变了才重解析整表（外部编辑/删除即时生效），写路径 `_reconcile_from_disk` 折叠不变；无撕裂（atomic write os.replace），读侧不需锁。**② 可选文件 watch（显式开启）**——`LocalCredentialProvider(watch=True)`（或 `CredentialsService` 装配）以 watchdog 主动监听外部编辑（同上游 chokidar watch + reconcileFromDisk 文本比对 + 逐 entry fan-out），缺省关闭（与 ACP 持久化同构，避免默认起线程）；watch 事件去抖单飞折叠，逐 entry 发 `credentials/reference-updated`/`credentials/record-updated`（经 `CredentialsService` 转发 ctx 事件），自写 echo 由文本比对抑制。`credentials_local.py` 还实现记录（record）服务侧五件套：`read_record`/`describe_record`/`list_records`/`modify_record`/`delete_record`（modify_record 是唯一写路径：持锁内 reconcile 折叠外部编辑 → mutate 收到当前记录返回替换/拒绝 → 写前准入与读路径同一套 → 原子写入磁盘；`<scope>/<id>` 键语法 `[a-z][a-z0-9-]*`，段非法逐字 TypeError）。
 
 ### 子 agent 远程三通道
 
@@ -298,7 +311,7 @@ landlock 梯队由 `seams/landlock_run.py` 的 ctypes 自限制执行器真执�
 ```python
 # 语义示意（ptc_runtime/types.py）
 run(request=PtcRunRequest(sandbox=spec, program, bindings, timeout_ms, max_log_bytes))
-# -> PtcRunResult(bytecode?, sandbox)  或 failure=PtcRunFailure(code=..., message=...)
+# -> PtcRunResult(bytecode?, sandbox) 或 failure=PtcRunFailure(code=..., message=...)
 ```
 
 载体差异（诚实标注）：上游是 Node 后端（worker/subprocess + fd-3 wire），mini 用 CPython 子进程 + 行 JSON——和沙箱一样，**子进程不是安全边界**（上游同款声明：防的是失控程序毁掉宿主进程，不是躲恶意代码）。装配 = `install_ptc_runtime(ctx)`（opt-in）。

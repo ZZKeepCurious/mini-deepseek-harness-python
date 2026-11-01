@@ -14,25 +14,7 @@ Upstream is built on **everything is a plugin** and [Cordis](https://github.com/
 
 ## Architecture
 
-At runtime the spine is: `boot` / `loader` loads composition and plugins → the session appends events only → projections such as `derive_messages` build model-visible history → the agent runs turn/step loops over the model and tools, writing durable facts back to the same log → when you need a browser or automation, `web/` exposes upstream-compatible wire and `webui/` consumes only that contract. See [docs/index.md](docs/index.md) and [docs/architecture.md](docs/architecture.md) section 1.0 for diagrams.
-
-```mermaid
-flowchart TB
-  Boot["boot / loader<br/>YAML composition → plugin tree"]
-  Log["Session append-only event log"]
-  Proj["derive_messages & projections"]
-  Loop["Agent loop<br/>turn / step"]
-  Tools["Tools pipeline"]
-  Web["miniharness/web<br/>unary + WS mux"]
-  UI["webui/<br/>wire only"]
-
-  Boot --> Log
-  Log --> Proj --> Loop --> Tools
-  Tools --> Log
-  Loop --> Log
-  Web --> Log
-  UI --> Web
-```
+At runtime: `boot` / `loader` → append-only Session log → projections and Agent loop → `web/` wire with `webui/` as wire-only client. Module layout and chapter acceptance tests: [docs/system-map.md](docs/system-map.md). Learning paths: [docs/guides/learning-paths.md](docs/guides/learning-paths.md). Package mapping: [docs/architecture.md](docs/architecture.md).
 
 The repo splits into three layers (dependency rules: [docs/architecture.md](docs/architecture.md), section 3):
 
@@ -76,7 +58,9 @@ CLI state lives under `MINIHARNESS_HOME` (default `~/.miniharness`): sessions in
 
 | If you need… | See |
 |---|---|
-| Handbook home + 16-chapter map | [docs/index.md](docs/index.md) |
+| Handbook home + 16-chapter table | [docs/index.md](docs/index.md) |
+| System map (modules, Fig S1–S6, acceptance tests) | [docs/system-map.md](docs/system-map.md) |
+| Learning paths (read-along vs greenfield) | [docs/guides/learning-paths.md](docs/guides/learning-paths.md) |
 | Module ↔ upstream package table | [docs/architecture.md](docs/architecture.md) |
 | Web unary, Remote frames, error codes | [docs/interface-wire.md](docs/interface-wire.md) (`WebApi.ROUTES` in `miniharness/web/api.py`) |
 | Upstream analysis (with Mermaid) | [docs/report/index.md](docs/report/index.md) |

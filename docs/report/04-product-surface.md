@@ -3,7 +3,7 @@
 <p class="lead">Web、headless、SDK/ACP/hooks 等入口背后，用户看到的是 preset 模式、Trajectory、审批弹窗、plan/goal 与长会话压缩——这些都由同一条事件日志驱动，而不是第二份产品状态。本页按十个议题说明上游产品面如何设计，以及 mini 在哪一层复现。</p>
 
 !!! note "定位说明"
-    本页内容全部可定位到上游源码或 docs；产品体验的归纳（如四种模式中文名）来自 `apps/cli/config/agent-presets/*/preset.yml` 的 description 字段直译，属上游真实存在。上游存在多处*命名换代*（如审批词汇、包路径），相关澄清见各议题。
+ 本页内容全部可定位到上游源码或 docs；产品体验的归纳（如四种模式中文名）来自 `apps/cli/config/agent-presets/*/preset.yml` 的 description 字段直译，属上游真实存在。上游存在多处*命名换代*（如审批词汇、包路径），相关澄清见各议题。
 
 ## 议题 1：模式设计——四种 agent preset
 
@@ -20,10 +20,10 @@
 
 ### 1.2 实现：preset = 会话级 agent 组合
 
-每个 preset 目录含 `preset.yml`（名字、描述、排序）与 `agent.cordis.yml`（组合本体）。关键设计（`packages/preset/README.md:5,14`）：
+每个 preset 目录含 `preset.yml`（名字、描述、排序）与 `agent.cordis.yml`（组合本体）。关键设计（`packages/preset/README.md,14`）：
 
 - **挂载点**：组合挂在 agent 作用域（scope）下，`ctx.agentPresets` 提供词汇表与文件系统发现（可信根 + 用户自建根）；
-- **roster 即目录列表**：预置名单就是 `apps/cli/config/agent-presets/` 的目录列举，不维护第二份清单（`preset/README.md:12`）；
+- **roster 即目录列表**：预置名单就是 `apps/cli/config/agent-presets/` 的目录列举，不维护第二份清单（`preset/README.md`）；
 - **进程级设施留在 host plane**：注册表、跨会话服务是进程单例，属于 host 组合；preset 只携带"这一个 agent 贡献给它们的东西"。命名了进程级全局服务的行会在挂载时被拒绝，而不是与下一个会话冲突；
 - **realm 隔离**：service 行必须挂在带 `isolate` realm 的 group 内（`standard/agent.cordis.yml:11-18`），否则与根 realm 冲突——这就是"一个进程同时跑多个不同 preset 的 agent"的底层保障。
 
@@ -53,6 +53,10 @@
 | preset roster + per-agent mount | 出厂内置根 `miniharness/preset/{standard,minimal}/` + 用户 `$MINIHARNESS_HOME/.agent-presets`；`preset/presets.py` 目录发现即名单、per-agent 挂载视图、host 缺工具 fail loud、进程级冲突拒绝挂载；`agent.cordis.yml` 可翻译为 mini Preset。上游四模式里的 `code`/`cordis` 目录可拷入用户根接入（手册 08 章） | 声明式 `agent-preset-registry`（不扫目录）为上游 rc.2+ 形态，mini 仍以目录 roster 为主 |
 | PTC 模式（`ctx.ptcRuntime` + `run_code`） | `miniharness/ptc_runtime/` + 工具层 PTC 派发（`tool/ptc-dispatch*` 日志、Python worker 子进程、可选 `sandbox_mode` confine）；与 preset 解耦——`code` preset 目录未随包出厂，但运行时与 wire 已接线（`architecture.md` 映射表） | — |
 
+### Mini trace（议题 1）
+
+`preset/presets.py` roster 挂载 → `tests/test_presets.py`；CLI `miniharness presets list`（教学扩展）。章 [08](../chapters/08-composition-layer.md)。
+
 ## 议题 2：外部入口全景
 
 ### 2.1 产品体验
@@ -61,16 +65,16 @@
 
 ### 2.2 实现
 
-每个入口共用同一条启动链：解析 profile 与 patch → 层叠 bundle 条目 → `boot()` 经 Loader 激活插件树 → 各 surface 的 startup 插件挂 web 端口或 headless 单任务。内置 bundle 根提供出厂组合，home 用户根提供覆盖；`composeEntries` 只层叠配置，真正加载在 `boot()`。
+每个入口共用同一条启动链：解析 profile 与 patch → 层叠 bundle 条目 → `boot` 经 Loader 激活插件树 → 各 surface 的 startup 插件挂 web 端口或 headless 单任务。内置 bundle 根提供出厂组合，home 用户根提供覆盖；`composeEntries` 只层叠配置，真正加载在 `boot`。
 
 ```mermaid
 flowchart TD
-  Bin["apps/cli bin&lt;br/&gt;--profile · --patch · task"]
-  Prof["loadProfile&lt;br/&gt;profile.yml 双锚点"]
-  Comp["composeEntries&lt;br/&gt;bundle + patch 层叠"]
-  Boot["boot() + Loader&lt;br/&gt;插件树激活"]
-  Surf["surface startup&lt;br/&gt;web · headless · acp · sdk"]
-  Bin --> Prof --> Comp --> Boot --> Surf
+ Bin["apps/cli bin&lt;br/&gt;--profile · --patch · task"]
+ Prof["loadProfile&lt;br/&gt;profile.yml 双锚点"]
+ Comp["composeEntries&lt;br/&gt;bundle + patch 层叠"]
+ Boot["boot + Loader&lt;br/&gt;插件树激活"]
+ Surf["surface startup&lt;br/&gt;web · headless · acp · sdk"]
+ Bin --> Prof --> Comp --> Boot --> Surf
 ```
 
 | 入口 | 形态 | 协议/载体 | 说明 |
@@ -81,12 +85,12 @@ flowchart TD
 | SDK 协议 | 官方 SDK | `packages/sdk/protocol` | Python/TS 官方客户端，全会话操控 |
 | hooks 桥接 | Claude Code / Codex hooks | `packages/hooks` | 把 harness 作为这些 IDE agent 的后端工具执行器 |
 
-<p class="mermaid-note">注：三协议入口的会话协议信封与事件序列一致（envelope/编号/消息模型），这是 mini 复现"JSON-RPC 最小子集"（见手册 07 章 §7.6「JSON-RPC 信封子集」）的约定依据。</p>
+<p class="mermaid-note">注：三协议入口的会话协议信封与事件序列一致（envelope/编号/消息模型），这是 mini 复现"JSON-RPC 最小子集"（见手册 [07 §7.6](../chapters/07-sdk.md#sec-7-6)）的约定依据。</p>
 
 ### 2.3 源码证据
 
 - `apps/cli/src/{bin.ts,args.ts,profile-boot/*,boot.ts}` —— 启动与 profile 加载链路
-- `packages/bundle/headless/src/{index,startup}.ts` —— headless 语义（mini 对照见 §2.4）；startup.ts:31-56 只解析 task 位置参数与 --help，无 --session
+- `packages/bundle/headless/src/{index,startup}.ts` —— headless 语义（mini 对照见 §2.4）；startup.ts 只解析 task 位置参数与 --help，无 --session
 - `docs/architecture.md` 与 `packages/sdk/protocol` —— 协议约定
 
 ### 2.4 mini 对照
@@ -95,22 +99,26 @@ mini 用同一套「组合 boot → surface 分裂」：`cli/` 承载 headless �
 
 | 面 | mini | 深读 |
 |---|---|---|
-| headless / 启动器 | `cli/headless.py`、`cli/main.py` | [手册 07](../chapters/07-external-entry-points.md) §7.2 |
-| web 传输 | `miniharness/web/` | interface-wire、[手册 07 §7.5](../chapters/07-external-entry-points.md) |
-| 三协议 | `protocol/{sdk,acp,hooks}.py` | 手册 07 §7.6–§7.8 |
+| headless / 启动器 | `cli/headless.py`、`cli/main.py` | [手册 07 §7.2](../chapters/07-headless.md#sec-7-2) |
+| web 传输 | `miniharness/web/` | interface-wire、[手册 07 §7.5](../chapters/07-web-transport.md#sec-7-5) |
+| 三协议 | `protocol/{sdk,acp,hooks}.py` | [§7.6](../chapters/07-sdk.md#sec-7-6)–[§7.8](../chapters/07-hooks.md#sec-7-8) |
 | 组合 / Loader | `boot/`、`loader/` | 手册 08、报告 [03 §5.5](03-flows.md) |
 | 插件 Remote | `web/api.py`、`boot/plugin_*` | interface-wire §4.15 |
 
 浏览器端：`webui/` 只依赖 wire；`web/static/` 为旧 SSE 教学参照。`cli/session_cmds.py` 为教学扩展（上游会话列表在 web 面）。并行工具、重试、YAML 组合、CI 等与入口正交，不在此重复，见 architecture 映射表与手册 04/05/12。
 
+### Mini trace（议题 2）
+
+[T1 headless](../guides/traces/headless-one-task.md) · [T3 web unary](../guides/traces/web-unary-session.md) · [T4 审批](../guides/traces/web-follow-approval.md) · `tests/test_web_server.py` · `session/create` 等在 `WebApi.ROUTES`（101 条）。
+
 ## 议题 3：Trajectory 轨迹台账
 
 ### 3.1 产品体验
 
-Trajectory 是 **web 专属**的"Agent 的 DevTools"：一个按 turn 组织的可检查事件台账（`packages/client/ui-trajectory/README.md:5`）。它把原始事件流折叠成 User/Assistant/Tool/嵌套 Subtool 的记录，用户可：按时间线扫读（Overview 区域，四种投影模式、TTFT 两色标注）、展开任意记录看局部检查器（Summary/Payload/Timing/Input/Output）、全文搜索（浏览器内）、折叠展开。长会话呈虚拟化滚动：尾部打开、向上翻页加载更早记录。
+Trajectory 是 **web 专属**的"Agent 的 DevTools"：一个按 turn 组织的可检查事件台账（`packages/client/ui-trajectory/README.md`）。它把原始事件流折叠成 User/Assistant/Tool/嵌套 Subtool 的记录，用户可：按时间线扫读（Overview 区域，四种投影模式、TTFT 两色标注）、展开任意记录看局部检查器（Summary/Payload/Timing/Input/Output）、全文搜索（浏览器内）、折叠展开。长会话呈虚拟化滚动：尾部打开、向上翻页加载更早记录。
 
 !!! warning "澄清（重要）"
-    Trajectory **不是独立数据系统**，也不是某种"session-timeline"包——全仓 grep 无该包。它就是同一份事件溯源日志在浏览器端的投影视图；`session-query`（议题 7）与它无数据关系。
+ Trajectory **不是独立数据系统**，也不是某种"session-timeline"包——全仓 grep 无该包。它就是同一份事件溯源日志在浏览器端的投影视图；`session-query`（议题 7）与它无数据关系。
 
 ### 3.2 实现
 
@@ -118,19 +126,19 @@ Trajectory 从**同一份会话日志**出发：`session/page` 按消息边界�
 
 ```mermaid
 flowchart LR
-  Log["Session 日志&lt;br/&gt;唯一数据源"]
-  Page["session/page RPC&lt;br/&gt;消息边界分页"]
-  Fold["折叠 definition&lt;br/&gt;match · update · finalNode"]
-  Snap["TrajectorySnapshot"]
-  UI["webui Trajectory&lt;br/&gt;虚拟化 · 搜索"]
+ Log["Session 日志&lt;br/&gt;唯一数据源"]
+ Page["session/page RPC&lt;br/&gt;消息边界分页"]
+ Fold["折叠 definition&lt;br/&gt;match · update · finalNode"]
+ Snap["TrajectorySnapshot"]
+ UI["webui Trajectory&lt;br/&gt;虚拟化 · 搜索"]
 
-  Log --> Page --> Fold --> Snap --> UI
+ Log --> Page --> Fold --> Snap --> UI
 ```
 
 分页边界取 append-origin 消息边界，折叠窗口内不会出现半截消息。虚拟化只挂载可见行窗口（阈值 100 行、overscan 12），长会话向上翻页加载更早记录。
 
 - **折叠引擎是纯函数**：每个折叠定义由 `match/update/finalNode` 构成（trajectory-*-definition.ts），无副作用、可重入——这是"日志投影"而非"状态机"的本质；
-- **保留边界**：设计笔记明确拒绝"把日志拍平成裸记录流"——Turn/Step/Request 边界保留因果结构（.agents/notes/implemented/feature/2026-07-27-trajectory-inspection-ledger.md:44）；
+- **保留边界**：设计笔记明确拒绝"把日志拍平成裸记录流"——Turn/Step/Request 边界保留因果结构（.agents/notes/implemented/feature/2026-07-27-trajectory-inspection-ledger.md）；
 - **Overview**：从同一折叠数据投影真实开始时间与耗时（TTFT 等），不是另一套采集；
 - **搜索**：浏览器内增量索引（trajectory-search-index.ts），随事件到达增量更新，不走 session-query；
 - **虚拟化**：只挂载可见行（阈值 100 行、overscan 12、DOM 上限 160，trajectory-virtualization.e2e.ts 固定该约定）；
@@ -138,13 +146,13 @@ flowchart LR
 
 ### 3.3 源码证据
 
-- `packages/client/ui-trajectory/README.md:5` —— Trajectory 定义（turn 组织的可检查回放）
+- `packages/client/ui-trajectory/README.md` —— Trajectory 定义（turn 组织的可检查回放）
 - `packages/client/ui-conversation/src/client/conversation/assembler.ts` —— 折叠窗口与 per-target 物化
-- `packages/client/ui-trajectory/src/client/trajectory-contract.ts:60-68` —— TrajectorySnapshot 结构
+- `packages/client/ui-trajectory/src/client/trajectory-contract.ts` —— TrajectorySnapshot 结构
 - `packages/client/ui-trajectory/src/client/trajectory-*-definition.ts` —— 纯函数折叠定义（match/update/finalNode）
 - `packages/client/ui-trajectory/src/client/trajectory-search-index.ts` —— 浏览器内增量搜索索引
 - `apps/web/tests/trajectory-virtualization.e2e.ts` —— 虚拟化行窗口约定
-- `.agents/notes/implemented/feature/2026-07-27-trajectory-inspection-ledger.md:44` —— 不扁平化、保留边界的决策
+- `.agents/notes/implemented/feature/2026-07-27-trajectory-inspection-ledger.md` —— 不扁平化、保留边界的决策
 
 ### 3.4 mini 对照
 
@@ -152,6 +160,10 @@ flowchart LR
 |---|---|---|
 | 折叠引擎（纯函数） | `client/trajectory.py`：turn/step 聚合 message 内嵌流（V2 stream）→timing、callId 树、tool-call 节点只来自 `tool/call` 事件、崩溃尾部 partial 标记、纯函数（手册 10 章） | turn 摘要为教学扩展（上游 trajectory-contract 无 turns 摘要） |
 | 虚拟化 / Overview / 搜索 | `client/trajectory.py` 为终端纯函数引擎（虚拟化与搜索在浏览器前端实现） | 浏览器前端 `webui/` 提供：Trajectory 虚拟化窗口 + Overview 折叠跳转 + 全文 search（`webui/src/trajectory/{model,search}.ts`，纯前端零约定改动）；`client/trajectory.py` 保持终端渲染不变 |
+
+### Mini trace（议题 3）
+
+`client/trajectory.py` → `tests/test_trajectory.py`；Web 消费 `session/follow` + `session/page`（wire §4.1、§3）。章 [10](../chapters/10-trajectory-projection.md)。
 
 ## 议题 4：Agent 干预面
 
@@ -165,18 +177,18 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-  Host["宿主 followup · steer · inject · cancel"]
-  Inbox["inbox&lt;br/&gt;next-turn | next-step"]
-  Pre["agent/pre-step waterfall"]
-  Loop["driver turn/step"]
-  Log["Session 日志&lt;br/&gt;inbox/spliced · turn/*"]
+ Host["宿主 followup · steer · inject · cancel"]
+ Inbox["inbox&lt;br/&gt;next-turn | next-step"]
+ Pre["agent/pre-step waterfall"]
+ Loop["driver turn/step"]
+ Log["Session 日志&lt;br/&gt;inbox/spliced · turn/*"]
 
-  Host --> Inbox --> Loop
-  Pre --> Loop
-  Loop --> Log
+ Host --> Inbox --> Loop
+ Pre --> Loop
+ Loop --> Log
 ```
 
-Agent 接口定义于 `packages/core/agent/src/runtime-types.ts:164`：
+Agent 接口定义于 `packages/core/agent/src/runtime-types.ts`：
 
 | 方法 | 语义 | 日志体现 |
 |---|---|---|
@@ -185,12 +197,12 @@ Agent 接口定义于 `packages/core/agent/src/runtime-types.ts:164`：
 | `inject(messages)` | 非唤醒注入：running 中入 inbox，不触发新 turn | inbox 事件 |
 | `send(msg, target, wakeup)` | 统一原语：wakeup 决定 followup 还是 inject | inbox 事件 |
 | `cancel(cause, opts)` | 清 inbox（除非 keepInbox）+ abort 活跃活动；idle no-op | inbox/spliced + turn/end aborted |
-| `whenIdle()` | 整机 quiescence 信号：无活跃 driver 或 maintenance 才 resolve | — |
+| `whenIdle` | 整机 quiescence 信号：无活跃 driver 或 maintenance 才 resolve | — |
 | `runMaintenance(task)` | true idle 下执行非回合维护（如 compactNow、goal 驱动的维护路径） | — |
 
 #### 干预通道（waterfall 系列）
 
-- **pre-step**：`agent/pre-step` 瀑布，决策 `{kind:'reject'}|{kind:'enter', messages}`（调用点 `core/agent-loop/src/agent.ts:225-243`）；reject → `turn/end {kind:'blocked'}`（agent.ts:267-269）。真实拒绝者：hooks-codex、hooks-claude-code（把 pre-tool/step 决策映射进来）、goal-round-driver（校验 goal 消息 reservation，见议题 8）；
+- **pre-step**：`agent/pre-step` 瀑布，决策 `{kind:'reject'}|{kind:'enter', messages}`（调用点 `core/agent-loop/src/agent.ts`）；reject → `turn/end {kind:'blocked'}`（agent.ts）。真实拒绝者：hooks-codex、hooks-claude-code（把 pre-tool/step 决策映射进来）、goal-round-driver（校验 goal 消息 reservation，见议题 8）；
 - **request**：`agent/request` 瀑布可在请求派生前改配置（含 compaction 的 request-error 恢复，见议题 9）；
 - **approval**：`tools/pre-execute` 瀑布返回 `{kind:'ask'}` 走审批（见议题 5）；
 - **inbox 日志语义**：被拒绝的 claimed 消息"既不丢弃也不重发"；取消时未派发的 tool call 补 `ABORTED_BEFORE_DISPATCH` 错误结果对。
@@ -201,14 +213,18 @@ Agent 接口定义于 `packages/core/agent/src/runtime-types.ts:164`：
 
 ### 4.3 源码证据
 
-- `packages/core/agent/src/runtime-types.ts:64-144` —— Agent 接口全表
-- `packages/core/agent-loop/src/agent.ts:225-243, 267-269` —— pre-step 瀑布与 blocked 落日志
-- `packages/hooks/hooks-codex/src/index.ts:211` 与 `packages/hooks/hooks-claude-code/src/index.ts:224` —— 真实 pre-step 拒绝者
-- `packages/goal/goal-round-driver/src/index.ts:334-414` —— goal reservation 校验（enter 非 reject）
+- `packages/core/agent/src/runtime-types.ts` —— Agent 接口全表
+- `packages/core/agent-loop/src/agent.ts, 267-269` —— pre-step 瀑布与 blocked 落日志
+- `packages/hooks/hooks-codex/src/index.ts` 与 `packages/hooks/hooks-claude-code/src/index.ts` —— 真实 pre-step 拒绝者
+- `packages/goal/goal-round-driver/src/index.ts` —— goal reservation 校验（enter 非 reject）
 
 ### 4.4 mini 对照
 
 mini loop（`core/agent_loop/agent.py`）覆盖完整干预面：`followup` + inbox + pre-step blocked + finally 闭合，以及 `steer`（下一 step 唤醒）/ `inject`（非唤醒入 inbox）/ `cancel`（清 inbox + aborted 闭合边界生效）/ `when_idle`（quiescence）/ `run_maintenance`（仅 true idle）（手册 09 章）。
+
+### Mini trace（议题 4）
+
+`tests/test_loop_intervention.py` · `session/control` Remote（wire §4.2）· 章 [09](../chapters/09-agent-intervention.md)。
 
 ## 议题 5：一次性审批体验
 
@@ -217,7 +233,7 @@ mini loop（`core/agent_loop/agent.py`）覆盖完整干预面：`followup` + in
 当模型调用需要人类点头的操作（危险命令、写文件、删除等）时，web 面板弹出 **Reject / Allow once** 两个按钮（`packages/client/ui-approval/src/client/ApprovalPanel.tsx`）。**没有"永远允许"**：每次授权只作用于被询问的那一个动作，下一次调用必须重新 ask。无人值守时可用 `never` 策略确定性拒绝，或由 ACP 机器应答（只给一次性 allow-once/reject-once 两个选项）。
 
 !!! warning "词汇澄清"
-    现仓库词汇是 `ApprovalOutcome` / `ApprovalPolicy` / `PreToolDecision`，不存在 `PermissionStatus`、`approvalContext` 等旧符号；且"allowed-once 豁免下一次"不存在——`packages/interaction/user-approval/README.md` 已知限制明示无 allow-always、无记忆规则、无撤销、无授权存储（`README.md:60`）。
+ 现仓库词汇是 `ApprovalOutcome` / `ApprovalPolicy` / `PreToolDecision`，不存在 `PermissionStatus`、`approvalContext` 等旧符号；且"allowed-once 豁免下一次"不存在——`packages/interaction/user-approval/README.md` 已知限制明示无 allow-always、无记忆规则、无撤销、无授权存储（`README.md`）。
 
 ### 5.2 实现
 
@@ -225,35 +241,39 @@ mini loop（`core/agent_loop/agent.py`）覆盖完整干预面：`followup` + in
 
 ```mermaid
 flowchart LR
-  Pre["tools/pre-execute&lt;br/&gt;kind ask"]
-  Svc["ctx.approval.request"]
-  Asked["approval/asked"]
-  WF["approval/request waterfall"]
-  Dec["approval/decided"]
-  Pipe["工具管线 allow/deny"]
+ Pre["tools/pre-execute&lt;br/&gt;kind ask"]
+ Svc["ctx.approval.request"]
+ Asked["approval/asked"]
+ WF["approval/request waterfall"]
+ Dec["approval/decided"]
+ Pipe["工具管线 allow/deny"]
 
-  Pre --> Svc --> Asked --> WF --> Dec --> Pipe
+ Pre --> Svc --> Asked --> WF --> Dec --> Pipe
 ```
 
-- **闭合四值**：`'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'`（`packages/interaction/user-approval/src/types.ts:29`），唯一放行是 allowed-once；
-- **两档策略**：`ApprovalPolicy = 'ask' | 'never'`（index.ts:94）；`never` 在进入 waterfall 分发**之前**确定性返回 rejected（index.ts:304-312）——因为 `prepend:true` 的监听器无法绕过 service 自身先裁决；有效策略 = 日志中最后一个 `approval/policy` 事件的纯 fold（index.ts:112-118），恢复无需 catch-up，`setApprovalPolicy()` 是唯一写路径；
-- **审计不进模型转录**：三个事件（asked/decided/policy）都 log-only、无 surfaceOp、无 role；模型只看到提问方消费者最终的工具结果。策略另经两条模型可见路径：system-prompt runtime-context 快照（`approval:policy`，order 115，index.ts:204-216）+ 策略切换时注入带 `source:{kind:'plugin'}` 的 user/message（index.ts:226-237）；
-- **四个 answerer 通道**：web 人工（`web/approvals.py` 挂 async `tools/ask` 闸门 → `approval/request` 经 `$events` 远程事件瀑布投递 → 浏览器 `$events/result` 回投结算，wire 约定同 `packages/api/remotes`，api-proxy.ts:1407-1488 旧路径已随 apiproxy 删除）；ACP 机器（只给 allow-once/reject-once，acp/src/index.ts:215-229）；hooks 桥（把 PreToolUse 的 ask 透传，hooks-claude-code/src/index.ts:238-244）；无内置 answerer（headless 组合 resolve unavailable 并 fail-closed）；
-- **权限旋钮在部署层**：`packages/bundle/base/cordis.patch.yml:188-205` 声明 approval 行（policy 由 `DSH_PERMISSION_MODE` 推导）+ `permission-presets` 三档表（read-only / workspace-write / danger-full-access，各自捆绑 sandbox 模式 + 审批策略，schema 在 `packages/interaction/permission-presets/src/index.ts:161-178`）。
+- **闭合四值**：`'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'`（`packages/interaction/user-approval/src/types.ts`），唯一放行是 allowed-once；
+- **两档策略**：`ApprovalPolicy = 'ask' | 'never'`（index.ts）；`never` 在进入 waterfall 分发**之前**确定性返回 rejected（index.ts）——因为 `prepend:true` 的监听器无法绕过 service 自身先裁决；有效策略 = 日志中最后一个 `approval/policy` 事件的纯 fold（index.ts），恢复无需 catch-up，`setApprovalPolicy` 是唯一写路径；
+- **审计不进模型转录**：三个事件（asked/decided/policy）都 log-only、无 surfaceOp、无 role；模型只看到提问方消费者最终的工具结果。策略另经两条模型可见路径：system-prompt runtime-context 快照（`approval:policy`，order 115，index.ts）+ 策略切换时注入带 `source:{kind:'plugin'}` 的 user/message（index.ts）；
+- **四个 answerer 通道**：web 人工（`web/approvals.py` 挂 async `tools/ask` 闸门 → `approval/request` 经 `$events` 远程事件瀑布投递 → 浏览器 `$events/result` 回投结算，wire 约定同 `packages/api/remotes`，api-proxy.ts 旧路径已随 apiproxy 删除）；ACP 机器（只给 allow-once/reject-once，acp/src/index.ts）；hooks 桥（把 PreToolUse 的 ask 透传，hooks-claude-code/src/index.ts）；无内置 answerer（headless 组合 resolve unavailable 并 fail-closed）；
+- **权限旋钮在部署层**：`packages/bundle/base/cordis.patch.yml:188-205` 声明 approval 行（policy 由 `DSH_PERMISSION_MODE` 推导）+ `permission-presets` 三档表（read-only / workspace-write / danger-full-access，各自捆绑 sandbox 模式 + 审批策略，schema 在 `packages/interaction/permission-presets/src/index.ts`）。
 
 ### 5.3 源码证据
 
-- `packages/interaction/user-approval/README.md:5,59-62` —— 一次性 seam 总述；仅 open turn 有效；无内置 answerer
-- `packages/interaction/user-approval/src/index.ts:34-72,94,112-118,257-344` —— 事件声明、策略、fold、request/decide 全流程
-- `packages/core/tools/src/index.ts:588-591,1475-1481,1689-1729` —— PreToolDecision 与 serviceAsk 映射
-- `packages/api/remotes/src/{remote-events,types}.ts` —— web 通道 waterfall 与应答 payload 约束（早期 apiproxy 时代的 `api-proxy.ts:1407-1488` / `api/approvals.ts` 已随 apiproxy 删除，职责移入 api/gateway + api/remotes）
-- `packages/acp/acp/src/index.ts:215-229` —— ACP 一次性机器选项
+- `packages/interaction/user-approval/README.md,59-62` —— 一次性 seam 总述；仅 open turn 有效；无内置 answerer
+- `packages/interaction/user-approval/src/index.ts,94,112-118,257-344` —— 事件声明、策略、fold、request/decide 全流程
+- `packages/core/tools/src/index.ts,1475-1481,1689-1729` —— PreToolDecision 与 serviceAsk 映射
+- `packages/api/remotes/src/{remote-events,types}.ts` —— web 通道 waterfall 与应答 payload 约束（早期 apiproxy 时代的 `api-proxy.ts` / `api/approvals.ts` 已随 apiproxy 删除，职责移入 api/gateway + api/remotes）
+- `packages/acp/acp/src/index.ts` —— ACP 一次性机器选项
 - `packages/bundle/base/cordis.patch.yml:188-205` —— 部署级 permission 配置
-- `docs/subsystems/approval.md:21,33,86-88` —— fail-closed 语义与审计 log-only
+- `docs/subsystems/approval.md,33,86-88` —— fail-closed 语义与审计 log-only
 
 ### 5.4 mini 对照
 
 mini 的审批层：`ask/never` 两档、'never' 在派发前由服务自身确定性拒绝、审计事件 `approval/asked|decided` turn-enclosed 且 log-only 非 surface、`approval/policy` 最后一条胜出纯 fold、无 answerer/抛错/非词汇表返回值归一化 'unavailable' fail closed、'allowed-once' 无跨调用豁免（手册 09 章）。**web 人工通道**（`web/approvals.py`）接在工具管线闸门 `tools/ask` 而非上游的 `approval/request`（教学简化），wire 约定一致——`approval/request` 经 `$events` 远程事件瀑布投递、浏览器 `$events/result` 回投结算（result∈APPROVAL_OUTCOMES，非法值 fail-closed 'unavailable'）、网关 dispose 全 pending 'cancelled'（手册 07 章 §7.5.4）。
+
+### Mini trace（议题 5）
+
+`interaction/approval.py` · `tests/test_approval.py` · [T4](../guides/traces/web-follow-approval.md)（`$events/result`）。
 
 ## 议题 6：运行时自我修改
 
@@ -262,26 +282,30 @@ mini 的审批层：`ask/never` 两档、'never' 在派发前由服务自身确�
 在创造模式下，agent 可以**运行时给自己加新插件**：先 inspect 运行时（列表/查询/自身），define 一个新包（kind new），run 激活，stop/undefine 回收。示例 demo（`scripts/demo-cordis.mjs` + `examples/web-cordis/cordis.yml`，端口 3081）走完全程：define `pkg-1` → run → `invoke('double')` 返回 42。
 
 !!! warning "关键事实（修正预期）"
-    原 `packages/self-modification/` 已改名为 `packages/extensions/`。临时插件**只存进程内存，明确不写 cordis.yml、不写入磁盘、重启不恢复**（`tool-cordis/README.md:19`）——"agent 直接改配置"这条路径是设计上排除的。
+ 原 `packages/self-modification/` 已改名为 `packages/extensions/`。临时插件**只存进程内存，明确不写 cordis.yml、不写入磁盘、重启不恢复**（`tool-cordis/README.md`）——"agent 直接改配置"这条路径是设计上排除的。
 
 ### 6.2 实现
 
 - **七工具两族**（tool-cordis）：`inspect_list` / `inspect_query` / `inspect_self`（检查）+ `define` / `run` / `stop` / `undefine`（修改）；
-- **完整流程**（`cordis-host-runner/tests/runner.spec.ts:150-176`）：define（kind new，mint `dyn-1`/`pkg-1`）→ run（立即 `status:'running'`、`run-1`、`ctx.provide('dynDoubler')` 生效）→ invoke 返回 42；
+- **完整流程**（`cordis-host-runner/tests/runner.spec.ts`）：define（kind new，mint `dyn-1`/`pkg-1`）→ run（立即 `status:'running'`、`run-1`、`ctx.provide('dynDoubler')` 生效）→ invoke 返回 42；
 - **带浏览器半的包**：走 `cordis/request-run` 审批往返（拒绝则不启动，失败回滚）；
 - **失败诊断路径**：run 失败 → `inspect_self` 读诊断 → define 新包 → `run mode:"update"` 热更新；
-- **异步结果回喂**：经 `agent.steer` 送回 agent（cordis-host-runner/src/index.ts:1019-1117）。
+- **异步结果回喂**：经 `agent.steer` 送回 agent（cordis-host-runner/src/index.ts）。
 
 ### 6.3 源码证据
 
-- `packages/extensions/tool-cordis/README.md:19` —— 进程内存、不写 cordis.yml 的明示
-- `packages/extensions/cordis-host-runner/tests/runner.spec.ts:150-176` —— 端到端示例全流程
-- `packages/extensions/cordis-host-runner/src/index.ts:1019-1117` —— inspect_self 诊断与 steer 回喂
-- `.agents/notes/implemented/architecture/2026-08-11-repository-naming-contract-and-rename-ledger.md:260` —— 改名记录
+- `packages/extensions/tool-cordis/README.md` —— 进程内存、不写 cordis.yml 的明示
+- `packages/extensions/cordis-host-runner/tests/runner.spec.ts` —— 端到端示例全流程
+- `packages/extensions/cordis-host-runner/src/index.ts` —— inspect_self 诊断与 steer 回喂
+- `.agents/notes/implemented/architecture/2026-08-11-repository-naming-contract-and-rename-ledger.md` —— 改名记录
 
 ### 6.4 mini 对照
 
 mini 的动态插件（`extensions/dynamic.py`）：进程内存 define/run/stop/undefine 生命周期，define 仅登记、run 才生效、运行中 run = retract 旧 run 后 replace、undefine 运行中自动 retract、进程级冲突 fail loud、重启不恢复（手册 11 章）。
+
+### Mini trace（议题 6）
+
+`python -m unittest tests.test_dynamic -v` · 章 [11](../chapters/11-runtime-self-modification.md)。
 
 ## 议题 7：会话恢复 / resume
 
@@ -295,57 +319,61 @@ web 中打开历史会话有两种不同深度：**读历史窗口**（滚动回
 
 ```mermaid
 flowchart TB
-  subgraph Read ["读历史（不 resume）"]
-    Page["session/page&lt;br/&gt;beforeSeq · maxMessages"]
-    Follow["session/follow 实时帧"]
-  end
-  subgraph Run ["恢复运行"]
-    Ens["ensureSession"]
-    Res["agents.resume&lt;br/&gt;prepare + publish"]
-  end
-  Log["持久化 Session 日志"]
-  Log --> Page
-  Log --> Follow
-  Log --> Ens --> Res
+ subgraph Read ["读历史（不 resume）"]
+ Page["session/page&lt;br/&gt;beforeSeq · maxMessages"]
+ Follow["session/follow 实时帧"]
+ end
+ subgraph Run ["恢复运行"]
+ Ens["ensureSession"]
+ Res["agents.resume&lt;br/&gt;prepare + publish"]
+ end
+ Log["持久化 Session 日志"]
+ Log --> Page
+ Log --> Follow
+ Log --> Ens --> Res
 ```
 
 ```text
 会话检索与恢复：
-sidebar 搜索 → ctx.sessions.search（runtime manager.ts:518-527）→ RPC session/search
-  · listVisibleSessionSummaries() 划定授权可见集
-  · sessionQuery.searchSessions：事件过滤 [user/message, assistant/message] × surface current
-  · 分页游标消费（≤ SESSION_SEARCH_PROVIDER_CALL_LIMIT 次），逐 hit 校验可见性
-  · snippet 240 codepoints，≤20 条 + hasMore（api/session-search.ts:2,5）
+sidebar 搜索 → ctx.sessions.search（runtime manager.ts）→ RPC session/search
+ · listVisibleSessionSummaries 划定授权可见集
+ · sessionQuery.searchSessions：事件过滤 [user/message, assistant/message] × surface current
+ · 分页游标消费（≤ SESSION_SEARCH_PROVIDER_CALL_LIMIT 次），逐 hit 校验可见性
+ · snippet 240 codepoints，≤20 条 + hasMore（api/session-search.ts,5）
 
 打开窗口（读历史，不激活）：
-  ui-workspace open → ctx.sessions.open → RPC session/page（尾页 PAGE_MESSAGES=50）
-  → host：historySourceFor（attached 优先，否则持久化 inspect，session-controller/src/index.ts，aliased host/history-source）
-  → paginate：消息边界切页 → session/page（throughSeq/beforeSeq/maxMessages，gateway 映射）；客户端与 mux 实时帧按 seq 缝合；subscribedLastSeq>tailSeq 补拉（gap repair）
-  → loadOlder（beforeSeq=窗口首 seq）
+ ui-workspace open → ctx.sessions.open → RPC session/page（尾页 PAGE_MESSAGES=50）
+ → host：historySourceFor（attached 优先，否则持久化 inspect，session-controller/src/index.ts，aliased host/history-source）
+ → paginate：消息边界切页 → session/page（throughSeq/beforeSeq/maxMessages，gateway 映射）；客户端与 mux 实时帧按 seq 缝合；subscribedLastSeq>tailSeq 补拉（gap repair）
+ → loadOlder（beforeSeq=窗口首 seq）
 
 真正恢复（resume，激活运行）：
-  ensureSession：持久化记录存在 → ctx.agents.resume({resumeSessionId})（session-controller/src/index.ts ensureSession 等效）
-  → agent-loop：persistence.prepare → setupAndPublish('resume')（agent-loop/src/index.ts:655-710）
-  声明式路径：config agents[].resumeSessionId（与 sessionId 互斥，index.ts:270-373）
+ ensureSession：持久化记录存在 → ctx.agents.resume({resumeSessionId})（session-controller/src/index.ts ensureSession 等效）
+ → agent-loop：persistence.prepare → setupAndPublish('resume')（agent-loop/src/index.ts）
+ 声明式路径：config agents[].resumeSessionId（与 sessionId 互斥，index.ts）
 ```
 
-- **分页语义**（session-controller/src/index.ts session/page，原 api-proxy.ts:282-313 已随 apiproxy 删除）：`beforeSeq` 缺省=尾页；从尾部倒着数 maxMessages 个 **append-origin 消息**（user/assistant message 且 isAppendSurfaceEvent）；replacement 拷贝不占配额；派生事件经 `sourceEventSeqs` 归并到所属消息（如 `tool/result` 引其 `tool/call`；V2 起 assistant 消息内嵌流自带边界、禁带 `sourceEventSeqs`），**绝不在消息中段切页**；`compaction/summary` 与其 replacement 同页；
-- **全文检索是 opt-in**：session-query 家族（服务定义 + SQLite FTS5 实现，`packages/session-query/`）索引六类事件（user/message、assistant/message、tool/call name+arguments、tool/result content+error、todo/write、turn/end reason）；结构性事件不产生文档（extraction.ts:13-42）；出厂 base bundle 默认 `openAt: never`（SQLite 永不打开，搜索抛 `SESSION_QUERY_SEARCH_DISABLED`），此时 sidebar 退化为本地子串匹配（bundle/base/cordis.patch.yml:109-121）；
+- **分页语义**（session-controller/src/index.ts session/page，原 api-proxy.ts 已随 apiproxy 删除）：`beforeSeq` 缺省=尾页；从尾部倒着数 maxMessages 个 **append-origin 消息**（user/assistant message 且 isAppendSurfaceEvent）；replacement 拷贝不占配额；派生事件经 `sourceEventSeqs` 归并到所属消息（如 `tool/result` 引其 `tool/call`；V2 起 assistant 消息内嵌流自带边界、禁带 `sourceEventSeqs`），**绝不在消息中段切页**；`compaction/summary` 与其 replacement 同页；
+- **全文检索是 opt-in**：session-query 家族（服务定义 + SQLite FTS5 实现，`packages/session-query/`）索引六类事件（user/message、assistant/message、tool/call name+arguments、tool/result content+error、todo/write、turn/end reason）；结构性事件不产生文档（extraction.ts）；出厂 base bundle 默认 `openAt: never`（SQLite 永不打开，搜索抛 `SESSION_QUERY_SEARCH_DISABLED`），此时 sidebar 退化为本地子串匹配（bundle/base/cordis.patch.yml:109-121）；
 - **读历史从不 resume 或发布 Agent**（packages/api/session-controller/src/index.ts）——两条路径刻意分离；
-- **headless 无 --session**：startup.ts:31-56 只解析 task 位置参数；headless.spec.ts:90 的 resume 桩直接 reject 证明从不调用。
+- **headless 无 --session**：startup.ts 只解析 task 位置参数；headless.spec.ts 的 resume 桩直接 reject 证明从不调用。
 
 ### 7.3 源码证据
 
-- `packages/api/session-controller/src/index.ts`（session/page / session/search / session/fork / resume 约定；原 api-proxy.ts:282-313/1533-1538/1617-1662/2036-2165 已随 apiproxy 删除）—— 分页、historySourceFor、ensureSession、session/search
+- `packages/api/session-controller/src/index.ts`（session/page / session/search / session/fork / resume 约定；原 api-proxy.ts/1533-1538/1617-1662/2036-2165 已随 apiproxy 删除）—— 分页、historySourceFor、ensureSession、session/search
 - `packages/api/session-controller/src/types.ts` —— page 游标（throughSeq/beforeSeq/maxMessages）+ SessionErrorDetailsMap 错误闭集
-- `packages/session-query/session-query/src/extraction.ts:13-42` —— 索引文档投影六类事件
-- `packages/session-query/session-query-sqlite/README.md:19,40-42,55` —— FTS5、openAt 三态、进程内同步执行
-- `packages/core/agent-loop/src/index.ts:655-710` —— resume 的 prepare/setupAndPublish
-- `packages/bundle/headless/src/startup.ts:31-56` 与 `tests/headless.spec.ts:90` —— headless 不支持恢复
+- `packages/session-query/session-query/src/extraction.ts` —— 索引文档投影六类事件
+- `packages/session-query/session-query-sqlite/README.md,40-42,55` —— FTS5、openAt 三态、进程内同步执行
+- `packages/core/agent-loop/src/index.ts` —— resume 的 prepare/setupAndPublish
+- `packages/bundle/headless/src/startup.ts` 与 `tests/headless.spec.ts` —— headless 不支持恢复
 
 ### 7.4 mini 对照
 
-mini 持久化层采用 JSONL + fail-closed + interrupted 修复，且 `sessions` 子命令（`cli/session_cmds.py`）提供 CLI 版会话管理（list / resume / delete，教学扩展）。**web 表层**：`webui/` + `session/list|create|page|search` 等 unary 与 `session/follow` 流（分页边界同议题 7.2）；`ensureSession` + `agents.resume` 走同一 Remote 约定。**登记简化**：跨会话 FTS 检索（上游 `session-query` + `openAt` 三态）在 mini 为可选域（`session_query/`，默认组合未必打开 SQLite FTS）；sidebar 全文搜索行为与上游出厂 base bundle 默认可能不一致。headless 保持不支持恢复（同上游 startup.ts:31-56 只解析 task 位置参数）。
+mini 持久化层采用 JSONL + fail-closed + interrupted 修复，且 `sessions` 子命令（`cli/session_cmds.py`）提供 CLI 版会话管理（list / resume / delete，教学扩展）。**web 表层**：`webui/` + `session/list|create|page|search` 等 unary 与 `session/follow` 流（分页边界同议题 7.2）；`ensureSession` + `agents.resume` 走同一 Remote 约定。**登记简化**：跨会话 FTS 检索（上游 `session-query` + `openAt` 三态）在 mini 为可选域（`session_query/`，默认组合未必打开 SQLite FTS）；sidebar 全文搜索行为与上游出厂 base bundle 默认可能不一致。headless 保持不支持恢复（同上游 startup.ts 只解析 task 位置参数）。
+
+### Mini trace（议题 7）
+
+[T2 持久化](../guides/traces/persistence-kill-resume.md) · `session/page` / `session/follow` · `cli/session_cmds.py` · `tests/test_session_store.py`。
 
 ## 议题 8：plan mode 与 goal
 
@@ -359,49 +387,49 @@ plan 与 goal 都只靠会话日志恢复：plan 折叠 `plan/mode` 决定是否
 
 #### plan mode（`packages/plan/plan-mode/`，ctx.planMode）
 
-- **状态只写日志**：唯一持久事实是会话事件 `plan/mode {active:boolean}`（log-only、非 surface、整值替换，index.ts:46-55）；生效状态 = `foldPlanMode` 对日志前缀的纯折叠（index.ts:129-138），resume/fork/compaction 都能恢复，无 live mirror；
-- **软指导**：激活时 `plan:policy` prompt section（order 50，index.ts:225-233）把部署配置的指导文本加入每个 model request；sandbox 模式与审批策略是独立强制限制，不读写 plan 状态；
-- **工具目录跨模式不变**：`exit_plan_mode` 在非激活时也保持注册（index.ts:63-67），进出 plan 只改 prompt 不改工具目录——请求缓存稳定（standard/agent.cordis.yml:118 注释原文）；
-- **写入路径**：`set()` 时若 agent 空闲（无 open turn）立即 append；turn 打开中只记录 pending intent，等下一次**被接受的 in-turn pre-step** 追加（index.ts:425-460）——与 step 边界严格一致；
-- **退出审查**：`exit_plan_mode` 要求完整 markdown 计划，经 user-questions 弹"Plan review"（Approve / Keep planning）；批准 → pending 退出在下一 accepted pre-step 写入日志；Keep planning 是带用户反馈的失败调用（index.ts:305-393）。
+- **状态只写日志**：唯一持久事实是会话事件 `plan/mode {active:boolean}`（log-only、非 surface、整值替换，index.ts）；生效状态 = `foldPlanMode` 对日志前缀的纯折叠（index.ts），resume/fork/compaction 都能恢复，无 live mirror；
+- **软指导**：激活时 `plan:policy` prompt section（order 50，index.ts）把部署配置的指导文本加入每个 model request；sandbox 模式与审批策略是独立强制限制，不读写 plan 状态；
+- **工具目录跨模式不变**：`exit_plan_mode` 在非激活时也保持注册（index.ts），进出 plan 只改 prompt 不改工具目录——请求缓存稳定（standard/agent.cordis.yml:118 注释原文）；
+- **写入路径**：`set` 时若 agent 空闲（无 open turn）立即 append；turn 打开中只记录 pending intent，等下一次**被接受的 in-turn pre-step** 追加（index.ts）——与 step 边界严格一致；
+- **退出审查**：`exit_plan_mode` 要求完整 markdown 计划，经 user-questions 弹"Plan review"（Approve / Keep planning）；批准 → pending 退出在下一 accepted pre-step 写入日志；Keep planning 是带用户反馈的失败调用（index.ts）。
 
 #### goal（`packages/goal/`：goal + goal-round-driver + tool-goal + command-goal）
 
-- **事件**：durable 事件只有 `goal/change`（全快照或 clear 墓碑，version 1，domain.ts:25-36）+ 进程内通知 `goal/changed`；**不存在** `goal/claim` / `goal/round` 事件——round 只是消息 source 字段与快照计数（澄清）；
-- **goal round**：驱动器把"active 且 armed 且未超限"的 goal 变成顺序轮次——每条是 goal 来源的 user 消息（`source:{kind:'goal', goalId, revision, round}`），经 `agent.followup()` 进 inbox，成为普通 FIFO turn（goal-round-driver/src/index.ts:174-179）；
-- **pre-step 消费**：goal 消息**走 enter 而非 reject**；驱动器在 proposed messages 中认出 goal 来源，下游之前/之后各校验一次完整 reservation（active/armed、revision、round==roundsStarted+1、phase==claimed），校验失败才 reject（或下游 reject 时标记 blocked，code `prompt-rejected`）（index.ts:334-414）；
-- **容量与并发**：轮次上限 `maxGoalRounds` 超限自动 block（code `round-limit`，index.ts:166-172）；按 agent 串行化——同一时刻最多一个在飞 round（index.ts:208-241）；resume/fork 后需人授权重新 armed；预留前先 `ctx.sessions.flush()` 检查点保证 goal/changed 持久义务（index.ts:142-154）。
+- **事件**：durable 事件只有 `goal/change`（全快照或 clear 墓碑，version 1，domain.ts）+ 进程内通知 `goal/changed`；**不存在** `goal/claim` / `goal/round` 事件——round 只是消息 source 字段与快照计数（澄清）；
+- **goal round**：驱动器把"active 且 armed 且未超限"的 goal 变成顺序轮次——每条是 goal 来源的 user 消息（`source:{kind:'goal', goalId, revision, round}`），经 `agent.followup` 进 inbox，成为普通 FIFO turn（goal-round-driver/src/index.ts）；
+- **pre-step 消费**：goal 消息**走 enter 而非 reject**；驱动器在 proposed messages 中认出 goal 来源，下游之前/之后各校验一次完整 reservation（active/armed、revision、round==roundsStarted+1、phase==claimed），校验失败才 reject（或下游 reject 时标记 blocked，code `prompt-rejected`）（index.ts）；
+- **容量与并发**：轮次上限 `maxGoalRounds` 超限自动 block（code `round-limit`，index.ts）；按 agent 串行化——同一时刻最多一个在飞 round（index.ts）；resume/fork 后需人授权重新 armed；预留前先 `ctx.sessions.flush` 检查点保证 goal/changed 持久义务（index.ts）。
 
 <p class="fig-cap">图 8：goal round 驱动（快照 → followup → pre-step reservation）</p>
 
 ```mermaid
 flowchart TD
-  Mut["goal/change 写入日志&lt;br/&gt;goal/changed 通知"]
-  Fold["fold 快照&lt;br/&gt;active · armed · round 预算"]
-  Idle["agent idle"]
-  Drv["goal-round-driver&lt;br/&gt;至多一个在飞 round"]
-  Fu["followup&lt;br/&gt;source: goal"]
-  Pre["agent/pre-step&lt;br/&gt;reservation 校验"]
-  Turn["普通 FIFO turn"]
-  Block["turn/end blocked&lt;br/&gt;round-limit · prompt-rejected"]
+ Mut["goal/change 写入日志&lt;br/&gt;goal/changed 通知"]
+ Fold["fold 快照&lt;br/&gt;active · armed · round 预算"]
+ Idle["agent idle"]
+ Drv["goal-round-driver&lt;br/&gt;至多一个在飞 round"]
+ Fu["followup&lt;br/&gt;source: goal"]
+ Pre["agent/pre-step&lt;br/&gt;reservation 校验"]
+ Turn["普通 FIFO turn"]
+ Block["turn/end blocked&lt;br/&gt;round-limit · prompt-rejected"]
 
-  Mut --> Fold
-  Fold --> Idle
-  Idle --> Drv --> Fu --> Pre
-  Pre -->|enter| Turn
-  Pre -->|reject| Block
-  Turn --> Idle
+ Mut --> Fold
+ Fold --> Idle
+ Idle --> Drv --> Fu --> Pre
+ Pre -->|enter| Turn
+ Pre -->|reject| Block
+ Turn --> Idle
 ```
 
 ### 8.3 源码证据
 
-- `packages/plan/plan-mode/src/index.ts:46-55,63-67,129-138,205-233,305-393,425-460` —— plan 全链路
+- `packages/plan/plan-mode/src/index.ts,63-67,129-138,205-233,305-393,425-460` —— plan 全链路
 - `apps/cli/config/agent-presets/standard/agent.cordis.yml:104-124` —— entry-local realm 与部署指导文本（含 118 行缓存稳定注释）
-- `docs/subsystems/plan.md:5,9-11,33` —— 软指导与 log-only 语义
-- `packages/goal/goal-round-driver/src/index.ts:142-205,208-241,334-414` —— round 驱动与瀑布消费
-- `packages/goal/goal/src/domain.ts:25-36,66` 与 `fold.ts:321-331` —— goal/change 事件与严格重放校验
-- `packages/goal/tool-goal/README.md:9-25,49` —— 模型侧工具与权威要求
-- `docs/subsystems/goal.md:44-70,100-111` —— 快照字段与 GoalMessageSource
+- `docs/subsystems/plan.md,9-11,33` —— 软指导与 log-only 语义
+- `packages/goal/goal-round-driver/src/index.ts,208-241,334-414` —— round 驱动与瀑布消费
+- `packages/goal/goal/src/domain.ts,66` 与 `fold.ts` —— goal/change 事件与严格重放校验
+- `packages/goal/tool-goal/README.md,49` —— 模型侧工具与权威要求
+- `docs/subsystems/goal.md,100-111` —— 快照字段与 GoalMessageSource
 
 ### 8.4 mini 对照
 
@@ -415,6 +443,10 @@ wire 与折叠语义与上游一致：`plan/mode`、`goal/change`、goal 消息 
 
 登记简化（须在映射表核对）：plan scope 层叠未复现；goal 无 Typert remote、无 competingQueued、completionAuthority 近似为「当前 step 在 goal 轮次中」；工具 canonical 值与 `Tool.render` 分离（plan/goal 三工具同上游 JSON 契约）。
 
+### Mini trace（议题 8）
+
+`examples/plan_goal_demo.py --approve` · `tests/test_goal*.py` · `plan/mode` / `goal/change` 事件 · wire `goals/*`（interface-wire §4.12）。
+
 ## 议题 9：上下文压缩与后台作业
 
 ### 9.1 产品体验
@@ -427,54 +459,54 @@ wire 与折叠语义与上游一致：`plan/mode`、`goal/change`、goal 消息 
 
 ```mermaid
 flowchart LR
-  Meter["ctx.tokenMeter fold"]
-  Pre["agent/pre-step 压力检查"]
-  Sum["compaction 摘要 LLM"]
-  CP["user/message 检查点&lt;br/&gt;surfaceOp replace"]
-  End["compaction/end"]
+ Meter["ctx.tokenMeter fold"]
+ Pre["agent/pre-step 压力检查"]
+ Sum["compaction 摘要 LLM"]
+ CP["user/message 检查点&lt;br/&gt;surfaceOp replace"]
+ End["compaction/end"]
 
-  Meter --> Pre --> Sum --> CP --> End
+ Meter --> Pre --> Sum --> CP --> End
 ```
 
 #### compaction（`packages/compaction/`：seam + compaction-basic + pruner + command-compact）
 
-- **可选能力**：不在 agent-loop 脊柱上；`ctx.tokenMeter` 独立服务（docs/subsystems/compaction.md:5,69）；
-- **触发**：`thresholdRatio` 默认 **0.8**（`floor(contextWindow × ratio)` → thresholdTokens，config.ts:20-23,144-154），tokenMeter 请求+响应压力 ≥ 阈值触发；`retainRatio` 默认 0.16 为保留尾部预算；`context-overflow`（provider 报 `CONTEXT_WINDOW_EXCEEDED`）绕过阈值强制减容（index.ts:283-312）；
+- **可选能力**：不在 agent-loop 脊柱上；`ctx.tokenMeter` 独立服务（docs/subsystems/compaction.md,69）；
+- **触发**：`thresholdRatio` 默认 **0.8**（`floor(contextWindow × ratio)` → thresholdTokens，config.ts,144-154），tokenMeter 请求+响应压力 ≥ 阈值触发；`retainRatio` 默认 0.16 为保留尾部预算；`context-overflow`（provider 报 `CONTEXT_WINDOW_EXCEEDED`）绕过阈值强制减容（index.ts）；
 - **事件**：`compaction/start`（先写入作为锁）、`compaction/summary`、`compaction/end`（最后释放，崩溃留下可检测孤儿锁）+ 可选 `compaction/prune`；**不存在** compaction-request / compaction/compress 名称（澄清）；三个事件 log-only；surface 实际变更是带 `surfaceOp:{op:'replace',start,end}` 的 user/message 检查点（事务 id 关联）；
-- **KV 复用**：summarization 是一次直接 `ctx.llm.stream()`（purpose:'compaction'），**逐字重放**会话自己的 system prompt、工具、被遮蔽区消息，最后追加固定压缩指令——复用 provider warm prefix cache（summarizer.ts:111,161-176）；
-- **衔接**：压力检查挂在串行 `agent/pre-step`（request 派生前）；overflow 恢复挂在 `agent/request-error`，仅当 `surface.replaceGeneration` 前进才返回 retry（index.ts:147-223）；手动路径 compactNow 闭合后 `ctx.sessions.flush()` 放行后续 prompt（region.ts:231-237）。
+- **KV 复用**：summarization 是一次直接 `ctx.llm.stream`（purpose:'compaction'），**逐字重放**会话自己的 system prompt、工具、被遮蔽区消息，最后追加固定压缩指令——复用 provider warm prefix cache（summarizer.ts,161-176）；
+- **衔接**：压力检查挂在串行 `agent/pre-step`（request 派生前）；overflow 恢复挂在 `agent/request-error`，仅当 `surface.replaceGeneration` 前进才返回 retry（index.ts）；手动路径 compactNow 闭合后 `ctx.sessions.flush` 放行后续 prompt（region.ts）。
 
 #### tokenMeter（`packages/llm/token-meter/`）
 
-- 无配置、**自身不产生任何会话事件**：对既有事件流做增量 fold（logRevision = consumedEvents），提供请求压力与表面定价两个快照（index.ts:60-98,116-147）；
-- 用量来源：`assistant/message.usage` + `assistant/message`/`assistant/attempt` 内嵌流展开出的 usage 样本（同一步早样本+最终样本，后者替换前者不重复计数，usage-projection.ts:82,116——每次 v2 Assistant 结算贡献其流内嵌的最后一个 usage 样本）；
-- 锚定/估算双路径：最新成功请求 usage 在其 canonical 信封与当前 request/header 一致且总数 ≥ 启发式锚价时复用（baseline.kind='usage'），否则估算（4 字符/token 等固定启发式，estimate.ts:12-19）。
+- 无配置、**自身不产生任何会话事件**：对既有事件流做增量 fold（logRevision = consumedEvents），提供请求压力与表面定价两个快照（index.ts,116-147）；
+- 用量来源：`assistant/message.usage` + `assistant/message`/`assistant/attempt` 内嵌流展开出的 usage 样本（同一步早样本+最终样本，后者替换前者不重复计数，usage-projection.ts,116——每次 v2 Assistant 结算贡献其流内嵌的最后一个 usage 样本）；
+- 锚定/估算双路径：最新成功请求 usage 在其 canonical 信封与当前 request/header 一致且总数 ≥ 启发式锚价时复用（baseline.kind='usage'），否则估算（4 字符/token 等固定启发式，estimate.ts）。
 
 #### 后台作业（`packages/jobs/`：seam + jobs-local + tool-jobs）
 
-- 工具：`job_output(job_id, wait?, timeout_ms?)`（默认非阻塞读流式增量，wait 有界）、`job_list()`、`job_kill(job_id, reason?)`；canonical 值 `{text,job}` / `PublicJobSnapshot[]` / `{outcome:'cancellation-requested'|'already-finished', job}`；
-- 生命周期事件：注册表在 owner 会话追加 log-only `job/registered`/`job/settled`（JobRegisteredData/JobSettledData：jobId/owner/kind/label/startedAt/toolCall? + finishedAt/status/cause/producerReported/detail?，jobs/jobs/src/types.ts:16-66；发射失败只 warn，index.ts:443-463）；完成 notice 仍走进程内 `events.subscribe` 监听器（busy 注入 / idle 唤醒，maxConsecutiveWakes 默认 3，tool-jobs/README.md:19-25）；
-- 发号：`<kind>-<16 位 UUID hex>`（`randomUUID().replaceAll('-','').slice(0,16)`，同注册表持有旧 id 时重试，index.ts:227-232）；`JobSpec.toolCall?` 记录创建它的工具调用（callId/rootCallId），由各 producer（tool-bash/tool-pwsh/tool-terminal/tool-workflow）从 `ToolExecution` 透传；
-- 并发：`maxConcurrentJobsPerOwner` 默认 **10**（按精确 Agent 实例计 running+stopping，jobs-local/src/index.ts:28,144-146）；触发入口是 bash / pwsh / terminal(`pty-send`) / workflow 的 `run_in_background: true`（subagent 已不再是 job kind，JobKindMap 仅 `bash`，view.ts:32-34）；
+- 工具：`job_output(job_id, wait?, timeout_ms?)`（默认非阻塞读流式增量，wait 有界）、`job_list`、`job_kill(job_id, reason?)`；canonical 值 `{text,job}` / `PublicJobSnapshot[]` / `{outcome:'cancellation-requested'|'already-finished', job}`；
+- 生命周期事件：注册表在 owner 会话追加 log-only `job/registered`/`job/settled`（JobRegisteredData/JobSettledData：jobId/owner/kind/label/startedAt/toolCall? + finishedAt/status/cause/producerReported/detail?，jobs/jobs/src/types.ts；发射失败只 warn，index.ts）；完成 notice 仍走进程内 `events.subscribe` 监听器（busy 注入 / idle 唤醒，maxConsecutiveWakes 默认 3，tool-jobs/README.md）；
+- 发号：`<kind>-<16 位 UUID hex>`（`randomUUID.replaceAll('-','').slice(0,16)`，同注册表持有旧 id 时重试，index.ts）；`JobSpec.toolCall?` 记录创建它的工具调用（callId/rootCallId），由各 producer（tool-bash/tool-pwsh/tool-terminal/tool-workflow）从 `ToolExecution` 透传；
+- 并发：`maxConcurrentJobsPerOwner` 默认 **10**（按精确 Agent 实例计 running+stopping，jobs-local/src/index.ts,144-146）；触发入口是 bash / pwsh / terminal(`pty-send`) / workflow 的 `run_in_background: true`（subagent 已不再是 job kind，JobKindMap 仅 `bash`，view.ts）；
 - 注册表在 host plane，standard preset 只挂模型侧 tool-jobs（standard/agent.cordis.yml:64-74）。
 
 #### 可继续子代理（`packages/subagent/`）
 
-- durable 子 Session + 至多一个进程内 Activation；Activation 不是 request/result：可执行多个 FIFO turn，后代仍运行期间保持驻留（subagent/continuation.ts:1-11,154-159）；
+- durable 子 Session + 至多一个进程内 Activation；Activation 不是 request/result：可执行多个 FIFO turn，后代仍运行期间保持驻留（subagent/continuation.ts,154-159）；
 - durable 事件 `subagent/descriptor`（log-only、跨压缩保留）+ 进程内 observe-only `subagent/start`/`subagent/end`（每个 Activation 驻留期一对，cold resume 是新 epoch 新 runId）；inbox 生命周期沿用 agent/inbox 事件；
-- followup 路由：running → 同 Activation 入队；waiting → 唤醒；无 Activation → `coldResume`（persistence.inspect → authorizeLineage → 折叠 descriptor → ctx.agents.resume，不经过 provider，continuation.ts:883-932）；
+- followup 路由：running → 同 Activation 入队；waiting → 唤醒；无 Activation → `coldResume`（persistence.inspect → authorizeLineage → 折叠 descriptor → ctx.agents.resume，不经过 provider，continuation.ts）；
 - standard preset 的 spawn/fork 工具 `backgroundMode: continuable`；结束经 `subagent-settled` settlement notice 送达（与子代理自发 subagent-report 区分）。
 
 ### 9.3 源码证据
 
-- `packages/compaction/compaction-basic/src/config.ts:20-23,144-154` —— 0.8/0.16 阈值
-- `packages/compaction/compaction-basic/src/region.ts:152-254` —— start→summary→replace→end 事务与 flush
-- `packages/compaction/compaction-basic/src/summarizer.ts:111,161-176` —— 前缀重放与 KV 复用
-- `packages/compaction/compaction-basic/src/index.ts:147-223,368-420` —— pre-step 压力检查 / request-error 恢复 / compactNow
-- `packages/llm/token-meter/src/index.ts:60-98,116-147,221-261` —— 增量 fold 与 usage 折入锚
-- `packages/jobs/tool-jobs/README.md:9-15,19-27` 与 `docs/subsystems/jobs.md:16-22,180-285` —— 工具语义与 ctx.jobs 约定
-- `packages/jobs/jobs-local/src/index.ts:28,144-146` —— 并发上限 10
-- `packages/subagent/subagent/src/continuation.ts:403-457,476-505,883-932,966-1076` —— startContinuable / followup 路由 / coldResume / 物化
+- `packages/compaction/compaction-basic/src/config.ts,144-154` —— 0.8/0.16 阈值
+- `packages/compaction/compaction-basic/src/region.ts` —— start→summary→replace→end 事务与 flush
+- `packages/compaction/compaction-basic/src/summarizer.ts,161-176` —— 前缀重放与 KV 复用
+- `packages/compaction/compaction-basic/src/index.ts,368-420` —— pre-step 压力检查 / request-error 恢复 / compactNow
+- `packages/llm/token-meter/src/index.ts,116-147,221-261` —— 增量 fold 与 usage 折入锚
+- `packages/jobs/tool-jobs/README.md,19-27` 与 `docs/subsystems/jobs.md,180-285` —— 工具语义与 ctx.jobs 约定
+- `packages/jobs/jobs-local/src/index.ts,144-146` —— 并发上限 10
+- `packages/subagent/subagent/src/continuation.ts,476-505,883-932,966-1076` —— startContinuable / followup 路由 / coldResume / 物化
 - `packages/core/agent/src/consumed-work.ts` + `packages/subagent/subagent/src/lifecycle.ts` —— foldConsumedWork 记账与 epochStopReason 终局折叠
 - `apps/cli/config/agent-presets/standard/agent.cordis.yml:64-74,128-155,186-198` —— jobs/compaction/subagent 组合位点
 
@@ -495,7 +527,7 @@ mini 的后台作业（`jobs/`，进程内注册表 + 三工具 + 完成 notice�
 - **完成 notice**：按 `completionDelivery` 走 wakeup（idle owner 开 turn，预算 maxConsecutiveWakes=3，user 输入认领恢复）或 quiet（一律 inject）；
 - **输出封顶**：输出与 notice 按 `outputLimitBytes` 做 UTF-8 字节封顶，模型可见输出再经工具层 `finalizeContent` 兜底二次封顶（job_output/job_kill 保 `[status: ...]` 行，`[output truncated]` / `[result truncated]` 截断标记同上游 finalizeTaskContent）；
 - **与上游一致**：注册表在 owner 会话落 log-only `job/registered`/`job/settled`（JobRegisteredData/JobSettledData，含可选 `toolCall` 与 `producerReported`），`JobSpec.toolCall` 由各 producer 从 `ToolExecution.callId/rootCallId` 透传；
-- **简化标注与已定载体**：agent registry + assertLive（`core/agents.py` AgentRegistry + install_agents + assert_live_agent，注册点 `AgentLoop.publish()`，jobs `_assert_access`/goal `_prepare_mutation` 接线；controller/监听器另按 scope 分层：`registry.py` `_layers = ScopedLayers(...)` + `chain_layers(scope_of(owner))`，同上游作用域化分层）；wake 预算载体（user 输入认领恢复改经安装 ctx 订阅 `agent/inbox/claimed`，仅 `source.kind=='user'` 恢复，同 tool-jobs `spendWakes.delete(agent)`，+ `agent/disposed` 防泄漏，AgentLoop 删 `on_inbox_claimed` 零参钩子）；teardown 排干为事件驱动（逐任务等待 `settled` 事件，`registry.py:431-436`，同上游 `await Promise.all(settled)`，非限时轮询）；canonical value + native renderer 分离（`jobs/tools.py` execute 返回结构化结果、`render=` 承担模型可见文本，同上游 output.render）；finalizeContent 载体（上游经 `outputLimits` WeakMap 即 pre-execute prepend 捕获取上限，mini 每次现查，等价回退路径、无 policy 时行为一致）；`run_in_background` 触发入口已经模型侧 `subagent` 工具复现（见下）。
+- **简化标注与已定载体**：agent registry + assertLive（`core/agents.py` AgentRegistry + install_agents + assert_live_agent，注册点 `AgentLoop.publish`，jobs `_assert_access`/goal `_prepare_mutation` 接线；controller/监听器另按 scope 分层：`registry.py` `_layers = ScopedLayers(...)` + `chain_layers(scope_of(owner))`，同上游作用域化分层）；wake 预算载体（user 输入认领恢复改经安装 ctx 订阅 `agent/inbox/claimed`，仅 `source.kind=='user'` 恢复，同 tool-jobs `spendWakes.delete(agent)`，+ `agent/disposed` 防泄漏，AgentLoop 删 `on_inbox_claimed` 零参钩子）；teardown 排干为事件驱动（逐任务等待 `settled` 事件，`registry.py`，同上游 `await Promise.all(settled)`，非限时轮询）；canonical value + native renderer 分离（`jobs/tools.py` execute 返回结构化结果、`render=` 承担模型可见文本，同上游 output.render）；finalizeContent 载体（上游经 `outputLimits` WeakMap 即 pre-execute prepend 捕获取上限，mini 每次现查，等价回退路径、无 policy 时行为一致）；`run_in_background` 触发入口已经模型侧 `subagent` 工具复现（见下）。
 
 mini 的可继续子代理（`seams/subagent/`：descriptor + continuation + 委托工具 `subagent` + 控制工具三件套 + report 工具，装配在 demo/headless/session_cmds 入口）：
 
@@ -503,7 +535,7 @@ mini 的可继续子代理（`seams/subagent/`：descriptor + continuation + 委
 - **双路径执行**：父有 driver → 投递即返回 message id、Activation 跨回合驻留、watchSettlement 结算；无 driver → 同步 pump 门面；
 - **生命周期事件** `subagent/start`/`subagent/end`：runId 配对、SubagentRunInfo/RunEndInfo payload、逐监听器收容派发、经委托父 scope 载体的 scoped dispatch（打标监听器按载波键或其祖先接纳、未打标全局接纳，无标号父退化祖先链派发）；
 - **命名 provider 注册表**：`register_provider` 登记按模型重建适配器的入口，disposer 注销即发布 `subagent/provider-removed` 边且幂等；解析时注册表优先、回落缺省工厂；
-- **DRAINING 准入截止**：manager 级 `drain()` 与 scoped `drain_descendants(parents)`，精确在世根过滤、closingScopes 成员 = 根 + 后代世系、child-first 强制结算、聚合错误；`assert_admitting` 接入 start/send 准入边界，拒绝措辞逐字一致；
+- **DRAINING 准入截止**：manager 级 `drain` 与 scoped `drain_descendants(parents)`，精确在世根过滤、closingScopes 成员 = 根 + 后代世系、child-first 强制结算、聚合错误；`assert_admitting` 接入 start/send 准入边界，拒绝措辞逐字一致；
 - **终局折叠** `foldConsumedWork` + `epochStopReason`（stepped/claimed 记账、droppedUnrun→aborted）；
 - **所有权记账**：sendWaking/admitWaking（accepted 窗口、waiting/settled 判定顺序）；
 - **interrupt 授权矩阵**：user/ancestor authority、stale 调用方防探针、缺席目标接受性 no-op；
@@ -511,6 +543,10 @@ mini 的可继续子代理（`seams/subagent/`：descriptor + continuation + 委
 - **finishDisposal 顺序**：cancel top-down → flushFinalState best-effort → capture → 拆除 → notifySettlement → releaseOwnership → end 边；
 - **模型侧 `subagent` 工具**：同 tool-subagent 约定（文案/canonical+render 逐字，canonical 恒 `{kind:'activation',subagentId}`、render `started subagent <id>`、`cwd` 参数、config 逐字拒绝 `persona`/`toolFilter`）；
 - **简化标注**：invariant 运行时校验不适用（上游 per-provider invariant 分包架构）；同步模式结算投递走非唤醒 next-step。
+
+### Mini trace（议题 9）
+
+`tests/test_compaction.py` · `tests/test_jobs.py` · `command/run` / `command/done` 轨迹 notice · `schedule/*` Remote（wire §4.9）· `job/list` 流。
 
 ## 议题 10：skills 能力家族——按需加载的指令
 
@@ -533,19 +569,19 @@ skills 家族由四个包组成，职责分得很清楚：
 
 #### 分层注册表（`packages/skill/skill/src/index.ts`）
 
-`ctx.skills` 与 `ctx.tools` 同构：一个 global 层 + 每条 scope 链一层，按"离调用会话最近优先"合并，同名冲突由最近层胜出（index.ts:507-512）。provider 注册进调用方所在的层（host 组合挂的插件进 global，preset 挂的进 preset 层）。`SkillSource` 七桶：`project-dsh` / `project-agents` / `runtime` / `user-dsh` / `user-agents` / `custom` / `bundled`（+ 字符串扩张），`skill` 名字必须是 kebab-case 小写（`^[a-z0-9]+(?:-[a-z0-9]+)*$`，index.ts:20）。
+`ctx.skills` 与 `ctx.tools` 同构：一个 global 层 + 每条 scope 链一层，按"离调用会话最近优先"合并，同名冲突由最近层胜出（index.ts）。provider 注册进调用方所在的层（host 组合挂的插件进 global，preset 挂的进 preset 层）。`SkillSource` 七桶：`project-dsh` / `project-agents` / `runtime` / `user-dsh` / `user-agents` / `custom` / `bundled`（+ 字符串扩张），`skill` 名字必须是 kebab-case 小写（`^[a-z0-9]+(?:-[a-z0-9]+)*$`，index.ts）。
 
 三个观察接口（这是 skills 能力扩展口的核心约定）：
 
-1. `list()`：每个 provider 的候选摘要，**期望是一个"完整发现"的数组**，而不是增量补丁；
-2. `snapshot()`：`{skills, complete}`，complete 为 true 才缓存复用；collect 期间 revision 变动且重试一次（MAX_COLLECT_ATTEMPTS=2）仍不稳定 → 返回 incomplete 且不缓存（index.ts:525-546）；
+1. `list`：每个 provider 的候选摘要，**期望是一个"完整发现"的数组**，而不是增量补丁；
+2. `snapshot`：`{skills, complete}`，complete 为 true 才缓存复用；collect 期间 revision 变动且重试一次（MAX_COLLECT_ATTEMPTS=2）仍不稳定 → 返回 incomplete 且不缓存（index.ts）；
 3. `get(name)`：全文，不缓存正文（每次重新从 provider 取），所以**正文变更无需版本号/hash/失效通知**。
 
-provider 返回的候选必须通过严格校验（name 合法、description 是字符串等），**非法候选直接抛错 fail fast**（index.ts:642-646），而不是静默过滤。`get()` 若返回的定义名与候选名不符，会精确失效该 provider 并拒绝该条（invalidateEntry，index.ts:629-639）。
+provider 返回的候选必须通过严格校验（name 合法、description 是字符串等），**非法候选直接抛错 fail fast**（index.ts），而不是静默过滤。`get` 若返回的定义名与候选名不符，会精确失效该 provider 并拒绝该条（invalidateEntry，index.ts）。
 
 #### invocation 策略（双布尔）
 
-每个 skill 携带 `invocation = {modelInvocable, userInvocable}`（index.ts:48），四态齐全：两 false = 禁用；只 model = 模型工具可调、用户手势不可；只 user = 手势可调、目录与工具隐去（`disable-model-invocation` 的 skill 唯一入口）；两 true = 双表面。`get()` 是策略中立的加载原语，由消费方自行判谓词——所以工具与手势对同一个 skill 的可见性可以不同。
+每个 skill 携带 `invocation = {modelInvocable, userInvocable}`（index.ts），四态齐全：两 false = 禁用；只 model = 模型工具可调、用户手势不可；只 user = 手势可调、目录与工具隐去（`disable-model-invocation` 的 skill 唯一入口）；两 true = 双表面。`get` 是策略中立的加载原语，由消费方自行判谓词——所以工具与手势对同一个 skill 的可见性可以不同。
 
 #### 渲染（renderSkillContent）
 
@@ -561,25 +597,25 @@ provider 返回的候选必须通过严格校验（name 合法、description 是
 </skill_content>
 ```
 
-XML 转义（escapeText/escapeAttr，index.ts:217-234），资源指引按 provider 类型四种形态：managed（"Resources ... managed by provider"）、directory（"Base directory for this skill: <path>"）、URL、opaque。
+XML 转义（escapeText/escapeAttr，index.ts），资源指引按 provider 类型四种形态：managed（"Resources ... managed by provider"）、directory（"Base directory for this skill: <path>"）、URL、opaque。
 
 #### 文件系统 provider（`packages/skill/skill-filesystem/src/index.ts`）
 
 - **六个 rank 源**（README 表格）：project-dsh `.dsh/skills`（rank 100）、project-agents `.agents/skills`（200）、custom 配置目录（300）、user-dsh `$DSH_HOME/skills`（400）、user-agents `$DSH_AGENTS_HOME/skills`（500）、bundled `$DSH_BUNDLED_SKILL_DIR`（600）；
 - **两种载体**：目录 bundle `<name>/SKILL.md`，或扁平 `<name>.md`；刻意排除嵌套 `**/SKILL.md`（只挖一层）；
 - **frontmatter**（YAML）：必填 `name` / `description`，可选 `whenToUse` / `metadata` / `disable-model-invocation` / `user-invocable`；布尔字段接受 `true/false/yes/no/on/off/1/0`；**camelCase 旧键或非法布尔 → 整条 skill 丢弃（fail-closed）+ warn**（README:57），而不是丢弃该字段退回宽松默认；
-- **主体与目录分离生命周期**：目录由发现时解析 frontmatter 得到；`get()` 每次重读文件取正文，正文改动无需 hash/缓存失效；
-- **watch**：chokidar 观察直接成员增减与 `SKILL.md` 变化，`references/scripts/assets` 等资源目录变化不触发失效；缺失根目录用 `fs.watchFile` 逐段探测；首访工具 `write`/`edit` 会通过 `fs/observed` 同步失效 provider（index.ts:228-234）；
+- **主体与目录分离生命周期**：目录由发现时解析 frontmatter 得到；`get` 每次重读文件取正文，正文改动无需 hash/缓存失效；
+- **watch**：chokidar 观察直接成员增减与 `SKILL.md` 变化，`references/scripts/assets` 等资源目录变化不触发失效；缺失根目录用 `fs.watchFile` 逐段探测；首访工具 `write`/`edit` 会通过 `fs/observed` 同步失效 provider（index.ts）；
 - **ctx.fs 优先**：有 fs 服务时 listDir/readText/`.git` 探测全走 `ctx.fs`（沙箱 / 远程实现），无则回退 Node fs（README:43）。
 
 #### 消费端（`packages/skill/tool-skill/src/index.ts`）
 
-- **pre-step 目录**：每个 eligible pre-step 调 `ctx.skills.snapshot()`（index.ts:231-250）；首次非空且 `skill` 工具可见 → 向 enter 决策注入 durable user 消息（`<system-reminder>` 目录模板，index.ts:254-277）；
-- **digest 判变**：目录消息带 `skill-catalog` source（catalog form，`{entries, update?}`），entries 的 sha256 作为 digest 基准（index.ts:328-337）；成员/描述/可见性变化 → append 一条完整替换目录；删光 → 空目录显式退役旧名字（tombstone）；
-- **incomplete 不发**：snapshot 不完整 → 本 pre-step 不发，保留 last-good 目录（index.ts:233-236）；
+- **pre-step 目录**：每个 eligible pre-step 调 `ctx.skills.snapshot`（index.ts）；首次非空且 `skill` 工具可见 → 向 enter 决策注入 durable user 消息（`<system-reminder>` 目录模板，index.ts）；
+- **digest 判变**：目录消息带 `skill-catalog` source（catalog form，`{entries, update?}`），entries 的 sha256 作为 digest 基准（index.ts）；成员/描述/可见性变化 → append 一条完整替换目录；删光 → 空目录显式退役旧名字（tombstone）；
+- **incomplete 不发**：snapshot 不完整 → 本 pre-step 不发，保留 last-good 目录（index.ts）；
 - **工具可见性参与 digest**：`skill` 工具被限制/被同名 scoped 影子覆盖时目录整体省略——身份比较用"本插件注册的定义"而不是按名查找（README:15），保证全局挂载与 per-agent 挂载行为一致；
-- **`/名字` 手势**：SKILL_GESTURE 正则只扫 claimed user 消息（index.ts:409, 177-204），命中可 user 调用的 skill 则 `get()` 全文渲染为 user instructions 注入（`skill-invocation` source），同一步内重复手势只注入一次；未知或 user 禁用的名字保持普通文本；
-- **`skill` 工具**：`name` 参数 kebab 校验；错误三态严格区分：`Error: invalid skill name "<name>"` / `Error: skill "<name>" is unknown or no longer available` / `Error: skill "<name>" is not available for model invocation`（index.ts:130-156）。
+- **`/名字` 手势**：SKILL_GESTURE 正则只扫 claimed user 消息（index.ts, 177-204），命中可 user 调用的 skill 则 `get` 全文渲染为 user instructions 注入（`skill-invocation` source），同一步内重复手势只注入一次；未知或 user 禁用的名字保持普通文本；
+- **`skill` 工具**：`name` 参数 kebab 校验；错误三态严格区分：`Error: invalid skill name "<name>"` / `Error: skill "<name>" is unknown or no longer available` / `Error: skill "<name>" is not available for model invocation`（index.ts）。
 
 #### 装配点
 
@@ -589,10 +625,10 @@ XML 转义（escapeText/escapeAttr，index.ts:217-234），资源指引按 provi
 
 ### 10.3 源码证据
 
-- `packages/skill/skill/src/index.ts:20-34,39,48,147-234,232-271,279-330,391-454,471-546,622-646` —— 注册表、三接口、渲染、校验、失效
-- `packages/skill/skill-filesystem/src/index.ts:36-40,49-89,130,182-234,241` 与 `README.md:15-27,33-59,69-75` —— rank 表、frontmatter、watch、已知局限
-- `packages/skill/tool-skill/src/index.ts:34,61-69,81-160,177-251,254-277,328-337,409` 与 `README.md:11-31,39-63,148-168` —— 目录生命周期、工具错误三态、手势、模板
-- `packages/skill/skill-badge/src/index.ts:17,25,58` 与 `assets/dsh-badge.md` —— bundled 示例 provider
+- `packages/skill/skill/src/index.ts,39,48,147-234,232-271,279-330,391-454,471-546,622-646` —— 注册表、三接口、渲染、校验、失效
+- `packages/skill/skill-filesystem/src/index.ts,49-89,130,182-234,241` 与 `README.md,33-59,69-75` —— rank 表、frontmatter、watch、已知局限
+- `packages/skill/tool-skill/src/index.ts,61-69,81-160,177-251,254-277,328-337,409` 与 `README.md,39-63,148-168` —— 目录生命周期、工具错误三态、手势、模板
+- `packages/skill/skill-badge/src/index.ts,25,58` 与 `assets/dsh-badge.md` —— bundled 示例 provider
 - `packages/bundle/base/cordis.patch.yml:237-248`、`packages/bundle/web-app/cordis.patch.yml:323-333`、`apps/cli/config/agent-presets/standard/agent.cordis.yml:83-87` —— 装配
 - `docs/subsystems/skills.md` 与 `packages/skill/skill/README.md` —— 设计意图（社区实现按 progressive disclosure，同 Anthropic Agent Skills 理念，见 deepseekdocs.com/en/docs/features/skills）
 
@@ -600,15 +636,19 @@ XML 转义（escapeText/escapeAttr，index.ts:217-234），资源指引按 provi
 
 mini 的 skills 实现（`miniharness/skills/`，L2 编排层；装配在 demo/headless/ACP/SDK 入口）对应上四包如下：
 
-- `registry.py` —— `SkillRegistry`（`ctx.skills` 服务）：global + scope 链分层注册、`list`/`snapshot`/`get` 三接口、候选校验 fail fast、incomplete 不缓存 + revision 抖动重试一次、collect 缓存按 (cwd, scope 链, revision) 键控 LRU、`invalidate_cache`（revision++ + 清缓存 + `skills/change` 事件，监听器异常容错）、`get()` 定义名不符 → 精确失效该 provider 条目；`renderSkillContent`/escapeText/escapeAttr、digest 均逐字一致。register_provider 同时接受"create 工厂返回 dict 或对象"两种形态。
-- `filesystem.py` —— `FileSystemSkillProvider`：六类根（project-dsh 100 / project-agents 200 / custom 300 / user-dsh 400 / user-agents 500 / bundled 600，同根 rank 一致靠 providerOrder+localOrder 决胜）、目录 bundle `<name>/SKILL.md` + 扁平 `<name>.md`、`find_project_root`（向上找 `.git`）、user-dsh 根跳过 `.system`；frontmatter 经 pyyaml（硬依赖 `safe_load`）；camelCase 旧键或非法布尔 → fail-closed 丢弃 + warn；`get()` 每次重读文件取正文。
+- `registry.py` —— `SkillRegistry`（`ctx.skills` 服务）：global + scope 链分层注册、`list`/`snapshot`/`get` 三接口、候选校验 fail fast、incomplete 不缓存 + revision 抖动重试一次、collect 缓存按 (cwd, scope 链, revision) 键控 LRU、`invalidate_cache`（revision++ + 清缓存 + `skills/change` 事件，监听器异常容错）、`get` 定义名不符 → 精确失效该 provider 条目；`renderSkillContent`/escapeText/escapeAttr、digest 均逐字一致。register_provider 同时接受"create 工厂返回 dict 或对象"两种形态。
+- `filesystem.py` —— `FileSystemSkillProvider`：六类根（project-dsh 100 / project-agents 200 / custom 300 / user-dsh 400 / user-agents 500 / bundled 600，同根 rank 一致靠 providerOrder+localOrder 决胜）、目录 bundle `<name>/SKILL.md` + 扁平 `<name>.md`、`find_project_root`（向上找 `.git`）、user-dsh 根跳过 `.system`；frontmatter 经 pyyaml（硬依赖 `safe_load`）；camelCase 旧键或非法布尔 → fail-closed 丢弃 + warn；`get` 每次重读文件取正文。
 - `tool_skill.py` —— 消费端：pre-step 目录注入（首次非空且 `skill` 工具可见 → durable user 消息）、digest 判变（成员/描述/可见性变化 → 完整替换目录）、空目录退役 tombstone、incomplete 不发、工具可见性参与 digest（身份比较用本插件注册的定义）、`skill` 工具（错误三态逐字）、`/名字` 手势（skill-invocation source、去重保序、未知/user 禁用名保持普通文本）；手势 listener 先注册、catalog 后注册（waterfall 顺序保证目录在前、手势离答案最近）。
 - 装配：`install_skills(ctx)`（幂等；创建注册表 + 挂 filesystem provider + 两个 pre-step listener），`register_skill_tools(reg, registry)` 把 `skill` 工具注册进现有 ToolRegistry；demo/headless/ACP/SDK 均已接线，standard preset 的 tools 列表保留 `"skills"` 与实现一致。
 
 mini 与上游的差异：
 
-- **watch**：`FileSystemSkillProvider` 默认开启 watchdog 文件监听（`skills/watcher.py` 的 `SkillWatchManager`，事件过滤 / 去抖 → 失效回调 + 失效条目精确失效，`filesystem.py:373-459`，`watch=False` 可关）；
-- **badge 为 opt-in bundled provider**：`skills/badge.py` 实现内置 `dsh-badge`，需经 `install_badge_skill(ctx)` 显式装配，`install_skills(ctx)` 不自动装（`skills/__init__.py:62-87`）；
+- **watch**：`FileSystemSkillProvider` 默认开启 watchdog 文件监听（`skills/watcher.py` 的 `SkillWatchManager`，事件过滤 / 去抖 → 失效回调 + 失效条目精确失效，`filesystem.py`，`watch=False` 可关）；
+- **badge 为 opt-in bundled provider**：`skills/badge.py` 实现内置 `dsh-badge`，需经 `install_badge_skill(ctx)` 显式装配，`install_skills(ctx)` 不自动装（`skills/__init__.py`）；
 - **无 `ctx.fs` 服务适配**（直接 os 读取）；lookup cwd 读 `session.meta['cwd']`（同上游 `session.header.cwd`）；
-- **execute 直接返回渲染文本**（无 canonical value + native renderer 分离，`skills/tool_skill.py:23`）；工具错误前缀统一 `Error: `（同上游 toolErrorResult）；
+- **execute 直接返回渲染文本**（无 canonical value + native renderer 分离，`skills/tool_skill.py`）；工具错误前缀统一 `Error: `（同上游 toolErrorResult）；
 - 目录注入为每个会话增加 durable 消息，与 `skill` 工具的可见性联动（digest 含工具可见性）一致，不存在"目录与工具不一致"的偏差。
+
+### Mini trace（议题 10）
+
+`miniharness/skills/` · `tests/test_skills.py` · pre-step 目录 + `skill` 工具 · 章 03/04 工具注册惯例。

@@ -14,7 +14,7 @@
 
 ## 架构与分层
 
-运行时围绕一条主链：`boot` / `loader` 加载组合与插件 → 会话只追加事件 → 投影（如 `derive_messages`）算出模型可见历史 → Agent 在 turn/step 里调模型与工具，模型可见事实写回同一条日志 → 需要浏览器或自动化时，由 `web/` 暴露与上游一致的 wire，`webui/` 只消费这份约定。详图见 [docs/index.md](docs/index.md) 与 [docs/architecture.md](docs/architecture.md) §1.0。
+运行时围绕一条主链：`boot` / `loader` → Session 事件日志 → 投影与 Agent loop → `web/` wire、`webui/` 只消费约定。功能模块在整体架构中的位置（Fig S1～S6、十六章验收）见 [docs/system-map.md](docs/system-map.md)；学习路径见 [docs/guides/learning-paths.md](docs/guides/learning-paths.md)。目录与映射表见 [docs/architecture.md](docs/architecture.md)。
 
 ```mermaid
 flowchart TB
@@ -76,7 +76,9 @@ CLI 写入的状态在 `MINIHARNESS_HOME`（默认 `~/.miniharness`）：会话�
 
 | 若需要… | 见 |
 |---|---|
-| 手册首页与 16 章学习地图 | [docs/index.md](docs/index.md) |
+| 手册首页与 16 章表 | [docs/index.md](docs/index.md) |
+| 系统地图（模块总图、章节验收） | [docs/system-map.md](docs/system-map.md) |
+| 学习路径（走读 / 复现、按目标选章） | [docs/guides/learning-paths.md](docs/guides/learning-paths.md) |
 | 模块与上游包的对照表 | [docs/architecture.md](docs/architecture.md) |
 | Web unary、Remote 帧与错误码 | [docs/interface-wire.md](docs/interface-wire.md)（端点以 `miniharness/web/api.py` 的 `WebApi.ROUTES` 为准） |
 | 上游解读报告（含 Mermaid） | [docs/report/index.md](docs/report/index.md) |

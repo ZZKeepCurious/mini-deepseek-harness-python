@@ -3,6 +3,10 @@
 > 对应 dsh 真实源码：`packages/core/scope/src/index.ts` + `store.ts`
 > 前置：第 2 章（事件总线四种派发、作用域）、第 13 章（Service / intercept / isolate）。产出文件：`miniharness/core/dsh_scope.py`；消费方 `core/scope.py`（事件派发 `this_arg=` 载波参数）、`core/session_store.py`（owner 路由）、`core/tools.py`（ScopedLayers 注册表）。
 
+## 在 system-map 中的位置
+
+本章对应 [system-map Fig S1](../system-map.md#fig-s1) 的 **14 dsh_scope**（Composition；体裁：**实现**）。控制面载波与 [Fig S4](../system-map.md#fig-s4) 的 agent/session 路由互证。
+
 ## 14.1 这一章要做什么
 
 第 2 章的 `isolate` 解决"同一个服务名在不同作用域解析到不同实现"。但事件派发还想要一种**更精细的路由**：一个监听器只接收"某个具体身份（agent / session / tool）"相关的事件，而不是整个作用域树。
@@ -18,21 +22,21 @@ dsh 用一个极小的原语解决这个问题：**不透明的 scope 键（`Sco
 
 ```mermaid
 flowchart TB
-  Root["根 scope"]
-  Child["子 agent scope"]
-  Reg["ScopedLayers 注册&lt;br/&gt;向下继承"]
-  Ev["scopeTarget 事件&lt;br/&gt;向上接纳"]
-  Root --> Child
-  Child --> Reg
-  Child --> Ev
-  Ev -.-> Root
+ Root["根 scope"]
+ Child["子 agent scope"]
+ Reg["ScopedLayers 注册&lt;br/&gt;向下继承"]
+ Ev["scopeTarget 事件&lt;br/&gt;向上接纳"]
+ Root --> Child
+ Child --> Reg
+ Child --> Ev
+ Ev -.-> Root
 ```
 
 ## 14.2 概念：ScopeKey 与载波
 
 | 概念 | 作用 |
 |---|---|
-| `ScopeKey` | 不透明、按身份比较（Python 里是最小可弱引用类，因为裸 `object()` 不可弱引用）的身份键 |
+| `ScopeKey` | 不透明、按身份比较（Python 里是最小可弱引用类，因为裸 `object` 不可弱引用）的身份键 |
 | `scopeParents` | 一个 `WeakMap<key, parentKey>`，记录谁是谁的 enclosing scope；一条关系 |
 | `scopeTarget(base, key)` | 铸一个"仅用于路由"的接收器（载波）：它不暴露 `base` 的属性，只携带"路由键 = key" |
 | 打标监听器 | 经 `this_arg=` 传一个载波的监听器，按"载波键或其祖先"过滤接纳 |
@@ -46,66 +50,66 @@ flowchart TB
 
 ```python
 class ScopeKey:
-    __slots__ = ("__weakref__",)
-    def __repr__(self):
-        return f"<ScopeKey {id(self):x}>"
+ __slots__ = ("__weakref__",)
+ def __repr__(self):
+ return f"<ScopeKey {id(self):x}>"
 
-_scope_parents = weakref.WeakKeyDictionary()
+_scope_parents = weakref.WeakKeyDictionary
 
 def link_scope_parent(key, parent):
-    cursor = parent
-    while cursor is not None:
-        if cursor is key:
-            raise RuntimeError("dsh-scope: scope parent link would form a cycle")
-        cursor = _scope_parents.get(cursor)
-    _scope_parents[key] = parent
+ cursor = parent
+ while cursor is not None:
+ if cursor is key:
+ raise RuntimeError("dsh-scope: scope parent link would form a cycle")
+ cursor = _scope_parents.get(cursor)
+ _scope_parents[key] = parent
 
 def bind_scope_parent(key, parent):
-    if key in _scope_parents:
-        raise RuntimeError("dsh-scope: scope key is already bound to a parent; "
-                           "re-linking requires the binding returned by the original bind")
-    link_scope_parent(key, parent)
-    return ScopeParentBinding(key)     # 仅此持有者可 rebind
+ if key in _scope_parents:
+ raise RuntimeError("dsh-scope: scope key is already bound to a parent; "
+ "re-linking requires the binding returned by the original bind")
+ link_scope_parent(key, parent)
+ return ScopeParentBinding(key) # 仅此持有者可 rebind
 
 def scope_parent_of(key):
-    return _scope_parents.get(key)
+ return _scope_parents.get(key)
 
-def scope_chain_of(key):               # nearest-first: [key, parent, ...]
-    chain = []
-    cursor = key
-    while cursor is not None:
-        chain.append(cursor)
-        cursor = _scope_parents.get(cursor)
-    return chain
+def scope_chain_of(key): # nearest-first: [key, parent, ...]
+ chain = []
+ cursor = key
+ while cursor is not None:
+ chain.append(cursor)
+ cursor = _scope_parents.get(cursor)
+ return chain
 ```
 
-对照上游 `index.ts:39-102`：`scopeParents` 是 `WeakMap<ScopeKey, ScopeKey>`；`linkScopeParent` 从 `parent` 沿父链走到根，撞上 `key` 即拒绝（每条链都走到根，确保无环）；`bindScopeParent` 已绑定键抛错，仅返回的 `ScopeParentBinding` 能 `rebind`——blank-session 重组（在新会话里按新根重建 scope 树）时，只有原绑定持有者能改父链接。mini 用 `WeakKeyDictionary` 承载弱引用语义，`ScopeKey` 用最小类（裸 `object()` 不可弱引用）。
+对照上游 `index.ts`：`scopeParents` 是 `WeakMap<ScopeKey, ScopeKey>`；`linkScopeParent` 从 `parent` 沿父链走到根，撞上 `key` 即拒绝（每条链都走到根，确保无环）；`bindScopeParent` 已绑定键抛错，仅返回的 `ScopeParentBinding` 能 `rebind`——blank-session 重组（在新会话里按新根重建 scope 树）时，只有原绑定持有者能改父链接。mini 用 `WeakKeyDictionary` 承载弱引用语义，`ScopeKey` 用最小类（裸 `object` 不可弱引用）。
 
 ### 2. `create_scope` —— 铸一枚带身份的作用域
 
 ```python
 def create_scope(ctx, key, parent=None, name="scope"):
-    if parent is not None:
-        bind_scope_parent(key, parent)
-    fiber = ctx.plugin({"name": name, "apply": _scope_noop})   # 独立 fiber（同 ctx.plugin(scope)）
-    scoped = fiber.context
-    scoped._scope_key = key                                    # 把身份打在上下文上
-    return Scope(scoped, fiber)
+ if parent is not None:
+ bind_scope_parent(key, parent)
+ fiber = ctx.plugin({"name": name, "apply": _scope_noop}) # 独立 fiber（同 ctx.plugin(scope)）
+ scoped = fiber.context
+ scoped._scope_key = key # 把身份打在上下文上
+ return Scope(scoped, fiber)
 ```
 
-作用域上下文继承铸造方 fiber 的依赖 API，并**拥有**经它做出的每笔注册（fiber 拆解即逆序回滚，见第 2 章）。`Scope.dispose()` 记忆化 `quiesce_fiber`：先 `fiber.dispose()`，再跟随 `fiber.inertia` 排空。`inertia` 是 fiber 拆解期间在途的异步转换（第 2 章 §2.3），拆解后要等它到达静止点才能继续（同上游 `quiesceFiber`；mini 按"每个新惯性对象各消费一次"逼近上游"完成后置 undefined"的语义）。
+作用域上下文继承铸造方 fiber 的依赖 API，并**拥有**经它做出的每笔注册（fiber 拆解即逆序回滚，见第 2 章）。`Scope.dispose` 记忆化 `quiesce_fiber`：先 `fiber.dispose`，再跟随 `fiber.inertia` 排空。`inertia` 是 fiber 拆解期间在途的异步转换（第 2 章 §2.3），拆解后要等它到达静止点才能继续（同上游 `quiesceFiber`；mini 按"每个新惯性对象各消费一次"逼近上游"完成后置 undefined"的语义）。
 
 ### 3. `scope_of` —— 读最近的身份标号
 
 ```python
 def scope_of(ctx):
-    node = ctx
-    while node is not None:
-        key = getattr(node, "_scope_key", None)
-        if key is not None:
-            return key
-        node = getattr(node, "parent", None)
-    return None
+ node = ctx
+ while node is not None:
+ key = getattr(node, "_scope_key", None)
+ if key is not None:
+ return key
+ node = getattr(node, "parent", None)
+ return None
 ```
 
 沿 parent 链向上找第一个带 `_scope_key` 的节点（上游 `ctx[kScope]` 的原型继承等价；`Scope` 包装经 `__getattr__` 代理亦可用）。无标号上下文返回 `None`——意味着"全局"。
@@ -114,31 +118,31 @@ def scope_of(ctx):
 
 ```python
 class _ScopeCarrier:
-    __slots__ = ("base", "key", "base_filter", "__weakref__")
-    def __init__(self, base, key):
-        self.base = base
-        self.key = key
-        self.base_filter = getattr(base, "_context_filter", None)
-    def admit(self, ctx):
-        if self.base_filter is not None and not self.base_filter(ctx):
-            return False
-        tag = scope_of(ctx)
-        if tag is None:
-            return True                       # 未打标监听器：全局接纳
-        cursor = self.key
-        while cursor is not None:             # 载波键或其任一祖先 → 接纳
-            if cursor is tag:
-                return True
-            cursor = scope_parent_of(cursor)
-        return False                          # 低于派发键的标号：排除
+ __slots__ = ("base", "key", "base_filter", "__weakref__")
+ def __init__(self, base, key):
+ self.base = base
+ self.key = key
+ self.base_filter = getattr(base, "_context_filter", None)
+ def admit(self, ctx):
+ if self.base_filter is not None and not self.base_filter(ctx):
+ return False
+ tag = scope_of(ctx)
+ if tag is None:
+ return True # 未打标监听器：全局接纳
+ cursor = self.key
+ while cursor is not None: # 载波键或其任一祖先 → 接纳
+ if cursor is tag:
+ return True
+ cursor = scope_parent_of(cursor)
+ return False # 低于派发键的标号：排除
 
 def scope_target(base, key):
-    carrier = _ScopeCarrier(base, key)
-    _carrier_keys[carrier] = key
-    return carrier
+ carrier = _ScopeCarrier(base, key)
+ _carrier_keys[carrier] = key
+ return carrier
 ```
 
-同上游 `index.ts:170-185`：`scopeTarget(base, key)` 保留 `base` 自身 Cordis filter，再按 scope 图接纳——**未打标 → 全局；打标 → 键或键的祖先命中才接纳**。注释写得很直白："事件沿 scope 链向上流、绝不向下（a tag BELOW the dispatch key stays excluded）"。
+同上游 `index.ts`：`scopeTarget(base, key)` 保留 `base` 自身 Cordis filter，再按 scope 图接纳——**未打标 → 全局；打标 → 键或键的祖先命中才接纳**。注释写得很直白："事件沿 scope 链向上流、绝不向下（a tag BELOW the dispatch key stays excluded）"。
 
 这正是"注册向下、事件向上"的另一半：一个常驻组合（standing composition，进程启动时挂上、一直存在的宿主 root 就是这种）挂了祖先 scope 的监听器，就能收到其下每个 agent 的事件，而不必每个 agent 单独注册——这也是第 7、9 章里"一个会话店观察每个被组合 agent"的根基。
 
@@ -148,58 +152,58 @@ def scope_target(base, key):
 
 ```python
 class ScopedLayers:
-    def __init__(self, create_layer, on_change):
-        self.global_layer = create_layer(None)
-        self._scoped = {}
-    def chain_layers(self, scope):            # 现存覆盖，最远祖先在前、精确 scope 最后
-        layers = []
-        for key in reversed(scope_chain_of(scope)):
-            layer = self._scoped.get(key)
-            if layer is not None:
-                layers.append(layer)
-        return layers
-    def merge(self, scope, pick):             # 全局 + 按序 scope 链遮蔽（近者胜）
-        merged = dict(pick(self.global_layer).entries())
-        for layer in self.chain_layers(scope):
-            for name, value in pick(layer).entries():
-                merged[name] = value
-        return merged
-    def effect(self, ctx, action, label, notify=True):
-        scope = scope_of(ctx)                 # 可见性 + effect 归属都来自注册上下文
+ def __init__(self, create_layer, on_change):
+ self.global_layer = create_layer(None)
+ self._scoped = {}
+ def chain_layers(self, scope): # 现存覆盖，最远祖先在前、精确 scope 最后
+ layers = []
+ for key in reversed(scope_chain_of(scope)):
+ layer = self._scoped.get(key)
+ if layer is not None:
+ layers.append(layer)
+ return layers
+ def merge(self, scope, pick): # 全局 + 按序 scope 链遮蔽（近者胜）
+ merged = dict(pick(self.global_layer).entries)
+ for layer in self.chain_layers(scope):
+ for name, value in pick(layer).entries:
+ merged[name] = value
+ return merged
+ def effect(self, ctx, action, label, notify=True):
+ scope = scope_of(ctx) # 可见性 + effect 归属都来自注册上下文
 
-        def body():
-            if scope is None:
-                layer = self.global_layer
-                created = False
-            else:
-                existing = self._scoped.get(scope)
-                if existing is None:
-                    layer = self._create_layer(scope)
-                    self._scoped[scope] = layer
-                    created = True
-                else:
-                    layer = existing
-                    created = False
+ def body:
+ if scope is None:
+ layer = self.global_layer
+ created = False
+ else:
+ existing = self._scoped.get(scope)
+ if existing is None:
+ layer = self._create_layer(scope)
+ self._scoped[scope] = layer
+ created = True
+ else:
+ layer = existing
+ created = False
 
-            try:
-                undo = action(layer)
-            except Exception:
-                if scope is not None and created and layer.isEmpty():
-                    self._scoped.pop(scope, None)   # 变更抛错且层是新建的空层 → 回收
-                raise
+ try:
+ undo = action(layer)
+ except Exception:
+ if scope is not None and created and layer.isEmpty:
+ self._scoped.pop(scope, None) # 变更抛错且层是新建的空层 → 回收
+ raise
 
-            def disposer():
-                undo()
-                if scope is not None and layer.isEmpty():
-                    self._scoped.pop(scope, None)
-                if notify:
-                    self._on_change()
+ def disposer:
+ undo
+ if scope is not None and layer.isEmpty:
+ self._scoped.pop(scope, None)
+ if notify:
+ self._on_change
 
-            yield disposer
-            if notify:
-                self._on_change()
+ yield disposer
+ if notify:
+ self._on_change
 
-        return ctx.effect(body, label)
+ return ctx.effect(body, label)
 ```
 
 `NamedEntries`（插入序、命名、重复诊断、幂等撤销）与 `AnonymousEntries`（插入序、匿名、独立注册身份）是两层的具体存储。关键设计：**读从不创建 scope 层**（`peek` 链盲，只寻址某 scope 自身贡献；需要继承用 `chain_layers`）；注册把一次同步层变更挂到注册上下文（scope 可见性 + effect 归属），层空了才回收。第 3 章工具注册表（`core/tools.py`）正是用它实现"per-agent 工具隔离 + 全局工具作为后备"。
@@ -234,8 +238,8 @@ python -m unittest tests.test_dsh_scope -v
 
 打开 `deepseek-harness/packages/core/scope/src`：
 
-- `index.ts:14-204`：`ScopeKey` 类型、`scopeParents` 关系、`bindScopeParent`/`scopeParentOf`/`scopeChainOf`（带环检测）、`createScope`（独立 fiber + `kScope` 打标）、`scopeOf`、`scopeTarget`（保留 base filter + 向上接纳）、`isScopeCarrier`/`carrierKeyOf`。
-- `store.ts:30-267`：`NamedEntries` / `AnonymousEntries`（插入序、借值、幂等撤销、单层回收）、`ScopedLayers`（全局层 + 精确 scope 层、`chainLayers`/`merge`/`effect` 把层变更挂到注册上下文的 scope 可见性与 effect 归属）。
+- `index.ts`：`ScopeKey` 类型、`scopeParents` 关系、`bindScopeParent`/`scopeParentOf`/`scopeChainOf`（带环检测）、`createScope`（独立 fiber + `kScope` 打标）、`scopeOf`、`scopeTarget`（保留 base filter + 向上接纳）、`isScopeCarrier`/`carrierKeyOf`。
+- `store.ts`：`NamedEntries` / `AnonymousEntries`（插入序、借值、幂等撤销、单层回收）、`ScopedLayers`（全局层 + 精确 scope 层、`chainLayers`/`merge`/`effect` 把层变更挂到注册上下文的 scope 可见性与 effect 归属）。
 
 ## 14.8 收尾
 

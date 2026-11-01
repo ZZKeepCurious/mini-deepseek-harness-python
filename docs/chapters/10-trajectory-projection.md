@@ -3,6 +3,10 @@
 > 对应 dsh 真实源码：`packages/client/ui-trajectory`（Trajectory 是 web 专属视图；数据源 = 同一份事件溯源日志，经 `session/page` RPC 分页后在浏览器端投影）。
 > 前置：第 1、4、7 章。本章产出：`miniharness/client/trajectory.py`；测试 `tests/test_trajectory.py`。
 
+## 在 system-map 中的位置
+
+本章对应 [system-map Fig S1](../system-map.md#fig-s1) 的 **10 Trajectory 视图**（体裁：**实现**）。浏览器端折叠在 `webui/`；本章为终端/headless 纯函数引擎。
+
 ## 10.1 这一章要做什么
 
 事件溯源日志是给机器读的，人怎么看一次会话？Trajectory 给出的答案是**投影**：把同一份日志折叠成按 turn 组织的可检查台账。本章讲这个折叠怎么算——事件流进，`TrajectorySnapshot` 出。
@@ -11,17 +15,17 @@ Trajectory 是 web 专属的"Agent 的 DevTools"：按 turn 组织的事件台�
 
 ```mermaid
 flowchart LR
-  Log["Session 事件日志"]
-  Fold["fold_trajectory&lt;br/&gt;纯函数"]
-  Out["终端 / JSON / webui"]
-  Log --> Fold --> Out
+ Log["Session 事件日志"]
+ Fold["fold_trajectory&lt;br/&gt;纯函数"]
+ Out["终端 / JSON / webui"]
+ Log --> Fold --> Out
 ```
 
 上游折叠的三个要点：
 
 1. **折叠是纯函数**：每个折叠 target 用独立 definition（`match/update/finalNode`）物化，无副作用、可重入（`trajectory-*-definition.ts`）；
-2. **保留边界**：设计笔记明确拒绝"把日志拍平成裸记录流"——Turn/Step/Request 边界保留因果结构（`.agents/notes/archived/feature/2026-07-27-trajectory-inspection-ledger.md:44`）；
-3. **产物是快照**：`TrajectorySnapshot` 含 `systemPrompts?`、`eventNodes`、`eventLocations`、`requests`、`callSchemas`、`partial`、`runningCalls`（`trajectory-contract.ts:69-78`）。
+2. **保留边界**：设计笔记明确拒绝"把日志拍平成裸记录流"——Turn/Step/Request 边界保留因果结构（`.agents/notes/archived/feature/2026-07-27-trajectory-inspection-ledger.md`）；
+3. **产物是快照**：`TrajectorySnapshot` 含 `systemPrompts?`、`eventNodes`、`eventLocations`、`requests`、`callSchemas`、`partial`、`runningCalls`（`trajectory-contract.ts`）。
 
 ## 10.2 mini 复现：`fold_trajectory`
 
@@ -30,17 +34,17 @@ flowchart LR
 ```python
 @dataclass
 class TrajectoryNode:
-    id: str
-    kind: str            # 'turn' | 'user' | 'assistant' | 'tool-call' | 'tool-result'
-    turn: int
-    step: int
-    seq: int
-    started_at: int
-    ended_at: int | None = None
-    text: str = ""
-    call_id: str | None = None
-    parent_id: str | None = None
-    children: list["TrajectoryNode"] = field(default_factory=list)
+ id: str
+ kind: str # 'turn' | 'user' | 'assistant' | 'tool-call' | 'tool-result'
+ turn: int
+ step: int
+ seq: int
+ started_at: int
+ ended_at: int | None = None
+ text: str = ""
+ call_id: str | None = None
+ parent_id: str | None = None
+ children: list["TrajectoryNode"] = field(default_factory=list)
 ```
 
 ### 折叠算法
@@ -83,19 +87,19 @@ mini 的字段名与上游不完全相同，对照如下：
 ## 10.3 消费端：三个只读视图
 
 ```python
-snapshot.messages()            # 折叠后的消息序列（role + text，按 seq 序）
-snapshot.last_assistant_text() # 最后一条非空 assistant 文本（与 headless 语义呼应）
-snapshot.format_text()         # 终端可读台账（turn 分组 + 缩进 + 耗时）
+snapshot.messages # 折叠后的消息序列（role + text，按 seq 序）
+snapshot.last_assistant_text # 最后一条非空 assistant 文本（与 headless 语义呼应）
+snapshot.format_text # 终端可读台账（turn 分组 + 缩进 + 耗时）
 ```
 
-`last_assistant_text()` 与 headless 的 `summarize` 语义一致——`summarize` 是最简投影（只拼 text 块），本模块是完整折叠（保留边界 + 工具树 + TTFT + partial 标记）。
+`last_assistant_text` 与 headless 的 `summarize` 语义一致——`summarize` 是最简投影（只拼 text 块），本模块是完整折叠（保留边界 + 工具树 + TTFT + partial 标记）。
 
 ## 10.4 与 headless 的关系
 
 `summarize`（第 7 章）是"投影"的一次极简使用：`firstSeq` 起、turn/start 之后收集、最后一条非空文本胜出。折叠引擎是它的泛化：同一份事件流，可以只取最后文本（headless），也可以展开成完整台账（web Trajectory），还可以序列化成 JSON 给 CI 断言：
 
 ```python
-fold_events_json(events)   # {"partial":…, "turns":[…], "requests":[…]}
+fold_events_json(events) # {"partial":…, "turns":[…], "requests":[…]}
 ```
 
 ## 10.5 硬性规定
@@ -115,3 +119,7 @@ fold_events_json(events)   # {"partial":…, "turns":[…], "requests":[…]}
 3. 手动构造一个崩溃尾部事件流，观察 partial 标记与 duration=None。
 4. 说出 mini 折叠引擎（`client/trajectory.py`）相对上游的简化：折叠语义一致，无 UI 层；`nodes`/`eventNodes`、`turns` 等字段的映射见 §10.2 表。
 5. 解释 tool-result 为什么按 callId 挂父子树，而不是按事件先后简单串联。
+
+## 10.7 回到 dsh：真实源码对照
+
+阅读 `packages/client/ui-trajectory` 的折叠 definition 与 `trajectory-contract.ts` 快照字段。mini `fold_trajectory` 保留 turn/step 边界与 partial 语义；虚拟化、Overview、全文搜索在 `webui/src/trajectory/`（零 wire 改动）。

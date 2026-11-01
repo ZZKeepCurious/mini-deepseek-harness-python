@@ -11,67 +11,67 @@
 | 方面 | dsh（产品本体） | deepseek-harness-sdk（Python 客户端） |
 |---|---|---|
 | 形态 | TypeScript monorepo：CLI + Web + 插件生态 + 组合系统，从源码构建运行 | PyPI 分发包 `deepseek-harness-sdk`（import `deepseek_harness`），内置捆绑运行时，安装后**不需要 Node.js** |
-| 扮演角色 | 运行时产品本身（消费者直接面向用户） | 面向 Python 程序员的驱动层（`DeepSeekHarness` 上下文管理器，`run()` 一次任务） |
+| 扮演角色 | 运行时产品本身（消费者直接面向用户） | 面向 Python 程序员的驱动层（`DeepSeekHarness` 上下文管理器，`run` 一次任务） |
 | 与运行时的连接 | 进程内直接调用插件 | 启动 `dsh-jsonrpc-agent` 子进程，走 stdio JSON-RPC；**同一协议在 TS 侧的对应实现是 `packages/sdk`（protocol/client/server）** |
 | 配置方式 | profile / bundle / patch 组合树（cordis.yml） | 内置默认组合（stdio JSON-RPC 服务器 + agent core + DeepSeek 适配器 + JSONL 持久化 + 本地 bash）；传 `cordis=` 指向自己的 cordis.yml 即可换组合（需保留 `@deepseek-ai/dsh-sdk-jsonrpc-server` 条目） |
 | 环境变量 | 继承 `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` / `DSH_HOME` 等 | 运行时继承同一套 `DEEPSEEK_*`；`DSH_SESSION_ROOT` 由 `session_root=` 参数设置；自定义组合经 `DSH_CORDIS_CONFIG` 注入 |
-| 平台 | macOS / Linux 为主（Windows 部分支持） | Linux x64 / arm64、macOS 14+ arm64；持久 PTY bash 需 POSIX，**不支持 Windows agent**；内置组合（`sdk-runtime/.../cordis.yml`）**不含 permission 层**，bash/fs 无路径限制——行为等价于 `danger-full-access`（**学习归纳**：该名仅见于上游 `app-boot.spec.ts:130` 的 `.env` 拒绝名单 `DSH_PERMISSION_MODE=danger-full-access`，非正式组合名），只能在可丢弃的 checkout/容器里跑 |
+| 平台 | macOS / Linux 为主（Windows 部分支持） | Linux x64 / arm64、macOS 14+ arm64；持久 PTY bash 需 POSIX，**不支持 Windows agent**；内置组合（`sdk-runtime/.../cordis.yml`）**不含 permission 层**，bash/fs 无路径限制——行为等价于 `danger-full-access`（**学习归纳**：该名仅见于上游 `app-boot.spec.ts` 的 `.env` 拒绝名单 `DSH_PERMISSION_MODE=danger-full-access`，非正式组合名），只能在可丢弃的 checkout/容器里跑 |
 
 ### 9.2 上手步骤
 
 1. **安装**（Python 3.10+）：
 
-    ```bash
-    python -m venv .venv
-    . .venv/bin/activate
-    python -m pip install deepseek-harness-sdk
-    ```
+ ```bash
+ python -m venv .venv
+ . .venv/bin/activate
+ python -m pip install deepseek-harness-sdk
+ ```
 
-    会自动装上同版本的 `deepseek-harness-runtime-bin` 平台 wheel，无需手动指定可执行文件。
+ 会自动装上同版本的 `deepseek-harness-runtime-bin` 平台 wheel，无需手动指定可执行文件。
 
 2. **设置凭据**：`DEEPSEEK_API_KEY` 必须；若走 OpenAI 兼容代理再设 `DEEPSEEK_BASE_URL`。
 
-    ```bash
-    export DEEPSEEK_API_KEY=sk-your-key-here
-    # export DEEPSEEK_BASE_URL=http://127.0.0.1:8000/v1
-    ```
+ ```bash
+ export DEEPSEEK_API_KEY=sk-your-key-here
+ # export DEEPSEEK_BASE_URL=http://127.0.0.1:8000/v1
+ ```
 
 3. **最小调用**：
 
-    ```python
-    from deepseek_harness import DeepSeekHarness
+ ```python
+ from deepseek_harness import DeepSeekHarness
 
-    with DeepSeekHarness() as harness:
-        result = harness.run("Say hi.")
-    print(result.final_response)
-    ```
+ with DeepSeekHarness as harness:
+ result = harness.run("Say hi.")
+ print(result.final_response)
+ ```
 
-    上下文管理器会延迟启动运行时子进程并在多次调用间复用。
+ 上下文管理器会延迟启动运行时子进程并在多次调用间复用。
 
 4. **带 workspace / 会话持久化 / 自定义组合**：
 
-    ```python
-    from pathlib import Path
-    from deepseek_harness import DeepSeekHarness
+ ```python
+ from pathlib import Path
+ from deepseek_harness import DeepSeekHarness
 
-    with DeepSeekHarness(
-        provider="deepseek-official",
-        model="deepseek-flash",
-        max_tokens=49_152,
-        cwd=str(Path("/absolute/path/to/workspace").resolve()),
-        session_root=str(Path("/absolute/path/to/sessions").resolve()),
-        cordis=str(Path("examples/jsonrpc-agent/minimal.cordis.yml").resolve()),
-    ) as harness:
-        result = harness.run("Inspect the repo and fix failing tests.", session_id="example-001")
-    print(result.final_response)
-    ```
+ with DeepSeekHarness(
+ provider="deepseek-official",
+ model="deepseek-flash",
+ max_tokens=49_152,
+ cwd=str(Path("/absolute/path/to/workspace").resolve),
+ session_root=str(Path("/absolute/path/to/sessions").resolve),
+ cordis=str(Path("examples/jsonrpc-agent/minimal.cordis.yml").resolve),
+ ) as harness:
+ result = harness.run("Inspect the repo and fix failing tests.", session_id="example-001")
+ print(result.final_response)
+ ```
 
 5. **理解返回值**：`RunResult` 含 `session_id`、`final_response`（该区间根会话最后提交的助手文本）、`finish_reason`（最后一个 `turn/end` 的 `kind`，如 `completed`/`max-tokens`/`error`）、`events`（根会话事件）、`notifications`（根会话 + 全部已知后代）、`session_root`。
 
 6. **session id 复用语义**：复用同一 harness + 同一 `session_id` 会**保留该会话的 Bash 进程**（工作目录、已导出的变量、shell 函数）。独立任务用新 id；只有需要延续同一段持久化会话才复用。
 
 !!! warning "安全边界"
-    内置组合（`sdk-runtime/.../cordis.yml`）不含 permission 层——bash 与编辑器可改任何路径，且上下文压缩关闭。行为等价于 `danger-full-access`（**学习归纳**：该名仅见于上游 `app-boot.spec.ts:130` 的 `.env` 拒绝名单 `DSH_PERMISSION_MODE=danger-full-access`，非正式组合名）。只应在可丢弃的 checkout 或容器内运行。仓库内置示例：`python examples/jsonrpc-agent/minimal.py --workspace <dir> --session-root <dir> --session-id example-001 "task"`。
+ 内置组合（`sdk-runtime/.../cordis.yml`）不含 permission 层——bash 与编辑器可改任何路径，且上下文压缩关闭。行为等价于 `danger-full-access`（**学习归纳**：该名仅见于上游 `app-boot.spec.ts` 的 `.env` 拒绝名单 `DSH_PERMISSION_MODE=danger-full-access`，非正式组合名）。只应在可丢弃的 checkout 或容器内运行。仓库内置示例：`python examples/jsonrpc-agent/minimal.py --workspace <dir> --session-root <dir> --session-id example-001 "task"`。
 
 ## 10. 添加插件与贡献
 
@@ -90,22 +90,22 @@ export const name = 'my-tool'
 export const inject = ['tools']
 
 export function apply(ctx: Context) {
-  ctx.tools.register(defineTool({
-    name: 'read_file',
-    description: 'Read a file from disk.',   // 模型看到的描述
-    parameters: {
-      path: { type: 'string', required: true, description: 'Absolute path' },
-      limit: { type: 'number' },             // 默认可选
-    },
-    output: {
-      schema: { type: 'string' },
-      render: (_args, value) => [{ type: 'text', text: value }],
-    },
-    async execute(args, exec) {
-      // args 由 schema 推导出类型 { path: string; limit?: number }
-      return readFile(args.path, { encoding: 'utf8', signal: exec.signal })
-    },
-  }))
+ ctx.tools.register(defineTool({
+ name: 'read_file',
+ description: 'Read a file from disk.', // 模型看到的描述
+ parameters: {
+ path: { type: 'string', required: true, description: 'Absolute path' },
+ limit: { type: 'number' }, // 默认可选
+ },
+ output: {
+ schema: { type: 'string' },
+ render: (_args, value) => [{ type: 'text', text: value }],
+ },
+ async execute(args, exec) {
+ // args 由 schema 推导出类型 { path: string; limit?: number }
+ return readFile(args.path, { encoding: 'utf8', signal: exec.signal })
+ },
+ }))
 }
 ```
 
@@ -120,14 +120,14 @@ export function apply(ctx: Context) {
 ```yaml
 # cordis.patch.yml —— 顶层数组，insert 一个插件行
 - insert:
-    - id: my-tool
-      name: my-tool            # 你的插件（安装进 profile 的 node_modules）
+ - id: my-tool
+ name: my-tool # 你的插件（安装进 profile 的 node_modules）
 ```
 
 把插件安装进 profile 用 `dsh plugin --profile <name> add <spec>`（转发给 pnpm，profile 缺失时先初始化；相对路径 spec 锚定到调用目录，因此从插件 checkout 里执行 `add .` 装的就是该 checkout）。若是带 `"dsh": { "bundle": { "patch": "./cordis.patch.yml" } }` 声明的组合包，安装后会自动加入 `dsh.profile.bundles` 层栈。
 
 !!! success "验收"
-    `pnpm dsh --profile <name> --dump-config` 能看到该行（注释标注来源文件与 overlay）；跑一次任务观察工具被调用；对行为变化按 `docs/testing.md` 补测试。
+ `pnpm dsh --profile <name> --dump-config` 能看到该行（注释标注来源文件与 overlay）；跑一次任务观察工具被调用；对行为变化按 `docs/testing.md` 补测试。
 
 ### 10.3 正式贡献：新增 workspace 包
 
@@ -139,17 +139,17 @@ export function apply(ctx: Context) {
 4. **写 README**：包自身 API/事件/扩展点在前，最后以固定四段收尾：`## Model Experience` → `### Request context and condition`（What the model sees / Token effect / KV Cache effect）→ `## Known Limitations and Deferred Work`。
 5. **验证**：
 
-    ```sh
-    pnpm install
-    pnpm run doc-sync
-    pnpm run constraints && pnpm run typecheck && pnpm run lint
-    pnpm run build && pnpm run hygiene
-    ```
+ ```sh
+ pnpm install
+ pnpm run doc-sync
+ pnpm run constraints && pnpm run typecheck && pnpm run lint
+ pnpm run build && pnpm run hygiene
+ ```
 
-    再按 `docs/testing.md` 补行为测试与快照；非平凡变更**必须同 PR 附 Agent Note**。
+ 再按 `docs/testing.md` 补行为测试与快照；非平凡变更**必须同 PR 附 Agent Note**。
 
 !!! success "其它插件形态参考"
-    `docs/cookbook/extension-cookbook.md` 有完整 feature → mechanism 映射：hook 插件（`ctx.on('tools/pre-execute', ...)` 返回 typed decision 的瀑布）、UI 插件（监听 `session/event` + `agent.followup()`）、外部协议驱动（把 wire peer 映射到 `ctx.agents`）、LLM 适配器（`LlmAdapter` 子类 + `ctx.llm.registerAdapter(['my-provider'], ...)`）。
+ `docs/cookbook/extension-cookbook.md` 有完整 feature → mechanism 映射：hook 插件（`ctx.on('tools/pre-execute', ...)` 返回 typed decision 的瀑布）、UI 插件（监听 `session/event` + `agent.followup`）、外部协议驱动（把 wire peer 映射到 `ctx.agents`）、LLM 适配器（`LlmAdapter` 子类 + `ctx.llm.registerAdapter(['my-provider'], ...)`）。
 
 ## 11. 其他常用 HOWTO
 
@@ -163,7 +163,7 @@ export function apply(ctx: Context) {
 
 - `pnpm mock:llm`：本地 mock LLM 服务器，无需 API key 跑通工具调用回合。
 - `pnpm run test:snapshot`：keyless ACP/headless 回放，比对期望输出；`-t <name>` 过滤；`test:snapshot:record` 重录（需 key）。
-- 会话即 JSONL 日志：模型可见历史由 `deriveMessages()` 投影，回放 = `sessions.create(id, { seed })`。任何模型可见输入都能从日志重建。
+- 会话即 JSONL 日志：模型可见历史由 `deriveMessages` 投影，回放 = `sessions.create(id, { seed })`。任何模型可见输入都能从日志重建。
 
 ### 11.3 给工具配 UI 卡片（render intent）
 

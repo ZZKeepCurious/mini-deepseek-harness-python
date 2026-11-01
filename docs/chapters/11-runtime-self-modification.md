@@ -4,9 +4,13 @@
 >
 > 对应 dsh 真实源码：`packages/extensions/`（`tool-cordis` 七工具 + `cordis-host-runner` 宿主）。mini 复现于 `miniharness/extensions/dynamic.py`。
 
+## 在 system-map 中的位置
+
+本章对应 [system-map Fig S1](../system-map.md#fig-s1) 的 **11 dynamic plugins**（体裁：**边界**）。进程内存生命周期，不写启动配置。
+
 ## 11.1 上游的边界设计
 
-自我修改在上游不是"agent 任意改配置"。`cordis-host-runner` 的说明文档写明（`cordis-host-runner/README.md:12`：`process-local dynamic definitions`、`Definitions disappear on restart`；`:58`：`session-scoped and process-local`）：动态定义按会话隔离、只存在进程内存里，重启即清空；历史日志保留工具参数与回执，但不恢复注册表。
+自我修改在上游不是"agent 任意改配置"。`cordis-host-runner` 的说明文档写明（`cordis-host-runner/README.md`：`process-local dynamic definitions`、`Definitions disappear on restart`；`:58`：`session-scoped and process-local`）：动态定义按会话隔离、只存在进程内存里，重启即清空；历史日志保留工具参数与回执，但不恢复注册表。
 
 这是刻意的安全设计：模型可以在这个进程里定义、运行、停止插件（改"运行时"），但不允许改"启动配置"（改"持久状态"需要人工操作文件）。配套还有几层约束：
 
@@ -16,15 +20,15 @@
 
 ```mermaid
 stateDiagram-v2
-  [*] --> Defined: define
-  Defined --> Running: run
-  Running --> Running: run replace
-  Running --> Defined: stop
-  Defined --> [*]: undefine
-  Running --> [*]: undefine retract
+ [*] --> Defined: define
+ Defined --> Running: run
+ Running --> Running: run replace
+ Running --> Defined: stop
+ Defined --> [*]: undefine
+ Running --> [*]: undefine retract
 ```
 
-## 11.2 生命周期（对应 `runner.spec.ts:150-176` 的完整流程）
+## 11.2 生命周期（对应 `runner.spec.ts` 的完整流程）
 
 上游测试里的标准路径：
 
@@ -46,9 +50,9 @@ mini 复现的对应 API：
 ```python
 registry = DynamicPluginRegistry(host_ctx)
 pkg_id = registry.define("new", "演示插件", provides=["dynDoubler"],
-                         apply=lambda ctx: ctx.provide("dynDoubler", lambda x: x * 2))
-run = registry.run(pkg_id)                    # {"runId": "run-1", "status": "running", ...}
-registry.invoke(run["runId"], "dynDoubler", 21)  # 42
+ apply=lambda ctx: ctx.provide("dynDoubler", lambda x: x * 2))
+run = registry.run(pkg_id) # {"runId": "run-1", "status": "running", ...}
+registry.invoke(run["runId"], "dynDoubler", 21) # 42
 registry.stop(run["runId"])
 registry.undefine(pkg_id)
 ```
@@ -58,7 +62,7 @@ registry.undefine(pkg_id)
 ## 11.3 硬性规定
 
 1. **define 只登记**：run 之前服务不可用（invoke 抛 KeyError）。
-2. **运行中可重复 run / 可 undefine**：`run` = 若已运行先 `_retract` 旧 run 再激活新 run（**replace 语义，非拒绝**，同上游 `cordis-host-runner/index.ts:861` 的 `startFresh`——旧 run 的服务立即消失，test `test_run_twice_replaces_old_run` 固定）；`undefine` 对运行中包**自动 retract 后删除**并返回 `{ok: True, wasRunning}`（同上游 `index.ts:228-236`，test `test_undefine_auto_retracts_running` 固定）；只有缺失包才拒绝——`run` 对未定义包抛 `KeyError`，`undefine` 返回 `{ok: false, reason: 'plugin-missing'}`（不抛错）。
+2. **运行中可重复 run / 可 undefine**：`run` = 若已运行先 `_retract` 旧 run 再激活新 run（**replace 语义，非拒绝**，同上游 `cordis-host-runner/index.ts` 的 `startFresh`——旧 run 的服务立即消失，test `test_run_twice_replaces_old_run` 固定）；`undefine` 对运行中包**自动 retract 后删除**并返回 `{ok: True, wasRunning}`（同上游 `index.ts`，test `test_undefine_auto_retracts_running` 固定）；只有缺失包才拒绝——`run` 对未定义包抛 `KeyError`，`undefine` 返回 `{ok: false, reason: 'plugin-missing'}`（不抛错）。
 3. **进程级冲突 fail loud**：插件声明的 provides 若祖先链上已存在（如 host 的 `session-persistence`），run 直接拒绝，host 服务不被覆盖。
 4. **只存进程内存**：新 registry = "重启"，定义与运行全部不恢复（`inspect_self` 快照为空）。
 5. **kind 限定**：非 `new` 的 define 抛 ValueError。
@@ -78,7 +82,12 @@ registry.undefine(pkg_id)
 2. 手写一次完整生命周期，观察各阶段 `inspect_self` 快照的变化；
 3. 构造一个进程级冲突场景，验证 fail loud 且 host 服务不被覆盖；
 4. 说出 mini 相对上游的简化（模型侧入口、审批往返）。
+5. 验收命令：`python -m unittest tests.test_dynamic -v`（全绿即闭合本章）。
 
-## 11.6 收尾
+## 11.6 回到 dsh：真实源码对照
+
+打开 `packages/extensions/cordis-host-runner` 与 tool-cordis 入口：对照 define/run/undefine 与进程级冲突。mini 见 `extensions/dynamic.py` 与 §11.4 简化标注。
+
+## 11.7 收尾
 
 动态插件的运行与持久配置严格分开：前者是进程内存里可回滚的隔离作用域，后者只能人工改文件。下一章把工具执行从串行推进到异步并行。

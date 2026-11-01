@@ -2,6 +2,10 @@
 
 > 目标：把 MiniHarness 跑起来，知道代码在哪里、测试怎么跑、每个文件对应什么。读完整本手册不装 Node.js、不装 TypeScript；必需的 pip 基础件有六个：SSE 传输用的 `httpx`、跨进程锁用的 `filelock`、文件观察用的 `watchdog`、YAML 配置用的 `pyyaml`、持久化帧容器用的 `zstandard`、图片管线用的 `pillow`。
 
+## 在 system-map 中的位置
+
+准备章（体裁：**准备**）。模块总图与 Capstone 见 [system-map Fig S6](../system-map.md#fig-s6)；全章验收见 [功能模块表](../system-map.md#module-chapter-verify) 第 00 行。
+
 ## 0.1 前置知识
 
 - Python 3.10+。核心实现以标准库为骨架：`unittest`、`json`、`sqlite3`、`threading`、`dataclasses`、`asyncio`；成熟开源库优先补齐关键能力——`httpx`（SSE 传输 + Web 出站）、`filelock`（跨进程锁）、`watchdog`（文件观察）、`pyyaml`（YAML 配置）、`zstandard`（持久化帧容器）、`pillow`（附件图片管线），无语义等价库处才手写。
@@ -9,6 +13,10 @@
 - 了解一个 Agent 回合的 wire 形状：`user message → assistant（可能带 tool call）→ tool result → assistant`。
 
 如果你不熟悉最后一条，先去 [`docs/report/05-roadmap.md`](../report/05-roadmap.md) 的「§6 从 0 到掌握的完整路线图」里 **P0 前置知识** 一行（必读 / 必做 / 验收），再对照手册第 4 章的回合时序。
+
+### 怎么读这套手册
+
+克隆仓库时 `miniharness/` 已是完整实现。默认推荐 **走读对照**：先跑该章测试，再读对应源码，最后做检查点练习。若要在空目录亲手复现章内骨架，见 [guides/learning-paths.md](../guides/learning-paths.md) 的空白复现模式。模块在整体架构中的位置见 [system-map.md](../system-map.md)。
 
 ## 0.2 目录结构
 
@@ -43,7 +51,7 @@ mini-deepseek-harness-python/        ← 仓库根
     └── report/                  ← 分析报告（MkDocs 站点）
 ```
 
-每个 `miniharness/` 文件的"第 N 章"标注，就是它对应的手册章节。想快速定位一个概念：先在手册找章节，再按章节号找文件。
+每个 `miniharness/` 文件的"第 N 章"标注，就是它对应的手册章节。想快速定位一个概念：先在手册找章节，再按章节号找文件。完整目录树见 [architecture.md §1.2](../architecture.md#sec-1-2)（比下列摘要更长）。
 
 ## 0.3 跑起来
 
@@ -101,3 +109,4 @@ MiniHarness 是清晰的 Python 复现（以可复现、可学习为核心），
 1. `python -m unittest discover -s tests -t .` 全部通过
 2. `python -m miniharness.demo` 输出一次完整的回合日志
 3. 能说出 `core/session`、`core/scope`、`core/tools`、`llm/`、`core/agent_loop`、`core/session/persistence`、`boot/` 各自管什么
+4. 读完 [system-map Fig S6](../system-map.md#fig-s6) 后，从 Capstone 清单中**至少完成一项**（`demo`、`examples/chat_demo.py`、`plan_goal_demo.py --approve`、或 `--profile web` + webui 构建）
