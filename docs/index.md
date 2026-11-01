@@ -91,6 +91,10 @@ python -m miniharness.demo
 
 > 每章开头都有"先动手再读解释"的最小代码；读完一章就运行一次该章测试，用断言验证硬性规定。
 
+## 设计参照（可选）
+
+Super-agent 论文与 `dsh-superagent-prototype` 的设计抽象与译文见 **[design/super-agent/](design/super-agent/index.md)**（先读 [设计抽象主文](design/super-agent/design-abstract.md)）。该线与内核复现（A 线）并行，**默认不约束** mini 实现；仅 [adopted.md](design/super-agent/adopted.md) 显式登记的原则在对应立项范围内生效。
+
 ## 手册与报告的关系
 
 - **[system-map.md](system-map.md)**：功能模块在整体架构中的位置（Fig S1～S6）与章节验收表。

@@ -13,6 +13,8 @@ web 半（传输层 + 浏览器前端）的 wire 面与上游一致：两信封 
 
 下一主线候选：插件示例集（教程用插件 + 真实工具演示）；在 agent-team 之外的更多 agent 编排；遥测上报面（telemetry-capture / OpenTelemetry，需远端数据面）。
 
+Super-agent 设计参照（论文 + prototype 译文与候选原则）见 [docs/design/super-agent/](docs/design/super-agent/index.md)（先读 [设计抽象](docs/design/super-agent/design-abstract.md)）；**采纳状态仅看** [adopted.md](docs/design/super-agent/adopted.md)，未登记者不构成开发义务。
+
 ## 扩展能力
 
 - **MCP 客户端 / 资源**：`miniharness/mcp/`（L3）——`apply(ctx, config)` 代连接 supervisor（stdio / streamable-http 统一，`tools/list_changed` 重同步、server instructions 字节上限 fail-loud、`failOnStartupError`）+ 指数退避重连（预算耗尽即停）+ 工具归属注册 `${server}.${name}#${hash}` + darkfrozen render / 图片受理投影 + mcp-resources 三个共享资源工具。**载体注记（SDK 2.2）**：SDK stdio 传输不投递子进程 EOF/退出（`_drain_stdout` 永久阻塞、read_stream 不关闭、在途 RPC 永挂）——mini 用有界 RPC 竞速（5s，对 `generation.lost` 中止）加常驻生命线 ping watchdog（15s 心跳 / 3s 超时），取代上游 within 取消令牌，避免子进程退出后握手流程阻塞；关闭屏障 5s 超时 fail-closed 防止重叠子进程。

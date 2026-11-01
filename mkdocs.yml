@@ -82,6 +82,32 @@ nav:
       - 走查 T5 SDK: guides/traces/sdk-stdio.md
   - 架构与对齐: architecture.md
   - 接口契约参考: interface-wire.md
+  - Super-agent 设计参照:
+      - 首页: design/super-agent/index.md
+      - 设计抽象（主文）: design/super-agent/design-abstract.md
+      - 出处: design/super-agent/sources.md
+      - 显式采纳治理: design/super-agent/00-governance.md
+      - 已采纳台账: design/super-agent/adopted.md
+      - 候选原则总表: design/super-agent/principles.md
+      - 讨论后不采纳: design/super-agent/rejected.md
+      - 论文:
+          - "01 动机与四特征": design/super-agent/paper-01-motivation-and-four-traits.md
+          - "02 双层架构": design/super-agent/paper-02-two-layer.md
+          - "03 事件驱动": design/super-agent/paper-03-event-driven.md
+          - "04 人机交互": design/super-agent/paper-04-human-interaction.md
+          - "05 持久化与 Watchdog": design/super-agent/paper-05-persistence.md
+          - "06 实验与开放问题": design/super-agent/paper-06-experiments-and-open.md
+      - Prototype 译文:
+          - "000 哲学": design/super-agent/proto-000-philosophy.md
+          - "001 领域模型": design/super-agent/proto-001-domain.md
+          - "002 授权": design/super-agent/proto-002-authorization.md
+          - "003 执行": design/super-agent/proto-003-execution.md
+          - "004 提示": design/super-agent/proto-004-prompts.md
+          - "005 面板": design/super-agent/proto-005-panel.md
+          - "006 部署": design/super-agent/proto-006-deployment.md
+          - "007 架构": design/super-agent/proto-007-architecture.md
+          - "008 Cookbook": design/super-agent/proto-008-cookbook.md
+      - 综合（见主文 §7–§8）: design/super-agent/synthesis-01-paper-to-prototype.md
   - 分析报告:
       - 报告首页: report/index.md
       - 01 项目全景与分层架构: report/01-overview.md
